@@ -183,18 +183,24 @@
 //!
 //! `_destroy` on a class handle waits for the tasks spawned by `_cb` calls,
 //! then stops the submission task and waits for it and for the records it
-//! left waiting on tasks of their own, runs the still-pending callbacks so each
-//! fires exactly once (§4 rule 5), and drops the producer; the
+//! left waiting on tasks of their own, closes a `KafkaProducer` the caller did
+//! not close (below), runs the still-pending callbacks so each fires exactly
+//! once (§4 rule 5), and drops the producer; the
 //! `kafka_common_KafkaFuture_get_cb` calls still waiting on its futures fire
 //! last, once each (see `ffi::kafka_future`). The delivery callbacks it runs
 //! may report inline; once it ran them it completes the ones still
 //! unreported as if each had reported success, so no future and no
 //! `flush_cb` or `commit_transaction_cb` waits forever, and
 //! `kafka_producer_Producer__set_callback_result` must not be called for it
-//! from elsewhere once `_destroy` began. It does not
-//! `close` the producer: as in Rust, a `KafkaProducer` dropped without
-//! `close` is force-closed with a warning, so a caller that wants a graceful
-//! shutdown calls `close` first.
+//! from elsewhere once `_destroy` began.
+//!
+//! A `KafkaProducer` the caller did not close is closed as
+//! `kafka_producer_Producer_close` closes it: the records it holds are sent,
+//! and their delivery callbacks fire with the outcome before `_destroy`
+//! returns, as no callback may fire after it. With no broker reachable that
+//! waits up to `delivery.timeout.ms`. Java has no `destroy`; a Java producer is
+//! released by `close()`, and one nothing references keeps sending on its
+//! daemon I/O thread.
 //!
 //! Called inside a tokio runtime (on a worker thread, or inside a
 //! `block_on`), where it cannot wait, `_destroy` returns at once and all of
@@ -804,8 +810,9 @@ where
 
     /// Awaits every task spawned by a `_cb` call or for a waiting record, then
     /// stops the submission task and awaits it and the records it left
-    /// waiting, fires the pending callbacks and drops the producer (see the
-    /// module docs), then stops the runtime and fires the completions of the
+    /// waiting, closes a `KafkaProducer` the caller did not close, fires the
+    /// pending callbacks and drops the producer (see the module docs), then
+    /// stops the runtime and fires the completions of the
     /// `KafkaFuture_get_cb` calls still waiting, each exactly once.
     ///
     /// The submission queue stays open until the `_cb` tasks have ended: a
@@ -848,11 +855,21 @@ where
         let _ = runtime.block_on(submission);
         await_tasks(client, &runtime);
         client.queue.execute();
-        // The producer's `Drop` only starts a forced close (a `KafkaProducer`
-        // needs the runtime context for that): its sender aborts the records
-        // still in flight later, on the runtime, firing their delivery
-        // callbacks into the queue, or never, if the shutdown below cancels it
-        // first. The queue runs once more for those already fired.
+        // A `KafkaProducer` the caller did not close is closed as `close()`
+        // closes it, now that every queued `send_cb` was handed over: its sender
+        // sends the records it holds before it stops. Leaving them to the sender
+        // task, as dropping the producer does, is not possible here: the
+        // shutdown below would cancel it, and a delivery callback must not fire
+        // after `destroy` returns.
+        if producer.has_unclosed_sender() {
+            let closed = runtime.block_on(catch_task_panic("kafka_producer_KafkaProducer_destroy", producer.close()));
+            if let Err(error) = closed {
+                log::warn!("Closing the producer on destroy failed: {error}");
+            }
+        }
+        // Dropping the producer then has no sender left to stop (a
+        // `KafkaProducer` needs the runtime context to drop). The queue runs
+        // once more for the delivery callbacks the close fired.
         {
             let _enter = runtime.enter();
             drop(producer);

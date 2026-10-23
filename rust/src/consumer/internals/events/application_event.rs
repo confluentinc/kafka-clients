@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use regex::Regex;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 
 use crate::common::{Error, IsolationLevel, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
@@ -65,9 +65,16 @@ pub(crate) enum ApplicationEvent {
     /// `ConsumerRebalanceListenerCallbackCompletedEvent` — app → bg
     /// half of the rebalance-listener handshake. The app side, after
     /// invoking the listener, sends this with the result.
+    ///
+    /// Sent for the callback a leave enqueued (a `PartitionsRemoved` event
+    /// with `ack_through_application_events`); the reconcile and release
+    /// callbacks still send on their `ack` directly.
     ConsumerRebalanceListenerCallbackCompleted {
         method_name: ConsumerRebalanceListenerMethodName,
         error: Option<Error>,
+        /// Java's `future`: the callback event's ack, which the processor
+        /// completes with `error` when it reaches this event.
+        ack: oneshot::Sender<Result<(), Error>>,
     },
     /// `AsyncPollEvent` — pumps the membership / fetch state machine.
     ///

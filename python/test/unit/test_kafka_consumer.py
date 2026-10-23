@@ -1647,10 +1647,11 @@ def test_another_thread_during_the_commit_callback_meets_the_guard() -> None:
 
 
 def _listener_consumer() -> KafkaConsumer[bytes, bytes]:
-    """A consumer subscribed with a listener, so commit_nowait() may deliver
-    listener callbacks on its caller's thread while it waits (the broker is
-    unreachable; empty-offsets commits complete at once). The branch C API runs
-    every callback in the waiting call's drain, so there is no helper thread."""
+    """A consumer subscribed with a listener (the broker is unreachable;
+    empty-offsets commits complete at once). As in Java, commit_nowait()
+    delivers no listener callback, only poll() and unsubscribe() do; the
+    callbacks the branch C API does run go through the waiting call's drain on
+    its caller's thread, so there is no helper thread."""
     consumer = new_consumer()
     consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
     return consumer

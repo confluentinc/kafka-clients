@@ -64,6 +64,9 @@ impl SaslConfigs {
     /// The GSSAPI (Kerberos) mechanism name.
     pub const GSSAPI_MECHANISM: &str = "GSSAPI";
 
+    /// The PLAIN mechanism name, the only one the client authenticator implements.
+    pub(crate) const PLAIN_MECHANISM: &str = "PLAIN";
+
     /// Default SASL mechanism (matches Java `DEFAULT_SASL_MECHANISM`).
     pub const DEFAULT_SASL_MECHANISM: &str = Self::GSSAPI_MECHANISM;
 }

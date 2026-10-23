@@ -352,9 +352,9 @@ impl CommonClientConfigs {
             return Ok(());
         }
         match config.get_string(SaslConfigs::SASL_MECHANISM)? {
-            Some(mechanism) if mechanism != "PLAIN" => Err(Error::local_unsupported_operation(format!(
-                "SASL mechanism '{mechanism}' is not supported by this client; only PLAIN is"
-            ))),
+            Some(mechanism) if mechanism != SaslConfigs::PLAIN_MECHANISM => Err(Error::local_unsupported_operation(
+                format!("SASL mechanism '{mechanism}' is not supported by this client; only PLAIN is"),
+            )),
             _ => Ok(()),
         }
     }

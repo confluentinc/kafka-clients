@@ -48,6 +48,8 @@ Examples (paths shown relative to the repo root):
   # kafka-producer-perf-test.sh; configure BOOTSTRAP_SERVERS, TOPIC_NAME,
   # THROUGHPUT, TEST_DURATION_SECONDS, VALUE_SIZE, PARTITIONS,
   # WARMUP_MESSAGES, INTERVAL_SECONDS, GROUP_ID (optional) in the .env;
+  # COMPRESSION_TYPE (optional: none/gzip/snappy/lz4/zstd) compresses the
+  # generated load, for python-consumer too;
   # EXTRA_CONSUMER_ARGS passes harness-specific flags through verbatim:
   python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
       --test rust-consumer --env-file ../consumer.env --results-dir ./perf-results
@@ -301,6 +303,12 @@ python_for_client_version() {
 # librdkafka-style --conf entries from SECURITY_PROTOCOL / SASL_MECHANISM /
 # SASL_USERNAME / SASL_PASSWORD in the .env (the same quartet the producer
 # tests use).
+#
+# COMPRESSION_TYPE (optional): compression.type (none/gzip/snappy/lz4/zstd) of
+# the kafka-producer-perf-test.sh load every consumer arm generates (the same
+# .env knob as the producer tests); unset keeps the generator's default.
+# rust-consumer / librdkafka-consumer get --compression-type, java-consumer
+# appends it to its --producer-props, python-consumer reads it from the env.
 CONS_FLAGS=()
 if [ -n "${BOOTSTRAP_SERVERS:-}" ]; then CONS_FLAGS+=(--bootstrap "$BOOTSTRAP_SERVERS"); fi
 if [ -n "${TOPIC_NAME:-}" ]; then CONS_FLAGS+=(--topic "$TOPIC_NAME"); fi
@@ -310,6 +318,7 @@ if [ -n "${TEST_DURATION_SECONDS:-}" ]; then CONS_FLAGS+=(--duration "$TEST_DURA
 if [ -n "${VALUE_SIZE:-}" ]; then CONS_FLAGS+=(--message-size "$VALUE_SIZE"); fi
 if [ -n "${PARTITIONS:-}" ] && [ "$PARTITIONS" -gt 0 ]; then CONS_FLAGS+=(--partitions "$PARTITIONS"); fi
 if [ -n "${INTERVAL_SECONDS:-}" ]; then CONS_FLAGS+=(--interval "$INTERVAL_SECONDS"); fi
+if [ -n "${COMPRESSION_TYPE:-}" ]; then CONS_FLAGS+=(--compression-type "$COMPRESSION_TYPE"); fi
 
 cd "$REPO"
 case "$TEST" in
@@ -424,6 +433,7 @@ case "$TEST" in
       --record-size "$MSIZE" --throughput "$RATE")
     if [ -n "${CLIENT_CONFIG:-}" ]; then PROD_ARGS+=(--producer.config "$CLIENT_CONFIG"); fi
     PROD_ARGS+=(--producer-props "bootstrap.servers=$BS" acks=1)
+    if [ -n "${COMPRESSION_TYPE:-}" ]; then PROD_ARGS+=("compression.type=$COMPRESSION_TYPE"); fi
     "$KB/kafka-producer-perf-test.sh" "${PROD_ARGS[@]}" \
       > "$OUT/producer.log" 2>&1 &
     PRODUCER_PID=$!
@@ -586,7 +596,8 @@ def main():
                         "(e2e latency; load self-generated via kafka-producer-perf-test.sh, "
                         "configured through BOOTSTRAP_SERVERS/TOPIC_NAME/THROUGHPUT/"
                         "TEST_DURATION_SECONDS/VALUE_SIZE/PARTITIONS/WARMUP_MESSAGES/"
-                        "INTERVAL_SECONDS/GROUP_ID/EXTRA_CONSUMER_ARGS in --env-file): "
+                        "INTERVAL_SECONDS/GROUP_ID/COMPRESSION_TYPE/EXTRA_CONSUMER_ARGS in "
+                        "--env-file): "
                         "rust-consumer = the consumer-perf crate; "
                         "librdkafka-consumer = the native C arm "
                         "(rust/consumer-perf/compare/librdkafka_e2e.c); "

@@ -56,6 +56,12 @@ pub trait Selectable: Send {
     /// Begin establishing a socket connection to the given address identified by
     /// the given id.
     ///
+    /// Returns without waiting for the handshake, like Java's non-blocking
+    /// `SocketChannel.connect`: `poll()` completes it and reports the connection in
+    /// `connected()`, or in `disconnected()` if it fails (refused, unreachable, ...). A
+    /// connection that never completes is the caller's to give up on, by closing it
+    /// (`NetworkClient` does so when `socket.connection.setup.timeout.ms` passes).
+    ///
     /// # Arguments
     ///
     /// * `id` - The id for this connection
@@ -68,7 +74,8 @@ pub trait Selectable: Send {
     ///
     /// # Errors
     ///
-    /// Returns an error if we cannot begin connecting.
+    /// Returns an error if we cannot begin connecting, such as a socket that cannot be created
+    /// or configured.
     #[doc(alias = "org.apache.kafka.common.network.Selectable#connect")]
     fn connect(
         &mut self,

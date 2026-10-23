@@ -70,8 +70,9 @@ python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
 # Same .env, other clients: --test librdkafka-consumer / java-consumer /
 # python-consumer. Configure BOOTSTRAP_SERVERS, TOPIC_NAME, THROUGHPUT,
 # TEST_DURATION_SECONDS, VALUE_SIZE, PARTITIONS, WARMUP_MESSAGES,
-# INTERVAL_SECONDS in the .env; EXTRA_CONSUMER_ARGS passes harness-specific
-# flags (e.g. --peak, fetch tuning, --client-config) through verbatim.
+# INTERVAL_SECONDS, COMPRESSION_TYPE (optional) in the .env; EXTRA_CONSUMER_ARGS
+# passes harness-specific flags (e.g. --peak, fetch tuning, --client-config)
+# through verbatim.
 ```
 
 ### Options
@@ -94,6 +95,7 @@ python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
 | `--results-dir` | `consumer-perf/results` | output directory |
 | `--no-produce` | (off) | don't launch a producer |
 | `--no-create-topic` | (off) | don't create/verify the topic |
+| `--compression-type` | (producer default) | producer `compression.type`: `none` / `gzip` / `snappy` / `lz4` / `zstd` |
 | `-v, --verbose` | (off) | log every poll (record counts / heartbeats) |
 
 `--selftest-cpu` runs a standalone CPU/RSS sampler check (burns CPU, prints

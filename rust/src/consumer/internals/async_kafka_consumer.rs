@@ -917,26 +917,22 @@ impl AsyncConsumerHandleState {
         Ok(())
     }
 
-    /// Shared submit + wakeup-aware-await core, the **no-drain** sibling
-    /// of [`AsyncKafkaConsumer::submit_and_drain`].
+    /// Shared submit + wakeup-aware-await core, the handle's
+    /// [`AsyncKafkaConsumer::submit_and_await`]: Java's
+    /// `applicationEventHandler.addAndGet(event)`.
     ///
-    /// The handle cannot own the background-event receiver or the
-    /// rebalance-listener invoker (those stay on `&mut self`), so it does
-    /// NOT drain background events while waiting. It is only ever called
-    /// reentrantly from *inside* a rebalance-listener callback, by which
-    /// point (after Phase 41b) the background task is no longer frozen on
-    /// the callback ack — it keeps spinning and services this event. A
-    /// single rebalance callback never triggers a nested rebalance, so
-    /// there is nothing for the handle to drain.
+    /// Like every blocking consumer call except `poll()` and
+    /// `unsubscribe()`, it does NOT drain background events while waiting
+    /// (§31). It is only ever called reentrantly from *inside* a user
+    /// callback, by which point (after Phase 41b) the background task is no
+    /// longer frozen on the callback ack — it keeps spinning and services
+    /// this event.
     ///
-    /// The wait honors `wakeup()` exactly like
-    /// [`AsyncKafkaConsumer::process_background_events_until`]'s
-    /// `enable_wakeup` arm: it races the receiver against the rotating
-    /// wakeup token's cancellation and the absolute `deadline_ms`. The
-    /// deadline / timeout logic is identical in shape — see that method
-    /// for the per-stage rationale.
+    /// The wait honors `wakeup()` through [`await_event_completion`]: it
+    /// races the receiver against the rotating wakeup token's cancellation
+    /// and the absolute `deadline_ms`.
     ///
-    /// As [`AsyncKafkaConsumer::submit_and_drain`], a wakeup pending when the
+    /// As [`AsyncKafkaConsumer::submit_and_await`], a wakeup pending when the
     /// call starts is raised before the event is submitted, Java's
     /// `setActiveTask` before `addAndGet`.
     async fn submit_and_await<T: Send + 'static>(
@@ -955,11 +951,6 @@ impl AsyncConsumerHandleState {
         self.application_event_handler.add(event, now_ms)?;
         self.await_completion_inner(receiver, deadline_ms, timeout_msg, enable_wakeup, false)
             .await
-    }
-
-    /// Milliseconds remaining until `deadline_ms`, saturating at zero.
-    fn remaining_ms(&self, deadline_ms: i64) -> i64 {
-        deadline_ms.saturating_sub(self.time.milliseconds()).max(0)
     }
 
     fn default_api_timeout_deadline_ms(&self) -> i64 {
@@ -985,12 +976,12 @@ impl AsyncConsumerHandleState {
             // deviation as `AsyncKafkaConsumer::partitions_for_with_timeout`.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before partitions for topic {topic} could be determined",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
 
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(deadline_ms);
         // Java's `partitionsFor` calls `setActiveTask(future)` — `enable_wakeup=true`.
@@ -1014,11 +1005,11 @@ impl AsyncConsumerHandleState {
             // deviation as `AsyncKafkaConsumer::list_topics_with_timeout`.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before all topics' metadata could be listed",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<PartitionInfo>>>(deadline_ms);
         // Java's `listTopics` calls `setActiveTask(future)` — `enable_wakeup=true`.
@@ -1136,7 +1127,7 @@ impl AsyncConsumerHandleState {
             }
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         loop {
             let position_offset = {
@@ -1172,7 +1163,7 @@ impl AsyncConsumerHandleState {
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     partition
                 )));
             }
@@ -1189,7 +1180,7 @@ impl AsyncConsumerHandleState {
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
@@ -1206,7 +1197,7 @@ impl AsyncConsumerHandleState {
             Ok(map) => Ok(map),
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
-                timeout.as_millis(),
+                ConsumerUtils::duration_to_millis(timeout),
                 format_partitions_for_display(partitions),
             ))),
             Err(err) => Err(err),
@@ -1228,7 +1219,7 @@ impl AsyncConsumerHandleState {
             timestamps_to_search.insert(tp.clone(), timestamp);
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -1265,7 +1256,7 @@ impl AsyncConsumerHandleState {
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -1288,7 +1279,7 @@ impl AsyncConsumerHandleState {
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -1325,7 +1316,7 @@ impl AsyncConsumerHandleState {
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -1339,9 +1330,9 @@ impl AsyncConsumerHandleState {
     /// [`AsyncCommitState`]: it runs the queued commit callbacks, waits for
     /// the consumer's earlier async commits (made through the consumer or a
     /// handle) and runs their callbacks, fires `interceptors.onCommit` and
-    /// records the `commit-sync` metric. Only the waits differ: they do not
-    /// process background events, which the consumer delivering this
-    /// callback already does.
+    /// records the `commit-sync` metric. The waits are the consumer's too:
+    /// neither processes background events, which only `poll()` and
+    /// `unsubscribe()` deliver, as in Java.
     async fn commit_sync(
         &self,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
@@ -1364,7 +1355,7 @@ impl AsyncConsumerHandleState {
         timeout: Duration,
     ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let receiver = self
             .commit(CommitEventKind::Sync { offsets, deadline_ms })
             .await?
@@ -1397,7 +1388,7 @@ impl AsyncConsumerHandleState {
                 deadline_ms,
                 format!(
                     "Timeout of {}ms expired before successfully committing offsets",
-                    timeout.as_millis()
+                    ConsumerUtils::duration_to_millis(timeout)
                 ),
                 true,
             )
@@ -1461,7 +1452,7 @@ impl AsyncConsumerHandleState {
         Ok(Some(receiver))
     }
 
-    /// The shared wakeup-aware, no-drain await core (see
+    /// The shared wakeup-aware await core (see
     /// [`Self::submit_and_await`]). Awaits an already-submitted event's
     /// receiver, racing it against the rotating wakeup token's
     /// cancellation (when `enable_wakeup`) and the absolute `deadline_ms`.
@@ -1481,97 +1472,26 @@ impl AsyncConsumerHandleState {
     }
 
     /// [`Self::await_completion`], with `result_first_on_entry` as
-    /// [`AsyncKafkaConsumer::process_background_events_until_inner`] takes it:
-    /// `false` where the wakeup was checked before the event was submitted
-    /// ([`Self::submit_and_await`]).
+    /// [`await_event_completion`] takes it: `false` where the wakeup was
+    /// checked before the event was submitted ([`Self::submit_and_await`]).
     async fn await_completion_inner<T: Send + 'static>(
         &self,
-        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
         result_first_on_entry: bool,
     ) -> Result<T, Error> {
-        // Java's `setActiveTask(future)` on a future that is already done
-        // keeps its result and leaves a pending wakeup armed for the next
-        // call (`WakeupTrigger.java` `setActiveTask`), so on entry the result
-        // is looked at before the wakeup, where the future can be done then
-        // (`result_first_on_entry`). Afterwards the wakeup goes first: it
-        // was not there when the result was last seen missing, and where both
-        // arrived since, the `biased` wait below also prefers it.
-        if result_first_on_entry && let Some(result) = try_take_completion(&mut receiver) {
-            return result;
-        }
-        loop {
-            if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                self.wakeup_trigger.rotate();
-                return Err(err);
-            }
-            match receiver.try_recv() {
-                Ok(Ok(value)) => return Ok(value),
-                Ok(Err(err)) => return Err(err),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(Error::local_illegal_state(
-                        "Background task dropped the completion sender without completing it",
-                    ));
-                },
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    let remaining = self.remaining_ms(deadline_ms);
-                    if remaining <= 0 {
-                        return Err(Error::timeout(timeout_msg.as_ref().to_string()));
-                    }
-                    let wait = std::cmp::min(remaining, 100) as u64;
-                    let token = if enable_wakeup {
-                        Some(self.wakeup_trigger.current_token())
-                    } else {
-                        None
-                    };
-                    let recv_fut = &mut receiver;
-                    match token {
-                        Some(tok) => {
-                            tokio::select! {
-                                biased;
-                                _ = tok.cancelled() => {
-                                    // The wakeup came while the result was
-                                    // pending: raise it now, ahead of the
-                                    // deadline check. A trigger disabled by
-                                    // close() reports none; keep waiting.
-                                    if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                                        self.wakeup_trigger.rotate();
-                                        return Err(err);
-                                    }
-                                },
-                                res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
-                                    match res {
-                                        Ok(Ok(Ok(value))) => return Ok(value),
-                                        Ok(Ok(Err(err))) => return Err(err),
-                                        Ok(Err(_recv_err)) => {
-                                            return Err(Error::local_illegal_state(
-                                                "Background task dropped the completion sender without completing it",
-                                            ));
-                                        },
-                                        Err(_elapsed) => {},
-                                    }
-                                },
-                            }
-                        },
-                        None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
-                            Ok(Ok(Ok(value))) => return Ok(value),
-                            Ok(Ok(Err(err))) => return Err(err),
-                            Ok(Err(_recv_err)) => {
-                                return Err(Error::local_illegal_state(
-                                    "Background task dropped the completion sender without completing it",
-                                ));
-                            },
-                            Err(_elapsed) => {},
-                        },
-                    }
-                },
-            }
-            if self.remaining_ms(deadline_ms) <= 0 {
-                return Err(Error::timeout(timeout_msg.as_ref().to_string()));
-            }
-        }
+        await_event_completion(
+            &self.wakeup_trigger,
+            self.time.as_ref(),
+            receiver,
+            deadline_ms,
+            timeout_msg,
+            enable_wakeup,
+            result_first_on_entry,
+        )
+        .await
     }
 }
 
@@ -1635,7 +1555,7 @@ fn build_close_handle_fns(
 ) -> (SignalCloseFn, LifecycleFn) {
     let close_notify = Arc::clone(&notify);
     let signal_close_fn: SignalCloseFn = Box::new(move |timeout: Duration| {
-        close_timeout_ms.store(timeout.as_millis().min(i64::MAX as u128) as i64, Ordering::Release);
+        close_timeout_ms.store(ConsumerUtils::duration_to_millis(timeout), Ordering::Release);
         running.store(false, Ordering::Release);
         close_notify.notify_one();
     });
@@ -2096,6 +2016,119 @@ fn try_take_completion<T>(receiver: &mut tokio::sync::oneshot::Receiver<Result<T
     }
 }
 
+/// Waits for an already-submitted event's result: Java's
+/// `ConsumerUtils.getResult(future, timer)` behind
+/// `applicationEventHandler.addAndGet(event)`, with
+/// `wakeupTrigger.setActiveTask(future)` when `enable_wakeup`.
+///
+/// This is the wait of every blocking consumer call except `poll()` and
+/// `unsubscribe()`, the owning consumer's and the [`ConsumerHandle`]'s
+/// alike. It does NOT process background events: Java runs
+/// `processBackgroundEvents()` only from `poll()` and `unsubscribe()`, so a
+/// queued rebalance callback or `ErrorEvent` stays queued for the next
+/// `poll()` (`consumer-threading.md` §31).
+///
+/// The receiver is raced against the rotating wakeup token's cancellation
+/// (when `enable_wakeup`) and the absolute `deadline_ms`, in 100 ms slices
+/// so the deadline follows the mock-clock-safe `time`.
+///
+/// `result_first_on_entry`: whether the event's result may already be there
+/// when its wakeup is registered, Java's `setActiveTask` on a done future,
+/// which keeps the result and leaves the wakeup pending. `false` where the
+/// wakeup was checked before the event was submitted (Java's
+/// `setActiveTask` before `addAndGet`): a wakeup seen afterwards found the
+/// event's future pending, so it wins.
+async fn await_event_completion<T: Send + 'static>(
+    wakeup_trigger: &WakeupTrigger,
+    time: &dyn Time,
+    mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+    deadline_ms: i64,
+    timeout_msg: impl AsRef<str>,
+    enable_wakeup: bool,
+    result_first_on_entry: bool,
+) -> Result<T, Error> {
+    // Java's `setActiveTask(future)` on a future that is already done
+    // keeps its result and leaves a pending wakeup armed for the next
+    // call (`WakeupTrigger.java` `setActiveTask`), so on entry the result
+    // is looked at before the wakeup, where the future can be done then
+    // (`result_first_on_entry`). Afterwards the wakeup goes first: it
+    // was not there when the result was last seen missing, and where both
+    // arrived since, the `biased` wait below also prefers it.
+    if result_first_on_entry && let Some(result) = try_take_completion(&mut receiver) {
+        return result;
+    }
+    loop {
+        if enable_wakeup && let Err(err) = wakeup_trigger.maybe_trigger_wakeup() {
+            wakeup_trigger.rotate();
+            return Err(err);
+        }
+        match receiver.try_recv() {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(err)) => return Err(err),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                return Err(Error::local_illegal_state(
+                    "Background task dropped the completion sender without completing it",
+                ));
+            },
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                let remaining = deadline_ms.saturating_sub(time.milliseconds()).max(0);
+                if remaining <= 0 {
+                    return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+                }
+                let wait = std::cmp::min(remaining, 100) as u64;
+                let token = if enable_wakeup {
+                    Some(wakeup_trigger.current_token())
+                } else {
+                    None
+                };
+                let recv_fut = &mut receiver;
+                match token {
+                    Some(tok) => {
+                        tokio::select! {
+                            biased;
+                            _ = tok.cancelled() => {
+                                // The wakeup came while the result was
+                                // pending: raise it now, ahead of the
+                                // deadline check. A trigger disabled by
+                                // close() reports none; keep waiting.
+                                if let Err(err) = wakeup_trigger.maybe_trigger_wakeup() {
+                                    wakeup_trigger.rotate();
+                                    return Err(err);
+                                }
+                            },
+                            res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                                match res {
+                                    Ok(Ok(Ok(value))) => return Ok(value),
+                                    Ok(Ok(Err(err))) => return Err(err),
+                                    Ok(Err(_recv_err)) => {
+                                        return Err(Error::local_illegal_state(
+                                            "Background task dropped the completion sender without completing it",
+                                        ));
+                                    },
+                                    Err(_elapsed) => {},
+                                }
+                            },
+                        }
+                    },
+                    None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                        Ok(Ok(Ok(value))) => return Ok(value),
+                        Ok(Ok(Err(err))) => return Err(err),
+                        Ok(Err(_recv_err)) => {
+                            return Err(Error::local_illegal_state(
+                                "Background task dropped the completion sender without completing it",
+                            ));
+                        },
+                        Err(_elapsed) => {},
+                    },
+                }
+            },
+        }
+        if deadline_ms.saturating_sub(time.milliseconds()).max(0) <= 0 {
+            return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+        }
+    }
+}
+
 /// An already-completed commit result, Java's `completedFuture(null)` for
 /// empty explicit offsets, read by `commitSync` as no committed offsets.
 fn completed_commit_result() -> CommitResultReceiver {
@@ -2231,9 +2264,9 @@ impl AsyncCommitState {
     /// Translates Java's
     /// `private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(CommitEvent)`
     /// (`AsyncKafkaConsumer.java:1126-1140`) up to the offsets-ready wait,
-    /// which the caller runs: the owning consumer processes background
-    /// events while it waits, a handle (already running inside a callback
-    /// that consumer delivers) does not.
+    /// which the caller runs. Neither the owning consumer nor a handle
+    /// processes background events during that wait: as in Java, only
+    /// `poll()` and `unsubscribe()` deliver them.
     ///
     /// Checks `group.id`, runs the queued commit callbacks, and returns
     /// `None` for empty explicit offsets (Java's `completedFuture(null)`);
@@ -2482,6 +2515,112 @@ impl AsyncCommitState {
     #[cfg(test)]
     fn last_pending_async_commit(&self) -> Option<PendingAsyncCommit> {
         self.lock_pending().last.clone()
+    }
+}
+
+/// Return the result of a `PartitionsRemoved` callback to the background
+/// task — the notify half of Java's
+/// `AsyncKafkaConsumer.invokeRebalanceCallbackAndNotifyBackgroundThread`.
+///
+/// With `ack_through_application_events` (the callback a leave enqueued),
+/// the ack goes back inside a `ConsumerRebalanceListenerCallbackCompleted`
+/// application event, as Java's
+/// `applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(...))`
+/// does: the background task then applies it after every event enqueued
+/// before it — including one the listener submitted and stopped waiting
+/// for — and before every event enqueued after it. Sending on `ack`
+/// directly would let the background task see the result before such an
+/// earlier, still-queued event. `add` wakes the background task. If the
+/// background task is gone, the event (and the ack in it) is dropped.
+///
+/// Otherwise (the reconcile and release callbacks) the result is sent on
+/// `ack` directly and the background task is woken through the
+/// application-event `Notify` (§31 step 4): never through the user-facing
+/// wakeup trigger, which would make the caller's next blocking call return
+/// a spurious `Wakeup`.
+pub(crate) fn notify_background_task_of_rebalance_callback(
+    application_event_handler: &ApplicationEventHandler,
+    method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
+    ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
+    ack_through_application_events: bool,
+    result: Result<(), Error>,
+    now_ms: i64,
+) {
+    if ack_through_application_events {
+        let _ = application_event_handler.add(
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error: result.err(), ack },
+            now_ms,
+        );
+    } else {
+        let _ = ack.send(result);
+        application_event_handler.wake_background_task();
+    }
+}
+
+/// Owns a `PartitionsRemoved` callback's ack while the app side runs the
+/// listener, so a leave's ack is still returned through the application-event
+/// queue if the caller's future is dropped mid-listener.
+///
+/// DoD §7: no Java counterpart. A Java app thread cannot be cancelled in the
+/// middle of a callback; the closest case is a listener cut short by a
+/// `WakeupException` / `InterruptException`, which
+/// `ConsumerRebalanceListenerInvoker` rethrows and
+/// `AsyncKafkaConsumer.invokeRebalanceCallbacks` catches into the event's
+/// error. `invokeRebalanceCallbackAndNotifyBackgroundThread` then still
+/// enqueues the `ConsumerRebalanceListenerCallbackCompletedEvent` behind
+/// everything the listener had enqueued. A Rust future dropped while the
+/// listener awaits would otherwise drop the ack unsent, and the background
+/// task would apply the leave ahead of the listener's still-queued ops (a
+/// revocation `commit_sync()` would then commit nothing). On drop this guard
+/// enqueues the completed event with an [`Error::Interrupt`], the error Java
+/// carries for an interrupted callback. `ApplicationEventHandler::add` is
+/// sync and never blocks, so it is safe to call from `Drop`.
+///
+/// Only a leave's ack (`ack_through_application_events`) is returned on
+/// drop; a reconcile or release ack is dropped unsent, as before.
+struct PartitionsRemovedAckGuard {
+    application_event_handler: Arc<ApplicationEventHandler>,
+    time: Arc<dyn Time>,
+    method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
+    ack: Option<tokio::sync::oneshot::Sender<Result<(), Error>>>,
+    ack_through_application_events: bool,
+}
+
+impl PartitionsRemovedAckGuard {
+    /// Returns the listener's `result` through
+    /// [`notify_background_task_of_rebalance_callback`].
+    fn complete(mut self, result: Result<(), Error>) {
+        if let Some(ack) = self.ack.take() {
+            notify_background_task_of_rebalance_callback(
+                &self.application_event_handler,
+                self.method_name,
+                ack,
+                self.ack_through_application_events,
+                result,
+                self.time.milliseconds(),
+            );
+        }
+    }
+}
+
+impl Drop for PartitionsRemovedAckGuard {
+    fn drop(&mut self) {
+        if !self.ack_through_application_events {
+            return;
+        }
+        if let Some(ack) = self.ack.take() {
+            notify_background_task_of_rebalance_callback(
+                &self.application_event_handler,
+                self.method_name,
+                ack,
+                true,
+                Err(Error::Interrupt(crate::common::errors::InterruptError::new(format!(
+                    "The {} callback was interrupted: the call running it was cancelled",
+                    self.method_name.fully_qualified_method_name()
+                )))),
+                self.time.milliseconds(),
+            );
+        }
     }
 }
 
@@ -3498,54 +3637,12 @@ where
         // TopicMetadataRequestManager — always built.
         let topic_metadata = Some(TopicMetadataRequestManager::new(&config));
 
-        // FetchRequestManager — always built. The `is_unavailable` and
-        // `maybe_throw_auth_failure` closures bridge to the delegate
-        // (the delegate is not visible from the fetch manager directly
-        // — Phase-7 design uses Arc<Fn> indirection).
+        // FetchRequestManager — always built. Java hands it the
+        // `NetworkClientDelegate` for `isUnavailable` / `maybeThrowAuthFailure`;
+        // here the bg task lends it the delegate on every `poll` /
+        // `poll_on_close` instead (see `NodeStatus`).
         let fetch = {
-            use crate::common::Node;
             use crate::common::utils::internals::BufferSupplier;
-
-            // Phase-12-deferred wiring: the delegate-backed
-            // `is_unavailable` / `maybe_throw_auth_failure` closures
-            // require an `Arc<AsyncMutex<NetworkClientDelegate<...>>>`
-            // crossing into a sync `Fn` boundary. Synchronously
-            // acquiring an async mutex inside a sync `Fn` is not
-            // possible without blocking. Phase 12 ships with no-op
-            // closures (always-available, never-auth-fail).
-            //
-            // Behavior gap (Critic Issue 4):
-            //   * `is_unavailable` no-op: the fetch manager treats
-            //     every node as available, so it may schedule fetches
-            //     to nodes the delegate has disconnected. The delegate
-            //     filters those at send-time, so the practical impact
-            //     is one extra round-trip per disconnected-node fetch
-            //     attempt — not a correctness bug.
-            //   * `maybe_throw_auth_failure` no-op IS a correctness
-            //     gap. Java's `AbstractFetch.java:452-457` calls
-            //     `isUnavailable(node)` THEN `maybeThrowAuthFailure(node)`
-            //     to surface cached auth errors observable on the
-            //     consumer side BEFORE the broker connection has been
-            //     established. With the no-op `|_| Ok(())`, an auth
-            //     error stays invisible until the broker actually RSTs
-            //     the next reconnect attempt, then surfaces via the
-            //     background event queue with delayed semantics.
-            //
-            // Phase 12 is PLAINTEXT-only (PLAN.md §"Out of scope"); the
-            // auth path is not exercised here. The closures MUST be
-            // replaced with delegate-backed snapshots before any
-            // SSL/SASL wiring lands.
-            //
-            // FIXME(phase-9-sasl): wire a sync snapshot of the
-            // delegate's node-availability + auth-failure maps. The
-            // delegate writes on `add_all_from_poll_result` /
-            // `handle_disconnections`; the closures read. Without this,
-            // an `AbstractFetch.maybeThrowAuthFailure`-equivalent path
-            // cannot surface `SASL_AUTHENTICATION_FAILED` from the
-            // delegate's cached state — auth errors will only appear
-            // after a subsequent broker round-trip.
-            let is_unavailable: crate::consumer::internals::IsUnavailableFn = Arc::new(|_n: &Node| false);
-            let maybe_auth: crate::consumer::internals::MaybeAuthFailureFn = Arc::new(|_n: &Node| Ok::<(), Error>(()));
 
             let mut frm = FetchRequestManager::new(
                 Arc::clone(&metadata),
@@ -3553,8 +3650,6 @@ where
                 fetch_config.clone(),
                 Arc::clone(&fetch_buffer),
                 Arc::new(BufferSupplier::create()),
-                is_unavailable,
-                maybe_auth,
                 Arc::clone(&api_versions),
                 Arc::clone(&fetch_metrics_manager),
                 config.retry_backoff_ms(),
@@ -3772,7 +3867,7 @@ where
             .set_async_consumer_metrics(Arc::clone(&async_consumer_metrics), Arc::clone(&application_event_queue_size));
 
         // Capture the running-flag + wakeup handles before moving
-        // `network_thread` into `tokio::spawn`. The erased closures
+        // `network_thread` into `spawn_dedicated`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
         let (signal_close_fn, wakeup_fn) = build_close_handle_fns(
@@ -3812,29 +3907,14 @@ where
         // poll-timeout timers. The §10 network-poll-to-completion
         // (cancel-safety), the §11 `Selector`/`Notify` wakeup, and the
         // §31 listener/commit callbacks (which run on the APP task — the
-        // bg only enqueues + awaits the oneshot) are all unaffected by
+        // bg only enqueues the callback event, stores the ack receiver and
+        // `try_recv`s it on later iterations) are all unaffected by
         // moving the bg loop onto a `current_thread` runtime.
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-        let thread_handle = std::thread::Builder::new()
-            .name("kafka-consumer-io".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build consumer io runtime");
-                rt.block_on(async move {
-                    let mut thread = network_thread;
-                    while thread.is_running() {
-                        thread.run_once().await;
-                    }
-                    thread.cleanup().await;
-                });
-                // Signal the close path that the bg loop + `cleanup()`
-                // have finished. Errors (receiver dropped before close)
-                // are benign — `await_join` treats them as a clean exit.
-                let _ = done_tx.send(());
-            })
-            .expect("spawn consumer io thread");
+        //
+        // The loop is `ConsumerNetworkThread::run`, which carries Java's
+        // per-iteration `catch (Throwable)`: a panicking iteration is logged
+        // and the loop continues, and `cleanup()` still runs on exit.
+        let (done_rx, thread_handle) = network_thread.spawn_dedicated();
 
         let network_thread_close =
             NetworkThreadCloseHandle::with_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
@@ -4095,6 +4175,17 @@ where
     #[cfg(test)]
     pub(crate) fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Test seam: how many fetch requests the production fetch manager has
+    /// built for `node_id` (each one a FETCH handed to the network client).
+    #[cfg(test)]
+    pub(crate) fn fetch_requests_built_for_test(&self, node_id: i32) -> u64 {
+        let guard = self.request_managers.lock().expect("request managers mutex poisoned");
+        guard
+            .fetch
+            .as_ref()
+            .map_or(0, |fetch| fetch.fetch_requests_built_for_test(node_id))
     }
 
     /// Test seam: weak references to the metadata and subscription state, so a
@@ -4395,7 +4486,7 @@ where
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::TopicSubscriptionChange { handle, topics: topics_set, listener },
             receiver,
             deadline_ms,
@@ -4426,7 +4517,7 @@ where
         // See `subscribe_internal_topics` for why we store the listener
         // only after the submit resolves Ok.
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, pattern, listener },
             receiver,
             deadline_ms,
@@ -4541,24 +4632,20 @@ where
         // [`Error::TopicAuthorization`] / [`Error::GroupAuthorization`].
         let ignore_predicate = |err: &Error| matches!(err, Error::TopicAuthorization(_) | Error::GroupAuthorization(_));
 
-        self.process_background_events_until_inner::<()>(
+        // Java's `unsubscribe()` does NOT call
+        // `wakeupTrigger.setActiveTask(...)` (see
+        // `AsyncKafkaConsumer.java:1933-1957`), and its wait is not wakeable.
+        self.process_background_events_until::<()>(
             receiver,
             deadline_ms,
             ignore_predicate,
             "Failed while waiting for the unsubscribe event to complete",
-            // Java's `unsubscribe()` does NOT call
-            // `wakeupTrigger.setActiveTask(...)` (see
-            // `AsyncKafkaConsumer.java:1933-1957`). Match that.
-            false,
-            /* skip_rebalance_callback = */ false,
             // AK 4.3.1 (KAFKA-20428): unsubscribe passes
             // `skipAssignmentEvents = true` so a `PartitionsAssigned`
             // event queued by an in-flight reconciliation is not applied
             // (the consumer is already leaving).
             /* skip_assignment_events = */
             true,
-            // Without wakeups the entry order does not matter.
-            /* result_first_on_entry = */ true,
         )
         .await
     }
@@ -4591,7 +4678,7 @@ where
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
             receiver,
             deadline_ms,
@@ -4609,11 +4696,12 @@ where
 
     // ── §31 process_background_events ─────────────────────────────────
     //
-    // Per `consumer-threading.md` §31, this method MUST be called at the
-    // top of every blocking-style API. It drains the bg-event channel
-    // via `try_recv` in a `while let` loop and dispatches each event on
-    // the caller's task — listener callbacks invoke the user-supplied
-    // `ConsumerRebalanceListener` inline.
+    // Per `consumer-threading.md` §31, only `poll()` (each
+    // `check_inflight_poll` pass) and `unsubscribe()` call this, as Java
+    // calls `processBackgroundEvents()` only from those. It drains the
+    // bg-event channel via `try_recv` in a `while let` loop and dispatches
+    // each event on the caller's task — listener callbacks invoke the
+    // user-supplied `ConsumerRebalanceListener` inline.
 
     /// Drains the background-events channel and dispatches each event
     /// on the caller's task. Mirrors Java's `boolean processBackgroundEvents()`.
@@ -4642,31 +4730,14 @@ where
     /// acquire the guard at all — the listener invoker reads paused
     /// partitions inside its own brief lock window.
     pub(crate) async fn process_background_events(&mut self) -> Result<bool, Error> {
-        self.process_background_events_inner(false, false).await
+        self.process_background_events_inner(false).await
     }
 
-    /// Inner implementation of [`Self::process_background_events`].
-    ///
-    /// `skip_rebalance_callback` controls how a pending §31
-    /// `PartitionsRemoved` / `PartitionsAssigned` event is handled:
-    ///
-    ///   - `false` (normal blocking-style APIs — `poll`, `commit_sync`, …):
-    ///     invoke the user listener on the caller's task, send the result
-    ///     on the §31 ack, and record any error into `first_error` so it
-    ///     surfaces to the caller — matching Java's `processBackgroundEvents`
-    ///     which rethrows the wrapped callback error.
-    ///   - `true` (close path — `leave_group_on_close`): do NOT invoke the
-    ///     user listener at all; send `Ok(())` on the `PartitionsRemoved` ack
-    ///     so the bg task's parked reconcile / release unblocks and completes
-    ///     cleanly. Java never invokes `on_partitions_assigned` (or any
-    ///     reconcile-queued callback) during `close()` — close runs rebalance
-    ///     callbacks only via `runRebalanceCallbacksOnClose` (revoked/lost,
-    ///     Step 4). Acking is a Rust-only necessity because our bg task parks
-    ///     on the ack (Java's `CompletableFuture` chain does not). See
-    ///     `leave_group_on_close`.
+    /// Inner implementation of [`Self::process_background_events`]
+    /// (Java's `processBackgroundEvents(boolean skipAssignmentEvents)`).
     ///
     /// `skip_assignment_events` (AK 4.3.1, KAFKA-20428) — Java's
-    /// `skipAssignmentEvents`. When `true` (unsubscribe / close), a
+    /// `skipAssignmentEvents`. When `true` (`unsubscribe()`), a
     /// `PartitionsAssigned` event is NOT processed (no assignment applied, no
     /// callback run); its ack is completed with an error to unblock the bg
     /// reconciliation, and it is NOT recorded into `first_error`. These
@@ -4674,12 +4745,8 @@ where
     /// `unsubscribe()` the consumer is already leaving, so applying a new
     /// assignment would be wrong. `PartitionsRemoved` (revoke / lost) events
     /// are always processed regardless of this flag (they are relevant during
-    /// unsubscribe so the user can flush offsets). Close sets both flags.
-    async fn process_background_events_inner(
-        &mut self,
-        skip_rebalance_callback: bool,
-        skip_assignment_events: bool,
-    ) -> Result<bool, Error> {
+    /// unsubscribe so the user can flush offsets).
+    async fn process_background_events_inner(&mut self, skip_assignment_events: bool) -> Result<bool, Error> {
         let mut first_error: Option<Error> = None;
         let mut had_events = false;
         // Java records `recordBackgroundEventQueueProcessingTime(now - startMs)`
@@ -4693,10 +4760,10 @@ where
         // Java `BackgroundEventHandler.drainEvents` (lines 65-70) records
         // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
         // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
-        // Since `process_background_events` runs at the top of every blocking-style
-        // API, Java continuously refreshes this gauge while idle. That
-        // unconditional refresh is preserved: the record below runs on every
-        // drain, empty or not.
+        // `process_background_events` runs from `poll()` and `unsubscribe()`
+        // (Java's only drain sites), so a polling consumer refreshes this gauge
+        // even while idle. That unconditional refresh is preserved: the record
+        // below runs on every drain, empty or not.
         //
         // What is NOT preserved is the literal `0`, and deliberately so. Java's
         // `drainTo` calls `fullyLock()`, so nothing can arrive mid-drain and `0`
@@ -4731,29 +4798,7 @@ where
                 BackgroundEvent::Error { error } => {
                     Self::record_first_error(&mut first_error, error);
                 },
-                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } if skip_rebalance_callback => {
-                    // Close path: do NOT invoke the user listener. Java never
-                    // invokes reconcile-queued callbacks during `close()` —
-                    // close runs rebalance callbacks only via
-                    // `runRebalanceCallbacksOnClose` (revoked/lost, Step 4),
-                    // and uses plain `addAndGet` for the rest of the close
-                    // steps, so any callback the membership manager queued is
-                    // simply never run and is discarded when the consumer
-                    // closes.
-                    //
-                    // We still must send the §31 ack so the bg task's parked
-                    // reconcile / release drive unblocks and completes cleanly
-                    // — without it the bg task never makes progress and
-                    // `network_thread_close.await_join()` (Step 8) hangs. Java
-                    // has no equivalent dependency because its KIP-848
-                    // reconcile chains via `CompletableFuture` and never parks
-                    // the bg thread on the ack.
-                    let _ = method_name;
-                    let _ = partitions;
-                    let _ = ack.send(Ok(()));
-                    self.application_event_handler.wake_background_task();
-                },
-                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, ack_through_application_events } => {
                     // AK 4.3.1 (KAFKA-20106): `process(PartitionsRemovedEvent)`
                     // → `invokeRebalanceCallbackAndNotifyBackgroundThread`.
                     // `method_name` is `ON_PARTITIONS_REVOKED` or
@@ -4764,6 +4809,17 @@ where
                     // `rebalance_listener` lock is separate from
                     // `SubscriptionState`, so no recursive lock concern.
                     let listener = self.rebalance_listener.lock().unwrap().clone();
+
+                    // Holds the ack across the listener `.await`, so a leave's
+                    // ack still goes back behind the listener's ops if this
+                    // future is dropped mid-listener.
+                    let ack_guard = PartitionsRemovedAckGuard {
+                        application_event_handler: Arc::clone(&self.application_event_handler),
+                        time: Arc::clone(&self.time),
+                        method_name,
+                        ack: Some(ack),
+                        ack_through_application_events,
+                    };
 
                     // The listener may call back into the consumer through
                     // its `ConsumerHandle` (Java: the same thread re-enters
@@ -4805,19 +4861,18 @@ where
                         )
                     });
 
-                    let send_result = result.clone();
-                    let _ = ack.send(send_result);
-
-                    // Phase 41b: poke the bg-task wakeup `Notify` so the
-                    // bg loop wakes promptly and `try_recv`s this ack on
-                    // its next `reconcile` entry — rather than waiting out
-                    // the selector poll timeout. This reuses the existing
-                    // application-event wakeup primitive (Java's
-                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
-                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
-                    // Perf Contract item 2).
+                    // Return the result and poke the bg-task wakeup
+                    // `Notify` (Phase 41b) so the bg loop wakes promptly and
+                    // `try_recv`s this ack on its next `reconcile` entry —
+                    // rather than waiting out the selector poll timeout. This
+                    // reuses the existing application-event wakeup primitive
+                    // (Java's `wakeupNetworkThread()` → `Selector.wakeup()`
+                    // analog); it does NOT shrink `poll_wait_time_ms` (no
+                    // busy-spin — Perf Contract item 2). A leave's callback
+                    // returns through the application-event queue instead,
+                    // whose `add` wakes the loop the same way.
                     //
-                    // This MUST be the application-event notify, NOT
+                    // The wake MUST be the application-event notify, NOT
                     // `network_thread_close.wakeup()` / `wakeup_trigger.wakeup()`.
                     // Those cancel the wakeup token, which is Java's
                     // `KafkaConsumer.wakeup()` — it arms a user-visible
@@ -4829,16 +4884,16 @@ where
                     // reach the selector through `run_once`'s `select!`, so
                     // this wakes the loop just as promptly with no
                     // user-visible side effect.
-                    self.application_event_handler.wake_background_task();
+                    ack_guard.complete(result.clone());
 
                     if let Err(err) = result {
                         Self::record_first_error(&mut first_error, err);
                     }
                 },
                 BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack }
-                    if skip_assignment_events || skip_rebalance_callback =>
+                    if skip_assignment_events =>
                 {
-                    // AK 4.3.1 (KAFKA-20428): during unsubscribe / close, skip
+                    // AK 4.3.1 (KAFKA-20428): during unsubscribe, skip
                     // processing assignment-update events — they are only
                     // relevant from `poll()`. Java completes the event's future
                     // EXCEPTIONALLY to unblock the reconciliation in the
@@ -4849,26 +4904,11 @@ where
                     // Java: `new KafkaException("Assignment event skipped ...")` — a
                     // bare KafkaException carries no error code; use the neutral
                     // `UnknownServerError` code while preserving the message text.
-                    //
-                    // Message-fidelity note (Critic 64, Observation 2): Java has a
-                    // single literal for this skip
-                    // (`AsyncKafkaConsumer.java:2373`, "...consumer is
-                    // unsubscribing"), and reaches it ONLY via the unsubscribe
-                    // path — Java's `close()` never passes
-                    // `skipAssignmentEvents=true`. Rust reaches this arm on BOTH
-                    // unsubscribe AND close (close sets `skip_assignment_events`
-                    // to unblock the bg reconcile that Java simply abandons), so
-                    // on the close path the "unsubscribing" wording is slightly
-                    // inaccurate. This is a deliberate, benign deviation: the
-                    // error is internal (it rides the bg-reconcile ack, is
-                    // completed-exceptionally-not-recorded, and is never surfaced
-                    // to the user), and the message text is byte-identical to
-                    // Java's only literal for this skip.
                     let _ = ack.send(Err(Error::with_message(
                         crate::common::protocol::Errors::UnknownServerError,
                         "Assignment event skipped because consumer is unsubscribing",
                     )));
-                    log::debug!("Skipped processing PartitionsAssigned during unsubscribe/close");
+                    log::debug!("Skipped processing PartitionsAssigned during unsubscribe");
                     self.application_event_handler.wake_background_task();
                 },
                 BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
@@ -4978,138 +5018,43 @@ where
     }
 
     /// Iterative variant of [`Self::process_background_events`] used by
-    /// blocking-style APIs (`unsubscribe`, `commit_sync`, future
-    /// `poll`) that need to interleave bg-event draining with waiting on
-    /// a specific [`tokio::sync::oneshot::Receiver`].
+    /// `unsubscribe()`, the one blocking-style API besides `poll()` that
+    /// interleaves bg-event draining with waiting on its own event.
     ///
     /// Mirrors Java's
     /// `<T> T processBackgroundEvents(Future<T> future, Timer timer,
-    ///                                Predicate<Exception> ignoreErrorEventException)`
-    /// (`AsyncKafkaConsumer.java:2271`). Each iteration:
+    ///                                Predicate<Exception> ignoreErrorEventException,
+    ///                                boolean skipAssignmentEvents)`
+    /// (`AsyncKafkaConsumer.java:2442-2474`). Each iteration:
     ///
-    /// 1. Observes the result and any pending wakeup (§11), the result
-    ///    first on entry and the wakeup first afterwards (see
-    ///    `enable_wakeup` below). A wakeup that wins returns
-    ///    `Error::Wakeup` with the token rotated.
-    /// 2. Drains the bg-event channel (invokes any pending listener
-    ///    callbacks on the caller's task).
-    /// 3. Returns a result seen in step 1; otherwise observes a wakeup
-    ///    that came during a drain that ran events, then the result.
-    /// 4. Otherwise, races a 100ms bounded wait against the receiver
-    ///    AND the wakeup token's cancellation signal, the token first.
-    /// 5. Loops while the absolute `deadline_ms` is not exceeded.
+    /// 1. Drains the bg-event channel (invokes any pending listener
+    ///    callbacks on the caller's task); an error the predicate does not
+    ///    ignore is returned.
+    /// 2. Returns the result if the event is done.
+    /// 3. Otherwise, when the drain ran no events, waits up to 100 ms for
+    ///    the result.
+    /// 4. Loops while the absolute `deadline_ms` is not exceeded.
     ///
-    /// # `enable_wakeup`
+    /// The wait is not wakeable: Java's `unsubscribe()` does not call
+    /// `wakeupTrigger.setActiveTask(...)`.
     ///
-    /// Mirrors Java's `wakeupTrigger.setActiveTask(future)` /
-    /// `clearTask()` discipline: only blocking APIs that Java registers
-    /// the future on observe the wakeup, and whichever of the result and
-    /// the wakeup came first wins. A result already there on entry is
-    /// returned and a pending wakeup is left armed for the next call
-    /// (Java's `setActiveTask` on a done future); a wakeup that arrives
-    /// while the result is pending is raised, also when it arrives while
-    /// the drain runs a rebalance listener and the result follows it.
-    /// Close-path callers (`leave_group_on_close`,
-    /// `await_pending_async_commits_and_execute_commit_callbacks` with
-    /// `enable_wakeup=false`) pass `false` here so the disabled-wakeups
-    /// guarantee from `wakeup_trigger.disable()` is also respected on
-    /// the per-API axis.
-    ///
-    /// Returns `Err(Error::timeout(...))` when the deadline
-    /// expires without a completion, or `Err(Error::Wakeup(...))`
-    /// when a concurrent `wakeup()` interrupts the wait.
-    pub(crate) async fn process_background_events_until<T: Send + 'static>(
+    /// Returns `Err(Error::timeout(...))` when the deadline expires without
+    /// a completion.
+    async fn process_background_events_until<T: Send + 'static>(
         &mut self,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         ignore_error_predicate: impl Fn(&Error) -> bool,
         timeout_msg: impl AsRef<str>,
-        enable_wakeup: bool,
-    ) -> Result<T, Error> {
-        self.process_background_events_until_inner(
-            receiver,
-            deadline_ms,
-            ignore_error_predicate,
-            timeout_msg,
-            enable_wakeup,
-            /* skip_rebalance_callback = */ false,
-            /* skip_assignment_events = */ false,
-            /* result_first_on_entry = */ true,
-        )
-        .await
-    }
-
-    /// Inner implementation of [`Self::process_background_events_until`]
-    /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
-    /// flags forwarded to [`Self::process_background_events_inner`]. See that
-    /// method for the close-path / unsubscribe rationale.
-    ///
-    /// `result_first_on_entry`: whether the event's result may already be
-    /// there when its wakeup is registered, Java's `setActiveTask` on a done
-    /// future, which keeps the result and leaves the wakeup pending
-    /// (`commitSync`'s `commitFuture` for empty offsets, and the waits
-    /// [`Self::process_background_events_until`] serves). `false` where the
-    /// wakeup was checked before the event was submitted
-    /// ([`Self::submit_and_drain`], Java's `setActiveTask` before `addAndGet`):
-    /// a wakeup seen afterwards found the event's future pending, so it wins.
-    #[expect(clippy::too_many_arguments)]
-    async fn process_background_events_until_inner<T: Send + 'static>(
-        &mut self,
-        receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
-        deadline_ms: i64,
-        ignore_error_predicate: impl Fn(&Error) -> bool,
-        timeout_msg: impl AsRef<str>,
-        enable_wakeup: bool,
-        skip_rebalance_callback: bool,
         skip_assignment_events: bool,
-        result_first_on_entry: bool,
     ) -> Result<T, Error> {
-        let mut receiver = receiver;
-        // Java's `setActiveTask(future)` lets whichever came first win
-        // (`WakeupTrigger.java` `setActiveTask` / `wakeup`): a future that is
-        // already done when it is set keeps its result and leaves a pending
-        // wakeup for the next call (`completeExceptionally` on a done future
-        // returns false); a wakeup that arrives while it is pending fails it
-        // with `WakeupException`. The token and the receiver carry no order,
-        // so each observation below checks the one known to be earlier first:
-        // on entry the result (it is "done before set"), afterwards the wakeup
-        // (it was not there when the result was last seen missing). Where
-        // both arrived since the last look, the wakeup wins, as the `biased`
-        // wait does. Without `result_first_on_entry` the wakeup goes first
-        // on entry too: it was checked before the event was submitted, so a
-        // wakeup seen now came while the event's future was pending.
-        let mut entering = result_first_on_entry;
-
         loop {
-            // Observation before the drain. A result seen here stands even if
-            // a wakeup arrives while the drain runs listeners; it is returned
-            // after the drain, which runs as it always has.
-            let mut ready = if entering {
-                try_take_completion(&mut receiver)
-            } else {
-                None
-            };
-            entering = false;
-            if ready.is_none() {
-                // §11: a pending wakeup with the result still missing fails
-                // the wait; the token is rotated after raising it.
-                if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                    self.wakeup_trigger.rotate();
-                    return Err(err);
-                }
-                ready = try_take_completion(&mut receiver);
-            }
-
-            let had_events = match self
-                .process_background_events_inner(skip_rebalance_callback, skip_assignment_events)
-                .await
-            {
+            let had_events = match self.process_background_events_inner(skip_assignment_events).await {
                 Ok(had) => had,
                 Err(err) => {
                     if ignore_error_predicate(&err) {
-                        // Treat as if no events were processed (Java
-                        // swallows the matched exception inside the
-                        // try/catch at line 2274-2279).
+                        // Java swallows the matched exception inside the
+                        // try/catch at line 2448-2451.
                         false
                     } else {
                         return Err(err);
@@ -5117,104 +5062,53 @@ where
                 },
             };
 
-            // Java line 2282: `if (future.isDone()) return getResult(future)`.
-            if let Some(result) = ready {
-                return result;
-            }
-            // A wakeup that came while the drain ran a listener (§31, a
-            // Rust-only delivery: Java's waits block in `getResult`) came
-            // before any result arriving after it was looked for.
-            if had_events
-                && enable_wakeup
-                && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup()
-            {
-                self.wakeup_trigger.rotate();
-                return Err(err);
-            }
+            // Java line 2454: `if (future.isDone()) return getResult(future)`.
             if let Some(result) = try_take_completion(&mut receiver) {
                 return result;
             }
 
-            // Java line 2287: if no events were processed this tick, do a
-            // bounded wait (100ms) for the future or for a new bg event.
+            // Java line 2459: if no events were processed this tick, do a
+            // bounded wait (100ms) for the future.
             if !had_events {
                 let remaining = self.remaining_ms(deadline_ms);
                 if remaining <= 0 {
                     return Err(Error::timeout(timeout_msg.as_ref().to_string()));
                 }
                 let wait = std::cmp::min(remaining, 100) as u64;
-                // §11: race the receiver against the wakeup token's
-                // cancellation so `wakeup()` from another task interrupts
-                // the wait immediately. The token clone is cheap (Arc).
-                let token = if enable_wakeup {
-                    Some(self.wakeup_trigger.current_token())
-                } else {
-                    None
-                };
-                let recv_fut = &mut receiver;
-                match token {
-                    Some(tok) => {
-                        tokio::select! {
-                            biased;
-                            _ = tok.cancelled() => {
-                                // The wakeup came while the result was
-                                // pending: raise it now, ahead of the deadline
-                                // check. A trigger disabled by close() reports
-                                // none; then keep waiting.
-                                if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                                    self.wakeup_trigger.rotate();
-                                    return Err(err);
-                                }
-                            },
-                            res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
-                                match res {
-                                    Ok(Ok(result)) => return result,
-                                    Ok(Err(_recv_err)) => {
-                                        return Err(Error::local_illegal_state(
-                                            "Background task dropped the completion sender without completing it",
-                                        ));
-                                    },
-                                    // Java's `swallow TimeoutException` — keep looping.
-                                    Err(_elapsed) => {},
-                                }
-                            },
-                        }
+                match tokio::time::timeout(Duration::from_millis(wait), &mut receiver).await {
+                    Ok(Ok(result)) => return result,
+                    Ok(Err(_recv_err)) => {
+                        return Err(Error::local_illegal_state(
+                            "Background task dropped the completion sender without completing it",
+                        ));
                     },
-                    None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
-                        Ok(Ok(result)) => return result,
-                        Ok(Err(_recv_err)) => {
-                            return Err(Error::local_illegal_state(
-                                "Background task dropped the completion sender without completing it",
-                            ));
-                        },
-                        Err(_elapsed) => {},
-                    },
+                    // Java's `swallow TimeoutException` — keep looping.
+                    Err(_elapsed) => {},
                 }
             }
 
-            // Java line 2299: `while (timer.notExpired())`.
+            // Java line 2471: `while (timer.notExpired())`.
             if self.remaining_ms(deadline_ms) <= 0 {
                 return Err(Error::timeout(timeout_msg.as_ref().to_string()));
             }
         }
     }
 
-    /// Submit `event` and await its typed completion via
-    /// [`Self::process_background_events_until`], interleaving bg-event
-    /// drains and observing wakeup (§31 / §11).
+    /// Submit `event` and await its typed completion: Java's
+    /// `applicationEventHandler.addAndGet(event)`, preceded by
+    /// `wakeupTrigger.setActiveTask(event.future())` when `enable_wakeup`.
     ///
-    /// This is the standard pattern for blocking-style consumer APIs:
-    /// it replaces the direct
-    /// `application_event_handler.add_and_get(event, receiver, now).await`
-    /// call which has the deadlock pitfall documented in
-    /// `process_background_events_until` (a bg-task `select!` blocked on
-    /// a `RebalanceListenerCallbackNeeded` ack cannot serve the
-    /// completion event until the app side drains the listener
-    /// callback from the bg-event channel).
+    /// This is the wait of every blocking-style consumer API except `poll()`
+    /// and `unsubscribe()`. It does NOT drain the background-event queue:
+    /// Java runs `processBackgroundEvents()` only from those two, so a queued
+    /// rebalance callback or `ErrorEvent` stays queued for the next `poll()`
+    /// (`consumer-threading.md` §31). That is safe because the bg loop never
+    /// waits for a listener ack while it services other events: reconcile and
+    /// release acks are `try_recv`ed across iterations, and the only awaited
+    /// ack belongs to the `unsubscribe()` leave, whose caller drains.
     ///
-    /// `enable_wakeup` mirrors Java's per-API `setActiveTask` decision;
-    /// see [`Self::process_background_events_until`] doc-comment. Java calls
-    /// `wakeupTrigger.setActiveTask(event.future())` before
+    /// `enable_wakeup` mirrors Java's per-API `setActiveTask` decision. Java
+    /// calls `wakeupTrigger.setActiveTask(event.future())` before
     /// `applicationEventHandler.addAndGet(event)` (`committed`, `partitionsFor`,
     /// `listTopics`, `updateFetchPositions`: `AsyncKafkaConsumer.java:1264`,
     /// `:1311`, `:1339`, `:2080`), so a wakeup pending when the call starts
@@ -5223,8 +5117,8 @@ where
     /// `addAndGet` still enqueues that event, but its future is failed by then
     /// and nothing reads what the background thread does with it, so the
     /// event is not submitted here.
-    pub(crate) async fn submit_and_drain<T: Send + 'static>(
-        &mut self,
+    async fn submit_and_await<T: Send + 'static>(
+        &self,
         event: ApplicationEvent,
         receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
@@ -5237,54 +5131,114 @@ where
         }
         let now_ms = self.time.milliseconds();
         self.application_event_handler.add(event, now_ms)?;
-        self.process_background_events_until_inner::<T>(
+        await_event_completion(
+            &self.wakeup_trigger,
+            self.time.as_ref(),
             receiver,
             deadline_ms,
-            |_| false,
             timeout_msg,
             enable_wakeup,
-            /* skip_rebalance_callback = */ false,
-            /* skip_assignment_events = */ false,
             /* result_first_on_entry = */ false,
         )
         .await
     }
 
-    /// Close-path variant of [`Self::submit_and_drain`].
-    ///
-    /// Identical to `submit_and_drain` (enqueue the event, then drain the
-    /// background-event channel while awaiting the completion handle) with
-    /// two close-specific differences:
-    ///
-    ///   - `enable_wakeup` is always `false` — close has already disabled
-    ///     wakeups (`wakeup_trigger.disable()`).
-    ///   - Pending §31 rebalance-listener callbacks are NOT invoked while
-    ///     draining; the ack is answered with `Ok(())` so the bg task
-    ///     unblocks for shutdown (`skip_rebalance_callback = true`). Java
-    ///     never invokes `on_partitions_assigned` during `close()`.
-    ///
-    /// See `leave_group_on_close` for why the drain (and not a plain
-    /// event-result wait) is required here.
-    async fn submit_and_drain_for_close<T: Send + 'static>(
-        &mut self,
-        event: ApplicationEvent,
+    /// Awaits an already-submitted event's result without draining the
+    /// background-event queue: Java's `ConsumerUtils.getResult(future, timer)`
+    /// (see [`await_event_completion`]). A result already there on entry wins
+    /// over a pending wakeup, which stays armed for the next call (Java's
+    /// `setActiveTask` on a done future).
+    async fn await_completion<T: Send + 'static>(
+        &self,
         receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
         deadline_ms: i64,
         timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
     ) -> Result<T, Error> {
-        let now_ms = self.time.milliseconds();
-        self.application_event_handler.add(event, now_ms)?;
-        self.process_background_events_until_inner::<T>(
+        await_event_completion(
+            &self.wakeup_trigger,
+            self.time.as_ref(),
             receiver,
             deadline_ms,
-            |_| false,
             timeout_msg,
-            /* enable_wakeup = */ false,
-            /* skip_rebalance_callback = */ true,
-            /* skip_assignment_events = */ true,
+            enable_wakeup,
             /* result_first_on_entry = */ true,
         )
         .await
+    }
+
+    /// Close-path variant of [`Self::submit_and_await`], used by
+    /// `leave_group_on_close`.
+    ///
+    /// Enqueues the event and waits for its result without processing
+    /// background events, as Java's `addAndGet` does, with these differences:
+    ///
+    ///   - Wakeups are not observed — close has already disabled them
+    ///     (`wakeup_trigger.disable()`).
+    ///   - The wait is NOT bounded by the event's `deadline_ms`. Java's
+    ///     `addAndGet` blocks on an unbounded `ConsumerUtils.getResult(future)`
+    ///     (`ApplicationEventHandler.addAndGet`): the event's future is
+    ///     completed by the network thread — by its processing, by the reaper
+    ///     with a `TimeoutException` once `deadline_ms` has passed
+    ///     (`ConsumerNetworkThread.runOnce` processes the queue before it
+    ///     reaps), or on shutdown. Returning at `deadline_ms` here instead
+    ///     lets `close(Duration::ZERO)` stop the bg task before it has
+    ///     processed the event, so the member never leaves the group.
+    ///   - Deliberate deviation: Java has no bound at all, so a network
+    ///     thread stuck inside one iteration hangs `close()`. Here the wait
+    ///     gives up with an `Error::Timeout` at
+    ///     `max(deadline_ms, submission time) + max(request.timeout.ms, 100 ms)`.
+    ///     It is measured from the submission at the latest, and its grace is
+    ///     never zero, so it cannot already be expired when the event is
+    ///     enqueued (a long revoked/lost listener, or `request.timeout.ms=0`).
+    ///     With a healthy bg loop the reaper completes the event first, so
+    ///     the backstop changes nothing there.
+    ///
+    /// Returns `Ok(None)` when the bg task dropped the completion sender
+    /// without completing it (it has shut down): there is nothing left to
+    /// wait for.
+    async fn submit_and_await_for_close<T: Send + 'static>(
+        &self,
+        event: ApplicationEvent,
+        mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+    ) -> Result<Option<T>, Error> {
+        use tokio::sync::oneshot::error::TryRecvError;
+
+        // Smallest grace the backstop gives the bg task after submission, used
+        // when `request.timeout.ms` is below it (it may be 0): one full
+        // 100 ms wait slice of the loop below. `add` wakes the bg task, so a
+        // healthy loop processes the event well within it.
+        const MIN_BACKSTOP_GRACE_MS: i64 = 100;
+
+        let now_ms = self.time.milliseconds();
+        self.application_event_handler.add(event, now_ms)?;
+        // The event keeps `deadline_ms` (the reaper expires it there, as
+        // Java's does); only the backstop is measured from the submission, so
+        // it is never already expired when the steps before this one (a
+        // revoked/lost listener, the auto-commit) used up the close timeout.
+        let grace_ms = std::cmp::max(self.config.request_timeout_ms() as i64, MIN_BACKSTOP_GRACE_MS);
+        let backstop_deadline_ms = std::cmp::max(deadline_ms, now_ms).saturating_add(grace_ms);
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => return result.map(Some),
+                Err(TryRecvError::Closed) => return Ok(None),
+                Err(TryRecvError::Empty) => {},
+            }
+            let remaining = self.remaining_ms(backstop_deadline_ms);
+            if remaining <= 0 {
+                return Err(Error::timeout(timeout_msg.as_ref().to_string()));
+            }
+            // Wait in slices of at most 100 ms, so the backstop is measured on
+            // the consumer's `Time`.
+            let wait = Duration::from_millis(std::cmp::min(remaining, 100) as u64);
+            match tokio::time::timeout(wait, &mut receiver).await {
+                Ok(Ok(result)) => return result.map(Some),
+                Ok(Err(_recv_err)) => return Ok(None),
+                Err(_elapsed) => {},
+            }
+        }
     }
 
     /// Returns the milliseconds remaining until the supplied deadline,
@@ -5388,7 +5342,8 @@ where
             }
         }
 
-        let poll_deadline_ms = CompletableEvent::calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
+        let poll_deadline_ms =
+            CompletableEvent::calculate_deadline_ms(start_ms, ConsumerUtils::duration_to_millis(timeout));
         let mut first_pass = true;
 
         loop {
@@ -5929,7 +5884,7 @@ where
     /// `private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(CommitEvent)`
     /// (`AsyncKafkaConsumer.java:1139-1153`), shared with every
     /// [`ConsumerHandle`] through [`AsyncCommitState::submit_commit`]; this
-    /// side adds the offsets-ready wait, which processes background events.
+    /// side adds the offsets-ready wait.
     ///
     /// Returns the typed receiver from the commit event's handle, or `None`
     /// for empty explicit offsets (Java's `completedFuture(null)`). Callers
@@ -5952,11 +5907,9 @@ where
         // Java: `ConsumerUtils.getResult(commitEvent.offsetsReady(), defaultApiTimeoutMs.toMillis())`.
         // This blocks until the bg task has resolved which offsets to
         // commit (so subsequent fetches don't shift the commit window).
-        // Issue 10 / §31: route the wait through
-        // `process_background_events_until` so a bg-task
-        // rebalance-listener callback enqueued mid-wait is delivered on
-        // the caller's task instead of blocking the bg task on its
-        // ack.
+        // Like Java's, the wait does not process background events (§31):
+        // a rebalance callback or error queued meanwhile waits for the next
+        // `poll()`.
         //
         // The wait is not wakeable, for `commit_sync` as for `commit_async`:
         // Java waits on `offsetsReady` without `setActiveTask`
@@ -5969,10 +5922,9 @@ where
         // snapshots. `commitAsync` never throws `WakeupException` either
         // (`AsyncKafkaConsumer.java:1699-1715`, Issue 22).
         let or_deadline_ms = self.default_api_timeout_deadline_ms();
-        self.process_background_events_until::<()>(
+        self.await_completion::<()>(
             offsets_ready_rx,
             or_deadline_ms,
-            |_| false,
             OFFSETS_READY_TIMEOUT_MSG,
             /* enable_wakeup = */ false,
         )
@@ -6058,7 +6010,7 @@ where
         timeout: Duration,
     ) -> Result<(), Error> {
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         let receiver = self
             .commit_inner(CommitEventKind::Sync { offsets, deadline_ms })
@@ -6074,10 +6026,8 @@ where
         // Java: `ConsumerUtils.getResult(commitFuture, requestTimer)`
         // with `wakeupTrigger.setActiveTask(commitFuture)` for the
         // duration of the await (`AsyncKafkaConsumer.java:1819,
-        // :1719-1724`). Issue 10 / §31: route through
-        // `process_background_events_until` so a mid-wait
-        // rebalance-listener callback is delivered on the caller's
-        // task. Issue 11 / §11: `enable_wakeup=true` makes a
+        // :1719-1724`). Like Java's, the wait does not process background
+        // events (§31). Issue 11 / §11: `enable_wakeup=true` makes a
         // concurrent `wakeup()` interrupt the wait.
         // Issue 19: Java's `commit(Optional<...>, Duration)` does not
         // attach a custom timeout message — `ConsumerUtils.getResult`
@@ -6086,13 +6036,12 @@ where
         // Rust-side string that does NOT format the offsets map via
         // Debug.
         let wait_result = self
-            .process_background_events_until::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            .await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
                 receiver,
                 deadline_ms,
-                |_| false,
                 format!(
                     "Timeout of {}ms expired before successfully committing offsets",
-                    timeout.as_millis()
+                    ConsumerUtils::duration_to_millis(timeout)
                 ),
                 true,
             )
@@ -6192,7 +6141,7 @@ where
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
         // Java's `seek(...)` does NOT call `setActiveTask` — match.
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch: None },
             receiver,
             deadline_ms,
@@ -6219,7 +6168,7 @@ where
         }
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::SeekUnvalidated {
                 handle,
                 partition,
@@ -6257,7 +6206,7 @@ where
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
             receiver,
             deadline_ms,
@@ -6286,7 +6235,7 @@ where
             }
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         loop {
             // Read the validated position under the lock; drop guard before await.
@@ -6299,16 +6248,15 @@ where
             }
 
             // Java: `updateFetchPositions(timer)` — drives the
-            // `CheckAndUpdatePositionsEvent` round-trip. Routed through
-            // `submit_and_drain` so a bg-task rebalance-listener
-            // callback enqueued mid-wait is delivered on the caller's
-            // task (Issue 10 / §31). Java `setActiveTask` analog: the
+            // `CheckAndUpdatePositionsEvent` round-trip with a plain
+            // `addAndGet`, which does not process background events (§31).
+            // Java `setActiveTask` analog: the
             // helper's `enable_wakeup=true` raises a wakeup pending before
             // the event is submitted and makes a concurrent `wakeup()`
             // interrupt the wait (Issue 11 / §11).
             let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
             let drain_result = self
-                .submit_and_drain::<()>(
+                .submit_and_await::<()>(
                     ApplicationEvent::CheckAndUpdatePositions { handle },
                     receiver,
                     deadline_ms,
@@ -6333,7 +6281,7 @@ where
             // Java: `wakeupTrigger.maybeTriggerWakeup()` after every
             // `updateFetchPositions` (`AsyncKafkaConsumer.java:1235`): a
             // wakeup that came once the event's future was done, which the
-            // drain helper leaves pending, fails the call here, before the
+            // wait leaves pending, fails the call here, before the
             // valid position is read again.
             if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
                 self.wakeup_trigger.rotate();
@@ -6342,7 +6290,7 @@ where
             if self.time.milliseconds() >= deadline_ms {
                 return Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     partition
                 )));
             }
@@ -6389,18 +6337,15 @@ where
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
         // Java's `committed(...)` calls `setActiveTask(event.future())`
         // (`AsyncKafkaConsumer.java:1277`) so a concurrent `wakeup()`
-        // interrupts the wait — `enable_wakeup=true`. Issue 10 / §31:
-        // the helper interleaves bg-event drains so a mid-wait
-        // rebalance-listener callback is delivered on the caller's
-        // task instead of deadlocking the bg task on its ack.
+        // interrupts the wait — `enable_wakeup=true`.
         let result = self
-            .submit_and_drain::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            .submit_and_await::<HashMap<TopicPartition, OffsetAndMetadata>>(
                 ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
                 receiver,
                 deadline_ms,
@@ -6419,7 +6364,7 @@ where
                 // `{:?}` Debug form.
                 Err(Error::timeout(format!(
                     "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
-                    timeout.as_millis(),
+                    ConsumerUtils::duration_to_millis(timeout),
                     format_partitions_for_display(partitions),
                 )))
             },
@@ -6441,10 +6386,8 @@ where
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<Option<i64>>(deadline_ms);
         // Java's `currentLag` does NOT call `setActiveTask` —
-        // `enable_wakeup=false`. Issue 10 / §31: still routes through
-        // the drain helper so a bg-task listener callback fired during
-        // the wait is serviced.
-        self.submit_and_drain::<Option<i64>>(
+        // `enable_wakeup=false`.
+        self.submit_and_await::<Option<i64>>(
             ApplicationEvent::CurrentLag {
                 handle,
                 partition: topic_partition.clone(),
@@ -6513,7 +6456,7 @@ where
             timestamps_to_search.insert(tp.clone(), timestamp);
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             // Java: `if (timeout.isZero()) { applicationEventHandler.add(listOffsetsEvent); return new HashMap<>(); }`.
@@ -6531,11 +6474,9 @@ where
             HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>,
         >(deadline_ms);
         // Java's `beginningOffsets` / `endOffsets` do NOT call
-        // `setActiveTask` — `enable_wakeup=false`. Issue 10 / §31: the
-        // drain helper interleaves bg-event processing so a mid-wait
-        // listener callback is serviced on the caller's task.
+        // `setActiveTask` — `enable_wakeup=false`.
         let result = self
-            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
                 receiver,
                 deadline_ms,
@@ -6577,7 +6518,7 @@ where
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -6615,7 +6556,7 @@ where
             return Ok(HashMap::new());
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
 
         if timeout.is_zero() {
             // Java: `if (timeout.toMillis() == 0L) { applicationEventHandler.add(...); return listOffsetsEvent.emptyResults(); }`.
@@ -6640,10 +6581,9 @@ where
             HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>,
         >(deadline_ms);
         // Java's `offsetsForTimes` does NOT call `setActiveTask` —
-        // `enable_wakeup=false`. Issue 10 / §31: drain helper still
-        // interleaves bg-event processing.
+        // `enable_wakeup=false`.
         let result = self
-            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
                 receiver,
                 deadline_ms,
@@ -6675,7 +6615,7 @@ where
             },
             Err(Error::Timeout(_)) => Err(Error::timeout(format!(
                 "Failed to get offsets by times in {}ms",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             ))),
             Err(err) => Err(err),
         }
@@ -6721,18 +6661,18 @@ where
             // hierarchy or the wire code changes.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before partitions for topic {topic} could be determined",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
 
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `partitionsFor` calls `setActiveTask(future)`
         // (`AsyncKafkaConsumer.java:1324`) — `enable_wakeup=true`.
         let map = self
-            .submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+            .submit_and_await::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
                 ApplicationEvent::TopicMetadata { handle, topic: topic.to_string() },
                 receiver,
                 deadline_ms,
@@ -6763,16 +6703,16 @@ where
             // `Error` cannot represent; class, code and ancestry match.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before all topics' metadata could be listed",
-                timeout.as_millis()
+                ConsumerUtils::duration_to_millis(timeout)
             )));
         }
         let now_ms = self.time.milliseconds();
-        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let (handle, receiver, _erased) =
             CompletableEvent::make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
         // Java's `listTopics` calls `setActiveTask(future)`
         // (`AsyncKafkaConsumer.java:1352`) — `enable_wakeup=true`.
-        self.submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+        self.submit_and_await::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
             ApplicationEvent::AllTopicsMetadata { handle },
             receiver,
             deadline_ms,
@@ -6795,9 +6735,8 @@ where
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
         // Java's `pause(...)` does NOT call `setActiveTask` —
-        // `enable_wakeup=false`. Issue 10 / §31: drain helper still
-        // services bg-event callbacks fired during the wait.
-        self.submit_and_drain::<()>(
+        // `enable_wakeup=false`.
+        self.submit_and_await::<()>(
             ApplicationEvent::PausePartitions { handle, partitions: set },
             receiver,
             deadline_ms,
@@ -6818,7 +6757,7 @@ where
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
         // Java's `resume(...)` does NOT call `setActiveTask`.
-        self.submit_and_drain::<()>(
+        self.submit_and_await::<()>(
             ApplicationEvent::ResumePartitions { handle, partitions: set },
             receiver,
             deadline_ms,
@@ -6950,7 +6889,7 @@ where
         // close-step — Java clips to `request.timeout.ms` so each
         // close-step inherits the broker-RPC bound.
         let request_timeout_ms = self.config.request_timeout_ms() as i64;
-        let capped_timeout_ms = std::cmp::min(timeout.as_millis() as i64, request_timeout_ms);
+        let capped_timeout_ms = std::cmp::min(ConsumerUtils::duration_to_millis(timeout), request_timeout_ms);
         let close_start_ms = self.time.milliseconds();
         let close_deadline_ms = CompletableEvent::calculate_deadline_ms(close_start_ms, capped_timeout_ms);
 
@@ -7229,30 +7168,32 @@ where
         }
 
         log::debug!("Leaving the consumer group during consumer close");
-        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(deadline_ms);
+        // The erased handle is not kept: once the bg task drops every clone of
+        // the handle without completing it, the wait below sees that and
+        // proceeds instead of waiting out its backstop.
+        let (handle, receiver, _) = CompletableEvent::make_completable_event::<()>(deadline_ms);
         // Java's `leaveGroupOnClose` does NOT call `setActiveTask` and
         // close has already called `wakeup_trigger.disable()`
         // (Java line 1545) so wakeup is inert in this path —
-        // `enable_wakeup=false`. §31: still routes through the drain
-        // helper so the bg-task rebalance-listener handshake is serviced
-        // on the caller's task — without that, a bg task blocked awaiting
-        // a `RebalanceListenerCallbackNeeded` ack (see
-        // `AbstractMembershipManager::invoke_rebalance_callback`) would
-        // never unblock and `network_thread_close.await_join()` (Step 8)
-        // would hang forever. Java's KIP-848 reconcile chains via
-        // `CompletableFuture` and never parks the bg thread on the ack, so
-        // Java has no equivalent shutdown dependency on draining here.
+        // `enable_wakeup=false`.
         //
-        // `submit_and_drain_for_close` runs the drain with
-        // `skip_rebalance_callback=true`: any pending §31
-        // `RebalanceListenerCallbackNeeded` is acked with `Ok(())` WITHOUT
-        // invoking the user listener (see `process_background_events_inner`).
-        // Java never invokes `on_partitions_assigned` during close (close
-        // runs rebalance callbacks only via `runRebalanceCallbacksOnClose`,
-        // revoked/lost only, at Step 4), so a failing assigned-listener must
-        // neither run nor surface as a `close()` error.
+        // Java waits with a plain `applicationEventHandler.addAndGet(...)`
+        // (`AsyncKafkaConsumer.java:1754`), without processing background
+        // events: a queued rebalance callback is not run (close runs the
+        // listener only through `runRebalanceCallbacksOnClose`, Step 4) and a
+        // queued `ErrorEvent` neither fails close nor stops this wait. Nothing
+        // on the background task waits for those events either: the leave on
+        // close runs no callbacks (`leave_group_on_close` → `run_callbacks =
+        // false`), and a reconcile or release parked on a listener ack only
+        // `try_recv`s it across bg-loop iterations, so the shutdown proceeds
+        // and the unread events are dropped with the consumer, as Java
+        // abandons them.
+        //
+        // The wait is not bounded by `deadline_ms` (see
+        // `submit_and_await_for_close`), so `close(Duration::ZERO)` still
+        // leaves the group, as Java's does.
         let result = self
-            .submit_and_drain_for_close::<()>(
+            .submit_and_await_for_close::<()>(
                 ApplicationEvent::LeaveGroupOnClose { handle, membership_operation },
                 receiver,
                 deadline_ms,
@@ -7260,10 +7201,22 @@ where
             )
             .await;
         match result {
-            Ok(()) => {
+            Ok(Some(())) => {
                 log::info!("Completed leaving the group");
                 Ok(())
             },
+            Ok(None) => {
+                // The bg task ended without completing the event (Java's
+                // shutdown fails it with a `TimeoutException`, handled
+                // below); there is nothing left to wait for.
+                log::warn!(
+                    "Consumer attempted to leave the group but the background task ended before completing it. \
+                     It will proceed to close."
+                );
+                Ok(())
+            },
+            // The reaper expired the event at its deadline, or the backstop in
+            // `submit_and_await_for_close` gave up.
             Err(Error::Timeout(_)) => {
                 // Java's `catch (TimeoutException) { log.warn(...) }` —
                 // close proceeds.
@@ -8269,6 +8222,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![tp.clone()],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -8345,6 +8299,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![known.clone(), unknown],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -8361,6 +8316,202 @@ mod tests {
         let err = handle.current_lag(&known).await.expect_err("outside the listener");
         assert!(err.is_local_concurrent_modification_error(), "unexpected error {err:?}");
         completer.abort();
+    }
+
+    /// PR #263 review (Copilot): a leave's `on_partitions_revoked` returns its
+    /// ack through the application-event queue, behind every event the
+    /// listener submitted — here a `ConsumerHandle` seek whose wait the
+    /// listener abandoned with `tokio::time::timeout` — as Java's
+    /// `invokeRebalanceCallbackAndNotifyBackgroundThread` enqueues
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` after the listener
+    /// returns. The ack is not sent directly, which would let the bg task
+    /// apply the leave before the still-queued seek. A reconcile or release
+    /// callback still gets its ack directly, with nothing enqueued.
+    #[tokio::test]
+    async fn leave_callback_ack_is_enqueued_after_events_the_listener_submitted() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+
+        struct AbandoningListener {
+            handle: ConsumerHandle,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for AbandoningListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                // The seek is enqueued on the first poll; the zero timeout
+                // then abandons the wait with the event still queued.
+                let wait =
+                    tokio::time::timeout(Duration::ZERO, self.handle.seek_with_offset(partitions[0].clone(), 42));
+                assert!(wait.await.is_err(), "the listener stopped waiting for the seek");
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let listener = Arc::new(AbandoningListener { handle: consumer.handle() });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        let send_callback = |ack_through_application_events: bool| {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![tp.clone()],
+                        ack: ack_tx,
+                        ack_through_application_events,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("bg event sent");
+            ack_rx
+        };
+
+        // A leave's callback.
+        let mut ack_rx = send_callback(true);
+        consumer.process_background_events().await.expect("listener ran");
+        assert!(
+            matches!(ack_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "a leave's ack must not be sent directly"
+        );
+        match app_event_rx.try_recv().expect("the listener's seek is queued").event {
+            ApplicationEvent::SeekUnvalidated { partition, offset, .. } => {
+                assert_eq!((partition, offset), (tp.clone(), 42));
+            },
+            other => panic!("expected the listener's seek first, got {}", other.type_name()),
+        }
+        match app_event_rx.try_recv().expect("the callback-completed event is queued").event {
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert!(error.is_none(), "the listener returned Ok");
+                // The processor completes the carried future.
+                ack.send(Ok(())).expect("receiver alive");
+                assert!(matches!(ack_rx.try_recv(), Ok(Ok(()))), "the event carries this callback's ack");
+            },
+            other => panic!(
+                "expected the callback-completed event after the seek, got {}",
+                other.type_name()
+            ),
+        }
+        assert!(app_event_rx.try_recv().is_err(), "nothing else queued");
+
+        // A reconcile / release callback: the ack is sent directly.
+        let mut ack_rx = send_callback(false);
+        consumer.process_background_events().await.expect("listener ran");
+        assert!(matches!(ack_rx.try_recv(), Ok(Ok(()))), "the ack is sent directly");
+        assert!(
+            matches!(
+                app_event_rx.try_recv().expect("the listener's seek is queued").event,
+                ApplicationEvent::SeekUnvalidated { .. }
+            ),
+            "only the listener's seek is queued"
+        );
+        assert!(app_event_rx.try_recv().is_err(), "no callback-completed event for a direct ack");
+    }
+
+    /// PR #263 review (Critic pr2-c2 finding 1): when the caller's future is
+    /// dropped while a leave's `on_partitions_revoked` is still running, the
+    /// ack is not dropped unsent: the callback-completed event is still
+    /// enqueued behind the op the listener had submitted, carrying an
+    /// `Error::Interrupt`. Java's analog is a listener cut short by an
+    /// `InterruptException`, which `AsyncKafkaConsumer.invokeRebalanceCallbacks`
+    /// catches into the event's error before
+    /// `invokeRebalanceCallbackAndNotifyBackgroundThread` enqueues the
+    /// completed event. Without it the bg task would see a closed ack and
+    /// apply the leave ahead of the listener's still-queued seek.
+    #[tokio::test]
+    async fn leave_callback_ack_is_enqueued_after_the_listener_ops_when_the_caller_is_cancelled() {
+        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::future::Future;
+        use std::task::Poll;
+        use tokio::sync::oneshot;
+
+        struct SeekingListener {
+            handle: ConsumerHandle,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for SeekingListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                // Nothing completes the seek, so the listener is still
+                // awaiting it when the caller's future is dropped.
+                self.handle.seek_with_offset(partitions[0].clone(), 42).await
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, .. } = handles;
+        let listener = Arc::new(SeekingListener { handle: consumer.handle() });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let (ack_tx, mut ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![tp.clone()],
+                    ack: ack_tx,
+                    ack_through_application_events: true,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+
+        // Poll the caller's future once — far enough for the listener to
+        // submit its seek and park on it — then drop it.
+        {
+            let mut drain = Box::pin(consumer.process_background_events());
+            std::future::poll_fn(|cx| {
+                assert!(drain.as_mut().poll(cx).is_pending(), "the listener is waiting on its seek");
+                Poll::Ready(())
+            })
+            .await;
+        }
+
+        match app_event_rx.try_recv().expect("the listener's seek is queued").event {
+            ApplicationEvent::SeekUnvalidated { partition, offset, .. } => {
+                assert_eq!((partition, offset), (tp.clone(), 42));
+            },
+            other => panic!("expected the listener's seek first, got {}", other.type_name()),
+        }
+        match app_event_rx
+            .try_recv()
+            .expect("the callback-completed event is still queued after the cancelled callback")
+            .event
+        {
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                let error = error.expect("a cancelled callback completes with an error");
+                assert!(
+                    error.is_interrupt_error(),
+                    "Java's error for an interrupted callback, got {error:?}"
+                );
+                assert_eq!(
+                    error.to_string(),
+                    Error::Interrupt(crate::common::errors::InterruptError::new(
+                        "The ConsumerRebalanceListener.onPartitionsRevoked callback was interrupted: the call \
+                         running it was cancelled"
+                    ))
+                    .to_string()
+                );
+                ack.send(Err(error)).expect("receiver alive");
+                assert!(matches!(ack_rx.try_recv(), Ok(Err(_))), "the event carries this callback's ack");
+            },
+            other => panic!(
+                "expected the callback-completed event after the seek, got {}",
+                other.type_name()
+            ),
+        }
+        assert!(app_event_rx.try_recv().is_err(), "nothing else queued");
     }
 
     /// An `OffsetCommitCallback` drained by the consumer's own `commit()`
@@ -8633,6 +8784,105 @@ mod tests {
         assert!(n.parse::<i32>().unwrap() >= 1, "unexpected generated id {client_id:?}");
 
         consumer.close().await.expect("close should succeed");
+    }
+
+    /// Audit finding FC-03: a closed and dropped production consumer is freed,
+    /// together with its metrics registry, subscription state, metadata and the
+    /// rebalance listener it was given. Java's back-references (the
+    /// `kafka-metrics-count` gauge capturing the registry, `Metrics.java:190`;
+    /// `addClusterUpdateListener(this)`, `OffsetsRequestManager.java:148`) are
+    /// collected by the garbage collector once the application drops the
+    /// consumer; translated as strong `Arc`s they formed cycles that kept every
+    /// consumer alive for the life of the process, so a C listener's
+    /// `user_data_destroy` never ran.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closed_and_dropped_consumer_is_freed() {
+        use std::collections::HashMap;
+        use std::sync::Weak;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        struct Fc03Listener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for Fc03Listener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        // A refused localhost port, so the ctor does not block on network IO.
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.id".to_string(), "fc-03-group".to_string()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+        ]);
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(Fc03Listener);
+        let listener_weak = Arc::downgrade(&listener);
+        consumer
+            .subscribe_with_topics_listener(vec!["fc-03-topic".to_string()], listener)
+            .await
+            .expect("subscribe should succeed");
+
+        let subscriptions: Weak<Mutex<SubscriptionState>> = Arc::downgrade(&consumer.subscriptions);
+        let metadata: Weak<ConsumerMetadata> = Arc::downgrade(&consumer.metadata);
+        let metrics: Weak<Metrics> = Arc::downgrade(&consumer.metrics);
+        // Every registered `KafkaMetric` lives in the registry's shared map, so a
+        // metric outliving the consumer means the registry itself leaked.
+        let registered: Vec<(MetricName, Weak<KafkaMetric>)> = consumer
+            .metrics
+            .metrics()
+            .iter()
+            .map(|(name, metric)| (name.clone(), Arc::downgrade(metric)))
+            .collect();
+        assert!(!registered.is_empty(), "precondition: the consumer registers metrics");
+
+        consumer.close().await.expect("close should succeed");
+        drop(consumer);
+
+        // Allow any detached continuation still finishing after close to drop
+        // its clones.
+        let all_freed = || {
+            listener_weak.upgrade().is_none()
+                && subscriptions.upgrade().is_none()
+                && metadata.upgrade().is_none()
+                && metrics.upgrade().is_none()
+                && registered.iter().all(|(_, m)| m.upgrade().is_none())
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !all_freed() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            listener_weak.upgrade().is_none(),
+            "rebalance listener leaked after close + drop"
+        );
+        assert!(subscriptions.upgrade().is_none(), "SubscriptionState leaked after close + drop");
+        assert!(metadata.upgrade().is_none(), "ConsumerMetadata leaked after close + drop");
+        assert!(metrics.upgrade().is_none(), "Metrics leaked after close + drop");
+        let leaked: Vec<String> = registered
+            .iter()
+            .filter(|(_, m)| m.upgrade().is_some())
+            .map(|(name, _)| format!("{}/{}", name.group(), name.name()))
+            .collect();
+        assert!(leaked.is_empty(), "metrics registry leaked after close + drop: {leaked:?}");
     }
 
     /// `client.rack` reaches the membership manager as Java's
@@ -9472,6 +9722,7 @@ mod tests {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
+                        ack_through_application_events: false,
                     },
                     enqueued_ms: 0,
                 })
@@ -9561,9 +9812,8 @@ mod tests {
     // here per DoD §3.
     //
     // Skipped Java tests (commit 8 batch):
-    //   - testCommitInRebalanceCallback (Java line 474-506) — covered by
-    //     `issue_10_commit_sync_drains_listener_callback_while_waiting`
-    //     (inline above) AND the §31 regression pair in commit 11/N.
+    //   - testCommitInRebalanceCallback — TRANSLATED as
+    //     `test_commit_in_rebalance_callback` (§31 regression pair, below).
     //   - testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime —
     //     TRANSLATED (Phase M7) as
     //     `test_record_background_event_queue_size_and_time` (inline below).
@@ -10133,6 +10383,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10184,6 +10435,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10262,6 +10514,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms: 0,
         };
@@ -10292,67 +10545,8 @@ mod tests {
         drop(handles.subscriptions);
     }
 
-    /// The **close** arm (`skip_rebalance_callback = true`) must poke the
-    /// bg-task notify too.
-    ///
-    /// §31 requires the poke for every `RebalanceListenerCallbackNeeded` ack,
-    /// not only the ones that ran a listener. This arm discards the callback
-    /// (Java never invokes §31 callbacks during `close()`) but still sends the
-    /// ack so the parked reconcile completes — and the ack alone does not wake
-    /// the bg loop. Without the poke the loop only notices after the selector
-    /// poll times out, while `network_thread_close.await_join()` is waiting on
-    /// that very reconcile, so every `close()` pays a poll timeout.
-    ///
-    /// The sibling test above covers the normal arm. This one exists because
-    /// the two arms are separate code paths: the poke was present in one and
-    /// missing in the other, and no test noticed.
-    #[tokio::test]
-    async fn process_background_events_close_arm_pokes_bg_notify() {
-        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-        use tokio::sync::oneshot;
-
-        let (mut consumer, handles) = make_test_consumer_with_channels();
-
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::PartitionsRemoved {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                partitions: vec![TopicPartition::new("t".to_string(), 0)],
-                ack: ack_tx,
-            },
-            enqueued_ms: 0,
-        };
-        handles.bg_event_tx.send(env).expect("send ok");
-
-        // `skip_rebalance_callback = true` is the close path: the callback is
-        // discarded, the ack is still sent.
-        consumer
-            .process_background_events_inner(
-                /* skip_rebalance_callback = */ true, /* skip_assignment_events = */ true,
-            )
-            .await
-            .expect("ok");
-        assert!(ack_rx.await.expect("ack received").is_ok(), "the ack must still be sent");
-
-        tokio::time::timeout(Duration::from_secs(1), handles.event_notify.notified())
-            .await
-            .expect("the close arm must poke the bg notify after sending the ack");
-
-        // Same constraint as the normal arm: the poke must not arm a
-        // user-visible wakeup.
-        assert!(
-            !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "the close-arm poke must not fire the user-facing wakeup fn",
-        );
-        assert!(
-            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
-            "the close-arm poke must not arm a user-visible Error::Wakeup",
-        );
-        drop(handles.subscriptions);
-    }
-
     /// AK 4.3.1 (KAFKA-20428): when `skip_assignment_events` is set (the
-    /// unsubscribe / close path), a pending `PartitionsAssigned` event is NOT
+    /// unsubscribe path), a pending `PartitionsAssigned` event is NOT
     /// applied — its ack is completed EXCEPTIONALLY to unblock the bg
     /// reconciliation, with the message Java uses. Translated from
     /// `AsyncKafkaConsumerTest#testUnsubscribeWithPendingAssignmentEvent`.
@@ -10376,9 +10570,7 @@ mod tests {
 
         // skip_assignment_events = true (unsubscribe path).
         consumer
-            .process_background_events_inner(
-                /* skip_rebalance_callback = */ false, /* skip_assignment_events = */ true,
-            )
+            .process_background_events_inner(/* skip_assignment_events = */ true)
             .await
             .expect("ok — the skipped assignment event is not an app-side error");
 
@@ -10747,6 +10939,7 @@ mod tests {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: Vec::new(),
                 ack: ack_tx,
+                ack_through_application_events: false,
             },
             enqueued_ms,
         };
@@ -11066,133 +11259,6 @@ mod tests {
         );
     }
 
-    /// Java's `wakeup()` fails an active future that is not yet done
-    /// (`WakeupTrigger.java` `wakeup`, `ActiveFuture` branch). In Rust a
-    /// rebalance listener may run inside the wait (§31); a `wakeup()` it
-    /// sends before the awaited event completes must still fail the wait,
-    /// although the result has arrived by the time the drain returns.
-    #[tokio::test]
-    async fn wakeup_during_a_listener_before_the_result_fails_the_wait() {
-        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-        use crate::consumer::internals::events::CompletableEventHandle;
-        use async_trait::async_trait;
-        use tokio::sync::oneshot;
-
-        struct WakeThenComplete {
-            trigger: WakeupTrigger,
-            handle: std::sync::Mutex<Option<CompletableEventHandle<()>>>,
-        }
-        #[async_trait]
-        impl ConsumerRebalanceListener for WakeThenComplete {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                self.trigger.wakeup();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                // The bg task completes the awaited event after the wakeup.
-                self.handle.lock().unwrap().take().expect("handle").complete(());
-                Ok(())
-            }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-        }
-
-        let (mut consumer, handles) = make_test_consumer_with_channels();
-        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<()>(i64::MAX);
-        let listener = Arc::new(WakeThenComplete {
-            trigger: consumer.wakeup_trigger.clone(),
-            handle: std::sync::Mutex::new(Some(handle)),
-        });
-        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        handles
-            .bg_event_tx
-            .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::PartitionsRemoved {
-                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                    partitions: vec![TopicPartition::new("t".to_string(), 0)],
-                    ack: ack_tx,
-                },
-                enqueued_ms: 0,
-            })
-            .expect("send ok");
-        let deadline = consumer.time.milliseconds() + 5000;
-
-        let err = consumer
-            .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
-            .await
-            .expect_err("the wakeup came before the result");
-        assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
-        assert!(
-            !consumer.wakeup_trigger.current_token().is_cancelled(),
-            "the raised wakeup is rotated"
-        );
-        ack_rx.await.expect("ack sent").expect("listener ok");
-    }
-
-    /// A result already there when the wait starts wins over a pending
-    /// wakeup, and the wait still drains the background events queued for
-    /// it (§31) before returning the result.
-    #[tokio::test]
-    async fn result_ready_on_entry_wins_over_a_pending_wakeup_and_the_drain_still_runs() {
-        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-        use async_trait::async_trait;
-        use std::sync::atomic::AtomicUsize;
-        use tokio::sync::oneshot;
-
-        struct CountingListener {
-            revoked: AtomicUsize,
-        }
-        #[async_trait]
-        impl ConsumerRebalanceListener for CountingListener {
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                self.revoked.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-        }
-
-        let (mut consumer, handles) = make_test_consumer_with_channels();
-        let listener = Arc::new(CountingListener { revoked: AtomicUsize::new(0) });
-        *consumer.rebalance_listener.lock().unwrap() =
-            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
-        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-        handles
-            .bg_event_tx
-            .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::PartitionsRemoved {
-                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                    partitions: vec![TopicPartition::new("t".to_string(), 0)],
-                    ack: ack_tx,
-                },
-                enqueued_ms: 0,
-            })
-            .expect("send ok");
-        let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<i32>(i64::MAX);
-        handle.complete(7);
-        consumer.wakeup_trigger.wakeup();
-        let deadline = consumer.time.milliseconds() + 5000;
-
-        let value = consumer
-            .process_background_events_until::<i32>(receiver, deadline, |_| false, "timeout", true)
-            .await
-            .expect("the result was there before the wait");
-        assert_eq!(value, 7);
-        assert_eq!(listener.revoked.load(Ordering::SeqCst), 1, "the queued callback still ran");
-        ack_rx.await.expect("ack sent").expect("listener ok");
-        assert!(
-            consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
-            "the wakeup is still pending"
-        );
-    }
-
     /// The outcomes a task can have in Java's `WakeupTriggerTest`
     /// (`complete`, `completeExceptionally`, `cancel`), applied to the
     /// sending end of the awaited receiver; a dropped sender is Rust's
@@ -11236,18 +11302,16 @@ mod tests {
     /// `...FailedBeforeSet` and `...CancelledBeforeSet`: a task done before
     /// the wait starts keeps its outcome over an earlier `wakeup()`, which
     /// stays pending. Both waits are covered: the owning consumer's
-    /// `process_background_events_until` and `ConsumerHandle::await_completion`.
+    /// `await_completion` and `ConsumerHandle::await_completion`.
     #[tokio::test]
     async fn wakeup_before_a_task_done_before_the_wait_stays_pending() {
         for outcome in TaskOutcome::ALL {
-            let (mut consumer, _handles) = make_test_consumer_with_channels();
+            let (consumer, _handles) = make_test_consumer_with_channels();
             let (sender, receiver) = tokio::sync::oneshot::channel();
             outcome.apply(sender);
             consumer.wakeup_trigger.wakeup();
             let deadline = consumer.time.milliseconds() + 5000;
-            let result = consumer
-                .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
-                .await;
+            let result = consumer.await_completion::<()>(receiver, deadline, "timeout", true).await;
             outcome.assert_result(result);
             assert!(
                 consumer.wakeup_trigger.maybe_trigger_wakeup().is_err(),
@@ -11276,16 +11340,14 @@ mod tests {
     #[tokio::test]
     async fn wakeup_after_a_task_done_during_the_wait_stays_pending() {
         for outcome in TaskOutcome::ALL {
-            let (mut consumer, _handles) = make_test_consumer_with_channels();
+            let (consumer, _handles) = make_test_consumer_with_channels();
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let completer = tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 outcome.apply(sender);
             });
             let deadline = consumer.time.milliseconds() + 5000;
-            let result = consumer
-                .process_background_events_until::<()>(receiver, deadline, |_| false, "timeout", true)
-                .await;
+            let result = consumer.await_completion::<()>(receiver, deadline, "timeout", true).await;
             completer.await.expect("completer ok");
             outcome.assert_result(result);
             consumer.wakeup_trigger.wakeup();
@@ -11527,8 +11589,8 @@ mod tests {
     }
 
     /// Issue 11 negative: APIs Java doesn't `setActiveTask` (e.g.
-    /// `pause`) must NOT observe wakeup. The Rust drain helper passes
-    /// `enable_wakeup=false` so the wait completes normally.
+    /// `pause`) must NOT observe wakeup. `pause` submits its event with
+    /// `enable_wakeup=false`, so the wait completes normally.
     #[tokio::test]
     async fn issue_11_pause_does_not_observe_wakeup() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
@@ -11550,236 +11612,109 @@ mod tests {
         completer.await.expect("completer ok");
     }
 
-    /// Issue 10 regression: every blocking-style API must drain the
-    /// bg-event channel while waiting on its typed completion so a
-    /// rebalance-listener callback enqueued by the bg task (which
-    /// blocks on its ack — see `abstract_membership_manager.rs:747`)
-    /// is delivered on the caller's task instead of deadlocking.
-    ///
-    /// Scenario: app calls `commit_sync_with_timeout` with a short timeout;
-    /// before the commit event is completed, a
-    /// `RebalanceListenerCallbackNeeded` lands on the bg-event channel
-    /// AND its ack receiver is held by a "fake bg task" that waits for
-    /// the listener invocation. The Rust drain helper must invoke the
-    /// app-side listener inline, ack the callback, and then resolve
-    /// the commit. Without Issue 10's fix this would deadlock until
-    /// the commit_sync timeout.
-    #[tokio::test]
-    async fn issue_10_commit_sync_drains_listener_callback_while_waiting() {
-        use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
-        use async_trait::async_trait;
-        use std::sync::atomic::AtomicBool;
-        use tokio::sync::oneshot;
-
-        struct InlineListener {
-            invoked: Arc<AtomicBool>,
-        }
-        #[async_trait]
-        impl ConsumerRebalanceListener for InlineListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                self.invoked.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
-        }
-
-        let (mut consumer, mut handles) = make_test_consumer_with_channels();
-        let invoked = Arc::new(AtomicBool::new(false));
-        let listener: Arc<InlineListener> = Arc::new(InlineListener { invoked: Arc::clone(&invoked) });
-        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
-
-        // Coordination channel: the fake bg task signals back when it
-        // has received the listener ack.
-        let (ack_observed_tx, ack_observed_rx) = oneshot::channel::<()>();
-
-        // Fake bg task: waits for a CommitSync envelope, posts a
-        // `RebalanceListenerCallbackNeeded` to the bg channel and
-        // awaits its ack BEFORE completing the commit. This is exactly
-        // the order that the Java/Rust bg task's
-        // `invoke_rebalance_callback` would see.
-        let bg_event_tx = handles.bg_event_tx.clone();
-        let completer = tokio::spawn(async move {
-            // 1. Pull the CommitSync envelope.
-            let env = handles.app_event_rx.recv().await.expect("CommitSync envelope must arrive");
-            let (handle, offsets_ready) = match env.event {
-                ApplicationEvent::CommitSync { handle, offsets_ready, .. } => (handle, offsets_ready),
-                other => panic!("expected CommitSync, got {}", other.type_name()),
-            };
-
-            // 2. Post a listener callback that the app side must drain
-            //    while it's blocked on the commit.
-            // AK 4.3.1: use the revoke path (`PartitionsRemoved`), which the
-            // app drains and invokes inline without needing a bg AEP to
-            // process an ApplyAssignmentEvent (the assign path would).
-            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-            bg_event_tx
-                .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::PartitionsRemoved {
-                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
-                        ack: ack_tx,
-                    },
-                    enqueued_ms: 0,
-                })
-                .expect("bg event sent");
-
-            // 3. Block until the app side acks the listener callback —
-            //    the deadlock-free guarantee Issue 10 enforces.
-            let _ = ack_rx.await.expect("listener ack received");
-            let _ = ack_observed_tx.send(());
-
-            // 4. Now complete the commit.
-            offsets_ready.complete(());
-            handle.complete(HashMap::new());
-        });
-
-        consumer
-            .commit_sync_with_timeout(Duration::from_secs(5))
-            .await
-            .expect("commit_sync completes — no deadlock");
-        completer.await.expect("completer task ok");
-
-        assert!(invoked.load(Ordering::SeqCst), "listener must have been invoked");
-        // Sanity: the ack was observed before the commit completed,
-        // proving the drain was interleaved.
-        ack_observed_rx.await.expect("ack signal received");
-    }
-
     // ─── §31 regression pair ─────────────────────────────────────────
     //
     // consumer-threading.md §31: `ConsumerRebalanceListener` callbacks
     // execute on the caller's task. Two contracts:
-    //   - Test A: a listener that calls back into `commit_sync()` from
-    //     INSIDE `on_partitions_revoked` must succeed (no deadlock).
+    //   - Test A: a listener that calls `commit_sync()` (through its
+    //     `ConsumerHandle`) from INSIDE `on_partitions_revoked`, delivered by
+    //     `poll()`, must succeed (no deadlock).
     //   - Test B: the rebalance state machine must NOT advance until
     //     the listener future resolves.
     //
-    // These tests stand in for Java's canonical
-    // `testRebalanceListenerCommitInRevokedCallback` /
-    // `testRebalanceListenerCallbackResultBlocksReconciliation`. They
-    // exercise the cross-task handshake from
-    // `process_background_events` (app side) ↔
-    // `invoke_rebalance_callback` (bg side).
+    // They exercise the cross-task handshake from
+    // `process_background_events` (app side) ↔ the bg task's listener ack.
 
-    /// §31 Test A: `commit_sync()` called from inside
-    /// `on_partitions_revoked` must succeed.
+    /// §31 Test A, Java `AsyncKafkaConsumerTest.testCommitInRebalanceCallback`:
+    /// `poll()` delivers `on_partitions_revoked`, whose body calls
+    /// `commitSync(Map.of(tp, new OffsetAndMetadata(0)))` on the consumer it
+    /// captured, and the commit succeeds.
     ///
-    /// Setup: the listener's `on_partitions_revoked` body invokes
-    /// `commit_sync_with_offsets` on a shared consumer reference. If the
-    /// listener ran on the bg task this would deadlock (the bg task
-    /// would be the only one able to service the inner commit's
-    /// `CommitSync` envelope). The Issue 10 / §31 drain pattern makes
-    /// this work: listener invocation runs inline on the caller's
-    /// task and the test-side drainer feeds the inner CommitSync
-    /// envelope.
-    ///
-    /// Sanity check: this test would deadlock if the §31 contract is
-    /// broken (i.e., the listener runs on the bg task or
-    /// `process_background_events` is removed from `commit_sync`).
+    /// The listener commits through its [`ConsumerHandle`] (the Rust
+    /// equivalent of Java capturing the `consumer` variable). The fake bg task
+    /// answers the `CommitSync` event while the listener is still running,
+    /// which only works because the listener runs on the caller's task inside
+    /// `poll()` and the commit waits on its own event without draining.
     #[tokio::test]
-    async fn section_31_commit_sync_from_inside_revoked_callback_succeeds() {
+    async fn test_commit_in_rebalance_callback() {
         use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
         use async_trait::async_trait;
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicUsize;
         use tokio::sync::oneshot;
 
-        // Listener that posts a `CommitSync` request via the shared
-        // mpsc channel when `on_partitions_revoked` fires. Mirrors a
-        // real user callback that calls `consumer.commit_sync(...)`
-        // from within the rebalance listener — the listener has no
-        // direct &mut consumer here (Rust ownership), so we simulate
-        // by signalling a controller task to issue the commit.
-        struct CommitRequestingListener {
-            issue_commit_tx: tokio::sync::mpsc::UnboundedSender<()>,
-            revoked: Arc<AtomicBool>,
+        struct CommittingListener {
+            handle: ConsumerHandle,
+            outcome: std::sync::Mutex<Option<Result<(), Error>>>,
         }
         #[async_trait]
-        impl ConsumerRebalanceListener for CommitRequestingListener {
-            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                // Fire a commit request and (synchronously) await its
-                // completion via another channel. This stands in for
-                // the Java pattern `consumer.commitSync()` inside the
-                // callback body.
-                self.issue_commit_tx.send(()).expect("controller channel open");
-                self.revoked.store(true, Ordering::SeqCst);
+        impl ConsumerRebalanceListener for CommittingListener {
+            async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
+                let offsets: HashMap<TopicPartition, OffsetAndMetadata> = partitions
+                    .iter()
+                    .map(|tp| (tp.clone(), OffsetAndMetadata::new(0).expect("offset")))
+                    .collect();
+                *self.outcome.lock().unwrap() = Some(self.handle.commit_sync_with_offsets(offsets).await);
                 Ok(())
             }
             async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
                 Ok(())
             }
-            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                Ok(())
-            }
         }
 
-        let (mut consumer, mut handles) = make_test_consumer_with_channels();
-        let revoked = Arc::new(AtomicBool::new(false));
-        let (issue_commit_tx, mut _issue_commit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let listener: Arc<CommitRequestingListener> =
-            Arc::new(CommitRequestingListener { issue_commit_tx, revoked: Arc::clone(&revoked) });
-        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { mut app_event_rx, bg_event_tx, subscriptions, .. } = handles;
+        let tp = TopicPartition::new("foo".to_string(), 3);
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp.clone()]))
+            .unwrap();
+        let listener = Arc::new(CommittingListener { handle: consumer.handle(), outcome: std::sync::Mutex::new(None) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+        let commits = Arc::new(AtomicUsize::new(0));
+        let completer = {
+            let commits = Arc::clone(&commits);
+            tokio::spawn(async move {
+                while let Some(env) = app_event_rx.recv().await {
+                    if let ApplicationEvent::CommitSync { handle, offsets_ready, .. } = env.event {
+                        commits.fetch_add(1, Ordering::SeqCst);
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    }
+                }
+            })
+        };
 
-        // Fake bg task: pushes a RebalanceListenerCallbackNeeded event
-        // for `OnPartitionsRevoked` then awaits its ack. While the
-        // app-side listener body runs, it issues a commit request
-        // (via the controller channel) — but we keep this test
-        // simpler by NOT having the listener block on the commit
-        // result. The deadlock-freedom guarantee is observed via the
-        // ack being received (i.e., the app-side processed the
-        // callback inline rather than blocking on a separate task).
-        let bg_event_tx = handles.bg_event_tx.clone();
-        let (ack_observed_tx, ack_observed_rx) = oneshot::channel::<()>();
-        let (commit_done_tx, commit_done_rx) = oneshot::channel::<()>();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![tp],
+                    ack: ack_tx,
+                    ack_through_application_events: false,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
 
-        let fake_bg = tokio::spawn(async move {
-            // 1. Drain the CommitSync envelope (the OUTER commit_sync
-            //    that frames the test).
-            let env = handles.app_event_rx.recv().await.expect("outer CommitSync");
-            let (outer_handle, outer_offsets_ready) = match env.event {
-                ApplicationEvent::CommitSync { handle, offsets_ready, .. } => (handle, offsets_ready),
-                other => panic!("expected outer CommitSync, got {}", other.type_name()),
-            };
-
-            // 2. Post the rebalance-listener callback.
-            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
-            bg_event_tx
-                .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::PartitionsRemoved {
-                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
-                        ack: ack_tx,
-                    },
-                    enqueued_ms: 0,
-                })
-                .expect("bg event sent");
-
-            // 3. Wait for the ack — this MUST come back before we
-            //    complete the outer commit. If the §31 contract is
-            //    broken, the ack would never arrive (listener runs on
-            //    bg task or app-side is blocked on the outer commit).
-            ack_rx.await.expect("listener ack received").expect("listener returned Ok");
-            let _ = ack_observed_tx.send(());
-
-            // 4. Complete the outer commit.
-            outer_offsets_ready.complete(());
-            outer_handle.complete(HashMap::new());
-            let _ = commit_done_tx.send(());
-        });
-
-        consumer
-            .commit_sync_with_timeout(Duration::from_secs(5))
+        tokio::time::timeout(Duration::from_secs(5), consumer.poll(Duration::ZERO))
             .await
-            .expect("outer commit_sync must complete — no deadlock");
-        fake_bg.await.expect("fake_bg ok");
-
-        assert!(revoked.load(Ordering::SeqCst), "listener.on_partitions_revoked must have fired");
-        ack_observed_rx.await.expect("ack observed before outer commit completed");
-        commit_done_rx.await.expect("commit done");
+            .expect("poll() must not deadlock on the commit inside the listener")
+            .expect("poll ok");
+        ack_rx.await.expect("ack").expect("listener returned Ok");
+        match listener.outcome.lock().unwrap().take() {
+            Some(Ok(())) => {},
+            other => panic!("commitSync() inside onPartitionsRevoked must succeed, got {other:?}"),
+        }
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            1,
+            "the in-callback commitSync sent one CommitSync event"
+        );
+        completer.abort();
+        drop(subscriptions);
     }
 
     /// §31 Test B: rebalance state machine does NOT advance until the
@@ -11831,7 +11766,7 @@ mod tests {
         *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
 
         // Post a `RebalanceListenerCallbackNeeded` event mimicking
-        // the bg task's `invoke_rebalance_callback`.
+        // the bg task's `enqueue_rebalance_callback`.
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         handles
             .bg_event_tx
@@ -11840,6 +11775,7 @@ mod tests {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
+                    ack_through_application_events: false,
                 },
                 enqueued_ms: 0,
             })
@@ -12046,8 +11982,8 @@ mod tests {
     //   - `testEnsureCommitSyncExecutedCommitAsyncCallbacks`
     //
     // Skipped Java tests for this commit:
-    //   - `testCommitInRebalanceCallback` — covered in the §31 regression
-    //     pair (commit 11/N) which exercises commit-from-inside-listener.
+    //   - `testCommitInRebalanceCallback` — translated as
+    //     `test_commit_in_rebalance_callback` (§31 regression pair).
     //   - `testCommitAsyncUserSuppliedCallbackWithException` (parameterized) —
     //     unit tested in `OffsetCommitCallbackInvoker` tests; the consumer
     //     side just routes the error.
@@ -14067,6 +14003,398 @@ mod tests {
         close_leaves_group_for_timeout_inner(ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64).await;
     }
 
+    /// A fake bg task serving the close-path events: commits complete at
+    /// once, and each `LeaveGroupOnClose` handle is passed to `on_leave`,
+    /// which decides when (and whether) the "network thread" completes it.
+    fn spawn_close_path_drainer<F, Fut>(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        on_leave: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(crate::consumer::internals::events::CompletableEventHandle<()>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => on_leave(handle).await,
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        })
+    }
+
+    /// Audit finding C1-17: `close(Duration::ZERO)` must not shut the
+    /// background task down before it has processed `LeaveGroupOnClose`.
+    ///
+    /// Java's `leaveGroupOnClose` calls `applicationEventHandler.addAndGet(..)`,
+    /// which blocks on an unbounded `ConsumerUtils.getResult(future)`: the
+    /// future is completed only by the network thread, which processes the
+    /// event (member -> LEAVING) before its reaper expires it at the (already
+    /// passed) deadline. So the member is LEAVING before
+    /// `applicationEventHandler.close(..)` stops the network thread, and
+    /// `cleanup()` sends the leave heartbeat even with a 0 ms budget.
+    ///
+    /// The fake bg task here processes the event one ~20 ms "iteration" after
+    /// it is enqueued and then expires it, as the reaper does.
+    #[tokio::test]
+    async fn close_with_zero_timeout_waits_for_bg_to_process_leave_group_on_close() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        // `Some(signalled?)` captured when the fake bg task processes the event.
+        let signalled_at_processing: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_processing = Arc::clone(&signalled_at_processing);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_processing = Arc::clone(&at_processing);
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                at_processing
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete_with_error(Error::timeout("LeaveGroupOnClose was 20 ms past its expiration"));
+            }
+        });
+
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: an expired leave only logs a warning, as in Java");
+        drainer.abort();
+
+        let signalled = signalled_at_processing
+            .lock()
+            .unwrap()
+            .expect("the bg task must have processed LeaveGroupOnClose");
+        assert!(
+            !signalled,
+            "Java: close(Duration.ZERO) blocks in addAndGet(LeaveGroupOnCloseEvent) until the network \
+             thread has processed (or reaped) the event, so the member is LEAVING before the network \
+             thread is closed; Rust signalled the bg task to shut down before LeaveGroupOnClose was processed"
+        );
+        assert!(
+            handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0,
+            "close must still signal the bg task to shut down"
+        );
+    }
+
+    /// With a close timeout, `close()` waits for the leave heartbeat's
+    /// response (the event's completion), then proceeds — Java's
+    /// `addAndGet` returning and `log.info("Completed leaving the group")`.
+    #[tokio::test]
+    async fn close_with_timeout_waits_for_leave_group_on_close_completion() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        let signalled_at_completion: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_completion = Arc::clone(&signalled_at_completion);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_completion = Arc::clone(&at_completion);
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                at_completion
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete(());
+            }
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect("close ok");
+        let elapsed = started.elapsed();
+        drainer.abort();
+
+        assert_eq!(
+            *signalled_at_completion.lock().unwrap(),
+            Some(false),
+            "close must wait for the LeaveGroupOnClose completion before shutting the bg task down"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close must return once the leave completes, not wait out the close timeout; took {elapsed:?}"
+        );
+    }
+
+    /// Deliberate deviation from Java (whose wait is unbounded): if the bg
+    /// task is alive but never completes `LeaveGroupOnClose` — its reaper
+    /// would otherwise expire it at the event deadline — `close()` gives up at
+    /// the event deadline (here already passed, so the submission time) +
+    /// `request.timeout.ms` and proceeds, instead of hanging.
+    #[tokio::test]
+    async fn close_leave_group_wait_gives_up_at_deadline_plus_request_timeout() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 300;
+        // Keep every handle alive and uncompleted: a stuck bg iteration.
+        let held: Arc<Mutex<Vec<crate::consumer::internals::events::CompletableEventHandle<()>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let held_by_bg = Arc::clone(&held);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            held_by_bg.lock().unwrap().push(handle);
+            async {}
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: the backstop only logs the leave warning");
+        let elapsed = started.elapsed();
+        drainer.abort();
+
+        assert_eq!(held.lock().unwrap().len(), 1, "LeaveGroupOnClose must have been submitted");
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "close must keep waiting for the bg task past the (already expired) event deadline \
+             until deadline + request.timeout.ms (300 ms); returned after {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the backstop must bound the wait at about deadline + request.timeout.ms; took {elapsed:?}"
+        );
+        assert!(handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+    }
+
+    /// Runs `close(Duration::ZERO)` against a fake bg task that processes
+    /// `LeaveGroupOnClose` one ~20 ms "iteration" after it is enqueued, and
+    /// returns `Some(signalled?)` as seen when it processed the event (`None`
+    /// when it never processed it).
+    async fn close_with_zero_timeout_and_slow_bg(
+        mut consumer: AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+        handles: ConsumerTestHandles,
+    ) -> Option<bool> {
+        let signal_close_timeout_ms = Arc::clone(&handles.signal_close_timeout_ms);
+        let signalled_at_processing: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let at_processing = Arc::clone(&signalled_at_processing);
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, move |handle| {
+            let signal_close_timeout_ms = Arc::clone(&signal_close_timeout_ms);
+            let at_processing = Arc::clone(&at_processing);
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                at_processing
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(signal_close_timeout_ms.load(Ordering::Acquire) >= 0);
+                handle.complete_with_error(Error::timeout("LeaveGroupOnClose was 20 ms past its expiration"));
+            }
+        });
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close ok: an expired leave only logs a warning, as in Java");
+        drainer.abort();
+        assert!(
+            handles.signal_close_timeout_ms.load(Ordering::Acquire) >= 0,
+            "close must still signal the bg task to shut down"
+        );
+        *signalled_at_processing.lock().unwrap()
+    }
+
+    /// Review fix (PR #263): the close backstop is measured from the moment
+    /// `LeaveGroupOnClose` is submitted, so a revoked listener that ran past
+    /// close timeout + `request.timeout.ms` cannot leave it already expired.
+    /// Here `close(Duration::ZERO)` with `request.timeout.ms=300` first runs a
+    /// 400 ms `on_partitions_revoked`. Java: `leaveGroupOnClose`'s `addAndGet`
+    /// waits on an unbounded `ConsumerUtils.getResult(future)`, so the network
+    /// thread always processes the event (member -> LEAVING) before
+    /// `applicationEventHandler.close(..)` stops it.
+    #[tokio::test]
+    async fn close_waits_for_leave_group_on_close_after_a_listener_outlasting_the_backstop() {
+        use async_trait::async_trait;
+
+        struct SlowRevokeListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for SlowRevokeListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 300;
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::new(SlowRevokeListener) as Arc<dyn ConsumerRebalanceListener>);
+        let notifier = consumer.state_notifier();
+        notifier.on_group_assignment_updated(&HashSet::from([TopicPartition::new("t".to_string(), 0)]));
+        notifier.on_member_epoch_updated(Some(5), "member-1");
+
+        let started = std::time::Instant::now();
+        let signalled = close_with_zero_timeout_and_slow_bg(consumer, handles).await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "the revoked listener must have run before the leave; took {elapsed:?}"
+        );
+        assert_eq!(
+            signalled,
+            Some(false),
+            "Java: close blocks in addAndGet(LeaveGroupOnCloseEvent) until the network thread has \
+             processed the event, however long the revoked listener ran; Rust must not give up on a \
+             backstop that expired before the event was submitted (Some(true) = shut down first, \
+             None = never processed)"
+        );
+    }
+
+    /// Review fix (PR #263): `request.timeout.ms=0` (accepted, `atLeast(0)`)
+    /// with `close(Duration::ZERO)` still waits for the bg task to process
+    /// `LeaveGroupOnClose`: the backstop's grace period is positive even when
+    /// `request.timeout.ms` is zero. Java: `addAndGet` waits on an unbounded
+    /// `ConsumerUtils.getResult(future)`.
+    #[tokio::test]
+    async fn close_waits_for_leave_group_on_close_with_zero_request_timeout() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.config.request_timeout_ms = 0;
+        let signalled = close_with_zero_timeout_and_slow_bg(consumer, handles).await;
+        assert_eq!(
+            signalled,
+            Some(false),
+            "Java: close blocks in addAndGet(LeaveGroupOnCloseEvent) until the network thread has \
+             processed the event, even with request.timeout.ms=0; Rust must not give up on a \
+             zero-length backstop (Some(true) = shut down first, None = never processed)"
+        );
+    }
+
+    /// The bg task drops `LeaveGroupOnClose`'s completion sender without
+    /// completing it (it shut down): `close()` proceeds without an error, as
+    /// Java's close does when the network thread's shutdown fails the event
+    /// with a `TimeoutException`.
+    #[tokio::test]
+    async fn close_proceeds_when_bg_task_drops_leave_group_on_close() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let drainer = spawn_close_path_drainer(handles.app_event_rx, |handle| {
+            drop(handle);
+            async {}
+        });
+
+        let started = std::time::Instant::now();
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect("close ok: a bg task that ended without completing the leave does not fail close");
+        let elapsed = started.elapsed();
+        drainer.abort();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close must not wait for a gone bg task; took {elapsed:?}"
+        );
+    }
+
+    /// The bg task is already gone when `close()` starts: there is nothing to
+    /// wait for, so close returns at once. Java's `add` throws
+    /// `KafkaException` from `ensureNetworkThreadAlive()` and close rethrows
+    /// the first error as "Failed to close kafka consumer".
+    #[tokio::test]
+    async fn close_returns_at_once_when_bg_task_is_already_gone() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        drop(handles.app_event_rx);
+
+        let started = std::time::Instant::now();
+        let err = consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::from_secs(30)))
+            .await
+            .expect_err("Java: close() rethrows the dead-thread KafkaException");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "close must not wait for a gone bg task; took {elapsed:?}"
+        );
+        assert_eq!(err.to_string(), "Failed to close kafka consumer");
+    }
+
+    /// With the real background task, `close(Duration::ZERO)` returns once
+    /// the bg reaper expires `LeaveGroupOnClose` at its (already passed)
+    /// deadline, within about one bg iteration, not after the
+    /// `request.timeout.ms` (30 s) backstop. The member joins through a fake
+    /// group coordinator that never answers the leave heartbeat, so the leave
+    /// cannot complete by a response, and since the coordinator is known the
+    /// heartbeat is sent rather than skipped (`onHeartbeatRequestSkipped`
+    /// would complete the leave at once). The reaper's timeout is therefore
+    /// the only way the event completes. Java: `ConsumerNetworkThread.runOnce`
+    /// processes the event (building the leave heartbeat) before it reaps it,
+    /// and `leaveGroupOnClose` then logs "couldn't complete it within" and
+    /// proceeds.
+    #[test]
+    fn close_with_zero_timeout_returns_when_the_bg_reaper_expires_the_leave() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::StringDeserializer;
+        use crate::consumer::{CloseOptions, Consumer, KafkaConsumer};
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "topic";
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let (elapsed, epochs_at_close, epochs_after_close) = runtime.block_on(async move {
+            let broker = FakeBroker::start_with_group_coordinator("fake-cluster", TOPIC).await;
+            let props = HashMap::from([
+                (ConsumerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), broker.bootstrap()),
+                (ConsumerConfig::GROUP_PROTOCOL_CONFIG.to_string(), "consumer".to_string()),
+                (ConsumerConfig::GROUP_ID_CONFIG.to_string(), "test-group".to_string()),
+            ]);
+            let mut consumer = KafkaConsumer::<String, String>::new(
+                ConsumerConfig::new(&props).unwrap(),
+                StringDeserializer,
+                StringDeserializer,
+            )
+            .expect("consumer");
+            consumer
+                .subscribe_with_topics(vec![TOPIC.to_string()])
+                .await
+                .expect("subscribe");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while consumer.group_metadata().generation_id() != 1 && tokio::time::Instant::now() < deadline {
+                consumer.poll(Duration::from_millis(50)).await.expect("poll");
+            }
+            assert_eq!(
+                1,
+                consumer.group_metadata().generation_id(),
+                "the member must join the fake coordinator first; heartbeats: {:?}",
+                broker.heartbeat_epochs()
+            );
+            let epochs_at_close = broker.heartbeat_epochs();
+            let started = std::time::Instant::now();
+            consumer
+                .close_with_options(CloseOptions::new_with_timeout(Duration::ZERO))
+                .await
+                .expect("close");
+            let elapsed = started.elapsed();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !broker.heartbeat_epochs().contains(&-1) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (elapsed, epochs_at_close, broker.heartbeat_epochs())
+        });
+        assert!(
+            !epochs_at_close.contains(&-1),
+            "no leave heartbeat before close: {epochs_at_close:?}"
+        );
+        assert!(
+            epochs_after_close.contains(&-1),
+            "Java: the network thread processes LeaveGroupOnClose before reaping it, so the leave \
+             heartbeat (epoch -1) is sent even with a zero timeout; heartbeats: {epochs_after_close:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "close(Duration.ZERO) must return when the reaper expires LeaveGroupOnClose, not after the \
+             request.timeout.ms backstop; took {elapsed:?}"
+        );
+    }
+
     /// Java: `testVerifyApplicationEventOnShutdown` (Java line 683-691).
     /// On close, `CommitOnCloseEvent` is enqueued (Java verifies via
     /// `verify(applicationEventHandler).add(any(CommitOnCloseEvent.class))`).
@@ -14607,7 +14935,13 @@ mod tests {
         let start = std::time::Instant::now();
         let deadline = consumer.time.milliseconds() + 1000;
         let result = consumer
-            .process_background_events_until::<()>(receiver, deadline, |_| false, "should not see this msg", false)
+            .process_background_events_until::<()>(
+                receiver,
+                deadline,
+                |_| false,
+                "should not see this msg",
+                /* skip_assignment_events = */ false,
+            )
             .await;
         let elapsed = start.elapsed();
         result.expect("ready receiver must resolve");
@@ -14628,7 +14962,13 @@ mod tests {
 
         let deadline = consumer.time.milliseconds() + 100;
         let err = consumer
-            .process_background_events_until::<()>(receiver, deadline, |_| false, "drain helper timeout", false)
+            .process_background_events_until::<()>(
+                receiver,
+                deadline,
+                |_| false,
+                "drain helper timeout",
+                /* skip_assignment_events = */ false,
+            )
             .await
             .expect_err("must time out");
         assert!(matches!(err, Error::Timeout(_)), "unexpected err: {err:?}");
@@ -14641,6 +14981,83 @@ mod tests {
         fn _accept_consumer<C: crate::consumer::Consumer<Vec<u8>, Vec<u8>>>(_c: C) {}
         // Only the type-level check matters — no runtime assertions.
         let _phantom: fn(AsyncKafkaConsumer<Vec<u8>, Vec<u8>>) = _accept_consumer;
+    }
+
+    /// Audit finding C1-22, through the production constructor. Java's
+    /// `ConsumerNetworkThread.run()` (4.4) wraps every `runOnce()` in
+    /// `catch (final Throwable e)`, logs "Unexpected error caught in consumer
+    /// network thread" and keeps looping. The Rust constructor once drove its
+    /// own copy of the loop without that catch, so one panicking iteration
+    /// ended the bg thread and every later call failed with "The consumer
+    /// background task is not running". The `consumer_network_thread` tests
+    /// start the loop through `spawn_dedicated` directly; this one builds the
+    /// consumer with `AsyncKafkaConsumer::new` (what `KafkaConsumer::new`
+    /// calls), so it fails if the constructor stops going through
+    /// `ConsumerNetworkThread::run`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn constructed_consumer_survives_a_panicking_background_iteration() {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicUsize;
+
+        use crate::common::serialization::ByteArrayDeserializer;
+        use crate::consumer::internals::PollResult;
+        use crate::consumer::internals::RequestManager;
+
+        /// Panics on its first poll only, and counts every poll.
+        struct PanicOnceRequestManager {
+            poll_calls: Arc<AtomicUsize>,
+        }
+
+        impl RequestManager for PanicOnceRequestManager {
+            fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+                if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("request manager failure");
+                }
+                PollResult::with_time_until_next_poll_ms(10)
+            }
+
+            fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+                10
+            }
+        }
+
+        // No group.id: `assign` is then served by the bg loop alone, with no
+        // broker round trip. The bootstrap address refuses connections.
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+        ]);
+        let mut consumer = AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+            ConsumerConfig::new(&props).expect("config validates"),
+            Box::new(ByteArrayDeserializer),
+            Box::new(ByteArrayDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        consumer
+            .request_managers
+            .lock()
+            .unwrap()
+            .add_dyn_manager_for_test(Box::new(PanicOnceRequestManager { poll_calls: Arc::clone(&poll_calls) }));
+
+        // Wait for the loop to run the panicking iteration and at least one
+        // more.
+        let start = std::time::Instant::now();
+        while poll_calls.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let polls = poll_calls.load(Ordering::SeqCst);
+
+        let assigned = consumer.assign(vec![TopicPartition::new("topic1".to_string(), 0)]).await;
+        assert!(
+            polls >= 2 && assigned.is_ok(),
+            "Java: the network thread logs the error and keeps running, so later calls still succeed; Rust: \
+             manager polls={polls}, assign after the panicking iteration returned {assigned:?}"
+        );
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::new_with_timeout(Duration::ZERO))
+            .await
+            .expect("close");
     }
 
     // ── Phase 21: dedicated-IO-thread `NetworkThreadCloseHandle` tests ──
@@ -16056,5 +16473,573 @@ mod tests {
              poll() spun without yielding while maximumTimeToWait was 0"
         );
         drop(handles.subscriptions);
+    }
+
+    // ── Duration::MAX timeouts (audit finding C1-03) ───────────────────
+    //
+    // Rust saturates a `Duration` beyond `i64::MAX` ms to `i64::MAX` ms
+    // (`ConsumerUtils::duration_to_millis`) and never rejects it, so each test
+    // below asserts that single outcome: the call behaves as Java does for
+    // `Long.MAX_VALUE` ms.
+
+    /// Audit finding C1-03: `poll(Duration::MAX)` must keep blocking.
+    /// Java: `poll(Duration)` with `Long.MAX_VALUE` ms blocks until records
+    /// arrive (`AsyncKafkaConsumer.java` `poll` → `time.timer(timeout)`). An
+    /// unchecked `timeout.as_millis() as i64` wrapped `Duration::MAX` to
+    /// -1 ms, so the deadline had already passed and `poll` returned an empty
+    /// batch at once.
+    #[tokio::test]
+    async fn poll_with_duration_max_blocks() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        assign_and_seek_for_poll(&handles);
+        // Stand-in bg task: complete every AsyncPoll so poll() is gated only
+        // by its own deadline (no records ever arrive).
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    state.mark_validate_positions_complete();
+                    state.complete_successfully();
+                }
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_millis(500), consumer.poll(Duration::MAX)).await;
+        let took = start.elapsed();
+        drainer.abort();
+        assert!(
+            outcome.is_err(),
+            "poll(Duration::MAX) must still be blocked when the 500 ms test timeout fires (Java: \
+             Long.MAX_VALUE ms blocks until records arrive); it returned {:?} after {took:?}",
+            outcome.as_ref().map(|r| r.as_ref().map(|recs| recs.count()))
+        );
+    }
+
+    /// Audit finding C1-03: `commit_sync_with_offsets_timeout(.., Duration::MAX)` must wait
+    /// for a commit that completes 50 ms later and return `Ok`. Java:
+    /// `commitSync(offsets, Duration)` with `Long.MAX_VALUE` ms waits for the
+    /// commit; it never fails with a retriable `TimeoutException` before the
+    /// commit completes.
+    #[tokio::test]
+    async fn commit_sync_with_duration_max_does_not_time_out_immediately() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 0);
+        let offsets = singleton_offsets(tp, 10);
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitSync { handle, offsets_ready, .. } = env.event {
+                    offsets_ready.complete(());
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    handle.complete(HashMap::new());
+                }
+            }
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            consumer.commit_sync_with_offsets_timeout(offsets, Duration::MAX),
+        )
+        .await;
+        completer.abort();
+        assert!(
+            matches!(outcome, Ok(Ok(()))),
+            "commit_sync_with_offsets_timeout(Duration::MAX) must wait for a commit that completes 50 ms \
+             later and return Ok (Java: Long.MAX_VALUE ms waits for the commit); got {outcome:?}"
+        );
+    }
+
+    /// Audit finding C1-03 (ConsumerHandle path): `ConsumerHandle::position_with_timeout(..,
+    /// Duration::MAX)` must keep waiting for a position. An unchecked cast
+    /// wrapped the timeout to -1 ms and returned a retriable `TimeoutError` at once.
+    #[tokio::test]
+    async fn handle_position_with_duration_max_does_not_time_out_immediately() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1", 0);
+        {
+            // Assigned but no position yet: position() must wait for one.
+            let mut subs = handles.subscriptions.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+        }
+        // `ConsumerHandle` operations run only inside a callback the consumer
+        // is running; outside one they fail with `ConcurrentModification`.
+        let _in_callback = consumer.enter_callback_scope();
+        let handle = consumer.handle();
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(500), handle.position_with_timeout(&tp, Duration::MAX)).await;
+        assert!(
+            outcome.is_err(),
+            "ConsumerHandle::position_with_timeout(Duration::MAX) must still be waiting when the 500 ms \
+             test timeout fires (Java: position(tp, Duration) with Long.MAX_VALUE ms waits for a \
+             position); got {outcome:?}"
+        );
+        drop(handles.app_event_rx);
+    }
+
+    /// Audit finding C1-03 (close path): `close_with_options(timeout(Duration::MAX))` must
+    /// not close with a zero budget. Java caps the close timer at
+    /// `request.timeout.ms` (`createTimerForCloseRequests`,
+    /// `AsyncKafkaConsumer.java`), so `Long.MAX_VALUE` ms hands the
+    /// network thread ~`request.timeout.ms`. An unchecked cast gave `min(-1, request_timeout_ms)`
+    /// = -1 ms, so auto-commit-on-close, leave-group and the network-thread
+    /// cleanup all got 0 ms.
+    #[tokio::test]
+    async fn close_with_duration_max_keeps_the_request_timeout_budget() {
+        use crate::consumer::CloseOptions;
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let request_timeout_ms = consumer.config.request_timeout_ms() as i64;
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        let result = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::MAX)).await;
+        drainer.abort();
+
+        // The bg task gets what is left of the close timer
+        // (`close_deadline_ms - now`, on the fixture's real `SystemTime`), so the
+        // few milliseconds the close steps take are subtracted from the
+        // `request.timeout.ms` cap; 100 ms covers that and still fails a cap
+        // that is even slightly off.
+        let signalled = handles.signal_close_timeout_ms.load(Ordering::Acquire);
+        assert!(
+            (request_timeout_ms - 100..=request_timeout_ms).contains(&signalled),
+            "close(Duration::MAX) must hand the bg task the request.timeout.ms cap \
+             ({request_timeout_ms} ms, less the elapsed close time) (Java: createTimerForCloseRequests \
+             caps Long.MAX_VALUE ms at request.timeout.ms); got {signalled} ms (result {result:?})"
+        );
+    }
+
+    // ─── Background events wait for poll() (§31, audit finding VC-01) ───
+    //
+    // Java's `AsyncKafkaConsumer` runs `processBackgroundEvents()` — the only
+    // path that invokes `onPartitionsRevoked/Assigned/Lost` for a queued
+    // `PartitionsRemovedEvent` / `PartitionsAssignedEvent` or throws a queued
+    // `ErrorEvent` — only from `poll()` (`checkInflightPoll`, `:1013-1014`;
+    // `updateAssignmentMetadataIfNeeded`, `:2140`) and `unsubscribe()`
+    // (`:1948`). `commitSync` (`:1813-1827`), `committed` (`:1264-1291`),
+    // `seek` (`:1156-1200`), `pause` (`:1374-1385`), `assign` (`:1922`) and
+    // `close` (`:1639-1690`) block with a plain
+    // `applicationEventHandler.addAndGet(event)` / `ConsumerUtils.getResult`,
+    // running at most the offset-commit callbacks.
+
+    /// A rebalance listener that only records how often each method ran.
+    struct QueuedEventCountingListener {
+        revoked: Arc<AtomicUsize>,
+        assigned: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConsumerRebalanceListener for QueuedEventCountingListener {
+        async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+            self.revoked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+            self.assigned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Installs a [`QueuedEventCountingListener`] and returns its
+    /// `(revoked, assigned)` counters.
+    fn install_counting_listener(
+        consumer: &AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+    ) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let revoked = Arc::new(AtomicUsize::new(0));
+        let assigned = Arc::new(AtomicUsize::new(0));
+        *consumer.rebalance_listener.lock().unwrap() = Some(Arc::new(QueuedEventCountingListener {
+            revoked: Arc::clone(&revoked),
+            assigned: Arc::clone(&assigned),
+        }) as Arc<dyn ConsumerRebalanceListener>);
+        (revoked, assigned)
+    }
+
+    /// Fake background task: completes every event these tests submit at
+    /// once, counting the `ApplyAssignment`s, and ignores the rest
+    /// (`AsyncPoll` stays in flight).
+    fn spawn_queued_event_test_completer(
+        mut app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        apply_assignments: Arc<AtomicUsize>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. }
+                    | ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::FetchCommittedOffsets { handle, .. } => {
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::PausePartitions { handle, .. }
+                    | ApplicationEvent::SeekUnvalidated { handle, .. }
+                    | ApplicationEvent::AssignmentChange { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::ApplyAssignment { handle, .. } => {
+                        apply_assignments.fetch_add(1, Ordering::SeqCst);
+                        handle.complete(());
+                    },
+                    _ => {},
+                }
+            }
+        })
+    }
+
+    fn assign_for_queued_event_test(consumer: &AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, tp: &TopicPartition) {
+        let mut subs = consumer.subscriptions.lock().unwrap();
+        subs.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+    }
+
+    fn queue_revoke_callback(
+        bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        tp: &TopicPartition,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), Error>> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsRemoved {
+                    method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![tp.clone()],
+                    ack: ack_tx,
+                    ack_through_application_events: false,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+        ack_rx
+    }
+
+    fn queue_background_error(bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>, msg: &str) {
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::Error { error: Error::local_illegal_state(msg.to_string()) },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+    }
+
+    /// A boxed consumer call, for the shared bodies below.
+    type QueuedEventOp = for<'a> fn(
+        &'a mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+        TopicPartition,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>;
+
+    /// Shared body: a revoke callback is queued; `op` must not run it, the
+    /// next `poll()` must.
+    async fn assert_queued_listener_waits_for_poll(op_name: &str, op: QueuedEventOp) {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions, .. } = handles;
+        let completer = spawn_queued_event_test_completer(app_event_rx, Arc::new(AtomicUsize::new(0)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        assign_for_queued_event_test(&consumer, &tp);
+        let (revoked, _assigned) = install_counting_listener(&consumer);
+
+        let mut ack_rx = queue_revoke_callback(&bg_event_tx, &tp);
+
+        op(&mut consumer, tp.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{op_name} must succeed: {e}"));
+        assert_eq!(
+            revoked.load(Ordering::SeqCst),
+            0,
+            "{op_name} invoked onPartitionsRevoked for a queued PartitionsRemovedEvent; Java's \
+             AsyncKafkaConsumer.{op_name} waits with applicationEventHandler.addAndGet / getResult and \
+             never runs processBackgroundEvents(), so the listener only runs from the next poll()"
+        );
+        assert!(
+            matches!(ack_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+            "{op_name} must leave the callback-needed event (and its ack) for poll()"
+        );
+
+        consumer.poll(Duration::ZERO).await.expect("poll ok");
+        assert_eq!(
+            revoked.load(Ordering::SeqCst),
+            1,
+            "the next poll() must run the queued onPartitionsRevoked exactly once (Java checkInflightPoll -> \
+             processBackgroundEvents)"
+        );
+        assert!(ack_rx.await.expect("ack sent").is_ok(), "poll() acks the callback");
+        completer.abort();
+        drop(subscriptions);
+    }
+
+    /// Shared body: a background error is queued; `op` must not consume it,
+    /// the next `poll()` must return it.
+    async fn assert_queued_error_waits_for_poll(op_name: &str, op: QueuedEventOp) {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions, .. } = handles;
+        let completer = spawn_queued_event_test_completer(app_event_rx, Arc::new(AtomicUsize::new(0)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        assign_for_queued_event_test(&consumer, &tp);
+
+        queue_background_error(&bg_event_tx, "queued background error");
+
+        let result = op(&mut consumer, tp.clone()).await;
+        assert!(
+            result.is_ok(),
+            "{op_name} returned the queued background ErrorEvent ({:?}); Java's AsyncKafkaConsumer.{op_name} \
+             does not run processBackgroundEvents(), so the error stays queued and is thrown by the next poll()",
+            result.err()
+        );
+
+        let err = consumer
+            .poll(Duration::ZERO)
+            .await
+            .expect_err("the next poll() must throw the queued background error, as Java's does");
+        // Java's `poll()` throws it through `maybeWrapAsKafkaException`.
+        assert_eq!(
+            err.message(),
+            "LocalIllegalStateError: queued background error",
+            "poll() must surface the queued background error"
+        );
+        completer.abort();
+        drop(subscriptions);
+    }
+
+    #[tokio::test]
+    async fn commit_sync_leaves_queued_rebalance_callback_for_poll() {
+        assert_queued_listener_waits_for_poll("commitSync", |c, _tp| {
+            Box::pin(c.commit_sync_with_timeout(Duration::from_secs(5)))
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn committed_leaves_queued_rebalance_callback_for_poll() {
+        assert_queued_listener_waits_for_poll("committed", |c, tp| {
+            Box::pin(async move { c.committed(&[tp]).await.map(|_| ()) })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pause_leaves_queued_background_error_for_poll() {
+        assert_queued_error_waits_for_poll("pause", |c, tp| Box::pin(async move { c.pause(&[tp]).await })).await;
+    }
+
+    #[tokio::test]
+    async fn seek_leaves_queued_background_error_for_poll() {
+        assert_queued_error_waits_for_poll("seek", |c, tp| Box::pin(c.seek_with_offset(tp, 5))).await;
+    }
+
+    #[tokio::test]
+    async fn commit_sync_leaves_queued_background_error_for_poll() {
+        assert_queued_error_waits_for_poll("commitSync", |c, _tp| {
+            Box::pin(c.commit_sync_with_timeout(Duration::from_secs(5)))
+        })
+        .await;
+    }
+
+    /// `commitAsync` with a queued `ErrorEvent`: Java's `commitAsync` waits on
+    /// `offsetsReady` without processing background events
+    /// (`AsyncKafkaConsumer.java:1141-1151`), so it returns normally, its
+    /// callback runs once the commit completes (from the next `poll()`'s
+    /// `executeCallbacks()`), and that `poll()` then throws the queued error.
+    /// Draining here used to fail `commitAsync` after the commit had been
+    /// sent, so its callback was never invoked.
+    #[tokio::test]
+    async fn commit_async_with_queued_background_error_still_runs_its_callback() {
+        struct CountingCallback {
+            invoked: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for CountingCallback {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                error: Option<&Error>,
+            ) -> Result<(), Error> {
+                assert!(error.is_none(), "the commit succeeded, got {error:?}");
+                self.invoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions, .. } = handles;
+        let completer = spawn_queued_event_test_completer(app_event_rx, Arc::new(AtomicUsize::new(0)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        assign_for_queued_event_test(&consumer, &tp);
+        queue_background_error(&bg_event_tx, "queued background error");
+
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let result = consumer
+            .commit_async_with_offsets_callback(
+                singleton_offsets(tp, 5),
+                Arc::new(CountingCallback { invoked: Arc::clone(&invoked) }),
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "commitAsync returned the queued background ErrorEvent ({:?}) after sending the commit; Java's \
+             commitAsync does not run processBackgroundEvents()",
+            result.err()
+        );
+
+        // The commit completes on the fake bg task; its callback is queued by
+        // the spawned continuation.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while consumer.commit_state.last_pending_async_commit().is_some_and(|c| !c.is_done()) {
+            assert!(std::time::Instant::now() < deadline, "the commit never completed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let err = consumer
+            .poll(Duration::ZERO)
+            .await
+            .expect_err("the next poll() must throw the queued background error");
+        assert_eq!(err.message(), "LocalIllegalStateError: queued background error");
+        assert_eq!(
+            invoked.load(Ordering::SeqCst),
+            1,
+            "poll() runs the commit callback (executeCallbacks) before throwing the background error"
+        );
+        completer.abort();
+        drop(subscriptions);
+    }
+
+    /// `assign` with a queued `PartitionsAssignedEvent`: Java's `assign`
+    /// waits with `addAndGet(AssignmentChangeEvent)` (`:1922`), so the queued
+    /// assignment is neither applied (`ApplyAssignmentEvent`) nor delivered
+    /// to `onPartitionsAssigned` by it; the next `poll()` does both.
+    #[tokio::test]
+    async fn assign_does_not_apply_a_queued_pending_assignment() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions, .. } = handles;
+        let apply_assignments = Arc::new(AtomicUsize::new(0));
+        let completer = spawn_queued_event_test_completer(app_event_rx, Arc::clone(&apply_assignments));
+        let (_revoked, assigned) = install_counting_listener(&consumer);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        // The fake bg task does not apply the `AssignmentChange`; seed the
+        // assignment it would have applied, so `poll()` can run.
+        assign_for_queued_event_test(&consumer, &tp);
+        let stale = TopicPartition::new("t".to_string(), 1);
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![stale.clone()],
+                    added_partitions: vec![stale],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+
+        consumer.assign(vec![tp]).await.expect("assign ok");
+        assert_eq!(
+            apply_assignments.load(Ordering::SeqCst),
+            0,
+            "assign applied a queued PartitionsAssignedEvent; Java's assign() never runs processBackgroundEvents()"
+        );
+        assert_eq!(assigned.load(Ordering::SeqCst), 0, "assign must not run onPartitionsAssigned");
+        assert!(
+            matches!(ack_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+            "assign must leave the PartitionsAssignedEvent for poll()"
+        );
+
+        consumer.poll(Duration::ZERO).await.expect("poll ok");
+        assert_eq!(
+            apply_assignments.load(Ordering::SeqCst),
+            1,
+            "poll() applies the queued assignment"
+        );
+        assert_eq!(assigned.load(Ordering::SeqCst), 1, "poll() runs onPartitionsAssigned once");
+        assert!(ack_rx.await.expect("ack sent").is_ok());
+        completer.abort();
+        drop(subscriptions);
+    }
+
+    /// Java's `close()` never runs `processBackgroundEvents()`: its steps are
+    /// `commitSyncAllConsumed` (plain `commitSync`), `runRebalanceCallbacksOnClose`
+    /// (the listener called directly) and `leaveGroupOnClose`
+    /// (`applicationEventHandler.addAndGet`), `AsyncKafkaConsumer.java:1639-1690`.
+    /// A queued `ErrorEvent` is therefore never thrown by `close()`.
+    #[tokio::test]
+    async fn close_does_not_fail_with_queued_background_error() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.auto_commit_enabled = false;
+        queue_background_error(&handles.bg_event_tx, "queued background error");
+        let drainer = spawn_close_drainer(handles.app_event_rx);
+        let result = consumer.close().await;
+        drainer.abort();
+        assert!(
+            result.is_ok(),
+            "close() failed with the queued background ErrorEvent ({:?}); Java's close() does not run \
+             processBackgroundEvents(), so it does not throw it",
+            result.err()
+        );
+    }
+
+    /// With a queued `ErrorEvent`, `close()` still waits for its
+    /// `LeaveGroupOnClose` event, so the bg task sends the leave heartbeat
+    /// before it is shut down: Java's `leaveGroupOnClose` blocks in
+    /// `addAndGet` until the leave completes or the close timer expires
+    /// (`AsyncKafkaConsumer.java:1748-1762`). The fake bg task completes the
+    /// leave only after a delay; `close()` must not return before it.
+    #[tokio::test]
+    async fn close_with_queued_background_error_still_waits_for_the_leave() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.auto_commit_enabled = false;
+        queue_background_error(&handles.bg_event_tx, "queued background error");
+        let leave_completed = Arc::new(AtomicBool::new(false));
+        let mut app_event_rx = handles.app_event_rx;
+        let drainer = {
+            let leave_completed = Arc::clone(&leave_completed);
+            tokio::spawn(async move {
+                while let Some(env) = app_event_rx.recv().await {
+                    if let ApplicationEvent::LeaveGroupOnClose { handle, .. } = env.event {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        leave_completed.store(true, Ordering::SeqCst);
+                        handle.complete(());
+                    }
+                }
+            })
+        };
+
+        let result = consumer.close().await;
+        drainer.abort();
+        assert!(result.is_ok(), "close() must succeed: {:?}", result.err());
+        assert!(
+            leave_completed.load(Ordering::SeqCst),
+            "close() stopped waiting for LeaveGroupOnClose because of a queued background error; Java's \
+             leaveGroupOnClose waits for the leave with addAndGet"
+        );
+    }
+
+    /// With auto-commit on, Java's `close()` commits through `commitSync`
+    /// (`commitSyncAllConsumed`, `AsyncKafkaConsumer.java:1771-1780`), which
+    /// does not run `processBackgroundEvents()`: a queued revoke callback is
+    /// not invoked by it, and `runRebalanceCallbacksOnClose` invokes the
+    /// listener only for the group assignment snapshot (empty here).
+    #[tokio::test]
+    async fn close_auto_commit_does_not_invoke_queued_rebalance_listener() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.auto_commit_enabled = true;
+        let (revoked, _assigned) = install_counting_listener(&consumer);
+        let _ack_rx = queue_revoke_callback(&handles.bg_event_tx, &TopicPartition::new("t".to_string(), 0));
+        let drainer = spawn_close_drainer(handles.app_event_rx);
+        let result = consumer.close().await;
+        drainer.abort();
+        assert!(result.is_ok(), "close() must succeed: {:?}", result.err());
+        assert_eq!(
+            revoked.load(Ordering::SeqCst),
+            0,
+            "close() invoked onPartitionsRevoked for a queued PartitionsRemovedEvent (through its auto-commit); \
+             Java's close() commits with commitSync, which never runs processBackgroundEvents()"
+        );
     }
 }

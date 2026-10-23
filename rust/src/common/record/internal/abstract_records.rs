@@ -78,7 +78,10 @@ impl AbstractRecords {
     /// the given fields. This is only an estimate because it does not take into
     /// account overhead from the compression algorithm.
     ///
-    /// Corresponds to Java's `AbstractRecords.estimateSizeInBytesUpperBound`.
+    /// Corresponds to Java's `AbstractRecords.estimateSizeInBytesUpperBound`. Returns an
+    /// `i64` where Java returns an `int`, as
+    /// [`DefaultRecordBatch::estimate_batch_size_upper_bound`] does: a key or value slice
+    /// can be longer than any `byte[]`.
     #[doc(alias = "org.apache.kafka.common.record.internal.AbstractRecords#estimateSizeInBytesUpperBound")]
     pub fn estimate_size_in_bytes_upper_bound(
         magic: i8,
@@ -86,7 +89,7 @@ impl AbstractRecords {
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
-    ) -> i32 {
+    ) -> i64 {
         if magic >= RecordBatch::MAGIC_VALUE_V2 {
             DefaultRecordBatch::estimate_batch_size_upper_bound(key, value, headers)
         } else {

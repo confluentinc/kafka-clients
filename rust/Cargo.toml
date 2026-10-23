@@ -27,6 +27,8 @@ include = [
     "!/src/common/message/**",
     "!/src/integration_tests/**",
     "!/src/test_alloc_tracker.rs",
+    "!/src/test_fake_broker.rs",
+    "!/src/test_thread_safety.rs",
     "!/src/producer/internals/producer_test_utils.rs",
     "/generator/src/**/*.rs",
     "/generator/messages/*.json",

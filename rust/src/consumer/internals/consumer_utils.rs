@@ -51,6 +51,7 @@
 #![expect(dead_code)] // Phase 11 commit (1/N): helpers land before their callers (commits 2-7).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use log::info;
 
@@ -114,6 +115,25 @@ impl ConsumerUtils {
 
     /// Java: `CONSUMER_CLIENT_ID_METRIC_TAG` (package-private).
     pub(crate) const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+    /// Converts a `Duration` timeout to whole milliseconds, saturating at
+    /// `i64::MAX`.
+    ///
+    /// This is the consumer's translation of Java's `Duration.toMillis()`,
+    /// which every timed consumer API applies to its timeout (directly or via
+    /// `time.timer(timeout)`). Java's `toMillis()` throws
+    /// `ArithmeticException` for a `Duration` beyond `Long.MAX_VALUE` ms;
+    /// Rust users commonly pass `Duration::MAX` to mean "no timeout", so the
+    /// translation saturates to `i64::MAX` ms instead of failing. That is the
+    /// largest timeout Java can express, and Java treats it as "wait
+    /// forever" (`CompletableEvent.calculateDeadlineMs` caps the deadline at
+    /// `Long.MAX_VALUE`). An unchecked `as i64` cast would wrap
+    /// `Duration::MAX` to -1 ms, so the call would expire at once.
+    ///
+    /// Not a Java method: Java has no equivalent conversion that saturates.
+    pub(crate) fn duration_to_millis(duration: Duration) -> i64 {
+        i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    }
 
     /// Builds the log-prefix string used by Java's `LogContext`.
     ///
@@ -352,6 +372,26 @@ mod tests {
             ConsumerUtils::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
             "internal.throw.on.fetch.stable.offset.unsupported"
         );
+    }
+
+    /// Audit finding C1-03: `Duration::MAX` saturates to `i64::MAX` ms
+    /// (Java's largest expressible timeout) instead of wrapping to -1 ms.
+    #[test]
+    fn duration_to_millis_saturates_at_i64_max() {
+        assert_eq!(ConsumerUtils::duration_to_millis(Duration::MAX), i64::MAX);
+        assert_eq!(ConsumerUtils::duration_to_millis(Duration::from_millis(u64::MAX)), i64::MAX);
+        assert_eq!(
+            ConsumerUtils::duration_to_millis(Duration::from_millis(i64::MAX as u64)),
+            i64::MAX
+        );
+        assert_eq!(
+            ConsumerUtils::duration_to_millis(Duration::from_millis(i64::MAX as u64 - 1)),
+            i64::MAX - 1
+        );
+        assert_eq!(ConsumerUtils::duration_to_millis(Duration::from_millis(1500)), 1500);
+        // Sub-millisecond remainders truncate, as Java's toMillis() does.
+        assert_eq!(ConsumerUtils::duration_to_millis(Duration::from_micros(2999)), 2);
+        assert_eq!(ConsumerUtils::duration_to_millis(Duration::ZERO), 0);
     }
 
     #[test]

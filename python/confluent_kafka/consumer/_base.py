@@ -1764,11 +1764,12 @@ class _ConsumerState:
         ``commitAsync(offsets, callback)``: returns once the commit is sent; the
         callback runs inside a later call on this consumer, on its thread.
 
-        The core's commit waits for the offsets to commit and processes the
-        background events meanwhile (``consumer-threading.md`` §31; Java's
-        ``commitAsync`` does not), so a listener callback can be queued during
-        it: like every waiting call it submits the ``_cb`` form and runs the
-        queued callbacks on this thread while it waits.
+        The core's commit waits for the offsets to commit without processing
+        the background events, as Java's ``commitAsync`` does, so it delivers
+        no listener callback and no background error (only ``poll()`` and
+        ``unsubscribe()`` do). Like every waiting call it submits the ``_cb``
+        form and runs on this thread the callbacks the core hands it while it
+        waits, which here are only the queued commit callbacks.
 
         Inside a callback, the commit goes through the ConsumerHandle
         (``kafka_consumer_ConsumerHandle_commit_async``, or its

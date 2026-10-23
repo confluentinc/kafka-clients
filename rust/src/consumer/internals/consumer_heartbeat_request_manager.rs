@@ -981,6 +981,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         // `pollTimer.update(currentTimeMs)` here; the Rust deadline-based
         // timer doesn't need the update — `poll_timer_is_expired` reads
         // `current_time_ms` directly.
+        // Java parity, including its limitation: a dynamic member closed with
+        // REMAIN_IN_GROUP is LEAVING but `is_leaving_group()` is false for
+        // it, so if its poll timer has already expired this branch is taken
+        // on every poll, `transition_to_sending_leave_group(true)` fails
+        // (LEAVING -> PREPARE_LEAVING is not a valid transition) and no
+        // heartbeat is built. The close-time leave then never completes and
+        // `close()` waits out its close timeout, as Java's does (where the
+        // `IllegalStateException` escapes `runOnce` on every iteration).
         if self.inner.poll_timer_is_expired(current_time_ms) && !self.membership_manager.is_leaving_group() {
             log::warn!(
                 "Consumer poll timeout has expired. This means the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms."
@@ -2680,7 +2688,8 @@ mod tests {
         // Drive the member to LEAVING (a user-initiated leave, not poll-timer).
         mgr.inner.reset_poll_timer(0);
         make_joining(&mm);
-        mm.leave_group(0).await.unwrap();
+        let _leave_result = mm.leave_group(0).unwrap();
+        assert!(!mm.has_pending_leave_callback(), "no assignment to release");
         assert_eq!(mm.state(), MemberState::Leaving);
         assert!(mm.is_leaving_group());
 
@@ -3874,5 +3883,297 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Complete `unsent` (a heartbeat request) with a response carrying
+    /// `error_code` and `epoch`, through the request's own completion
+    /// handler, as the network layer does.
+    fn complete_heartbeat_with(
+        unsent: &crate::consumer::internals::UnsentRequest,
+        mm: &ConsumerMembershipManager,
+        error_code: i16,
+        epoch: i32,
+    ) {
+        use crate::ClientResponse;
+        use crate::ConsumerGroupHeartbeatResponseData;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = error_code;
+        data.member_id = Some(mm.member_id());
+        data.member_epoch = epoch;
+        data.heartbeat_interval_ms = 1_000;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        let header = RequestHeader::with_options(
+            RequestHeaderOptionsBuilder::new()
+                .set_request_api_key(&ApiKeys::CONSUMER_GROUP_HEARTBEAT)
+                .set_request_version(ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version())
+                .set_client_id("")
+                .set_correlation_id(1)
+                .build()
+                .unwrap(),
+        )
+        .expect("header ok");
+        let client_response = ClientResponse::with_timed_out(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
+        );
+        unsent.handler().on_complete(client_response);
+    }
+
+    /// A fatal error response to the leave heartbeat completes the leave.
+    /// `on_response` calls `transition_to_fatal` BEFORE
+    /// `on_heartbeat_failure(false)` (Java's `handleFatalFailure` then
+    /// `onHeartbeatFailure`), so the member is already FATAL when the failure
+    /// hook runs: only `transitionToFatal`'s "already left" completion
+    /// (`AbstractMembershipManager.java:509`) can release `unsubscribe()`.
+    #[tokio::test]
+    async fn fatal_error_response_to_leave_heartbeat_completes_leave() {
+        let (mut mgr, coord, mm, _rx) = make_with_coord_capturing_events(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+        let leave = mm.leave_group(0).unwrap();
+        assert!(!mm.has_pending_leave_callback());
+        assert_eq!(mm.state(), MemberState::Leaving);
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(!leave.is_done(), "the leave waits for the leave heartbeat's response");
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+        complete_heartbeat_with(&unsent, &mm, Errors::GroupAuthorizationFailed.code(), -1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while mgr.pending_completions_empty_for_test() {
+            assert!(std::time::Instant::now() < deadline, "forwarder did not deliver");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let _ = mgr.poll(0);
+        assert_eq!(mm.state(), MemberState::Fatal);
+        assert!(
+            leave.is_done(),
+            "a fatal error response to the leave heartbeat must complete the leave"
+        );
+    }
+
+    /// The unsubscribe leave's callback ack is applied only when the bg loop
+    /// drives it, never in the middle of a heartbeat build. Sequence: a
+    /// regular heartbeat is built while the member waits in PREPARE_LEAVING
+    /// (it carries the member epoch); the app acks the revoked callback
+    /// meanwhile; the build completes (`on_heartbeat_request_generated`)
+    /// with the member still PREPARE_LEAVING, so it is NOT mistaken for the
+    /// leave heartbeat. The bg loop then drives the ack, and the next poll
+    /// sends the real leave heartbeat, whose response completes the leave.
+    /// Java gets the same ordering by running the callback's `whenComplete`
+    /// on the network thread.
+    #[tokio::test]
+    async fn leave_callback_ack_never_lands_inside_a_heartbeat_build() {
+        use crate::consumer::ConsumerRebalanceListener;
+        use crate::consumer::internals::events::BackgroundEvent;
+        use std::collections::HashSet;
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _p: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _p: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+        let (mut mgr, coord, mm, mut rx) = make_with_coord_capturing_events(Some(0));
+        set_coordinator(&coord);
+        {
+            let mut subs = mm.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_with_topics(HashSet::from(["t".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+            subs.assign_from_subscribed(&[crate::common::TopicPartition::new("t", 0)])
+                .unwrap();
+        }
+        make_joining(&mm);
+        mm.abstract_mm.inner.lock().unwrap().update_member_epoch(5);
+        let leave = mm.leave_group(0).unwrap();
+        assert!(mm.has_pending_leave_callback(), "revoke callback enqueued");
+        assert_eq!(mm.state(), MemberState::PrepareLeaving);
+
+        // bg task, heartbeat poll part 1: a regular heartbeat is being built.
+        let data = mgr.build_request_data_for_test();
+        assert_eq!(data.member_epoch, 5, "regular heartbeat carries the member epoch");
+        // The app task acks the callback meanwhile.
+        match rx.try_recv().expect("callback event").event {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack.send(Ok(())).unwrap(),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            mm.state(),
+            MemberState::PrepareLeaving,
+            "the ack is not applied off the bg loop"
+        );
+        // bg task, heartbeat poll part 2: the regular heartbeat goes out.
+        mm.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(
+            mm.state(),
+            MemberState::PrepareLeaving,
+            "the regular heartbeat must not be taken for the leave heartbeat"
+        );
+
+        // Next run_once: the ack is applied, then the leave heartbeat is built.
+        mm.drive_pending_leave_callback().unwrap();
+        assert_eq!(mm.state(), MemberState::Leaving);
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1, "the leave heartbeat goes out");
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(!leave.is_done());
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+        complete_heartbeat_with(&unsent, &mm, Errors::None.code(), -1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while mgr.pending_completions_empty_for_test() {
+            assert!(std::time::Instant::now() < deadline, "forwarder did not deliver");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let _ = mgr.poll(0);
+        assert!(leave.is_done(), "the leave completes on the leave heartbeat's response");
+    }
+
+    // ---------------------------------------------------------------
+    // C2-01: the leave in progress (the future `unsubscribe()` waits on,
+    // which `ApplicationEventProcessor.process(UnsubscribeEvent)` chains the
+    // event future onto) completes through the heartbeat manager on every
+    // path that ends the leave heartbeat. Each test drives this manager's
+    // own `poll` and response / failure handling; none calls the membership
+    // manager's heartbeat hooks directly. The fatal-error response case is
+    // `fatal_error_response_to_leave_heartbeat_completes_leave` above.
+    // ---------------------------------------------------------------
+
+    /// A member in the group with nothing to release calls `leaveGroup()`
+    /// (no callback, so it is LEAVING at once), and the heartbeat manager's
+    /// poll builds the leave heartbeat (`onHeartbeatRequestGenerated`:
+    /// LEAVING -> UNSUBSCRIBED). Returns the manager, the membership
+    /// manager, the leave future and the leave heartbeat request.
+    fn send_leave_heartbeat() -> (
+        ConsumerHeartbeatRequestManager,
+        Arc<ConsumerMembershipManager>,
+        crate::common::internals::KafkaFutureImpl<()>,
+        UnsentRequest,
+    ) {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+        let leave = mm.leave_group(0).unwrap();
+        assert!(!mm.has_pending_leave_callback());
+        assert_eq!(mm.state(), MemberState::Leaving);
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1, "the leave heartbeat goes out");
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(!leave.is_done(), "the leave waits for the leave heartbeat's response");
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+        (mgr, mm, leave, unsent)
+    }
+
+    /// Wait for the spawned forwarder to hand the leave heartbeat's
+    /// completion to the manager, then poll once so the manager drains and
+    /// handles it, as the bg loop's next `run_once` does.
+    async fn handle_leave_heartbeat_completion(mgr: &mut ConsumerHeartbeatRequestManager) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while mgr.pending_completions_empty_for_test() {
+            assert!(std::time::Instant::now() < deadline, "forwarder did not deliver");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let _ = mgr.poll(0);
+    }
+
+    /// A successful response to the leave heartbeat completes the leave.
+    /// Java 4.4: `AbstractHeartbeatRequestManager.onResponse` ->
+    /// `membershipManager().onHeartbeatSuccess(response)`, whose
+    /// `state == UNSUBSCRIBED && memberEpoch(response) < 0 &&
+    /// maybeCompleteLeaveInProgress()` branch completes `leaveGroupInProgress`.
+    #[tokio::test]
+    async fn successful_response_to_leave_heartbeat_completes_leave() {
+        let (mut mgr, mm, leave, unsent) = send_leave_heartbeat();
+        complete_heartbeat_with(
+            &unsent,
+            &mm,
+            Errors::None.code(),
+            crate::common::requests::ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH,
+        );
+        handle_leave_heartbeat_completion(&mut mgr).await;
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(
+            leave.is_done(),
+            "Java: a successful response to the leave heartbeat completes the leave (onHeartbeatSuccess)"
+        );
+    }
+
+    /// A non-fatal error response to the leave heartbeat completes the leave.
+    /// Java 4.4: `AbstractHeartbeatRequestManager.onErrorResponse` handles
+    /// COORDINATOR_LOAD_IN_PROGRESS (back off, no state change) and then
+    /// calls `membershipManager().onHeartbeatFailure(false)`, which for an
+    /// UNSUBSCRIBED member calls `maybeCompleteLeaveInProgress()` ("the
+    /// leave group request is sent out once (not retried), so we should
+    /// complete the leave operation once the request completes, regardless
+    /// of the response").
+    #[tokio::test]
+    async fn error_response_to_leave_heartbeat_completes_leave() {
+        let (mut mgr, mm, leave, unsent) = send_leave_heartbeat();
+        complete_heartbeat_with(&unsent, &mm, Errors::CoordinatorLoadInProgress.code(), -1);
+        handle_leave_heartbeat_completion(&mut mgr).await;
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(
+            leave.is_done(),
+            "Java: an error response to the leave heartbeat completes the leave (onErrorResponse -> \
+             onHeartbeatFailure(false))"
+        );
+    }
+
+    /// A failed leave heartbeat request (no response: a retriable network
+    /// error) completes the leave. Java 4.4:
+    /// `AbstractHeartbeatRequestManager.onFailure` calls
+    /// `membershipManager().onHeartbeatFailure(exception instanceof
+    /// RetriableException)` last, which for an UNSUBSCRIBED member calls
+    /// `maybeCompleteLeaveInProgress()`.
+    #[tokio::test]
+    async fn failed_leave_heartbeat_request_completes_leave() {
+        let (mut mgr, mm, leave, unsent) = send_leave_heartbeat();
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkError));
+        handle_leave_heartbeat_completion(&mut mgr).await;
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(
+            leave.is_done(),
+            "Java: a failed leave heartbeat request completes the leave (onFailure -> onHeartbeatFailure(true))"
+        );
+    }
+
+    /// When the coordinator is unknown the leave heartbeat cannot be sent,
+    /// and the skipped heartbeat completes the leave. Java 4.4:
+    /// `AbstractHeartbeatRequestManager.poll` calls
+    /// `membershipManager().onHeartbeatRequestSkipped()` when
+    /// `coordinatorRequestManager.coordinator().isEmpty()`, which for a
+    /// LEAVING member transitions to UNSUBSCRIBED and calls
+    /// `maybeCompleteLeaveInProgress()`.
+    #[tokio::test]
+    async fn leave_heartbeat_skipped_when_coordinator_unknown_completes_leave() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        make_joining(&mm);
+        let leave = mm.leave_group(0).unwrap();
+        assert!(!mm.has_pending_leave_callback());
+        assert_eq!(mm.state(), MemberState::Leaving);
+        assert!(coord.coordinator().is_none(), "no coordinator known");
+        assert!(!leave.is_done(), "the leave waits for the heartbeat manager's poll");
+
+        let result = mgr.poll(0);
+        assert!(result.unsent_requests.is_empty(), "no leave heartbeat without a coordinator");
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(
+            leave.is_done(),
+            "Java: a leave heartbeat skipped for an unknown coordinator completes the leave \
+             (onHeartbeatRequestSkipped)"
+        );
     }
 }

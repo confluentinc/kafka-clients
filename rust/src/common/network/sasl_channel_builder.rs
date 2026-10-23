@@ -102,6 +102,7 @@ impl SaslChannelBuilder {
     ///
     /// Returns an error if:
     /// - The security protocol is not `SASL_PLAINTEXT` or `SASL_SSL`
+    /// - The SASL mechanism is not `PLAIN`
     /// - Username or password is missing in the SASL config
     /// - `SASL_SSL` is requested but no `ssl_factory` is provided
     #[doc(alias = "org.apache.kafka.common.network.SaslChannelBuilder#SaslChannelBuilder")]
@@ -120,6 +121,20 @@ impl SaslChannelBuilder {
                 format!(
                     "SaslChannelBuilder requires SASL_PLAINTEXT or SASL_SSL, got {:?}",
                     security_protocol
+                ),
+            ));
+        }
+
+        // The authenticator builds only the PLAIN token (RFC 4616). Java picks a
+        // `SaslClient` per mechanism; without SCRAM, GSSAPI and OAUTHBEARER clients, running
+        // them through PLAIN would send the cleartext password under the wrong mechanism.
+        if sasl_config.mechanism != SaslConfigs::PLAIN_MECHANISM {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "SASL mechanism '{}' is not supported by this client: only {} is implemented",
+                    sasl_config.mechanism,
+                    SaslConfigs::PLAIN_MECHANISM
                 ),
             ));
         }
@@ -333,6 +348,59 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("SASL_PLAINTEXT or SASL_SSL"));
+    }
+
+    /// Regression test: the authenticator only implements PLAIN, so any other
+    /// `sasl.mechanism` (including the `GSSAPI` default) must be rejected up
+    /// front instead of sending the cleartext PLAIN token under a SCRAM, GSSAPI
+    /// or OAUTHBEARER handshake.
+    #[test]
+    fn test_unsupported_sasl_mechanism_is_rejected() {
+        for mechanism in ["SCRAM-SHA-256", "SCRAM-SHA-512", "GSSAPI", "OAUTHBEARER", "plain", ""] {
+            let sasl_config = SaslConfigs {
+                mechanism: mechanism.to_string(),
+                username: Some("alice".to_string()),
+                password: Some(Password::new("alice-secret")),
+                ..SaslConfigs::default()
+            };
+            let result = SaslChannelBuilder::new(
+                SecurityProtocol::SaslPlaintext,
+                &sasl_config,
+                None,
+                None,
+                "test-client",
+                LogContext::empty(),
+            );
+            let message = result
+                .err()
+                .unwrap_or_else(|| panic!("{mechanism:?} must be rejected"))
+                .to_string();
+            assert_eq!(
+                format!("SASL mechanism '{mechanism}' is not supported by this client: only PLAIN is implemented"),
+                message
+            );
+            assert!(!message.contains("alice-secret"));
+        }
+    }
+
+    /// The default `sasl.mechanism` is `GSSAPI` (as in Java), so a config that
+    /// forgets `sasl.mechanism=PLAIN` fails instead of leaking its password.
+    #[test]
+    fn test_default_sasl_mechanism_is_rejected() {
+        let sasl_config = SaslConfigs {
+            username: Some("alice".to_string()),
+            password: Some(Password::new("alice-secret")),
+            ..SaslConfigs::default()
+        };
+        let result = SaslChannelBuilder::new(
+            SecurityProtocol::SaslSsl,
+            &sasl_config,
+            Some(SslFactory::new(&SslConfigs::default()).unwrap()),
+            None,
+            "test-client",
+            LogContext::empty(),
+        );
+        assert!(result.err().unwrap().to_string().contains("'GSSAPI' is not supported"));
     }
 
     /// `{:?}` of a builder holding credentials renders neither the password

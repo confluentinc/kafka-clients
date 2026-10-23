@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::common::Error;
 use crate::common::LocalIllegalArgumentError;
 use crate::common::config::config_def::{ParsedValue, Validator as ConfigValidator, as_string, config_error};
+use crate::consumer::internals::ConsumerUtils;
 
 /// The kind of auto-offset-reset strategy.
 ///
@@ -213,7 +214,14 @@ impl AutoOffsetResetStrategy {
                     .ok()
                     .map(|d| d.as_millis() as i64)?;
                 let dur = self.duration?;
-                let dur_millis = dur.as_millis() as i64;
+                // Java: `now.minus(duration).toEpochMilli()`. `Duration.parse`
+                // accepts durations beyond `Long.MAX_VALUE` ms, and for those
+                // Java throws `ArithmeticException` from `toEpochMilli()` here
+                // at reset time. This method has no error path, so the
+                // duration saturates at `i64::MAX` ms instead of wrapping (an
+                // unchecked cast would turn it into an arbitrary, possibly
+                // future, timestamp).
+                let dur_millis = ConsumerUtils::duration_to_millis(dur);
                 Some(now_millis.saturating_sub(dur_millis))
             },
             StrategyType::None_ => None,
@@ -509,6 +517,23 @@ mod tests {
         assert_eq!(
             AutoOffsetResetStrategy::from_string("none").unwrap(),
             AutoOffsetResetStrategy::NONE
+        );
+    }
+
+    /// Audit finding C1-03: a `by_duration` longer than `i64::MAX` ms (which
+    /// Java's `Duration.parse` also accepts) must not wrap into an arbitrary
+    /// or future timestamp. It saturates, giving a timestamp older than any
+    /// record, i.e. a reset to the earliest offset.
+    #[test]
+    fn test_timestamp_with_duration_beyond_i64_max_millis_saturates() {
+        // i64::MAX ms is 9223372036854775.807 s, so this is just beyond it.
+        let s = AutoOffsetResetStrategy::from_string("by_duration:PT9223372036854776S").unwrap();
+        assert_eq!(s.duration(), Some(Duration::from_secs(9_223_372_036_854_776)));
+        let ts = s.timestamp().expect("by_duration has a timestamp");
+        let now_millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        assert!(
+            ts <= now_millis - i64::MAX + 1_000,
+            "timestamp {ts} must be the saturated (oldest) value"
         );
     }
 

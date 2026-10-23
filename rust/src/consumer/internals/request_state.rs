@@ -16,12 +16,6 @@
 //!
 //! Translated from `org.apache.kafka.clients.consumer.internals.RequestState`.
 
-// Items here are consumed by Phase 6's `CoordinatorRequestManager` and by
-// later phases (`CommitRequestManager`, `*HeartbeatRequestManager`,
-// `OffsetsRequestManager`, ...). Suppress dead-code warnings for items
-// that are not yet referenced inside the workspace.
-#![cfg_attr(not(test), expect(dead_code))]
-
 use std::fmt;
 
 use crate::common::utils::internals::ExponentialBackoff;

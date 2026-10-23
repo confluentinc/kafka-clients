@@ -1142,8 +1142,9 @@ static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
 
 // Producer_destroy(handle): frees the class handle (which stops the submission
 // task, waits for the `_cb` tasks and runs every still-pending callback exactly
-// once -- on this thread) and then the C struct. Close first for a graceful
-// close. No other call may use the handle meanwhile or afterwards.
+// once -- on this thread) and then the C struct. A KafkaProducer not closed
+// yet is closed first, as Producer_close closes it. No other call may use the
+// handle meanwhile or afterwards.
 static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;

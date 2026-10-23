@@ -30,12 +30,14 @@
 //! - **Commit 5/N (this file):** the async-dispatch arms — `AsyncPoll`,
 //!   `CommitAsync`, `CommitSync`, `FetchCommittedOffsets`, `ListOffsets`,
 //!   `CheckAndUpdatePositions`, `TopicMetadata`, `AllTopicsMetadata`,
-//!   `Unsubscribe`, `CreateFetchRequests`, `LeaveGroupOnClose`. Each arm
-//!   spawns a detached `tokio::task` that awaits the relevant manager
-//!   future and writes its completion to the event's
-//!   [`CompletableEventHandle`] — mirroring Java's
+//!   `CreateFetchRequests`. Each arm spawns a detached `tokio::task` that
+//!   awaits the relevant manager future and writes its completion to the
+//!   event's [`CompletableEventHandle`] — mirroring Java's
 //!   `whenComplete(complete(event.future()))` chain (the spawned task
 //!   plays the same role as Java's CompletableFuture callback dispatch).
+//!   `Unsubscribe` and `LeaveGroupOnClose` do NOT spawn: they run the
+//!   synchronous part of the leave inline (as Java does inside `process`)
+//!   and complete the handle from the leave future's `when_complete`.
 //!
 //! # Lock discipline
 //!
@@ -543,57 +545,50 @@ impl ApplicationEventProcessor {
 
     /// Java: `process(ConsumerRebalanceListenerCallbackCompletedEvent)`.
     ///
-    /// # §31 translation deviation
-    ///
     /// Java models the listener handshake as a *pair* of events: the bg
     /// task enqueues `PartitionsRemovedEvent` / `PartitionsAssignedEvent`
     /// on the background-events queue (AK 4.3.1, KAFKA-20106; formerly the
     /// single `ConsumerRebalanceListenerCallbackNeededEvent`), and after
     /// invoking the listener the app side enqueues a *separate*
     /// `ConsumerRebalanceListenerCallbackCompletedEvent` back to the bg
-    /// task; the processor's body (this method, Java side) then completes
-    /// the future the membership manager is waiting on.
+    /// task, whose processing completes the future the membership manager
+    /// chained its next step on.
     ///
-    /// The Rust translation collapses the round-trip by embedding a
-    /// `tokio::sync::oneshot::Sender<Result<(), Error>>` directly in
-    /// `BackgroundEvent::PartitionsRemoved` / `BackgroundEvent::PartitionsAssigned`
-    /// (see `AbstractMembershipManager::enqueue_rebalance_callback` /
-    /// `enqueue_partitions_assigned_event`). The membership manager holds
-    /// the receiver as cross-iteration state; the app side completes the ack
-    /// by sending on the embedded sender. No second event is required.
+    /// # §31 translation deviation
     ///
-    /// As a result, this arm has no work to perform in Rust. We still
-    /// match Java's diagnostic: if a `Completed` event reaches the
-    /// processor without a heartbeat manager present, log the same
-    /// warning so the failure mode is observable in tests / logs.
-    /// The event variant remains in [`ApplicationEvent`] both to keep
-    /// the Java parity surface visible to readers and to leave room for
-    /// future diagnostics (e.g. tracing the original Java event lifecycle).
+    /// The reconcile and release callbacks collapse the round-trip: the app
+    /// sends the result on the `tokio::sync::oneshot::Sender` embedded in
+    /// `BackgroundEvent::PartitionsRemoved` / `PartitionsAssigned` (see
+    /// `AbstractMembershipManager::enqueue_rebalance_callback` /
+    /// `enqueue_partitions_assigned_event`), and the membership manager
+    /// `try_recv`s it each iteration. Only the callback a leave enqueued
+    /// comes back through this event, carrying that sender as `ack`, so the
+    /// leave's next step keeps the event's queue position (Java's FIFO).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
         method_name: crate::consumer::internals::ConsumerRebalanceListenerMethodName,
         error: Option<Error>,
+        ack: tokio::sync::oneshot::Sender<Result<(), Error>>,
     ) {
-        let _ = error;
-        let rm_guard = self.lock_request_managers();
-        if rm_guard.consumer_heartbeat.is_none() {
+        // Resolve the membership manager under a brief lock and release it
+        // before calling in, as `process_unsubscribe` does.
+        let membership_arc = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        let Some(mm) = membership_arc else {
             log::warn!(
                 "An internal error occurred; the group membership manager was not present, so the notification of the {} callback execution could not be sent",
                 method_name.fully_qualified_method_name()
             );
             return;
+        };
+        if let Err(e) = mm.consumer_rebalance_listener_callback_completed(method_name, error, ack) {
+            log::warn!("Failed to transition to send the leave group heartbeat: {}", e);
         }
-        // Rust's embedded-sender pattern (see method doc above) already
-        // resolves the membership manager's `ack_rx`. No further action
-        // here. Java's body would call
-        // `membershipManager.consumerRebalanceListenerCallbackCompleted(event)`,
-        // which completes a future the reconcile loop awaits — Rust's
-        // reconcile awaits the embedded `ack_rx` directly, so this
-        // method is intentionally empty.
-        log::trace!(
-            "ConsumerRebalanceListenerCallbackCompleted({}) observed; ack already delivered via embedded oneshot sender",
-            method_name.fully_qualified_method_name()
-        );
     }
 
     // -------------------------------------------------------------------
@@ -1048,8 +1043,12 @@ impl ApplicationEventProcessor {
     ///
     /// Two sub-paths (Java preserves both):
     ///
-    /// 1. **With heartbeat manager**: route through
-    ///    `membership_manager.leave_group(now_ms)` (spawned task).
+    /// 1. **With heartbeat manager**: `membership_manager.leave_group()`,
+    ///    with the event handle completed when the returned leave future
+    ///    completes — Java's `future.whenComplete(complete(event.future()))`.
+    ///    The future completes when the leave heartbeat's response arrives
+    ///    (or the leave ends otherwise), so `unsubscribe()` waits for the
+    ///    leave like Java's does.
     /// 2. **Without heartbeat manager**: clear subscription state inline
     ///    and complete the handle immediately. Java: "If the consumer is
     ///    not using the group management capabilities, we still need to
@@ -1057,8 +1056,7 @@ impl ApplicationEventProcessor {
     fn process_unsubscribe(&mut self, handle: super::CompletableEventHandle<()>) {
         // Resolve dispatch under a brief lock. Mirror Java's
         // `if (requestManagers.consumerHeartbeatRequestManager.isPresent())`
-        // branch — heartbeat present → spawn `leave_group` continuation;
-        // absent → clear subscription state inline.
+        // branch.
         let membership_arc = {
             let rm_guard = self.lock_request_managers();
             rm_guard
@@ -1068,17 +1066,21 @@ impl ApplicationEventProcessor {
         };
         match membership_arc {
             Some(mm) => {
+                // The synchronous part of Java's `leaveGroup()` runs here, on
+                // the bg task, as Java runs it inside `process(...)`: by the
+                // time this returns the member is PREPARE_LEAVING (or already
+                // LEAVING when there is no callback to run), so the heartbeat
+                // manager's poll in this same `run_once` sees it. A pending
+                // release callback is driven by the bg loop
+                // (`ConsumerMembershipManager::drive_pending_leave_callback`),
+                // never awaited here.
                 let now_ms = self.time.milliseconds();
-                tokio::spawn(async move {
-                    match mm.leave_group(now_ms).await {
-                        Ok(()) => {
-                            handle.complete(());
-                        },
-                        Err(err) => {
-                            handle.complete_with_error(err);
-                        },
-                    }
-                });
+                match mm.leave_group(now_ms) {
+                    Ok(leave_result) => Self::complete_handle_on_leave(&leave_result, handle),
+                    Err(err) => {
+                        handle.complete_with_error(err);
+                    },
+                }
             },
             None => {
                 {
@@ -1091,6 +1093,11 @@ impl ApplicationEventProcessor {
     }
 
     /// Java: `process(LeaveGroupOnCloseEvent)`.
+    ///
+    /// `leave_group_on_close` runs no callbacks, so the member is `LEAVING`
+    /// when it returns and the heartbeat manager's poll in this same
+    /// `run_once` (or `poll_on_close` during shutdown) builds the leave
+    /// heartbeat. The handle completes when the leave future does.
     fn process_leave_group_on_close(
         &mut self,
         handle: super::CompletableEventHandle<()>,
@@ -1112,16 +1119,12 @@ impl ApplicationEventProcessor {
                 log::debug!(
                     "Signal the ConsumerMembershipManager to leave the consumer group since the consumer is closing"
                 );
-                tokio::spawn(async move {
-                    match mm.leave_group_on_close(membership_operation, now_ms).await {
-                        Ok(()) => {
-                            handle.complete(());
-                        },
-                        Err(err) => {
-                            handle.complete_with_error(err);
-                        },
-                    }
-                });
+                match mm.leave_group_on_close(membership_operation, now_ms) {
+                    Ok(leave_result) => Self::complete_handle_on_leave(&leave_result, handle),
+                    Err(err) => {
+                        handle.complete_with_error(err);
+                    },
+                }
             },
             None => {
                 // Java's branch logs and returns without completing the
@@ -1134,6 +1137,26 @@ impl ApplicationEventProcessor {
                 ));
             },
         }
+    }
+
+    /// Complete `handle` when the leave future completes — Java's
+    /// `future.whenComplete(complete(event.future()))` in
+    /// `process(UnsubscribeEvent)` / `process(LeaveGroupOnCloseEvent)`. The
+    /// action runs on whichever task completes the leave (the bg task, on
+    /// the leave heartbeat's response), or right away if it is already done;
+    /// completing the handle is a non-blocking `oneshot` send.
+    fn complete_handle_on_leave(
+        leave_result: &crate::common::internals::KafkaFutureImpl<()>,
+        handle: super::CompletableEventHandle<()>,
+    ) {
+        leave_result.when_complete(move |result| match result {
+            Ok(()) => {
+                handle.complete(());
+            },
+            Err(err) => {
+                handle.complete_with_error(err.clone());
+            },
+        });
     }
 
     /// Java: `process(ApplyAssignmentEvent)` (AK 4.3.1, KAFKA-20106).
@@ -1406,7 +1429,12 @@ impl ApplicationEventProcessor {
                     ));
                     return;
                 };
-                fetch_mgr.create_fetch_requests()
+                let rx = fetch_mgr.create_fetch_requests();
+                // Java runs this on the network thread, so the same `runOnce`
+                // polls the fetch manager; this continuation runs on a spawned
+                // task, so wake the bg task to get the same prompt completion.
+                fetch_mgr.wake_background_task();
+                rx
             };
             match fetch_rx.await {
                 Ok(Ok(())) => {
@@ -1523,8 +1551,8 @@ impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
             ApplicationEvent::UpdatePatternSubscription { handle } => {
                 self.process_update_pattern_subscription(handle);
             },
-            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error } => {
-                self.process_consumer_rebalance_listener_callback_completed(method_name, error);
+            ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted { method_name, error, ack } => {
+                self.process_consumer_rebalance_listener_callback_completed(method_name, error, ack);
             },
 
             // ───── Async-dispatch arms (commit 5/N) ─────
@@ -1722,8 +1750,6 @@ mod tests {
                 fetch_config,
                 Arc::new(FetchBuffer::new()),
                 Arc::new(BufferSupplier::create()),
-                FetchRequestManager::always_available(),
-                FetchRequestManager::no_auth_failure(),
                 Arc::new(ApiVersions::new()),
                 crate::consumer::internals::FetchMetricsManager::for_test(),
                 100,
@@ -2305,10 +2331,12 @@ mod tests {
         fx.processor.process(ApplicationEvent::StopFindCoordinatorOnClose);
         fx.processor.process(ApplicationEvent::NewTopicsMetadataUpdate);
         // ConsumerRebalanceListenerCallbackCompleted is logged, no panic.
+        let (ack, _ack_rx) = tokio::sync::oneshot::channel();
         fx.processor
             .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 error: None,
+                ack,
             });
     }
 
@@ -2739,18 +2767,47 @@ mod tests {
         );
     }
 
-    /// `ConsumerRebalanceListenerCallbackCompleted` is a no-op in Rust
-    /// (the §31 embedded-oneshot pattern resolves the ack directly). Verify
-    /// the dispatch table accepts the event without panicking.
+    /// Without a heartbeat manager, `ConsumerRebalanceListenerCallbackCompleted`
+    /// only logs Java's warning and leaves the callback's future
+    /// uncompleted, as Java's `process(ConsumerRebalanceListenerCallbackCompletedEvent)`
+    /// returns early when `consumerHeartbeatRequestManager` is empty.
     #[test]
-    fn rebalance_listener_callback_completed_is_noop() {
-        let mut fx = setup_processor(true);
+    fn rebalance_listener_callback_completed_without_membership_leaves_future_uncompleted() {
+        let mut fx = setup_processor(false);
+        let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
         fx.processor
             .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 error: None,
+                ack,
             });
-        // No assertion: the test passes if no panic.
+        assert!(
+            matches!(ack_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)),
+            "no membership manager: the future is never completed"
+        );
+    }
+
+    /// With a membership manager, `ConsumerRebalanceListenerCallbackCompleted`
+    /// completes the callback's future with the event's error, as Java's
+    /// `ConsumerMembershipManager.consumerRebalanceListenerCallbackCompleted`
+    /// calls `future.completeExceptionally(e)`.
+    #[test]
+    fn rebalance_listener_callback_completed_completes_the_future_with_the_error() {
+        let mut fx = setup_processor(true);
+        let (ack, mut ack_rx) = tokio::sync::oneshot::channel();
+        fx.processor
+            .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                error: Some(Error::kafka_message("User rebalance callback throws an error")),
+                ack,
+            });
+        match ack_rx.try_recv() {
+            Ok(Err(e)) => assert_eq!(
+                e.to_string(),
+                Error::kafka_message("User rebalance callback throws an error").to_string()
+            ),
+            other => panic!("expected the future completed with the error, got {other:?}"),
+        }
     }
 
     // ===================================================================
@@ -2788,24 +2845,388 @@ mod tests {
     // Java: testProcessUnsubscribeEventWithGroupId
     //
     // With a group id wired in, the AEP routes Unsubscribe through
-    // `membership_manager.leave_group(now_ms)`. The leave_group future
-    // resolves through the membership state machine; for this test we
-    // observe that the AEP correctly spawns and completes the handle.
+    // `membership_manager.leave_group(now_ms)` and completes the handle with
+    // the returned leave future. The fixture's member is not in the group,
+    // so the leave future is already complete and so is the handle.
     // -------------------------------------------------------------------
     #[tokio::test(flavor = "current_thread")]
     async fn process_unsubscribe_event_with_group_id() {
         let mut fx = setup_processor(true);
         let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
         fx.processor.process(ApplicationEvent::Unsubscribe { handle });
-        // The leave_group call resolves the handle on the spawned task —
-        // we only verify the handle completes (success or failure both
-        // satisfy the spawn-pattern contract; Java verifies via
-        // `verify(membershipManager).leaveGroup()`).
+        // Java verifies via `verify(membershipManager).leaveGroup()`; here
+        // the not-in-group leave completes the handle successfully.
         let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
         assert!(
-            resolved.is_ok(),
-            "Unsubscribe with group id must spawn a continuation that completes the handle"
+            matches!(resolved, Ok(Ok(Ok(())))),
+            "Unsubscribe with group id must complete the handle with the leave result: {resolved:?}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // C2-01: the Unsubscribe / LeaveGroupOnClose event future follows the
+    // membership manager's leave-in-progress future. Java
+    // `process(UnsubscribeEvent)` / `process(LeaveGroupOnCloseEvent)` chain
+    // the event future onto `leaveGroup()` / `leaveGroupOnClose(...)`
+    // (`ApplicationEventProcessor.java:427-430,491-495`), which completes
+    // only when the leave heartbeat's response (or failure / skip / fence /
+    // fatal) is observed; and they start the leave synchronously, inside
+    // `process(...)` on the network thread.
+    // -------------------------------------------------------------------
+
+    /// The membership manager behind the fixture's heartbeat manager.
+    fn fixture_membership_manager(fx: &Fixture) -> Arc<ConsumerMembershipManager> {
+        let rm = fx.request_managers.lock().unwrap();
+        Arc::clone(rm.consumer_heartbeat.as_ref().expect("heartbeat manager").membership_manager())
+    }
+
+    /// A successful heartbeat response carrying the leave epoch: the response
+    /// to the leave heartbeat.
+    fn leave_heartbeat_response(member_id: String) -> crate::common::requests::ConsumerGroupHeartbeatResponse {
+        let mut data = crate::ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = crate::common::protocol::Errors::None.code();
+        data.member_id = Some(member_id);
+        data.member_epoch = crate::common::requests::ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH;
+        crate::common::requests::ConsumerGroupHeartbeatResponse::new(data)
+    }
+
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Replace the fixture's heartbeat manager with one whose coordinator
+    /// and background events the test holds.
+    fn install_observable_heartbeat_manager(
+        fx: &Fixture,
+    ) -> (
+        Arc<ConsumerMembershipManager>,
+        Arc<CoordinatorRequestManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+        let bg_handler = Arc::new(BackgroundEventHandler::new(bg_tx));
+        let mm = Arc::new(ConsumerMembershipManager::new(
+            "test-group",
+            None,
+            None,
+            30_000,
+            None,
+            Arc::clone(&fx.subscriptions),
+            None,
+            Arc::clone(&fx.metadata),
+            Arc::clone(&bg_handler),
+            true,
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+        ));
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group"));
+        let hrm = ConsumerHeartbeatRequestManager::new(
+            0,
+            &config,
+            Arc::clone(&coordinator),
+            Arc::clone(&fx.subscriptions),
+            Arc::clone(&mm),
+            bg_handler,
+        );
+        fx.request_managers.lock().unwrap().consumer_heartbeat = Some(hrm);
+        (mm, coordinator, bg_rx)
+    }
+
+    /// Translated from the Java contract of
+    /// `ApplicationEventProcessor.process(UnsubscribeEvent)`
+    /// (`future.whenComplete(complete(event.future()))` on `leaveGroup()`):
+    /// the `unsubscribe()` caller is released only once the leave heartbeat
+    /// is acknowledged, not when the member reaches LEAVING.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsubscribe_event_completes_only_after_leave_heartbeat_response() {
+        let mut fx = setup_processor(true);
+        let mm = fixture_membership_manager(&fx);
+        // Put the member in the group (JOINING is not `isNotInGroup`), so the
+        // leave is not the already-out-of-group fast path.
+        mm.transition_to_joining().unwrap();
+
+        let (handle, mut rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+        settle().await;
+        assert_eq!(mm.state(), crate::consumer::internals::MemberState::Leaving);
+        assert!(
+            rx.try_recv().is_err(),
+            "Java: the UnsubscribeEvent future must not complete while the member is LEAVING \
+             (leave heartbeat not built, sent or acked)"
+        );
+
+        // Leave heartbeat generated -> UNSUBSCRIBED; still no response.
+        mm.abstract_mm.on_heartbeat_request_generated().unwrap();
+        settle().await;
+        assert!(
+            rx.try_recv().is_err(),
+            "Java: the UnsubscribeEvent future must not complete before the leave heartbeat response"
+        );
+
+        // Leave heartbeat response (epoch -1) completes it.
+        mm.abstract_mm
+            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("UnsubscribeEvent must complete once the leave response arrives")
+            .expect("sender alive")
+            .expect("unsubscribe must succeed");
+    }
+
+    /// Java runs the synchronous part of `leaveGroup()` inside `process(...)`,
+    /// so when the event has been processed the member is already LEAVING
+    /// (no rebalance callback to run) and the heartbeat manager's poll in the
+    /// same `runOnce` builds the leave heartbeat. Pinned without yielding to
+    /// the runtime between `process` and the assertions: nothing spawned may
+    /// be needed for the transition.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsubscribe_and_leave_on_close_start_the_leave_synchronously() {
+        use crate::consumer::GroupMembershipOperation;
+        use crate::consumer::internals::MemberState;
+
+        // Unsubscribe.
+        let mut fx = setup_processor(true);
+        let (mm, coordinator, _bg_rx) = install_observable_heartbeat_manager(&fx);
+        coordinator.set_coordinator_for_test(crate::common::Node::new(0, "localhost".to_string(), 9092));
+        mm.transition_to_joining().unwrap();
+        let (handle, _rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+        assert_eq!(
+            mm.state(),
+            MemberState::Leaving,
+            "the member must be LEAVING as soon as the Unsubscribe event has been processed"
+        );
+        assert!(mm.is_leaving_group());
+        // The heartbeat manager's very next poll builds the leave heartbeat.
+        {
+            let mut rm = fx.request_managers.lock().unwrap();
+            let hrm = rm.consumer_heartbeat.as_mut().expect("heartbeat manager");
+            let result = hrm.poll(0);
+            assert_eq!(
+                result.unsent_requests.len(),
+                1,
+                "the leave heartbeat goes out in the same run_once"
+            );
+        }
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+
+        // LeaveGroupOnClose.
+        let mut fx = setup_processor(true);
+        let mm = fixture_membership_manager(&fx);
+        mm.transition_to_joining().unwrap();
+        let (handle, _rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::LeaveGroupOnClose {
+            handle,
+            membership_operation: GroupMembershipOperation::LeaveGroup,
+        });
+        assert_eq!(
+            mm.state(),
+            MemberState::Leaving,
+            "the member must be LEAVING as soon as the LeaveGroupOnClose event has been processed"
+        );
+        assert!(
+            mm.is_leaving_group(),
+            "a shutdown racing the event must find the member leaving, so poll_on_close sends the leave heartbeat"
+        );
+
+        // LeaveGroupOnClose(REMAIN_IN_GROUP) for a dynamic member: Java's
+        // `shouldSendLeaveHeartbeatNow()` is false, but the member is LEAVING,
+        // so `AbstractHeartbeatRequestManager.poll`'s second case
+        // (`shouldHeartbeatNow() && !requestInFlight()`) still sends a
+        // heartbeat carrying the leave epoch in the same `runOnce`, and the
+        // close waits for its response (audit finding C1-18).
+        let mut fx = setup_processor(true);
+        let (mm, coordinator, _bg_rx) = install_observable_heartbeat_manager(&fx);
+        coordinator.set_coordinator_for_test(crate::common::Node::new(0, "localhost".to_string(), 9092));
+        mm.transition_to_joining().unwrap();
+        let (handle, mut rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::LeaveGroupOnClose {
+            handle,
+            membership_operation: GroupMembershipOperation::RemainInGroup,
+        });
+        assert_eq!(mm.state(), MemberState::Leaving);
+        assert!(
+            !mm.is_leaving_group(),
+            "a dynamic REMAIN_IN_GROUP member is not 'leaving' for poll_on_close"
+        );
+        assert_eq!(
+            mm.member_epoch(),
+            crate::common::requests::ConsumerGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH
+        );
+        {
+            let mut rm = fx.request_managers.lock().unwrap();
+            let hrm = rm.consumer_heartbeat.as_mut().expect("heartbeat manager");
+            let result = hrm.poll(0);
+            assert_eq!(
+                result.unsent_requests.len(),
+                1,
+                "the LEAVING member heartbeats with the leave epoch in the same run_once"
+            );
+        }
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert!(rx.try_recv().is_err(), "the close-time leave waits for the heartbeat response");
+    }
+
+    /// A second Unsubscribe while the first leave is in progress gets the
+    /// SAME leave future (`AbstractMembershipManager.java:637-643`): neither
+    /// event completes before the leave response, and both complete with it.
+    /// A LeaveGroupOnClose arriving during an unsubscribe joins the same
+    /// leave.
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_leave_while_leaving_completes_with_the_first() {
+        use crate::consumer::GroupMembershipOperation;
+
+        let mut fx = setup_processor(true);
+        let mm = fixture_membership_manager(&fx);
+        mm.transition_to_joining().unwrap();
+
+        let (handle1, mut rx1) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle: handle1 });
+        let (handle2, mut rx2) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle: handle2 });
+        let (handle3, mut rx3) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::LeaveGroupOnClose {
+            handle: handle3,
+            membership_operation: GroupMembershipOperation::Default,
+        });
+        mm.abstract_mm.on_heartbeat_request_generated().unwrap();
+        settle().await;
+        assert!(rx1.try_recv().is_err(), "first leave must wait for the leave response");
+        assert!(rx2.try_recv().is_err(), "second leave must wait for the ongoing leave");
+        assert!(rx3.try_recv().is_err(), "close-time leave must wait for the ongoing leave");
+
+        mm.abstract_mm
+            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
+            .unwrap();
+        for rx in [rx1, rx2, rx3] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                .await
+                .expect("every leave event completes on the leave response")
+                .expect("sender alive")
+                .expect("leave must succeed");
+        }
+    }
+
+    /// Getting fenced or failing fatally while leaving ends the leave
+    /// (`transitionToFenced` / `transitionToFatal` call
+    /// `maybeCompleteLeaveInProgress()`), so the waiting `unsubscribe()` is
+    /// released without a leave response.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fence_or_fatal_while_leaving_completes_the_unsubscribe_event() {
+        for fatal in [false, true] {
+            let mut fx = setup_processor(true);
+            let mm = fixture_membership_manager(&fx);
+            mm.transition_to_joining().unwrap();
+            let (handle, mut rx) = CompletableEventHandle::<()>::new(60_000);
+            fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+            settle().await;
+            assert!(rx.try_recv().is_err(), "[fatal={fatal}] leave in progress");
+
+            if fatal {
+                mm.transition_to_fatal(0).unwrap();
+            } else {
+                mm.transition_to_fenced(0).unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                .await
+                .expect("the leave ends when the member is fenced / fails")
+                .expect("sender alive")
+                .expect("leave completes successfully");
+        }
+    }
+
+    /// With an assignment to release and a listener registered, the
+    /// Unsubscribe event leaves the member in PREPARE_LEAVING with the §31
+    /// callback enqueued (synchronously, as Java enqueues it inside
+    /// `process`). The bg task does not wait for the ack: the move to LEAVING
+    /// happens when the processor reaches the
+    /// `ConsumerRebalanceListenerCallbackCompleted` event carrying it, as
+    /// Java's `whenComplete` runs on the network thread while processing
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent`. The event still
+    /// completes only on the leave response.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsubscribe_with_callback_leaves_when_the_callback_completed_event_is_processed() {
+        use crate::consumer::ConsumerRebalanceListener;
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let mut fx = setup_processor(true);
+        let (mm, _coordinator, mut bg_rx) = install_observable_heartbeat_manager(&fx);
+        {
+            let mut subs = fx.subscriptions.lock().unwrap();
+            subs.subscribe_with_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+            subs.assign_from_subscribed(&[tp("topic1", 0)]).unwrap();
+        }
+        mm.transition_to_joining().unwrap();
+        mm.abstract_mm.inner.lock().unwrap().update_member_epoch(1);
+
+        let (handle, mut rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+        assert_eq!(
+            mm.state(),
+            MemberState::PrepareLeaving,
+            "the member waits in PREPARE_LEAVING for the revoked callback"
+        );
+        let ack = match bg_rx.try_recv().expect("the revoked callback is enqueued synchronously").event {
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack, ack_through_application_events } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                assert_eq!(partitions, vec![tp("topic1", 0)]);
+                assert!(
+                    ack_through_application_events,
+                    "a leave's callback returns through the application-event queue"
+                );
+                ack
+            },
+            other => panic!("unexpected event: {other:?}"),
+        };
+
+        assert!(mm.has_pending_leave_callback());
+        settle().await;
+        assert_eq!(
+            mm.state(),
+            MemberState::PrepareLeaving,
+            "nothing moves the member until the callback-completed event is processed"
+        );
+        // The app returns the ack inside the callback-completed event; its
+        // processing completes the future and runs the leave's next step.
+        fx.processor
+            .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                error: None,
+                ack,
+            });
+        assert_eq!(mm.state(), MemberState::Leaving);
+        assert!(!mm.has_pending_leave_callback());
+        assert!(rx.try_recv().is_err(), "still waiting for the leave heartbeat response");
+
+        mm.abstract_mm.on_heartbeat_request_generated().unwrap();
+        mm.abstract_mm
+            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("UnsubscribeEvent must complete once the leave response arrives")
+            .expect("sender alive")
+            .expect("unsubscribe must succeed");
     }
 
     // -------------------------------------------------------------------
@@ -2910,7 +3331,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 12_345);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 12_345);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3431,7 +3852,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3478,7 +3899,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3539,7 +3960,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3626,7 +4047,7 @@ mod tests {
                 {
                     let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(fetch_mgr) = guard.fetch.as_mut() {
-                        let _ = RequestManager::poll(fetch_mgr, 100);
+                        let _ = fetch_mgr.poll(&crate::consumer::internals::TestNodeStatus::all_available(), 100);
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -3687,5 +4108,145 @@ mod tests {
         metadata
             .metadata_arc()
             .update_with_current_request_version(&response, false, 1_000);
+    }
+
+    // ─── Background-loop wakes for requests queued by the AsyncPoll task ───
+    //
+    // Java processes an `AsyncPollEvent` on the network thread inside
+    // `ConsumerNetworkThread.runOnce()`: `processApplicationEvents()` runs
+    // before the request managers are polled, so the committed-offsets
+    // OffsetFetch that `process(AsyncPollEvent)` queues through
+    // `updateFetchPositions` (`OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`
+    // → `CommitRequestManager.fetchOffsets`) goes out in that same
+    // `runOnce`. `process_async_poll` queues it from a `tokio::spawn`ed task,
+    // which on the background task's `current_thread` runtime runs only once
+    // the loop is parked in its network poll, after the managers were polled.
+    // The loop parks on the `Notify` production wires into every manager's
+    // `set_completion_notify` (`event_notify`, the selector wakeup handle);
+    // unless the queuing pokes it, the request waits for the poll timeout
+    // (`MAX_POLL_TIMEOUT_MS`, 5 s) or an unrelated wake.
+
+    /// The processor, its subscription state, its commit manager and the
+    /// completion `Notify` its managers share.
+    type SharedNotifyFixture = (
+        ApplicationEventProcessor,
+        Arc<Mutex<SubscriptionState>>,
+        Arc<CommitRequestManager>,
+        Arc<tokio::sync::Notify>,
+    );
+
+    /// A processor whose commit, offsets and fetch managers share one
+    /// completion `Notify`, as `AsyncKafkaConsumer::new` wires `event_notify`
+    /// into all of them; the offsets manager uses the commit manager for
+    /// committed offsets, as in production.
+    fn processor_with_shared_completion_notify() -> SharedNotifyFixture {
+        use crate::common::utils::internals::BufferSupplier;
+        use crate::consumer::internals::FetchBuffer;
+        use crate::consumer::internals::FetchConfig;
+        use crate::consumer::internals::FetchRequestManager;
+
+        let subscriptions = make_subscriptions();
+        let metadata = make_metadata(Arc::clone(&subscriptions));
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            "test-group",
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+            0,
+        ));
+        commit.set_completion_notify(Arc::clone(&notify));
+        let coordinator = Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")));
+        let offsets = OffsetsRequestManager::new(
+            Arc::clone(&subscriptions),
+            Arc::clone(&metadata),
+            IsolationLevel::ReadUncommitted,
+            Arc::new(crate::common::utils::SystemTime),
+            100,
+            30_000,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            Some(Arc::clone(&commit)),
+            Arc::new(crate::consumer::internals::PositionsValidator::new(
+                Arc::clone(&subscriptions),
+                Arc::clone(&metadata),
+            )),
+        );
+        offsets.set_completion_notify(Arc::clone(&notify));
+        let mut fetch = FetchRequestManager::new(
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            100,
+        );
+        fetch.set_completion_notify(Arc::clone(&notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            coordinator,
+            Some(TopicMetadataRequestManager::new(&config)),
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(offsets),
+            Some(fetch),
+        )));
+        let processor = ApplicationEventProcessor::new(
+            request_managers,
+            metadata,
+            Arc::clone(&subscriptions),
+            Arc::new(Mutex::new(CompletableEventReaper::new())),
+            Arc::new(crate::common::utils::SystemTime),
+        );
+        (processor, subscriptions, commit, notify)
+    }
+
+    /// The committed-offsets OffsetFetch that `updateFetchPositions` queues
+    /// for a newly assigned partition from the AsyncPoll task must wake the
+    /// background loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_committed_offsets_fetch_wakes_background_task() {
+        let (mut processor, subscriptions, commit, notify) = processor_with_shared_completion_notify();
+        // A manually assigned partition with no position: INITIALIZING, so
+        // `updateFetchPositions` fetches its committed offset.
+        subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_user(HashSet::from([tp("topic", 0)]))
+            .expect("assign");
+        let state = Arc::new(super::super::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: i64::MAX,
+            poll_time_ms: 12_345,
+            state: Arc::clone(&state),
+        });
+        assert!(
+            yield_until(|| commit.inner_state_for_test() == 1, std::time::Duration::from_secs(5)).await,
+            "the AsyncPoll task must queue the committed-offsets OffsetFetch"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect(
+                "queuing the committed-offsets OffsetFetch from the spawned AsyncPoll task did not wake the \
+                 background loop, so it waits for the network poll timeout; Java sends it in the runOnce that \
+                 processes the AsyncPollEvent",
+            );
     }
 }

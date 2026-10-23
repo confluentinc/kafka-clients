@@ -356,6 +356,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // ──── Phase 1: drain application events ────
         self.process_application_events();
 
+        // ──── Phase 1.5: resume an unsubscribe waiting on its callback ────
+        //
+        // Java chains `clearAssignmentAndLeaveGroup()` on the leave's release
+        // callback with `whenComplete`; it runs on the network thread while
+        // `processApplicationEvents()` handles the callback-completed event,
+        // i.e. before the request managers poll. Phase 1 does the same when it
+        // processes the `ConsumerRebalanceListenerCallbackCompleted` event that
+        // carries the ack. This covers an ack dropped with no completed event
+        // to carry it (see the per-event check in `process_application_events`)
+        // when no application event follows.
+        // Either way the member moves PREPARE_LEAVING -> LEAVING before the
+        // heartbeat manager's poll in this same iteration, which then builds
+        // the leave heartbeat.
+        self.maybe_apply_leave_callback_ack();
+
         // Acquire the network-client-delegate mutex ONCE for the whole
         // iteration. The bg task is the delegate's only locker (verified:
         // the app side signals wakeups via the `WakeupTrigger` token and the
@@ -485,8 +500,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             if let (Some(coord_arc), Some(commit_arc)) = (coord_handle.as_ref(), commit_handle.as_ref()) {
                 collected_before.push(commit_arc.poll_with_coordinator(coord_arc.as_ref(), current_time_ms));
             }
-            // `entries()` ordering with the three Arc-shared slots skipped
-            // is `heartbeat → offsets → topic_metadata → fetch → dyn`.
+            // `entries()` ordering with the three Arc-shared slots and the
+            // fetch slot skipped is `heartbeat → offsets → topic_metadata →
+            // dyn`; fetch is polled right after (`dyn` is test-only and never
+            // populated together with fetch).
             // `membership_boundary()` returns the heartbeat count (0 or 1):
             // the leading `boundary` results join the before-batch (they are
             // processed before `membership.reconcile`); the rest join the
@@ -501,6 +518,15 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 } else {
                     collected_after.push(result);
                 }
+            }
+            // Java: `FetchRequestManager.poll(currentTimeMs)`, whose
+            // `prepareFetchRequests` asks the delegate `isUnavailable(node)` /
+            // `maybeThrowAuthFailure(node)`. The delegate is the one this
+            // iteration already holds (`delegate_guard`), so it is lent to the
+            // fetch manager rather than locked again. Fetch follows the
+            // membership boundary, so it joins the after-batch.
+            if let Some(fetch) = rm_guard.fetch.as_mut() {
+                collected_after.push(fetch.poll(&*delegate_guard, current_time_ms));
             }
         }
         for mut poll_result in collected_before.drain(..) {
@@ -563,7 +589,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
-        // topic_metadata, fetch, dyn) ────
+        // topic_metadata, dyn, fetch) ────
         for mut poll_result in collected_after.drain(..) {
             let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
             for node in try_connect_nodes {
@@ -646,6 +672,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             for rm in rm_guard.entries() {
                 let wait_ms = rm.maximum_time_to_wait(current_time_ms);
                 max_time_to_wait_ms = max_time_to_wait_ms.min(wait_ms);
+            }
+            // The fetch manager is outside `entries()` (Phase 2 polls it with
+            // the delegate), so it is consulted here explicitly.
+            if let Some(fetch) = rm_guard.fetch.as_ref() {
+                max_time_to_wait_ms = max_time_to_wait_ms.min(fetch.maximum_time_to_wait(current_time_ms));
             }
         }
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
@@ -801,6 +832,27 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let start_ms = self.time.milliseconds();
 
         for env in envelopes.drain(..) {
+            // A leave's callback ack comes back inside a
+            // `ConsumerRebalanceListenerCallbackCompleted` event in this queue,
+            // as Java's `ConsumerRebalanceListenerCallbackCompletedEvent` does,
+            // and processing that event runs the leave's `whenComplete` ->
+            // `clearAssignmentAndLeaveGroup()`. So the leave takes effect after
+            // every event enqueued before the ack — including one the listener
+            // submitted through its `ConsumerHandle` and stopped waiting for,
+            // which can still be queued here — and before every event enqueued
+            // after it (e.g. a `subscribe()` right after an `unsubscribe()`
+            // that timed out during the listener).
+            //
+            // This check only fires for an ack dropped with no completed event
+            // to carry it: the callback event itself was dropped before the app
+            // ran the listener (e.g. the consumer was dropped with it still in
+            // its background-event queue), or processing the completed event
+            // panicked before completing the future (caught by the boundary
+            // below). A caller future dropped mid-listener does NOT get here:
+            // `PartitionsRemovedAckGuard` still enqueues the completed event,
+            // with an interrupt error, behind the listener's ops. The closed
+            // ack is applied before the next event, so the leave cannot hang.
+            self.maybe_apply_leave_callback_ack();
             // Java CNT:256 — record the time this event spent in the queue.
             if let Some(metrics) = &metrics {
                 metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
@@ -837,6 +889,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
+    }
+
+    /// Apply a stored unsubscribe-leave callback ack, if it has arrived
+    /// (`ConsumerMembershipManager::drive_pending_leave_callback`). The app
+    /// returns that ack through the application-event queue, whose processing
+    /// applies it, so here it can only be one dropped with no completed event
+    /// to carry it. One atomic load when no leave callback is pending; no
+    /// allocation.
+    fn maybe_apply_leave_callback_ack(&self) {
+        if let Some(membership) = self.membership.as_ref()
+            && membership.has_pending_leave_callback()
+            && let Err(e) = membership.drive_pending_leave_callback()
+        {
+            log::warn!("Failed to transition to send the leave group heartbeat: {}", e);
+        }
     }
 
     /// The body of Java's per-event `try` block in `processApplicationEvents`:
@@ -928,42 +995,75 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // ──── 1. pollOnClose round ────
         //
         // Java's `cleanup` iterates `requestManagers.entries()` and calls
-        // `pollOnClose` on each. The Rust `entries()` skips coordinator
-        // and commit (Arc-shared); the bg-task drives them explicitly:
+        // `pollOnClose` on each, in the order `coordinator → commit →
+        // heartbeat → membership → offsets → topic metadata → fetch`
+        // (`RequestManagers` constructor). The Rust `entries()` skips
+        // coordinator, commit and fetch; the bg-task drives them explicitly,
+        // at their place in that order:
         //   * coordinator has no close-side work (Java's
         //     `CoordinatorRequestManager.pollOnClose` returns EMPTY).
         //   * commit drains pending offset-commit requests via
-        //     `drain_pending_offset_commit_requests()` — mirrors Java
-        //     `CommitRequestManager.pollOnClose` which calls
-        //     `drainPendingOffsetCommitRequests()` (Java
-        //     `CommitRequestManager.java:215`).
+        //     `drain_pending_offset_commit_requests()`. Java 4.4's
+        //     `CommitRequestManager` inherits the EMPTY `pollOnClose`; its
+        //     close-time drain is `poll()` while `closing`
+        //     (`drainPendingOffsetCommitRequests`), which runs in `runOnce`
+        //     before `cleanup`, so a pending `OffsetCommit` is always queued
+        //     ahead of everything `runAtClose` builds. This sweep goes first
+        //     for the same reason: the commit precedes the leave-group
+        //     heartbeat and the fetch-session close requests, also when the
+        //     coordinator leads a fetched partition.
+        //   * fetch builds the fetch-session close requests last.
+        //
+        // Java 4.4 CNT:412-434 wraps `runAtClose(...)` in `try { ... } catch
+        // (Exception e) { log.error("Unexpected error during shutdown. Proceed
+        // with closing.", e); } finally { ... }`, so a failure here still
+        // sends the unsent requests, reaps, and closes the managers and the
+        // delegate (steps 2-4). The round is sync, so `catch_unwind` covers
+        // it; the unwind drops the delegate guard, and the request-managers
+        // lock it may poison is taken through `into_inner` below.
         let current_time_ms = self.time.milliseconds();
-        let commit_on_close = {
-            let rm_guard = match self.request_managers.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
+        let poll_on_close_round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let commit_on_close = {
+                let rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.commit_handle()
             };
-            rm_guard.commit_handle()
-        };
-        {
-            let mut rm_guard = match self.request_managers.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let mut delegate_guard = self
-                .network_client_delegate
-                .try_lock()
-                .expect("delegate not contended on bg task");
-            for rm in rm_guard.entries() {
-                let result = rm.poll_on_close(current_time_ms);
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+            {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let mut delegate_guard = self
+                    .network_client_delegate
+                    .try_lock()
+                    .expect("delegate not contended on bg task");
+                // Commit's close-side drain (Java `CommitRequestManager.poll` while
+                // `closing` → `drainPendingOffsetCommitRequests`), ahead of the
+                // `entries()` walk as the commit manager is in Java's.
+                if let Some(commit_arc) = commit_on_close.as_ref() {
+                    let result = commit_arc.drain_pending_offset_commit_requests();
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
+                for rm in rm_guard.entries() {
+                    let result = rm.poll_on_close(current_time_ms);
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
+                // Java: `FetchRequestManager.pollOnClose(currentTimeMs)`, which
+                // skips close-session requests to unavailable nodes; it reads the
+                // delegate held here (`entries()` skips the fetch slot).
+                if let Some(fetch) = rm_guard.fetch.as_mut() {
+                    let result = fetch.poll_on_close(&*delegate_guard, current_time_ms);
+                    let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+                }
             }
-            // Commit's close-side drain (Java
-            // `CommitRequestManager.pollOnClose` → `drainPendingOffsetCommitRequests`).
-            if let Some(commit_arc) = commit_on_close.as_ref() {
-                let result = commit_arc.drain_pending_offset_commit_requests();
-                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
-            }
+        }));
+        if let Err(payload) = poll_on_close_round {
+            log::error!(
+                "Unexpected error during shutdown. Proceed with closing. {}",
+                panic_payload_message(&*payload)
+            );
         }
 
         // ──── 2. Drain unsent requests until timer expires ────
@@ -1061,8 +1161,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
     /// Java: `run()`. Wraps `run_once` in a loop guarded by `running`
     /// and the wakeup-token shutdown signal, and calls `cleanup` on
-    /// exit. Intended to be spawned via `tokio::spawn` from the Phase
-    /// 11 consumer constructor.
+    /// exit. Production runs it through [`Self::spawn_dedicated`], on the
+    /// `kafka-consumer-io` OS thread's single-thread runtime.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run")]
     pub(crate) async fn run(mut self) {
         use futures_util::FutureExt;
@@ -1075,8 +1175,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
             // { log.error(...) }` — swallow and continue, so a failing
             // iteration neither ends the task nor skips `cleanup()`. Without
-            // this boundary a panic would unwind out of the spawned task, which
-            // Tokio turns into task termination, not Java's swallow-and-continue.
+            // this boundary a panic would unwind out of `block_on` on the
+            // dedicated thread and end that OS thread (and the consumer's bg
+            // loop with it), not Java's swallow-and-continue.
             if let Err(payload) = std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
                 log::error!(
                     "Unexpected error caught in consumer network task: {}",
@@ -1091,7 +1192,46 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 tokio::task::yield_now().await;
             }
         }
-        self.cleanup().await;
+        // Java 4.4 CNT:143-171: the `finally { cleanup(); }` sits outside the
+        // `catch (Throwable)`, so a failure in `cleanup()` leaves `run()` and
+        // reaches `KafkaThread`'s uncaught-exception handler, which logs it at
+        // ERROR (`KafkaThread.java:51`); the thread then ends normally and
+        // `closeInternal`'s `join()` (CNT:379-390) returns, so `close()` does
+        // not fail. Catch the panic here for the same outcome: log it, return
+        // normally, and let `spawn_dedicated` signal `done`. Without the catch
+        // the panic unwinds out of `block_on`, skips `done`, and only reaches
+        // stderr through the default panic hook.
+        if let Err(payload) = std::panic::AssertUnwindSafe(self.cleanup()).catch_unwind().await {
+            log::error!("Uncaught error in consumer network task: {}", panic_payload_message(&*payload));
+        }
+    }
+
+    /// Runs [`Self::run`] on a dedicated `std::thread` named
+    /// `kafka-consumer-io` that hosts its own `current_thread` Tokio runtime,
+    /// and returns the receiver that fires once `run` (loop plus `cleanup`)
+    /// has returned, together with the OS thread handle.
+    ///
+    /// The Rust analog of Java starting this `KafkaThread` subclass, whose
+    /// body is `run()`. Production and tests both go through `run`, so the
+    /// per-iteration catch of `ConsumerNetworkThread.run()` applies to the
+    /// production loop too.
+    pub(crate) fn spawn_dedicated(self) -> (tokio::sync::oneshot::Receiver<()>, std::thread::JoinHandle<()>) {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build consumer io runtime");
+                rt.block_on(self.run());
+                // Signal the close path that the bg loop + `cleanup()`
+                // have finished. Errors (receiver dropped before close)
+                // are benign — `await_join` treats them as a clean exit.
+                let _ = done_tx.send(());
+            })
+            .expect("spawn consumer io thread");
+        (done_rx, thread_handle)
     }
 }
 
@@ -1222,6 +1362,9 @@ mod tests {
         /// to prove the `run_once` `select!` preempts a blocked poll.
         poll_block: Arc<AtomicBool>,
         poll_release: Arc<Notify>,
+        /// When `true`, `close()` panics — a failure in the last step of
+        /// `cleanup()`, after the pollOnClose round.
+        close_panics: Arc<AtomicBool>,
     }
 
     impl CountingClient {
@@ -1233,6 +1376,7 @@ mod tests {
                 has_in_flight_script: Arc::new(Mutex::new(VecDeque::new())),
                 poll_block: Arc::new(AtomicBool::new(false)),
                 poll_release: Arc::new(Notify::new()),
+                close_panics: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -1247,6 +1391,9 @@ mod tests {
         }
         fn poll_block(&self) -> Arc<AtomicBool> {
             self.poll_block.clone()
+        }
+        fn close_panics(&self) -> Arc<AtomicBool> {
+            self.close_panics.clone()
         }
     }
 
@@ -1363,6 +1510,9 @@ mod tests {
             self.inner.active()
         }
         async fn close(&mut self) {
+            if self.close_panics.load(Ordering::SeqCst) {
+                panic!("client close failure");
+            }
             self.inner.close().await
         }
     }
@@ -1882,6 +2032,47 @@ mod tests {
         );
     }
 
+    /// Request manager whose `pollOnClose` panics.
+    struct PanicOnCloseRequestManager;
+
+    impl RequestManager for PanicOnCloseRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            PollResult::empty()
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            panic!("poll on close failure");
+        }
+    }
+
+    /// Java 4.4 `ConsumerNetworkThread.cleanup()` (CNT:412-434) catches a
+    /// failure in `runAtClose(...)`, logs "Unexpected error during shutdown.
+    /// Proceed with closing." and still reaps and closes the managers and the
+    /// delegate in its `finally`. A panicking `poll_on_close` must therefore
+    /// neither escape `cleanup()` nor skip the later steps.
+    #[tokio::test]
+    async fn cleanup_proceeds_with_closing_when_poll_on_close_panics() {
+        let (mut fixture, _poll, _to, _hi) = make_thread_with_dyn_managers(vec![Box::new(PanicOnCloseRequestManager)]);
+        let (_h, mut rx, erased) = CompletableEvent::make_completable_event::<()>(0);
+        fixture.reaper.lock().unwrap().add(erased);
+
+        fixture.thread.cleanup().await;
+
+        assert!(
+            matches!(rx.try_recv().expect("sender used"), Err(Error::Timeout(_))),
+            "cleanup must still reap the tracked event after poll_on_close panics"
+        );
+        assert!(
+            !fixture
+                .delegate
+                .try_lock()
+                .expect("delegate not contended")
+                .client_for_test_ref()
+                .active(),
+            "cleanup must still close the network client after poll_on_close panics"
+        );
+    }
+
     /// Translated from `ConsumerNetworkThreadTest.testProcessEventFailureCompletesFutureExceptionally`
     /// (KAFKA-18812): when processing an event fails, its future is completed
     /// with the failure instead of being left for the reaper to time out.
@@ -2212,6 +2403,141 @@ mod tests {
         assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
     }
 
+    /// Request manager that panics on the first `poll` (or on every `poll`
+    /// when `always_panic`) and counts calls, without touching the running
+    /// flag, so the test decides when the loop stops.
+    struct CountingPanickingRequestManager {
+        always_panic: bool,
+        poll_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestManager for CountingPanickingRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            if self.poll_calls.fetch_add(1, Ordering::SeqCst) == 0 || self.always_panic {
+                panic!("request manager failure");
+            }
+            PollResult::with_time_until_next_poll_ms(10)
+        }
+
+        fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+            10
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// Starts the thread the way the production consumer does
+    /// (`spawn_dedicated`, a `kafka-consumer-io` OS thread), waits for at
+    /// least `min_polls` manager polls, then stops it like `close()` does
+    /// (clear the running flag) and asserts `done` fires, the OS thread exits
+    /// and `cleanup()` ran.
+    async fn assert_dedicated_thread_survives_panics(always_panic: bool, min_polls: usize) {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let manager = CountingPanickingRequestManager {
+            always_panic,
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let running = fixture.thread.running_handle();
+        let (done_rx, thread_handle) = fixture.thread.spawn_dedicated();
+
+        let start = std::time::Instant::now();
+        while poll_calls.load(Ordering::SeqCst) < min_polls
+            && !thread_handle.is_finished()
+            && start.elapsed() < Duration::from_secs(5)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let finished_early = thread_handle.is_finished();
+        let polls = poll_calls.load(Ordering::SeqCst);
+        running.store(false, Ordering::Release);
+        let done = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        let joined = tokio::task::spawn_blocking(move || thread_handle.join())
+            .await
+            .expect("join task");
+
+        assert!(
+            !finished_early && polls >= min_polls,
+            "Java: the network thread logs the error and keeps running; Rust: thread finished early={finished_early}, \
+             manager polls={polls}"
+        );
+        assert!(
+            matches!(done, Ok(Ok(()))),
+            "the dedicated thread must signal done after the loop exits, got {done:?}"
+        );
+        assert!(joined.is_ok(), "the dedicated OS thread must exit cleanly");
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must still run");
+    }
+
+    /// Audit C1-22. The production consumer runs the loop on the dedicated
+    /// `kafka-consumer-io` thread; Java's `ConsumerNetworkThread.run()`
+    /// catches every `runOnce()` failure, logs "Unexpected error caught in
+    /// consumer network thread" and keeps looping, with `cleanup()` in the
+    /// `finally`. One panicking iteration must not end that thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_survives_a_panicking_iteration() {
+        assert_dedicated_thread_survives_panics(false, 3).await;
+    }
+
+    /// Every iteration panics (e.g. a poisoned lock keeps failing). Java just
+    /// keeps looping; the Rust loop yields after each caught panic, so the
+    /// running-flag check is still reached and stopping the thread still
+    /// runs `cleanup()` and fires `done`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_stops_and_cleans_up_when_every_iteration_panics() {
+        assert_dedicated_thread_survives_panics(true, 3).await;
+    }
+
+    /// Java 4.4 `ConsumerNetworkThread.run()` (CNT:143-171) runs `cleanup()`
+    /// in a `finally` outside its `catch (Throwable)`; a failure there is
+    /// logged at ERROR by `KafkaThread`'s uncaught-exception handler and the
+    /// thread still ends, so `closeInternal`'s `join()` returns normally.
+    /// A panic in `cleanup()` (here: the client's `close()`, the last step)
+    /// must therefore still let the dedicated thread signal `done` and exit
+    /// cleanly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dedicated_thread_signals_done_when_cleanup_panics() {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let poll_on_close_calls = Arc::new(AtomicUsize::new(0));
+        let manager = CountingPanickingRequestManager {
+            always_panic: false,
+            poll_calls: poll_calls.clone(),
+            poll_on_close_calls: poll_on_close_calls.clone(),
+        };
+        let (fixture, _, _, _) = make_thread_with_dyn_managers(vec![Box::new(manager)]);
+        let close_panics = fixture
+            .delegate
+            .try_lock()
+            .expect("delegate not contended")
+            .client_for_test_ref()
+            .close_panics();
+        close_panics.store(true, Ordering::SeqCst);
+        // Stopped before it starts: `run()` goes straight to `cleanup()`.
+        fixture.thread.running_handle().store(false, Ordering::Release);
+        let (done_rx, thread_handle) = fixture.thread.spawn_dedicated();
+
+        let done = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        let joined = tokio::task::spawn_blocking(move || thread_handle.join())
+            .await
+            .expect("join task");
+
+        assert_eq!(poll_on_close_calls.load(Ordering::SeqCst), 1, "cleanup must have run");
+        assert!(
+            matches!(done, Ok(Ok(()))),
+            "the dedicated thread must signal done after cleanup() panics, got {done:?}"
+        );
+        assert!(
+            joined.is_ok(),
+            "the dedicated OS thread must exit cleanly after cleanup() panics"
+        );
+    }
+
     /// `wakeup` mid-poll: the bg-task `run_once` should not hang when
     /// the wakeup token is cancelled before/during the network poll.
     /// We assert `run_once` returns within a tight window even though
@@ -2256,6 +2582,424 @@ mod tests {
         );
         // Sanity: a second run_once should also not panic.
         thread.run_once().await;
+    }
+
+    /// A thread with a heartbeat manager (coordinator known) and a member in
+    /// the group (epoch 5) owning `t-0` with a listener registered, that has
+    /// just called `leave_group()`: PREPARE_LEAVING, its `onPartitionsRevoked`
+    /// callback enqueued. Returns the thread, the membership manager, the
+    /// subscription state, the application-event sender, the background-event
+    /// receiver (kept alive), the callback event (whose ack the app side
+    /// returns with [`return_leave_callback_ack`]) and the leave future.
+    #[expect(clippy::type_complexity)]
+    fn make_thread_with_member_preparing_to_leave() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+        mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+        crate::consumer::internals::events::BackgroundEvent,
+        crate::common::internals::KafkaFutureImpl<()>,
+    ) {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        let (thread, membership, subs, tx, mut bg_rx) = make_thread_with_member_in_group();
+        let leave = membership.leave_group(0).unwrap();
+        assert_eq!(membership.state(), MemberState::PrepareLeaving);
+        let callback = bg_rx.try_recv().expect("revoked callback enqueued").event;
+        assert!(
+            matches!(
+                callback,
+                BackgroundEvent::PartitionsRemoved { ack_through_application_events: true, .. }
+            ),
+            "a leave's callback returns through the application-event queue, got {callback:?}"
+        );
+        (thread, membership, subs, tx, bg_rx, callback, leave)
+    }
+
+    /// What the app side does once the listener for `callback` (a
+    /// `PartitionsRemoved` event) has returned `result`, through the same
+    /// helper `AsyncKafkaConsumer::process_background_events` uses (DoD §12).
+    fn return_leave_callback_ack(
+        tx: &mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        callback: crate::consumer::internals::events::BackgroundEvent,
+        result: Result<(), Error>,
+    ) {
+        use crate::consumer::internals::events::BackgroundEvent;
+        let BackgroundEvent::PartitionsRemoved { method_name, ack, ack_through_application_events, .. } = callback
+        else {
+            panic!("expected a PartitionsRemoved event, got {callback:?}");
+        };
+        let handler =
+            crate::consumer::internals::events::ApplicationEventHandler::new(tx.clone(), Arc::new(Notify::new()));
+        crate::consumer::internals::async_kafka_consumer::notify_background_task_of_rebalance_callback(
+            &handler,
+            method_name,
+            ack,
+            ack_through_application_events,
+            result,
+            1_000,
+        );
+    }
+
+    /// A thread with a heartbeat manager (coordinator known) and a member in
+    /// the group (epoch 5) owning `t-0` with a listener registered. Returns
+    /// the thread, the membership manager, the subscription state, the
+    /// application-event sender and the background-event receiver (kept
+    /// alive).
+    #[expect(clippy::type_complexity)]
+    fn make_thread_with_member_in_group() -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<ConsumerMembershipManager>,
+        Arc<Mutex<SubscriptionState>>,
+        mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
+        use crate::consumer::ConsumerRebalanceListener;
+        use crate::consumer::internals::ConsumerHeartbeatRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
+
+        struct NoopListener;
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for NoopListener {
+            async fn on_partitions_revoked(&self, _partitions: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _partitions: &[crate::common::TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        {
+            let mut guard = subs.lock().unwrap();
+            guard
+                .subscribe_with_topics(HashSet::from(["t".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+            guard
+                .assign_from_subscribed(&[crate::common::TopicPartition::new("t", 0)])
+                .unwrap();
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(bg_tx));
+        let membership = Arc::new(ConsumerMembershipManager::new(
+            "g".to_string(),
+            None,
+            None,
+            30_000,
+            None,
+            subs.clone(),
+            None,
+            metadata.clone(),
+            Arc::clone(&beh),
+            false,
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+        ));
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let heartbeat =
+            ConsumerHeartbeatRequestManager::new(0, &config, coordinator, subs.clone(), membership.clone(), beh);
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            Some(heartbeat),
+            Some(membership.clone()),
+            None,
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let thread = ConsumerNetworkThread::new(
+            time as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers,
+            Some(membership.clone()),
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        membership.transition_to_joining().unwrap();
+        membership.abstract_mm.inner.lock().unwrap().update_member_epoch(5);
+        (thread, membership, subs, tx, bg_rx)
+    }
+
+    /// C2-01 (Critic 1 item 1): an `unsubscribe()` leave waiting in
+    /// PREPARE_LEAVING for its `on_partitions_revoked` ack moves to LEAVING
+    /// on the bg loop, in `run_once` before the request managers poll — Java
+    /// runs `clearAssignmentAndLeaveGroup()` from the callback's
+    /// `whenComplete` on the network thread — so the heartbeat manager's poll
+    /// in the same iteration builds the leave heartbeat (LEAVING ->
+    /// UNSUBSCRIBED). The ack arriving on its own changes nothing.
+    #[tokio::test]
+    async fn run_once_applies_leave_callback_ack_before_heartbeat_poll() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, tx, _bg_rx, callback, leave) = make_thread_with_member_preparing_to_leave();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            membership.state(),
+            MemberState::PrepareLeaving,
+            "the ack alone must not move the member: the bg loop applies it"
+        );
+
+        thread.run_once().await;
+        assert_eq!(
+            membership.state(),
+            MemberState::Unsubscribed,
+            "the leave heartbeat must be built in the same run_once that applied the ack"
+        );
+        assert_eq!(membership.member_epoch(), -1);
+        assert!(!membership.has_pending_leave_callback());
+        assert!(!leave.is_done(), "the leave completes only on the leave heartbeat's response");
+    }
+
+    /// Audit finding C1-17: a `LeaveGroupOnClose` whose deadline has already
+    /// passed (`close(Duration::ZERO)`) is still processed — the member
+    /// leaves and the leave heartbeat is built and handed to the network
+    /// client — and the reaper then expires the event in the same
+    /// `run_once`, so the waiting `close()` proceeds after one iteration.
+    /// Java's `runOnce` processes the application events before
+    /// `applicationEventReaper.reap(currentTimeMs)`.
+    #[tokio::test]
+    async fn run_once_processes_then_reaps_an_expired_leave_group_on_close() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, tx, _bg_rx) = make_thread_with_member_in_group();
+        let now_ms = thread.time.milliseconds();
+        let (handle, mut rx, _) = CompletableEvent::make_completable_event::<()>(now_ms);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::LeaveGroupOnClose {
+                handle,
+                membership_operation: GroupMembershipOperation::Default,
+            },
+            enqueued_ms: now_ms,
+        })
+        .expect("send ok");
+
+        thread.run_once().await;
+
+        assert_eq!(
+            membership.state(),
+            MemberState::Unsubscribed,
+            "the expired LeaveGroupOnClose must still be processed and its leave heartbeat built"
+        );
+        assert_eq!(membership.member_epoch(), -1, "the leave heartbeat carries the leave epoch");
+        assert!(
+            thread.network_client_delegate.lock().await.has_any_pending_requests(),
+            "the leave heartbeat must have been handed to the network client"
+        );
+        match rx.try_recv().expect("the reaper must complete the event in the same run_once") {
+            // Java: "{event} was {pastDueMs} ms past its expiration of {deadlineMs}".
+            Err(err @ Error::Timeout(_)) => assert!(
+                err.to_string().ends_with(&format!(" was 0 ms past its expiration of {now_ms}")),
+                "unexpected reaper message: {err}"
+            ),
+            other => panic!("expected the reaper's timeout, got {other:?}"),
+        }
+    }
+
+    /// C2-01 (Critic 1 R2-1): the leave's callback ack is applied in queue
+    /// order with the application events. Java's
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` is enqueued before
+    /// anything the app submits afterwards, so `clearAssignmentAndLeaveGroup()`
+    /// runs before a `subscribe()` that follows an `unsubscribe()` which
+    /// returned without the ack applied (its deadline passed during the
+    /// listener). The new subscription must survive the old leave.
+    #[tokio::test]
+    async fn leave_callback_ack_is_applied_before_later_application_events() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+        let (handle, sub_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::TopicSubscriptionChange {
+                handle,
+                topics: HashSet::from(["t2".to_string()]),
+                listener: None,
+            },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+
+        thread.run_once().await;
+        assert!(matches!(sub_rx.await, Ok(Ok(()))), "subscribe() reported success");
+        let subscription = subs.lock().unwrap().subscription();
+        assert_eq!(
+            subscription,
+            HashSet::from(["t2".to_string()]),
+            "the late leave step must run before the subscribe, not wipe it"
+        );
+        assert!(!membership.has_pending_leave_callback(), "the old leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the old leave reached LEAVING and its leave heartbeat was built"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// PR #263 review (Copilot): the leave's callback ack must not overtake an
+    /// application event the listener submitted before it returned, even one
+    /// whose wait the listener abandoned (a `ConsumerHandle` op under
+    /// `tokio::time::timeout`, or a dropped future) and that is therefore
+    /// still queued. Java's app thread enqueues
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` after the listener
+    /// returns (`AsyncKafkaConsumer.invokeRebalanceCallbackAndNotifyBackgroundThread`),
+    /// on the same queue, so `ConsumerNetworkThread.processApplicationEvents`
+    /// first processes the listener's `SeekUnvalidatedEvent` — the partition
+    /// is still assigned, so the seek succeeds — and only then the
+    /// completed event, whose `whenComplete` runs
+    /// `clearAssignmentAndLeaveGroup()`. Applying the ack first would clear
+    /// the assignment under the seek, which then fails with "No current
+    /// assignment for partition t-0".
+    #[tokio::test]
+    async fn leave_callback_ack_is_applied_after_an_abandoned_listener_operation() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        let t0 = crate::common::TopicPartition::new("t", 0);
+
+        // The listener submits a seek through its handle and stops waiting
+        // for it: the event stays queued, the listener returns, and the app
+        // returns the callback's ack.
+        let (handle, mut seek_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::SeekUnvalidated { handle, partition: t0.clone(), offset: 42, offset_epoch: None },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+        return_leave_callback_ack(&tx, callback, Ok(()));
+
+        thread.run_once().await;
+        match seek_rx.try_recv() {
+            Ok(Ok(())) => {},
+            other => panic!(
+                "the seek the listener queued must run before the leave clears the assignment (Java FIFO), got {other:?}"
+            ),
+        }
+        let subs = subs.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty(), "the leave then cleared the assignment");
+        assert!(subs.subscription().is_empty(), "and unsubscribed");
+        drop(subs);
+        assert!(!membership.has_pending_leave_callback(), "the leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// The leave still proceeds when its ack is dropped with no completed
+    /// event to carry it (here the callback event itself is dropped before the
+    /// app ran the listener): the bg loop applies the closed ack before the
+    /// next application event, as it did before the ack moved to the
+    /// application-event queue. Java has no equivalent (its callback event
+    /// cannot be lost).
+    #[tokio::test]
+    async fn leave_callback_ack_dropped_by_the_app_is_applied_before_later_application_events() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        drop(callback);
+        let (handle, sub_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::TopicSubscriptionChange {
+                handle,
+                topics: HashSet::from(["t2".to_string()]),
+                listener: None,
+            },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+
+        thread.run_once().await;
+        assert!(matches!(sub_rx.await, Ok(Ok(()))), "subscribe() reported success");
+        assert_eq!(
+            subs.lock().unwrap().subscription(),
+            HashSet::from(["t2".to_string()]),
+            "the leave step ran before the subscribe"
+        );
+        assert!(!membership.has_pending_leave_callback());
+        assert_eq!(membership.member_epoch(), -1, "the leave heartbeat was built");
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// Critic pr2-c2 finding 2: Phase 1.5 of `run_once` applies a leave ack
+    /// dropped with no completed event to carry it when no application event
+    /// follows, before the heartbeat poll, so the leave heartbeat is built in
+    /// that same iteration rather than waiting for an application event that
+    /// may never come.
+    #[tokio::test]
+    async fn run_once_applies_a_dropped_leave_callback_ack_with_no_application_event() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, _subs, _tx, _bg_rx, callback, _leave) =
+            make_thread_with_member_preparing_to_leave();
+        drop(callback);
+
+        thread.run_once().await;
+        assert!(!membership.has_pending_leave_callback(), "the leave's step was applied");
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
+    }
+
+    /// Critic pr2-c2 finding 1, bg side: a leave ack completed with an error —
+    /// the interrupt error the app sends when the caller's future was dropped
+    /// mid-listener — still keeps its FIFO position behind the listener's
+    /// queued op, and still clears the assignment and leaves, as Java's
+    /// `whenComplete` in `AbstractMembershipManager.leaveGroup(boolean)` runs
+    /// `clearAssignmentAndLeaveGroup()` whether the callback failed or not.
+    #[tokio::test]
+    async fn error_completed_leave_callback_ack_is_applied_after_the_listener_operation() {
+        use crate::consumer::internals::MemberState;
+        let (mut thread, membership, subs, tx, _bg_rx, callback, _leave) = make_thread_with_member_preparing_to_leave();
+        let t0 = crate::common::TopicPartition::new("t", 0);
+        let (handle, mut seek_rx) = crate::consumer::internals::events::CompletableEventHandle::<()>::new(60_000);
+        tx.send(ApplicationEventEnvelope {
+            event: ApplicationEvent::SeekUnvalidated { handle, partition: t0, offset: 42, offset_epoch: None },
+            enqueued_ms: 1_000,
+        })
+        .unwrap();
+        return_leave_callback_ack(
+            &tx,
+            callback,
+            Err(Error::Interrupt(crate::common::errors::InterruptError::new("interrupted"))),
+        );
+
+        thread.run_once().await;
+        match seek_rx.try_recv() {
+            Ok(Ok(())) => {},
+            other => panic!("the listener's seek must run before the leave (Java FIFO), got {other:?}"),
+        }
+        assert!(
+            subs.lock().unwrap().assigned_partitions().is_empty(),
+            "the leave cleared the assignment"
+        );
+        assert!(!membership.has_pending_leave_callback());
+        assert_eq!(
+            membership.member_epoch(),
+            -1,
+            "the leave heartbeat was built in the same run_once"
+        );
+        assert_ne!(membership.state(), MemberState::PrepareLeaving);
     }
 
     /// Post-poll `maybeFailOnMetadataError(uncompletedEvents)` arm
@@ -2699,133 +3443,6 @@ mod tests {
         );
     }
 
-    /// KAFKA-18641 (COMMENTS.1.md Issue 5): with auto-commit enabled and the
-    /// interval elapsed, the background loop alone sends no OffsetCommit,
-    /// however many iterations it runs: Java's `CommitRequestManager.poll`
-    /// does not auto-commit. The auto-commit goes out only once the
-    /// application's `poll()` hands the background task an `AsyncPoll`
-    /// event, whose `update_timer_and_maybe_commit` enqueues it, so it covers
-    /// only records the application has had the chance to process.
-    #[tokio::test]
-    async fn run_once_auto_commits_only_on_an_async_poll_event() {
-        use crate::common::Node;
-        use crate::common::TopicPartition;
-        use crate::common::protocol::ApiKeys;
-        use crate::consumer::internals::CommitRequestManager;
-        use crate::consumer::internals::CoordinatorRequestManager;
-
-        let mut config = make_config();
-        config.group_id = Some("g".to_string());
-        config.enable_auto_commit = true;
-        config.auto_commit_interval_ms = 100;
-        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata = make_metadata(&config, subs.clone());
-        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
-
-        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g".to_string()));
-        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let commit = Arc::new(CommitRequestManager::new(
-            &config,
-            metadata.clone(),
-            subs.clone(),
-            "g".to_string(),
-            None,
-            time.clone() as Arc<dyn Time>,
-            time.milliseconds(),
-        ));
-        commit.set_coordinator(Arc::clone(&coordinator));
-        // A consumed position, so an auto-commit has offsets to send.
-        let tp = TopicPartition::new("t".to_string(), 0);
-        {
-            let mut s = subs.lock().unwrap();
-            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
-            s.seek(&tp, 42).expect("seek");
-        }
-
-        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
-            Some(coordinator.clone()),
-            None,
-            Some(commit.clone()),
-            None,
-            None,
-            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
-            None,
-        )));
-        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
-        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
-        let processor = ApplicationEventProcessor::new(
-            request_managers.clone(),
-            metadata.clone(),
-            subs.clone(),
-            reaper.clone(),
-            time.clone(),
-        );
-        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let mut thread = ConsumerNetworkThread::new(
-            time.clone() as Arc<dyn Time>,
-            rx,
-            reaper,
-            processor,
-            delegate.clone(),
-            request_managers,
-            None,
-            WakeupTrigger::new(),
-            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
-        );
-
-        // OffsetCommit requests the background task has handed to the
-        // network: still unsent in the delegate, or already sent.
-        async fn offset_commits(delegate: &AsyncMutex<NetworkClientDelegate<MockClient>>) -> usize {
-            let guard = delegate.lock().await;
-            let unsent = guard
-                .unsent_requests()
-                .iter()
-                .filter(|r| r.request_builder().is_some_and(|b| *b.api_key() == ApiKeys::OFFSET_COMMIT))
-                .count();
-            let sent = guard
-                .client_for_test_ref()
-                .requests()
-                .iter()
-                .filter(|r| *r.api_key() == ApiKeys::OFFSET_COMMIT)
-                .count();
-            unsent + sent
-        }
-
-        // The interval elapses several times over, with only the background
-        // loop running.
-        for _ in 0..5 {
-            time.sleep(100);
-            thread.run_once().await;
-            assert_eq!(
-                0,
-                offset_commits(&delegate).await,
-                "the background loop must not auto-commit on its own timer"
-            );
-        }
-
-        // The application polls: the AsyncPoll event fires the auto-commit.
-        let now = time.milliseconds();
-        let event = ApplicationEvent::AsyncPoll {
-            deadline_ms: now + 60_000,
-            poll_time_ms: now,
-            state: Arc::new(AsyncPollState::new()),
-        };
-        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now }).expect("send ok");
-        thread.run_once().await;
-        // The event's continuation runs on a spawned task (Java runs it
-        // inline): let it enqueue the commit, then the next iteration's
-        // `poll_with_coordinator` sends it.
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        thread.run_once().await;
-        assert_eq!(
-            1,
-            offset_commits(&delegate).await,
-            "the AsyncPoll event's update_timer_and_maybe_commit must send the auto-commit"
-        );
-    }
-
     // ─── Milestone 17 Phase 3: no busy loop while bootstrapping (KIP-909) ───
 
     /// The background loop's two waits, asserted by value, for a group
@@ -2921,8 +3538,6 @@ mod tests {
             ),
             Arc::new(crate::consumer::internals::FetchBuffer::new()),
             Arc::new(crate::common::utils::internals::BufferSupplier::create()),
-            crate::consumer::internals::FetchRequestManager::always_available(),
-            crate::consumer::internals::FetchRequestManager::no_auth_failure(),
             Arc::new(ApiVersions::new()),
             crate::consumer::internals::FetchMetricsManager::for_test(),
             retry_backoff_ms,
@@ -2981,6 +3596,169 @@ mod tests {
             );
             time.sleep(50);
         }
+    }
+
+    /// `run_once` lends the fetch manager the delegate it holds, so a fetch
+    /// is not built for a leader inside its reconnect backoff window and is
+    /// built again once the window has elapsed.
+    ///
+    /// Java's `AbstractFetch.prepareFetchRequests` skips a node for which
+    /// `NetworkClientDelegate.isUnavailable(node)` (`connectionFailed(node) &&
+    /// connectionDelay(node, now) > 0`) holds — the same shape as
+    /// `FetchRequestManagerTest.testFetchSkipsBlackedOutNodes`, which drives
+    /// `client.backoff(node, 500)` on a `MockClient`. Before the delegate was
+    /// lent to the fetch manager, the production predicate was `|_| false`, so
+    /// the fetch was built on every iteration and failed at once by the
+    /// delegate's disconnect check (a busy loop while the leader was down).
+    /// The second half pins that the fix does not stop fetching for good.
+    #[tokio::test]
+    async fn run_once_skips_fetch_to_node_in_reconnect_backoff_until_it_elapses() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+
+        // One broker (node 0) leading `test-0`, assigned with a validated
+        // position so the partition is fetchable.
+        let tp = crate::common::TopicPartition::new("test".to_string(), 0);
+        metadata.add_transient_topics(HashSet::from(["test".to_string()]));
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "dummy",
+            1,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([("test".to_string(), 1)]),
+            &|_tp| Some(0),
+            &std::collections::HashMap::from([("test".to_string(), crate::common::Uuid::random_uuid())]),
+        );
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, time.milliseconds());
+        let leader = metadata
+            .metadata_arc()
+            .fetch()
+            .leader_for(&tp)
+            .cloned()
+            .expect("node 0 leads test-0");
+        {
+            let mut guard = subs.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            guard
+                .seek_validated(
+                    &tp,
+                    crate::consumer::internals::FetchPosition::with_leader(
+                        0,
+                        Some(0),
+                        crate::metadata::LeaderAndEpoch::new(Some(leader.clone()), Some(0)),
+                    ),
+                )
+                .unwrap();
+        }
+
+        let fetch = crate::consumer::internals::FetchRequestManager::new(
+            metadata.clone(),
+            subs.clone(),
+            crate::consumer::internals::FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(crate::consumer::internals::FetchBuffer::new()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            config.retry_backoff_ms(),
+        );
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+
+        // Java's `client.backoff(node, 500)`: the leader's connection failed
+        // and is inside a 500 ms reconnect backoff, on the consumer's clock.
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        client.backoff(&leader, 500);
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let delegate = Arc::new(AsyncMutex::new(NetworkClientDelegate::new(
+            &config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        )));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            Arc::clone(&delegate),
+            request_managers.clone(),
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+        let create_fetch_requests = || {
+            let mut guard = request_managers.lock().unwrap();
+            guard.fetch.as_mut().expect("fetch manager").create_fetch_requests()
+        };
+        let fetch_in_flight_to_leader = || {
+            let guard = request_managers.lock().unwrap();
+            let fetch = guard.fetch.as_ref().expect("fetch manager");
+            fetch.abstract_fetch().nodes_with_pending_fetch_requests.contains(&leader.id())
+        };
+
+        // Inside the backoff window: no fetch is built, and the request for
+        // fetch requests still completes (Java completes the future and
+        // returns an empty poll result).
+        for step in 0..5 {
+            let mut ack = create_fetch_requests();
+            thread.run_once().await;
+            assert!(
+                delegate.lock().await.is_unavailable(&leader, time.milliseconds()),
+                "step {step}: the delegate reports node 0 as unavailable"
+            );
+            assert!(
+                !fetch_in_flight_to_leader(),
+                "step {step}: Java's AbstractFetch.prepareFetchRequests skips a node that \
+                 NetworkClientDelegate.isUnavailable reports in reconnect backoff, but a fetch was built for it"
+            );
+            assert!(
+                matches!(ack.try_recv(), Ok(Ok(()))),
+                "step {step}: the createFetchRequests future completes successfully"
+            );
+            time.sleep(50);
+        }
+
+        // The backoff has elapsed: the node is connectable again, so the next
+        // poll builds the fetch (Java: `isUnavailable` is false once
+        // `connectionDelay` is 0).
+        time.sleep(500);
+        assert!(!delegate.lock().await.is_unavailable(&leader, time.milliseconds()));
+        let mut ack = create_fetch_requests();
+        thread.run_once().await;
+        assert!(
+            fetch_in_flight_to_leader(),
+            "once node 0's reconnect backoff has elapsed, the fetch to it must be built again"
+        );
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
     }
 
     /// COMMENTS.93 Issue 2: `run_once` Phase 5 consults the commit manager
@@ -3061,5 +3839,967 @@ mod tests {
         time.sleep(500);
         thread.run_once().await;
         assert_eq!(retry_backoff_ms, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+    }
+
+    /// Shared setup for the fetch-manager `run_once` / `cleanup` tests:
+    /// `num_nodes` brokers with node 0 leading `test-0`, which is assigned
+    /// with a validated position so it is fetchable, and a
+    /// `FetchRequestManager` over that state. Returns the partition, its
+    /// leader, the topic id and the manager.
+    fn fetchable_partition_on_node_0(
+        config: &ConsumerConfig,
+        subs: &Arc<Mutex<SubscriptionState>>,
+        metadata: &Arc<ConsumerMetadata>,
+        now_ms: i64,
+        num_nodes: i32,
+    ) -> (
+        crate::common::TopicPartition,
+        Node,
+        crate::common::Uuid,
+        crate::consumer::internals::FetchRequestManager,
+    ) {
+        let tp = crate::common::TopicPartition::new("test".to_string(), 0);
+        let topic_id = crate::common::Uuid::random_uuid();
+        metadata.add_transient_topics(HashSet::from(["test".to_string()]));
+        let response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
+            "dummy",
+            num_nodes,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([("test".to_string(), 1)]),
+            &|_tp| Some(0),
+            &std::collections::HashMap::from([("test".to_string(), topic_id)]),
+        );
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, now_ms);
+        let leader = metadata
+            .metadata_arc()
+            .fetch()
+            .leader_for(&tp)
+            .cloned()
+            .expect("node 0 leads test-0");
+        assert_eq!(0, leader.id());
+        {
+            let mut guard = subs.lock().unwrap();
+            guard.assign_from_user(HashSet::from([tp.clone()])).unwrap();
+            guard
+                .seek_validated(
+                    &tp,
+                    crate::consumer::internals::FetchPosition::with_leader(
+                        0,
+                        Some(0),
+                        crate::metadata::LeaderAndEpoch::new(Some(leader.clone()), Some(0)),
+                    ),
+                )
+                .unwrap();
+        }
+        let fetch = crate::consumer::internals::FetchRequestManager::new(
+            metadata.clone(),
+            subs.clone(),
+            crate::consumer::internals::FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            ),
+            Arc::new(crate::consumer::internals::FetchBuffer::new()),
+            Arc::new(crate::common::utils::internals::BufferSupplier::create()),
+            Arc::new(ApiVersions::new()),
+            crate::consumer::internals::FetchMetricsManager::for_test(),
+            config.retry_backoff_ms(),
+        );
+        (tp, leader, topic_id, fetch)
+    }
+
+    /// A `ConsumerNetworkThread` over a real `NetworkClientDelegate` wrapping
+    /// `client`, without membership. Returns the thread, its delegate and the
+    /// cached `maximumTimeToWait` it publishes.
+    fn mock_client_thread(
+        config: &ConsumerConfig,
+        subs: &Arc<Mutex<SubscriptionState>>,
+        metadata: &Arc<ConsumerMetadata>,
+        time: &Arc<MockTime>,
+        request_managers: &Arc<Mutex<RequestManagers>>,
+        client: MockClient,
+    ) -> (
+        ConsumerNetworkThread<MockClient>,
+        Arc<AsyncMutex<NetworkClientDelegate<MockClient>>>,
+        Arc<AtomicI64>,
+    ) {
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let delegate = Arc::new(AsyncMutex::new(NetworkClientDelegate::new(
+            config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        )));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            Arc::clone(&delegate),
+            request_managers.clone(),
+            None,
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+        (thread, delegate, cached_max_time_to_wait_ms)
+    }
+
+    /// COMMENTS c3-05 Issue 1: `run_once` Phase 5 consults the fetch manager
+    /// (Java's `entries()` includes it, `ConsumerNetworkThread.java:232-235`;
+    /// `RequestManagers::entries()` skips the fetch slot). Here it is the
+    /// binding minimum: no coordinator, commit, heartbeat or topic-metadata
+    /// manager, and the offsets manager reports `i64::MAX`. With no fetch in
+    /// flight, Java's `FetchRequestManager.maximumTimeToWait` returns
+    /// `retryBackoffMs` so the application thread re-evaluates subscription
+    /// state promptly (KAFKA-20854); with a fetch in flight, `Long.MAX_VALUE`.
+    /// Without the consult the published bound would be `i64::MAX` throughout.
+    #[tokio::test]
+    async fn run_once_maximum_time_to_wait_includes_the_fetch_manager() {
+        let config = make_config();
+        let retry_backoff_ms = config.retry_backoff_ms();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (_tp, leader, _topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            Some(fetch),
+        )));
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let (mut thread, _delegate, cached_max_time_to_wait_ms) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // No fetch in flight: the fetch manager's retry backoff is the bound.
+        thread.run_once().await;
+        assert_eq!(
+            retry_backoff_ms,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "Java's FetchRequestManager.maximumTimeToWait returns retryBackoffMs with no fetch in flight"
+        );
+
+        // A fetch is sent to node 0 and its response does not arrive: the
+        // fetch manager no longer bounds the wait.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        thread.run_once().await;
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .nodes_with_pending_fetch_requests
+                .contains(&leader.id()),
+            "the fetch to node 0 is in flight"
+        );
+        assert_eq!(
+            i64::MAX,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "Java's FetchRequestManager.maximumTimeToWait returns Long.MAX_VALUE with a fetch in flight"
+        );
+    }
+
+    /// Java `FetchRequestManagerTest.testFetcherCloseClosesFetchSessionsInBroker`,
+    /// driven through `ConsumerNetworkThread::cleanup` (Java's `runAtClose`
+    /// over `requestManagers.entries()`, `ConsumerNetworkThread.java:311-319`,
+    /// `:420`). A normal fetch establishes a session with node 0; closing then
+    /// sends node 0 a request carrying that session id, `FINAL_EPOCH` and no
+    /// partition data.
+    ///
+    /// Rust addition: node 1 also holds a session but is in reconnect backoff,
+    /// so its close request is skipped (`FetchRequestManager.pollOnClose` →
+    /// `AbstractFetch.prepareCloseFetchSessionRequests` skips a node for which
+    /// `isUnavailable(node)` holds, `AbstractFetch.java:403`).
+    #[tokio::test]
+    async fn test_fetcher_close_closes_fetch_sessions_in_broker() {
+        use crate::common::requests::{AbstractRequest, ConcreteResponse, FetchMetadata, FetchResponse};
+        use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, leader, topic_id, mut fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 2);
+        let backed_off = metadata
+            .metadata_arc()
+            .fetch()
+            .node_by_id(1)
+            .cloned()
+            .expect("node 1 is in the cluster");
+        let _ = fetch.abstract_fetch_mut().session_handler_or_create(backed_off.id());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        client.backoff(&backed_off, 500);
+        let session_id = 123;
+        let mut partition = RespPartitionData::new();
+        partition.set_partition_index(tp.partition());
+        partition.set_error_code(crate::common::protocol::Errors::None.code());
+        partition.set_high_watermark(100);
+        partition.set_last_stable_offset(100);
+        partition.set_log_start_offset(0);
+        partition.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+        let mut topic = FetchableTopicResponse::new();
+        topic.set_topic(tp.topic().to_string());
+        topic.set_topic_id(topic_id);
+        topic.set_partitions(vec![partition]);
+        let mut data = crate::FetchResponseData::new();
+        data.set_error_code(crate::common::protocol::Errors::None.code());
+        data.set_throttle_time_ms(0);
+        data.set_session_id(session_id);
+        data.set_responses(vec![topic]);
+        client.prepare_response(ConcreteResponse::Fetch(FetchResponse::new(data)));
+        let (mut thread, delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // Normal fetch: sent, answered, and its completion drained by the
+        // next `poll`, which establishes the session with node 0.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        let session_established = || {
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .session_handler(leader.id())
+                .is_some_and(|handler| handler.session_id() == session_id)
+        };
+        for _ in 0..50 {
+            thread.run_once().await;
+            if session_established() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(
+            session_established(),
+            "the fetch response establishes session {session_id} with node 0"
+        );
+        assert!(!delegate.lock().await.has_any_pending_requests());
+
+        // Java's `runAtClose(...)` followed by `networkClientDelegate.poll(...)`:
+        // `cleanup` builds the close requests and polls once (zero close
+        // timeout), sending them.
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        // A request built for a node marks it pending (Java's
+        // `createFetchRequest`). The delegate does not hand a request for a
+        // node in backoff to the client, so the pending set is where a
+        // wrongly built close request for node 1 shows.
+        {
+            let rm_guard = request_managers.lock().unwrap();
+            let pending = &rm_guard
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .nodes_with_pending_fetch_requests;
+            assert!(pending.contains(&leader.id()), "a close-session request is built for node 0");
+            assert!(
+                !pending.contains(&backed_off.id()),
+                "Java's AbstractFetch.prepareCloseFetchSessionRequests skips node 1, which isUnavailable \
+                 (reconnect backoff), but a close-session request was built for it"
+            );
+        }
+        let mut guard = delegate.lock().await;
+        let fetches: Vec<_> = guard
+            .client_for_test_mut()
+            .requests_mut()
+            .iter_mut()
+            .filter(|r| *r.api_key() == crate::common::protocol::ApiKeys::FETCH)
+            .collect();
+        assert_eq!(
+            1,
+            fetches.len(),
+            "exactly one close-session request is sent, to node 0; node 1 is in reconnect backoff"
+        );
+        let close = fetches.into_iter().next().unwrap();
+        assert_eq!(leader.id_string(), close.destination());
+        let AbstractRequest::Fetch(request) = close.request_builder_mut().build().expect("build the fetch request")
+        else {
+            panic!("a fetch request was sent");
+        };
+        // session Id is the same
+        assert_eq!(session_id, request.metadata().session_id());
+        // contains final epoch: it indicates we want to close the session
+        assert_eq!(FetchMetadata::FINAL_EPOCH, request.metadata().epoch());
+        // partition data should be empty
+        assert!(
+            request.data().topics().is_empty(),
+            "the close request carries no partition data"
+        );
+    }
+
+    /// Close-time request order, with the group coordinator also leading the
+    /// fetched partition (both on node 0). In Java an `OffsetCommit` still
+    /// pending at close is queued ahead of every request `runAtClose` builds:
+    /// `CommitRequestManager.poll` drains it while `closing`
+    /// (`drainPendingOffsetCommitRequests`), and `runAtClose` walks
+    /// `requestManagers.entries()`, where the commit manager precedes the
+    /// fetch manager (`RequestManagers` constructor,
+    /// `ConsumerNetworkThread.runAtClose`). Rust's `cleanup` sweeps the commit
+    /// manager's unsent commits itself, so that sweep must come before the
+    /// fetch manager's `pollOnClose` and the `OffsetCommit` must reach node 0
+    /// before the fetch-session close request.
+    #[tokio::test]
+    async fn cleanup_queues_the_offset_commit_before_the_fetch_session_close() {
+        use std::collections::HashMap;
+
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::{ConcreteResponse, FetchResponse};
+        use crate::consumer::OffsetAndMetadata;
+        use crate::consumer::internals::CommitRequestManager;
+        use crate::consumer::internals::CoordinatorRequestManager;
+        use crate::fetch_response_data::{FetchableTopicResponse, PartitionData as RespPartitionData};
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, leader, topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        // The coordinator is node 0, the leader of `test-0`.
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g".to_string()));
+        coordinator.set_coordinator_for_test(leader.clone());
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g".to_string(),
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+            0,
+        ));
+        commit.set_coordinator(coordinator.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(coordinator),
+            None,
+            Some(commit.clone()),
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let mut client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let session_id = 123;
+        let mut partition = RespPartitionData::new();
+        partition.set_partition_index(tp.partition());
+        partition.set_error_code(crate::common::protocol::Errors::None.code());
+        partition.set_high_watermark(100);
+        partition.set_last_stable_offset(100);
+        partition.set_log_start_offset(0);
+        partition.set_preferred_read_replica(FetchResponse::INVALID_PREFERRED_REPLICA_ID);
+        let mut topic = FetchableTopicResponse::new();
+        topic.set_topic(tp.topic().to_string());
+        topic.set_topic_id(topic_id);
+        topic.set_partitions(vec![partition]);
+        let mut data = crate::FetchResponseData::new();
+        data.set_error_code(crate::common::protocol::Errors::None.code());
+        data.set_throttle_time_ms(0);
+        data.set_session_id(session_id);
+        data.set_responses(vec![topic]);
+        client.prepare_response(ConcreteResponse::Fetch(FetchResponse::new(data)));
+        let (mut thread, delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        // A normal fetch establishes a session with node 0, so closing has a
+        // fetch session to close there.
+        let mut ack = request_managers
+            .lock()
+            .unwrap()
+            .fetch
+            .as_mut()
+            .expect("fetch manager")
+            .create_fetch_requests();
+        let session_established = || {
+            request_managers
+                .lock()
+                .unwrap()
+                .fetch
+                .as_ref()
+                .expect("fetch manager")
+                .abstract_fetch()
+                .session_handler(leader.id())
+                .is_some_and(|handler| handler.session_id() == session_id)
+        };
+        for _ in 0..50 {
+            thread.run_once().await;
+            if session_established() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(ack.try_recv(), Ok(Ok(()))));
+        assert!(session_established(), "the fetch response establishes a session with node 0");
+        assert!(!delegate.lock().await.has_any_pending_requests());
+        delegate.lock().await.client_for_test_mut().requests_mut().clear();
+
+        // An offset commit is still unsent when the consumer closes.
+        let mut offsets: HashMap<_, OffsetAndMetadata> = HashMap::new();
+        offsets.insert(tp.clone(), OffsetAndMetadata::new(42).expect("offset is non-negative"));
+        let _commit_rx = commit.commit_sync(offsets, i64::MAX, time.milliseconds());
+
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        let mut guard = delegate.lock().await;
+        let sent: Vec<(ApiKeys, String)> = guard
+            .client_for_test_mut()
+            .requests()
+            .iter()
+            .map(|r| (*r.api_key(), r.destination().to_string()))
+            .collect();
+        assert_eq!(
+            vec![
+                (ApiKeys::OFFSET_COMMIT, leader.id_string().to_string()),
+                (ApiKeys::FETCH, leader.id_string().to_string()),
+            ],
+            sent,
+            "Java queues the pending OffsetCommit ahead of the fetch-session close request \
+             (the commit manager precedes the fetch manager in RequestManagers.entries())"
+        );
+    }
+
+    /// Java's `ConsumerNetworkThread.cleanup` ends with
+    /// `closeQuietly(requestManagers, ...)`, after the final network poll, and
+    /// `RequestManagers.close` closes every `Closeable` entry: the fetch
+    /// manager's `AbstractFetch.close` closes the fetch buffer (dropping its
+    /// buffered data) and the decompression buffer supplier. The request
+    /// managers are shared with the application side, so their `Drop` does not
+    /// stand in for this close.
+    #[tokio::test]
+    async fn cleanup_closes_the_fetch_manager() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let (tp, _leader, _topic_id, fetch) =
+            fetchable_partition_on_node_0(&config, &subs, &metadata, time.milliseconds(), 1);
+        let fetch_buffer = Arc::clone(&fetch.abstract_fetch().fetch_buffer);
+        fetch_buffer.add(crate::consumer::internals::CompletedFetch::new(
+            tp,
+            crate::fetch_response_data::PartitionData::new(),
+        ));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(fetch),
+        )));
+        let client = MockClient::with_static_nodes(Vec::<Node>::new(), time.clone() as Arc<dyn Time>);
+        let (mut thread, _delegate, _cached) =
+            mock_client_thread(&config, &subs, &metadata, &time, &request_managers, client);
+
+        thread.set_close_timeout_ms(0);
+        thread.cleanup().await;
+
+        let rm_guard = request_managers.lock().unwrap();
+        assert!(rm_guard.is_closed());
+        assert!(
+            rm_guard.fetch.as_ref().expect("fetch manager").abstract_fetch().closed,
+            "Java's cleanup closes the request managers, and with them the fetch manager (AbstractFetch.close)"
+        );
+        assert!(
+            fetch_buffer.is_empty(),
+            "Java's AbstractFetch.close closes the fetch buffer, which drops its buffered data"
+        );
+    }
+
+    /// Audit finding C4-01 / KAFKA-18641, through the real `run_once`: the
+    /// background loop never starts the interval auto-commit on its own (Java's
+    /// `CommitRequestManager.poll` only drains queued requests), so records
+    /// the application is still processing are not committed behind its back.
+    /// The fix must not swing the other way either:
+    ///   - with the timer expired, the bound published to the application
+    ///     task (`cachedMaximumTimeToWait`) is 0, so a long `poll()` with no
+    ///     new records wakes and submits an `AsyncPollEvent`;
+    ///   - that event (`ApplicationEventProcessor.process(AsyncPollEvent)` →
+    ///     `updateTimerAndMaybeCommit`) starts exactly one auto-commit, which
+    ///     the following iterations send and do not duplicate.
+    #[tokio::test]
+    async fn run_once_auto_commits_only_on_the_application_poll_event() {
+        use crate::common::TopicPartition;
+        use crate::common::protocol::ApiKeys;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 300;
+        let retry_backoff_ms = config.retry_backoff_ms();
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        coordinator.set_coordinator_for_test(Node::new(1, "localhost".to_string(), 9092));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let cached_max_time_to_wait_ms = Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS));
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::clone(&cached_max_time_to_wait_ms),
+        );
+        // OffsetCommit requests handed to the network layer so far: still
+        // unsent in the delegate, or already sent to the mock client (which
+        // never answers them).
+        let offset_commits_staged = || async {
+            let guard = delegate.lock().await;
+            let unsent = guard
+                .unsent_requests()
+                .iter()
+                .filter(|r| r.request_builder().is_some_and(|b| b.api_key() == &ApiKeys::OFFSET_COMMIT))
+                .count();
+            let sent = guard
+                .client_for_test_ref()
+                .requests()
+                .iter()
+                .filter(|r| r.api_key() == &ApiKeys::OFFSET_COMMIT)
+                .count();
+            unsent + sent
+        };
+
+        thread.run_once().await;
+        assert_eq!(300, cached_max_time_to_wait_ms.load(Ordering::Acquire));
+
+        // The interval expires while the application is still processing the
+        // records of its last poll(): the background loop keeps running, but
+        // must not commit.
+        time.sleep(400);
+        for _ in 0..3 {
+            thread.run_once().await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            0,
+            offset_commits_staged().await,
+            "Java: the background loop never starts an auto-commit; only the application's poll()/assign() does"
+        );
+        assert_eq!(
+            0,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "the expired auto-commit timer must bound the application task's wait, so a long poll() wakes up"
+        );
+
+        // The application's poll loop submits an AsyncPollEvent.
+        let now_ms = time.milliseconds();
+        let event = ApplicationEvent::AsyncPoll {
+            deadline_ms: now_ms + 60_000,
+            poll_time_ms: now_ms,
+            state: Arc::new(AsyncPollState::new()),
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        // The event's processing runs on a spawned task; the auto-commit it
+        // enqueues is sent by a following iteration.
+        for _ in 0..16 {
+            thread.run_once().await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            1,
+            offset_commits_staged().await,
+            "the application poll event must start exactly one auto-commit"
+        );
+        assert_eq!(
+            300,
+            cached_max_time_to_wait_ms.load(Ordering::Acquire),
+            "starting the auto-commit resets the interval timer"
+        );
+    }
+
+    /// Audit finding C4-01 follow-up: in Java the network thread processes an
+    /// `AsyncPollEvent` (which starts the interval auto-commit through
+    /// `updateTimerAndMaybeCommit`) and then polls the request managers in the
+    /// same `runOnce`, so the OffsetCommit is sent immediately. In Rust the
+    /// event's work runs on a spawned task that can enqueue the auto-commit
+    /// after the bg loop already polled the commit manager; the commit manager
+    /// must then wake the loop, or the commit waits until something else ends
+    /// the network poll (up to `MAX_POLL_TIMEOUT_MS`).
+    ///
+    /// The network poll here never returns on its own (a socket wait with no
+    /// data, idle otherwise), and the commit manager is given the client's
+    /// wakeup handle exactly as the production constructor does, so only that
+    /// wake can get the commit out. The deadline is far below the 5 s max poll
+    /// timeout.
+    #[tokio::test]
+    async fn auto_commit_from_application_poll_event_is_sent_promptly() {
+        use crate::common::TopicPartition;
+        use crate::common::protocol::ApiKeys;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        config.enable_auto_commit = true;
+        config.auto_commit_interval_ms = 300;
+        let retry_backoff_ms = config.retry_backoff_ms();
+
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        let metadata = make_metadata(&config, subs.clone());
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let coordinator = Arc::new(crate::consumer::internals::CoordinatorRequestManager::new(
+            retry_backoff_ms,
+            config.retry_backoff_max_ms(),
+            "g",
+        ));
+        coordinator.set_coordinator_for_test(Node::new(1, "localhost".to_string(), 9092));
+        let commit = Arc::new(crate::consumer::internals::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g",
+            None,
+            time.clone() as Arc<dyn Time>,
+            time.milliseconds(),
+        ));
+        commit.set_coordinator(Arc::clone(&coordinator));
+        let counting_delegate = make_counting_delegate(&config, metadata.clone());
+        // The network poll blocks until woken, emulating an idle socket wait.
+        counting_delegate
+            .client_for_test_ref()
+            .poll_block()
+            .store(true, Ordering::SeqCst);
+        // The one wakeup primitive, taken from the delegate and installed in
+        // the commit manager exactly as the production constructor does.
+        let event_notify = counting_delegate.wakeup_handle();
+        commit.set_completion_notify(Arc::clone(&event_notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(Arc::clone(&coordinator)),
+            None,
+            Some(Arc::clone(&commit)),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // The interval has expired; the application calls poll(), whose
+        // `ApplicationEventHandler::add` enqueues the AsyncPoll event and pokes
+        // the wakeup handle.
+        time.sleep(400);
+        let now_ms = time.milliseconds();
+        let event = ApplicationEvent::AsyncPoll {
+            deadline_ms: now_ms + 60_000,
+            poll_time_ms: now_ms,
+            state: Arc::new(AsyncPollState::new()),
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        event_notify.notify_one();
+
+        // Drive the bg loop until the commit manager has handed the
+        // auto-commit to the network layer: the event reset the timer (so the
+        // wait bound is the full interval again) and nothing is left unsent in
+        // the commit manager. Then stop the loop between iterations — releasing
+        // the blocked poll with the wakeup handle, as `close()` does — rather
+        // than cancelling `run_once` mid-poll.
+        let stop = AtomicBool::new(false);
+        let mut handed_over = false;
+        // No yield between iterations: on this current-thread runtime the
+        // event's spawned task then runs only once the loop has polled the
+        // commit manager and parked in the network poll — the ordering in
+        // which the auto-commit is enqueued too late for this iteration.
+        let driver = async {
+            while !stop.load(Ordering::SeqCst) {
+                thread.run_once().await;
+            }
+        };
+        let watcher = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while tokio::time::Instant::now() < deadline {
+                let now_ms = time.milliseconds();
+                if commit.maximum_time_to_wait(now_ms) == 300 && commit.unsent_offset_commits_len_for_test() == 0 {
+                    handed_over = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            stop.store(true, Ordering::SeqCst);
+            event_notify.notify_one();
+        };
+        tokio::join!(driver, watcher);
+
+        assert!(
+            handed_over,
+            "Java sends the auto-commit in the same runOnce that processes the AsyncPollEvent; \
+             the bg loop must be woken to send it instead of waiting out the network poll"
+        );
+        let guard = delegate.lock().await;
+        let staged = guard
+            .unsent_requests()
+            .iter()
+            .filter(|r| r.request_builder().is_some_and(|b| b.api_key() == &ApiKeys::OFFSET_COMMIT))
+            .count()
+            + guard
+                .client_for_test_ref()
+                .inner
+                .requests()
+                .iter()
+                .filter(|r| r.api_key() == &ApiKeys::OFFSET_COMMIT)
+                .count();
+        assert_eq!(1, staged, "the application poll event must start exactly one auto-commit");
+    }
+
+    /// Audit finding C4-14: a lag monitor calling `end_offsets` on an
+    /// otherwise idle consumer. In Java the `ListOffsets` response is handled
+    /// in the request future's `whenComplete` on the network thread
+    /// (`OffsetsRequestManager.buildListOffsetsRequests`), so the call returns
+    /// one round trip later. In Rust a spawned forwarder queues the response
+    /// for the offsets manager's next `poll`; unless it wakes the bg loop, the
+    /// result waits until something else ends the network poll — up to
+    /// `MAX_POLL_TIMEOUT_MS` (5 s), so `end_offsets_with_timeout(tps, 2s)`
+    /// always timed out.
+    ///
+    /// The network poll here never returns on its own (a socket wait with no
+    /// data, idle otherwise) and the offsets manager is given the client's
+    /// wakeup handle exactly as the production constructor does, so only that
+    /// wake can complete the lookup. The deadline is far below the 5 s max
+    /// poll timeout.
+    #[tokio::test]
+    async fn list_offsets_event_completes_on_response_on_idle_background_task() {
+        use std::collections::HashMap;
+
+        use crate::ListOffsetsResponseData;
+        use crate::common::TopicPartition;
+        use crate::common::requests::{ConcreteResponse, ListOffsetsRequest, ListOffsetsResponse, RequestTestUtils};
+        use crate::consumer::internals::events::CompletableEventHandle;
+        use crate::list_offsets_response_data::{ListOffsetsPartitionResponse, ListOffsetsTopicResponse};
+
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        // `t1-0` has a known leader (node 0), so the lookup is sent at once.
+        metadata.add_transient_topics(HashSet::from(["t1".to_string()]));
+        let metadata_response = RequestTestUtils::metadata_update_with(1, &HashMap::from([("t1".to_string(), 1)]));
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&metadata_response, false, 0);
+        let tp = TopicPartition::new("t1".to_string(), 0);
+
+        // The broker answers the ListOffsets request with end offset 7.
+        let mut partition = ListOffsetsPartitionResponse::new();
+        partition.set_partition_index(0);
+        partition.set_timestamp(ListOffsetsResponse::UNKNOWN_TIMESTAMP);
+        partition.set_offset(7);
+        partition.set_leader_epoch(ListOffsetsResponse::UNKNOWN_EPOCH);
+        let mut topic = ListOffsetsTopicResponse::new();
+        topic.set_name("t1".to_string());
+        topic.set_partitions(vec![partition]);
+        let mut data = ListOffsetsResponseData::new();
+        data.set_topics(vec![topic]);
+        let mut mock = MockClient::with_static_nodes(Vec::<Node>::new(), Arc::new(mock_time(0)));
+        mock.prepare_response(ConcreteResponse::ListOffsets(ListOffsetsResponse::new(data)));
+        let client = CountingClient::new(mock);
+        // The network poll blocks until woken, emulating an idle socket wait.
+        client.poll_block().store(true, Ordering::SeqCst);
+        let (bg_tx, _bg_rx) = mpsc::unbounded_channel();
+        let counting_delegate = NetworkClientDelegate::new(
+            &config,
+            client,
+            metadata.metadata_arc(),
+            Arc::new(BackgroundEventHandler::new(bg_tx)),
+            false,
+        );
+        // The one wakeup primitive, taken from the delegate and installed in
+        // the offsets manager exactly as the production constructor does.
+        let event_notify = counting_delegate.wakeup_handle();
+        let offsets = make_offsets_manager(&config, subs.clone(), metadata.clone());
+        offsets.set_completion_notify(Arc::clone(&event_notify));
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(offsets),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let time: Arc<MockTime> = Arc::new(mock_time(1_000));
+        let processor = ApplicationEventProcessor::new(
+            request_managers.clone(),
+            metadata.clone(),
+            subs.clone(),
+            reaper.clone(),
+            time.clone(),
+        );
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn Time>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            WakeupTrigger::new(),
+            Arc::new(AtomicI64::new(NetThread::MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // The application calls `end_offsets([t1-0])`: its
+        // `ApplicationEventHandler::add` enqueues the ListOffsets event and
+        // pokes the wakeup handle.
+        let now_ms = time.milliseconds();
+        let (handle, mut result_rx) = CompletableEventHandle::new(now_ms + 60_000);
+        let event = ApplicationEvent::ListOffsets {
+            handle,
+            timestamps_to_search: HashMap::from([(tp.clone(), ListOffsetsRequest::LATEST_TIMESTAMP)]),
+            require_timestamps: false,
+        };
+        tx.send(ApplicationEventEnvelope { event, enqueued_ms: now_ms })
+            .expect("send ok");
+        event_notify.notify_one();
+
+        // Drive the bg loop until the lookup completes or the deadline passes,
+        // then stop it between iterations — releasing the blocked poll with
+        // the wakeup handle, as `close()` does — rather than cancelling
+        // `run_once` mid-poll.
+        let stop = AtomicBool::new(false);
+        let mut outcome = None;
+        let driver = async {
+            while !stop.load(Ordering::SeqCst) {
+                thread.run_once().await;
+            }
+        };
+        let watcher = async {
+            outcome = tokio::time::timeout(Duration::from_secs(1), &mut result_rx).await.ok();
+            stop.store(true, Ordering::SeqCst);
+            event_notify.notify_one();
+        };
+        tokio::join!(driver, watcher);
+
+        let offsets = outcome
+            .expect(
+                "Java completes the ListOffsets lookup when the response arrives; the response must wake \
+                 the bg loop instead of waiting out the network poll (up to MAX_POLL_TIMEOUT_MS)",
+            )
+            .expect("event handle dropped")
+            .expect("the lookup must succeed");
+        let end_offset = offsets.get(&tp).expect("entry for t1-0").as_ref().expect("an offset");
+        assert_eq!(7, end_offset.offset());
     }
 }
