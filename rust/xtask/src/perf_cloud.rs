@@ -2173,6 +2173,9 @@ fn run_info(options: &RunOptions) -> RunInfo {
         }
     }
     for (label, value) in [
+        // The machine first: report::MACHINE_FACTS lists these two.
+        ("Instance", env("SEMAPHORE_AGENT_MACHINE_TYPE")),
+        ("CPU", cpu()),
         ("Batch", options.batch.clone()),
         ("Agent AZ ID", env("AGENT_AZ_ID")),
         ("Cluster size", env("PERF_CLUSTER_SIZE")),
@@ -2194,6 +2197,17 @@ fn run_info(options: &RunOptions) -> RunInfo {
         facts,
         ingress_mb_s: ingress,
     }
+}
+
+/// This machine's CPU model and logical CPU count (`AMD EPYC 9R45, 16
+/// vCPUs`), from Linux's `/proc/cpuinfo`; `None` elsewhere.
+fn cpu() -> Option<String> {
+    let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let model = info
+        .lines()
+        .find_map(|l| l.strip_prefix("model name")?.split_once(':').map(|(_, m)| m.trim().to_string()))?;
+    let count = info.lines().filter(|l| l.starts_with("processor")).count();
+    Some(format!("{model}, {count} vCPUs"))
 }
 
 /// A command's standard output, trimmed, when it ran, succeeded and printed
