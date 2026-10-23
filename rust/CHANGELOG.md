@@ -5,7 +5,7 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
-## [Unreleased]
+## [0.3.0-beta.1] - 2026-10-23
 
 ### Producer
 
