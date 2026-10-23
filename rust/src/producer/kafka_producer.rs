@@ -6069,6 +6069,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig::new(true, 0, false, "").unwrap(),
+            default_time(),
             Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
             None,
         ));
