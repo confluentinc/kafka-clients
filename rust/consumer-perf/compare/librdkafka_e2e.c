@@ -23,7 +23,9 @@
  *      records are seen.
  *   2. Wait until partitions are assigned (rebalance_cb assign), settle to the
  *      live edge (poll until empty), THEN fork+exec kafka-producer-perf-test.sh
- *      at a fixed throughput (guarded so it spawns once).
+ *      at a fixed throughput (guarded so it spawns once), with the
+ *      compression.type given by --compression-type
+ *      (none|gzip|snappy|lz4|zstd; default: the producer's own).
  *   3. Poll loop; e2e latency per record = now_wallclock_ms -
  *      rd_kafka_message_timestamp(rkmessage, &tstype) (ms). Skip `warmup`
  *      records, then measure `duration` seconds.
@@ -240,6 +242,9 @@ typedef struct {
      * generator can authenticate (SASL_SSL etc.). Mirrors the Rust harness's
      * --client-config forwarding. NULL => plain bootstrap only. */
     const char *producer_config;
+    /* --compression-type: compression.type of the spawned load generator.
+     * NULL => its default. */
+    const char *compression_type;
 } args_t;
 
 /* ----------------------- producer spawn (fork+exec) -------------------- */
@@ -252,15 +257,20 @@ static pid_t spawn_producer(const args_t *a, int64_t total_records) {
              a->kafka_bin);
 
     char num_records[64], record_size[64], throughput[64], bootstrap_prop[512];
+    char compression_prop[64];
     snprintf(num_records, sizeof(num_records), "%lld", (long long)total_records);
     snprintf(record_size, sizeof(record_size), "%d", a->message_size);
     snprintf(throughput, sizeof(throughput), "%d", a->throughput);
     snprintf(bootstrap_prop, sizeof(bootstrap_prop), "bootstrap.servers=%s",
              a->bootstrap);
+    if (a->compression_type)
+        snprintf(compression_prop, sizeof(compression_prop),
+                 "compression.type=%s", a->compression_type);
 
     printf(">>> Launching producer: throughput=%d fixed msg/s, %d bytes, "
-           "~%lld records\n",
-           a->throughput, a->message_size, (long long)total_records);
+           "~%lld records, compression=%s\n",
+           a->throughput, a->message_size, (long long)total_records,
+           a->compression_type ? a->compression_type : "default");
     fflush(stdout);
 
     pid_t pid = fork();
@@ -301,6 +311,10 @@ static pid_t spawn_producer(const args_t *a, int64_t total_records) {
             argv[n++] = bootstrap_prop;
             argv[n++] = (char *)"acks=1";
         }
+        /* Both branches end with --producer-props, which takes every k=v after
+         * it. At most 14 entries + NULL, within argv[16]. */
+        if (a->compression_type)
+            argv[n++] = compression_prop;
         argv[n] = NULL;
         execv(bin_path, argv);
         perror("execv kafka-producer-perf-test.sh");
@@ -472,6 +486,7 @@ int main(int argc, char **argv) {
     a.extra_conf_n = 0;
     a.no_produce = 0;
     a.producer_config = NULL;
+    a.compression_type = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -532,7 +547,21 @@ int main(int argc, char **argv) {
             a.no_produce = 1;
         else if (!strcmp(arg, "--producer-config"))
             a.producer_config = NEXT();
-        else {
+        else if (!strcmp(arg, "--compression-type")) {
+            a.compression_type = NEXT();
+            /* The load generator's output is discarded, so reject a typo here. */
+            if (strcmp(a.compression_type, "none") &&
+                strcmp(a.compression_type, "gzip") &&
+                strcmp(a.compression_type, "snappy") &&
+                strcmp(a.compression_type, "lz4") &&
+                strcmp(a.compression_type, "zstd")) {
+                fprintf(stderr,
+                        "invalid --compression-type '%s' (expected one of: "
+                        "none, gzip, snappy, lz4, zstd)\n",
+                        a.compression_type);
+                return 2;
+            }
+        } else {
             fprintf(stderr, "unknown arg: %s\n", arg);
             return 2;
         }
