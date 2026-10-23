@@ -19,3 +19,24 @@ producer-basic-perf-python  python  producer-max-1kb-200p producer-max-1kb-36p-l
 # a low load, then the high load with fetches tuned for throughput. 3 tests:
 # ~7 h 24 min at 5 + 30 min per client.
 consumer-basic-perf-python  python  consumer-fixed-250k-1kb-200p-librdkafka-poll consumer-fixed-500-10kb-200p-librdkafka-poll consumer-fixed-250k-1kb-200p-fetch-tuned
+
+# The Rust GA and Python Preview performance test plan (Confluence: "Rust GA
+# & Python Preview — Performance Test Plan"), in 7 batches, each its own
+# pipeline run. Times at 5 + 30 min per client (~37 min with setup).
+
+# Rust GA producer, 2 × 8 tests: ~14 h 48 min each.
+rust-ga-producer-1  rust  producer-fixed-500k-1kb-200p producer-fixed-100k-1kb-200p producer-max-1kb-200p producer-max-100b-200p producer-max-100kb-200p producer-max-1kb-200p-key100b producer-max-1kb-200p-acks0 producer-max-1kb-200p-acks1
+rust-ga-producer-2  rust  producer-max-10kb-36p-gzip producer-max-10kb-36p-lz4 producer-max-10kb-36p-zstd producer-max-10kb-36p-snappy producer-max-1kb-36p-idempotent producer-max-1kb-200p-idempotent txn-max-1kb-200p-1000rpt txn-max-1kb-200p-1000rpt-abort50
+
+# Rust GA consumer, 9 tests: ~16 h 39 min.
+rust-ga-consumer  rust  consumer-fixed-300k-1kb-36p consumer-fixed-300k-1kb-200p consumer-fixed-5k-1kb-36p consumer-fixed-5k-1kb-200p consumer-fixed-250-100kb-36p consumer-fixed-30k-10kb-36p-gzip consumer-fixed-30k-10kb-36p-lz4 consumer-fixed-30k-10kb-36p-zstd consumer-fixed-30k-10kb-36p-snappy
+
+# Python Preview producer, 9 + 8 tests: ~22 h 12 min and ~19 h 44 min. The
+# first is the longest batch of the plan; its last test (acks=1) is the one a
+# slow start would cut.
+python-preview-producer-1  python  producer-max-1kb-200p producer-max-100b-200p producer-max-100kb-200p producer-fixed-100k-1kb-200p producer-max-10kb-36p-gzip producer-max-10kb-36p-lz4 producer-max-10kb-36p-zstd producer-max-10kb-36p-snappy producer-max-1kb-200p-acks1
+python-preview-producer-2  python  producer-max-1kb-36p-idempotent producer-max-1kb-200p-idempotent producer-max-1kb-200p-acks0 producer-max-1kb-200p-key100b txn-max-1kb-200p-100rpt txn-max-1kb-200p-1000rpt txn-max-1kb-200p-10000rpt txn-max-1kb-200p-1000rpt-abort50
+
+# Python Preview consumer, 2 × 7 tests: ~17 h 16 min each.
+python-preview-consumer-1  python  consumer-fixed-150k-1kb-36p-librdkafka-poll consumer-fixed-150k-1kb-200p-librdkafka-poll consumer-fixed-5k-1kb-36p-librdkafka-poll consumer-fixed-5k-1kb-200p-librdkafka-poll consumer-fixed-500-10kb-36p-librdkafka-poll consumer-fixed-500-10kb-200p-librdkafka-poll consumer-fixed-150k-100b-36p-librdkafka-poll
+python-preview-consumer-2  python  consumer-fixed-150k-100b-200p-librdkafka-poll consumer-fixed-150k-1kb-36p-fetch-tuned consumer-fixed-150k-1kb-200p-fetch-tuned consumer-fixed-15k-10kb-36p-gzip-librdkafka-poll consumer-fixed-15k-10kb-36p-lz4-librdkafka-poll consumer-fixed-15k-10kb-36p-zstd-librdkafka-poll consumer-fixed-15k-10kb-36p-snappy-librdkafka-poll
