@@ -25,6 +25,7 @@ use super::LogDirDescription;
 /// The result of the `Admin::describe_log_dirs` call.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeLogDirsResult`.
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeLogDirsResult")]
 pub struct DescribeLogDirsResult {
     futures: HashMap<i32, KafkaFuture<HashMap<String, LogDirDescription>>>,

@@ -215,10 +215,10 @@ rust/src/common/
 ├── internals/      # KafkaFutureImpl, Topic, PartitionStates,
 │                   # ClusterResourceListeners
 ├── feature/, header/, memory/, utils/
-├── error.rs        # Error enum (166 variants) + ErrorHierarchy predicates
+├── error.rs        # Error enum (168 variants) + ErrorHierarchy predicates
 ├── kafka_error.rs  # KafkaError struct (Java's KafkaException)
-├── local_{illegal_argument,illegal_state,concurrent_modification,
-│   timeout}_error.rs, invalid_record_error.rs
+├── local_{illegal_argument,illegal_state,unsupported_operation,
+│   concurrent_modification,timeout}_error.rs, invalid_record_error.rs
 └── node.rs, cluster.rs, topic_partition.rs, topic_id_partition.rs,
     topic_partition_info.rs, topic_partition_replica.rs,
     topic_collection.rs, uuid.rs, kafka_future.rs,

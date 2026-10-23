@@ -33,17 +33,18 @@ pub(crate) fn box_quota(quota: Quota) -> *mut kafka_common_metrics_Quota_t {
     Box::into_raw(Box::new(quota)) as *mut kafka_common_metrics_Quota_t
 }
 
-/// The quota behind a handle (`Quota` is `Copy`).
+/// The quota behind a handle, borrowed.
 ///
 /// # Safety
 ///
-/// `quota` must be a valid quota handle.
-pub(crate) unsafe fn quota_of(quota: *const kafka_common_metrics_Quota_t) -> Quota {
+/// `quota` must be a valid quota handle, an owned one not destroyed, or a
+/// view not invalidated, while the returned reference is used.
+pub(crate) unsafe fn quota_of<'a>(quota: *const kafka_common_metrics_Quota_t) -> &'a Quota {
     // SAFETY: Per this function's `# Safety`, `quota` is a valid quota handle, i.e. the
-    // `Box::into_raw` of a `Quota` in `box_quota` (every quota handle is owned: no view of this
-    // type is handed out), so it points at a live, initialised `Quota`, which is `Copy` and read
-    // out here.
-    unsafe { *(quota as *const Quota) }
+    // `Box::into_raw` of a `Quota` in `box_quota`, or the view of a metric config's `Quota` that
+    // `kafka_common_metrics_MetricConfig_quota` hands out, so it points at a live, initialised
+    // `Quota`, borrowed for as long as the caller keeps the handle valid.
+    unsafe { &*(quota as *const Quota) }
 }
 
 /// `new Quota(double bound, boolean upper)`. Owned, freed with
@@ -77,7 +78,7 @@ pub extern "C" fn kafka_common_metrics_Quota_lower_bound(lower_bound: f64) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_is_upper_bound(self_: *const kafka_common_metrics_Quota_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid quota handle, as `quota_of`
-    // requires; the `Copy` quota is read out, so the borrow lasts for this call only.
+    // requires; the quota is read through a borrow that lasts for this call only.
     unsafe { quota_of(self_) }.is_upper_bound() as i8
 }
 
@@ -90,7 +91,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_is_upper_bound(self_: *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_bound(self_: *const kafka_common_metrics_Quota_t) -> f64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid quota handle, as `quota_of`
-    // requires; the `Copy` quota is read out, so the borrow lasts for this call only.
+    // requires; the quota is read through a borrow that lasts for this call only.
     unsafe { quota_of(self_) }.bound()
 }
 
@@ -106,7 +107,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_acceptable(
     value: f64,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid quota handle, as `quota_of`
-    // requires; the `Copy` quota is read out, so the borrow lasts for this call only.
+    // requires; the quota is read through a borrow that lasts for this call only.
     unsafe { quota_of(self_) }.acceptable(value) as i8
 }
 
@@ -121,7 +122,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_to_string(
     self_: *const kafka_common_metrics_Quota_t,
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid quota handle, as `quota_of`
-    // requires; the `Copy` quota is read out, so the borrow lasts for this call only. The string is
+    // requires; the quota is read through a borrow that lasts for this call only. The string is
     // copied into an owned C string.
     into_c_string(&unsafe { quota_of(self_) }.to_string())
 }
@@ -172,7 +173,7 @@ mod tests {
             kafka_common_metrics_Quota_destroy(lower);
 
             let built = kafka_common_metrics_Quota_new(3.0, 0);
-            assert_eq!(quota_of(built), Quota::new(3.0, false));
+            assert_eq!(*quota_of(built), Quota::new(3.0, false));
             kafka_common_metrics_Quota_destroy(built);
             kafka_common_metrics_Quota_destroy(ptr::null_mut());
         }

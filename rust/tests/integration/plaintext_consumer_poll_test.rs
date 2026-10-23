@@ -251,8 +251,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer")
 }
@@ -704,8 +704,8 @@ async fn test_async_consumer_max_poll_records() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.records", &max_poll_records.to_string())]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -753,8 +753,8 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // max.poll.interval.ms=5000 + sleep 7s (still > interval).
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "5000")]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -983,8 +983,8 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
             &group_id,
             &[("max.poll.interval.ms", "5000"), ("enable.auto.commit", "false")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -1179,8 +1179,8 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
             &group_id,
             &[("max.poll.interval.ms", "5000"), ("enable.auto.commit", "false")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -1219,8 +1219,8 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("max.poll.interval.ms", "1000")]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -1296,8 +1296,8 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -1367,8 +1367,8 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, &group_id, &[("auto.offset.reset", "none")]),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -1482,8 +1482,8 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
             &group_id,
             &[("max.poll.interval.ms", "1000"), ("enable.auto.commit", "false")],
         ),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 

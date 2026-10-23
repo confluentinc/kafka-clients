@@ -53,14 +53,14 @@ unguarded methods are `metrics()`, `wakeup()` (cross-thread by design),
 The last three are not translated yet: when one is, it takes `&self` and is
 added to the allowlist of `cargo xtask lint-custom`
 (`check-consumer-receiver`). The Rust-only `handle()` also takes `&self`: it
-hands out the `ConsumerHandle` (§31; Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md`), the one cross-thread path into the
+hands out the `ConsumerHandle` (§31, §41), the one cross-thread path into the
 consumer. The lint fails on any other `Consumer` / `DynConsumer` method taking
 `&self`. (`enforceRebalance` is unguarded in `AsyncKafkaConsumer` but guarded
 in `ClassicKafkaConsumer`, so it takes `&mut self`.)
 
 On `KafkaConsumer`, misuse of the guarded sync getters is a programming bug,
-so it panics with Java's message instead of returning a `Result` (the
-precedent is "precondition throws stay panics"): a closed consumer panics with
+so it panics with Java's message instead of returning a `Result`, per
+CLAUDE.md §12.5 (Panics policy): a closed consumer panics with
 `"This consumer has already been closed."`, and `group_metadata()` without
 `group.id` with `InvalidGroupIdException`'s message. Each getter documents its
 panic under `# Panics`. `current_lag` is already async and fallible, so on a
@@ -175,15 +175,16 @@ with a sealed, dyn-compatible `DynConsumer<K, V>` companion — the same shape a
     impl<K, V> KafkaConsumer<K, V> {
         pub fn new(
             config: ConsumerConfig,
-            key_deserializer: Box<dyn Deserializer<K>>,
-            value_deserializer: Box<dyn Deserializer<V>>,
+            key_deserializer: Box<dyn DynDeserializer<K>>,
+            value_deserializer: Box<dyn DynDeserializer<V>>,
         ) -> Result<Self, Error> {
             match GroupProtocol::of(config.group_protocol())? {
                 GroupProtocol::Consumer => Ok(Self {
                     delegate: AsyncKafkaConsumer::<K, V>::new(
                         config, key_deserializer, value_deserializer)?,
+                    not_sync: PhantomData,
                 }),
-                GroupProtocol::Classic => Err(Error::unsupported_version(
+                GroupProtocol::Classic => Err(Error::local_unsupported_operation(
                     "Classic group protocol is not yet supported in this client; \
                      set group.protocol=consumer (KIP-848).",
                 )),
@@ -203,7 +204,7 @@ Implementations:
     (§20): with a single delegate the field is `AsyncKafkaConsumer` directly.
   - `AsyncKafkaConsumer<K, V>` — KIP-848 consumer. It lives in
     `consumer.internals`, so it is `pub(crate)`: users reach it only through
-    `KafkaConsumer`. `ConsumerHandle` (§31; Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md`), declared in the same file, is
+    `KafkaConsumer`. `ConsumerHandle` (§31, §41), declared in the same file, is
     a Rust-only type with no Java class; it stays public through its
     `#[doc(alias = "rust-only")]` tag (`cargo xtask lint-custom`), because listeners need it for
     in-callback reentrancy.
@@ -226,13 +227,16 @@ Java's consumer is single-threaded and enforces it at runtime with
 methods (§1) rules out concurrent calls through one reference, and `!Sync`
 rules out sharing `&KafkaConsumer` across threads, so an accidental `Sync`
 (every field happening to be `Sync`) cannot let the `&self` methods race the
-others. `KafkaConsumer` holds a zero-sized `PhantomData<Cell<()>>` marker for
-this; no new dependency. A task that must reach the consumer from another
-thread (to wake it, or from a listener) goes through `consumer.handle()`.
-Unit tests in `kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs`
-pin the auto traits through the `test_thread_safety` probe, two
-`compile_fail` doc tests on `KafkaConsumer` pin `!Sync` and the `&mut self`
-getter, and `check-consumer-receiver` (§1) pins the receivers.
+others. `KafkaConsumer` and `MockConsumer` each hold a zero-sized
+`PhantomData<Cell<()>>` marker for this; no new dependency. They are the only
+`!Sync` public types: every other one is `Send + Sync` (CLAUDE.md §3, "Super
+and auto traits"). A task that must reach the consumer from another thread (to
+wake it, or from a listener) goes through `consumer.handle()`. Unit tests in
+`kafka_consumer.rs`, `mock_consumer.rs` and `dyn_consumer.rs` pin the auto
+traits through the `test_thread_safety` probe, `rust/src/api_promises.rs` pins
+them for the whole public API (`check-thread-safety-probe` keeps it complete),
+`compile_fail` doc tests on both consumers pin `!Sync` and on `KafkaConsumer`
+the `&mut self` getter, and `check-consumer-receiver` (§1) pins the receivers.
 
 When the classic protocol is added, `KafkaConsumer`'s field becomes a private
 enum over the two delegates and `KafkaConsumer::new` gains a new arm; the
@@ -290,11 +294,14 @@ rebalance or commit.
 **Do NOT use `#[async_trait]` for:**
 
   - `Consumer<K, V>` itself (see above).
-  - `Deserializer<T>` / `Serializer<T>` — per-record; their methods are
-    `async fn` in the trait, returning `impl Future` without a box
-    (`fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8]) -> impl
-    Future<Output = Result<T, Error>> + Send + 'a`), and their dyn-compatible
-    companions `DynDeserializer` / `DynSerializer` return an `InlineFuture`.
+  - `Deserializer<T>` / `Serializer<T>` — per-record traits. They are async
+    traits whose methods return `impl Future + Send` (CLAUDE.md §3,
+    `check-send-future`), each with a sealed dyn-compatible companion
+    (`DynDeserializer<T>`, `DynSerializer<T>`) that returns an `InlineFuture`
+    (`rust/src/common/serialization/inline_future.rs`): the future is stored in
+    a fixed buffer inside the value, so a client holding its serdes as trait
+    objects pays no allocation per key and per value; only a future too large
+    or too strictly aligned for that buffer is boxed, once per call.
   - `ConsumerInterceptor<K, V>` — per-batch but with per-record processing
     inside; keep generic dispatch (`<I: ConsumerInterceptor<K, V>>`) where
     feasible.
@@ -547,6 +554,12 @@ Match Java behavior. Specifically:
   - `enforce_rebalance_with_reason(reason)`: match Java's `AsyncKafkaConsumer`
     behavior (Java javadoc says it is classic-only; the AsyncKafkaConsumer
     implementation is the source of truth for the exact exception type).
+  - `group.protocol=classic`: `KafkaConsumer::new` returns a
+    `LocalUnsupportedOperationError` (`Error::local_unsupported_operation`),
+    Java's `UnsupportedOperationException`, the class `ClassicKafkaConsumer`
+    throws for a protocol feature it does not support
+    (`ClassicKafkaConsumer.java:544,550`). Not an `UnsupportedVersionError`:
+    that is the broker-version API error.
 
 **Future compatibility:**
 
@@ -567,7 +580,7 @@ send path. The symmetric rule on the receive path:
     decoded output (`T` for key, `T` for value). That allocation is
     unavoidable; it is the user's choice of type.
 
-**`Deserializer<T>` trait shape:**
+**`Deserializer<T>` trait shape** (`rust/src/common/serialization/deserializer.rs`):
 
     pub trait Deserializer<T>: Send + Sync + 'static {
         fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8])
@@ -578,15 +591,27 @@ send path. The symmetric rule on the receive path:
             headers: &'a RecordHeaders,
             data: &'a [u8],
         ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
-            let _ = headers;
-            self.deserialize(topic, data)
+            self.deserialize(topic, data) // Java default
         }
+        // KIP-863: the record's slice of the fetch buffer itself, so a
+        // deserializer can keep it without copying (`BytesDeserializer`).
+        fn deserialize_with_headers_bytes<'a>(
+            &'a self,
+            topic: &'a str,
+            headers: &'a RecordHeaders,
+            data: &'a Bytes,
+        ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
+            self.deserialize_with_headers(topic, headers, &data[..]) // Java default
+        }
+        fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool)
+            -> impl Future<Output = ()> + Send + 'a { /* no-op */ }
+        fn close(&mut self) -> impl Future<Output = ()> + Send { /* no-op */ }
     }
 
-An `async fn` in the trait (`impl Future`, no box). No `#[async_trait]`.
-`data: &[u8]` borrowed from the fetch buffer. Code holding a deserializer of
-any type uses the dyn-compatible `DynDeserializer`, whose futures are
-`InlineFuture`s, so a call through `dyn` allocates nothing per record for a future that fits `InlineFuture`'s buffer.
+Async methods returning `impl Future + Send`; no `#[async_trait]`. `data` is
+borrowed from the fetch buffer. The consumer calls its deserializers through
+`DynDeserializer<T>`, whose `InlineFuture` keeps the per-record call free of a
+boxed future (§2).
 
 **Compression handling:**
 
@@ -830,16 +855,14 @@ The mechanism mirrors Java's bidirectional event handshake
   - `OffsetCommitCallback` follows the same pattern: bg-side completion
     enqueues a callback-needed event; app-side drains and invokes.
   - **In-callback reentrancy:** a listener that calls back into the
-    consumer (`assign`/`seek`/`pause`/`resume`/`position`/`committed`/
+    consumer (`seek`/`pause`/`resume`/`position`/`committed`/
     `beginning_offsets`/`commit_*`) does so through a captured
-    [`ConsumerHandle`] (Phase 41, `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md` — the Rust equivalent of Java capturing the
+    [`ConsumerHandle`] (§41 — the Rust equivalent of Java capturing the
     `consumer` variable; the listener trait signature stays Java-identical,
     taking only `&self` + partitions). This only works because the bg loop
     is not frozen during the callback (step 2 above) — for `on_partitions_lost`
     fired by fence/fatal/stale as well as for the reconcile callbacks.
-    (`ConsumerHandle::assign` with an EMPTY collection is rejected with a
-    clear error: on the owning consumer `assign([])` leaves the group, which
-    the handle does not expose — Phase 41, Issue 4.)
+    The handle has no `assign`, `subscribe` or `unsubscribe` (KIP-1306, §41).
 
 **`ConsumerRebalanceListener` trait shape:**
 
@@ -912,3 +935,27 @@ them:
      block the listener on a channel held by the test, observe that the
      membership state machine has not advanced, release the channel,
      observe advancement.
+
+## 41. `ConsumerHandle`: the KIP-1306 callback view, plus `wakeup`
+
+`ConsumerHandle` (`rust/src/consumer/internals/async_kafka_consumer.rs`, public
+through `#[doc(alias = "rust-only")]`) is the `Send + Sync` handle that
+`Consumer::handle()` hands out. A listener or commit callback runs inside the
+caller's `poll()`, which holds the consumer `&mut`, so it calls back into the
+consumer through this `&self` handle (§31).
+
+Its public methods are the `Consumer` methods of KIP-1306's (KAFKA-20385)
+`RebalanceConsumer`: the `Consumer` trait minus `poll`, `close`, every
+`subscribe`, `unsubscribe`, `assign`, `enforce_rebalance`, the
+metric-subscription methods, `subscription()` and `metrics()`, plus `wakeup`.
+Java has no need to put `wakeup()` on the callback view, since another thread
+calls it on the consumer object; in Rust the `&mut self` consumer cannot be
+shared, so the handle is the only cross-thread path for Java's `wakeup()`
+contract.
+
+**How to apply:** each handle method takes `&self` and the trait method's
+parameters and returns the trait method's type (`impl Future<Output = R> + Send`
+for an async one); none of the excluded methods, nor an overload of one, is a
+`pub fn` of the handle; and no handle-only name is added. `cargo xtask
+lint-custom` (`check-consumer-handle`) enforces all three. A `pub(crate)` method
+is not checked (the C binding reads `metrics()` through one).

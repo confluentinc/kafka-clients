@@ -21,7 +21,7 @@
 //! 4. SASL authentication failure with wrong credentials
 //! 5. SASL unsupported mechanism rejection
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use crate::admin::AdminClientConfig;
@@ -31,6 +31,7 @@ use crate::common::network::SaslChannelBuilder;
 use crate::common::network::Selectable;
 use crate::common::network::Selector;
 use crate::common::network::SslChannelBuilder;
+use crate::common::network::channel_state::State;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ConcreteResponse;
@@ -73,43 +74,52 @@ fn client_config(props: &[(&str, &str)]) -> AdminClientConfig {
     AdminClientConfig::new(&map).unwrap()
 }
 
-/// Helper: SSL config trusting `ca_cert_pem`, hostname verification disabled
-/// (tests connect via 127.0.0.1).
-fn ssl_configs(ca_cert_pem: &str) -> SslConfigs {
-    client_config(&[
-        (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, ca_cert_pem),
-        (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
-    ])
-    .ssl_config()
-    .clone()
+/// Helper: a client config whose SSL config trusts `ca_cert_pem`, hostname
+/// verification disabled (tests connect via 127.0.0.1).
+fn ssl_client_config(ca_cert_pem: &str) -> AdminClientConfig {
+    ssl_client_config_with(ca_cert_pem, &[])
 }
 
-/// Helper: SASL config for `mechanism` with credentials in `sasl.jaas.config`.
-fn sasl_configs(mechanism: &str, login_module: &str, username: &str, password: &str) -> SaslConfigs {
+/// Helper: [`ssl_client_config`] plus the `extra` properties.
+fn ssl_client_config_with(ca_cert_pem: &str, extra: &[(&str, &str)]) -> AdminClientConfig {
+    let mut props = vec![
+        (SslConfigs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG, ca_cert_pem),
+        (SslConfigs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG, ""),
+    ];
+    props.extend_from_slice(extra);
+    client_config(&props)
+}
+
+/// Helper: a client config whose SASL config uses `mechanism` with
+/// credentials in `sasl.jaas.config`.
+fn sasl_client_config(mechanism: &str, login_module: &str, username: &str, password: &str) -> AdminClientConfig {
     let jaas = format!("{login_module} required username=\"{username}\" password=\"{password}\";");
     client_config(&[
         (SaslConfigs::SASL_MECHANISM, mechanism),
         (SaslConfigs::SASL_JAAS_CONFIG, &jaas),
     ])
-    .sasl_config()
-    .clone()
 }
 
 const PLAIN_LOGIN_MODULE: &str = "org.apache.kafka.common.security.plain.PlainLoginModule";
 
 /// Helper: create a Selector with SslChannelBuilder.
 fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
-    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
+    create_ssl_selector_with(ca_cert_pem, &[])
+}
+
+/// Helper: [`create_ssl_selector`] with the `extra` `ssl.*` properties.
+fn create_ssl_selector_with(ca_cert_pem: &str, extra: &[(&str, &str)]) -> Selector {
+    let ssl_factory = SslFactory::new(ssl_client_config_with(ca_cert_pem, extra).ssl_config()).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
     Selector::with_defaults(Selector::NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
 fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
-    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
-        sasl_config,
+        sasl_config.sasl_config(),
         None,
         None,
         "integration-test",
@@ -121,11 +131,11 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
-    let ssl_factory = SslFactory::new(&ssl_configs(ca_cert_pem)).unwrap();
-    let sasl_config = sasl_configs("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let ssl_factory = SslFactory::new(ssl_client_config(ca_cert_pem).ssl_config()).unwrap();
+    let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslSsl,
-        sasl_config,
+        sasl_config.sasl_config(),
         Some(ssl_factory),
         None,
         "integration-test",
@@ -244,6 +254,113 @@ async fn test_ssl_connection() {
     selector.close().await;
 }
 
+/// Helper: connects `selector` to `addr` and checks that the channel serves an
+/// `ApiVersions` request.
+async fn assert_serves_api_versions(selector: &mut Selector, addr: SocketAddr) {
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_ready(selector, NODE_ID).await;
+    let mut builder = api_versions_request::Builder::new();
+    let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
+    selector.send(send).expect("Failed to queue send");
+    poll_until_receive(selector).await;
+    let receives = selector.completed_receives();
+    assert_eq!(1, receives.len());
+    let response = parse_response(receives[0].payload().unwrap(), &header);
+    let ConcreteResponse::ApiVersions(ref avr) = response else {
+        panic!("Expected ApiVersions response, got: {response}");
+    };
+    assert_eq!(avr.data().error_code(), Errors::None.code());
+}
+
+/// Helper: connects `selector` to `addr` and checks that the TLS handshake
+/// fails: the channel is disconnected in the `AUTHENTICATION_FAILED` state,
+/// never ready, within [`MAX_POLL_ITERATIONS`] polls.
+async fn assert_handshake_fails(selector: &mut Selector, addr: SocketAddr) {
+    selector
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .await
+        .expect("Failed to connect");
+    poll_until_disconnected(selector).await;
+    assert!(!selector.is_channel_ready(NODE_ID));
+    let state = selector.disconnected().get(NODE_ID).expect("the channel is disconnected");
+    assert_eq!(state.state(), State::AuthenticationFailed, "{state:?}");
+}
+
+/// Test: `ssl.cipher.suites` reaches the handshake.
+///
+/// The broker certificate is ECDSA (`rcgen`'s default key), so a TLS 1.2
+/// `ECDHE_ECDSA` suite completes the handshake and serves a request, while a
+/// list holding only an `ECDHE_RSA` suite has no suite the broker can use with
+/// that certificate and the handshake fails.
+#[tokio::test]
+async fn test_ssl_connection_with_protocol_and_cipher_suites() {
+    let ctx = TestContext::new(ClusterConfig::default()).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
+    let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"),
+        ],
+    );
+    assert_serves_api_versions(&mut selector, addr).await;
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
+        ],
+    );
+    assert_handshake_fails(&mut selector, addr).await;
+    selector.close().await;
+}
+
+/// Test: `ssl.protocol` selects the default protocols and cipher suites, as
+/// JSSE's `SSLContext.getInstance(ssl.protocol)` does, against a broker whose
+/// SSL listener allows TLS 1.3 only
+/// (`listener.name.tlsonly.ssl.enabled.protocols=TLSv1.3`):
+///
+/// - `TLSv1.2` with the default suites cannot use TLS 1.3, so the handshake
+///   fails (Java: `No appropriate protocol`);
+/// - `TLSv1.2` with a TLS 1.3 suite in `ssl.cipher.suites` uses TLS 1.3 and
+///   connects, as Java does;
+/// - `TLSv1.3` (the default) connects.
+#[tokio::test]
+async fn test_ssl_protocol_against_tls13_only_listener() {
+    let props = BTreeMap::from([(
+        "KAFKA_LISTENER_NAME_TLSONLY_SSL_ENABLED_PROTOCOLS".to_string(),
+        "TLSv1.3".to_string(),
+    )]);
+    let ctx = TestContext::new(ClusterConfig::default().set_server_properties(props)).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
+    let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
+
+    let mut selector = create_ssl_selector_with(ca_cert_pem, &[(SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2")]);
+    assert_handshake_fails(&mut selector, addr).await;
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(
+        ca_cert_pem,
+        &[
+            (SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.2"),
+            (SslConfigs::SSL_CIPHER_SUITES_CONFIG, "TLS_AES_128_GCM_SHA256"),
+        ],
+    );
+    assert_serves_api_versions(&mut selector, addr).await;
+    selector.close().await;
+
+    let mut selector = create_ssl_selector_with(ca_cert_pem, &[(SslConfigs::SSL_PROTOCOL_CONFIG, "TLSv1.3")]);
+    assert_serves_api_versions(&mut selector, addr).await;
+    selector.close().await;
+}
+
 /// Test: SASL_PLAINTEXT connection — SASL handshake, auth, metadata fetch.
 #[tokio::test]
 async fn test_sasl_plaintext_connection() {
@@ -337,7 +454,7 @@ async fn test_sasl_wrong_credentials() {
 /// a SCRAM handshake.
 #[tokio::test]
 async fn test_sasl_unsupported_mechanism() {
-    let sasl_config = sasl_configs(
+    let sasl_config = sasl_client_config(
         "SCRAM-SHA-256",
         "org.apache.kafka.common.security.scram.ScramLoginModule",
         SASL_USERNAME,
@@ -345,7 +462,7 @@ async fn test_sasl_unsupported_mechanism() {
     );
     let error = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
-        sasl_config,
+        sasl_config.sasl_config(),
         None,
         None,
         "integration-test",

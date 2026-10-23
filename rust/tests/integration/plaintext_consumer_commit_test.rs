@@ -189,12 +189,8 @@ fn make_consumer_config_bytes(
 
 fn new_bytes_consumer(config: ConsumerConfig) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
     Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            config,
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
-        )
-        .expect("KafkaConsumer::new should succeed"),
+        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(config, ByteArrayDeserializer, ByteArrayDeserializer)
+            .expect("KafkaConsumer::new should succeed"),
     )
 }
 
@@ -215,8 +211,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 fn build_producer_bytes(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer")
 }

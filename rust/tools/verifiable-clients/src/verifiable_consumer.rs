@@ -904,11 +904,7 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
     );
 
     let config = ConsumerConfig::new(&props)?;
-    let consumer = KafkaConsumer::<String, String>::new(
-        config,
-        Box::new(StringDeserializer::new()),
-        Box::new(StringDeserializer::new()),
-    )?;
+    let consumer = KafkaConsumer::<String, String>::new(config, StringDeserializer::new(), StringDeserializer::new())?;
 
     // Java always constructs with `useAsyncCommit = false` (createFromArgs line
     // 716), so async commit is never taken even though the field exists.

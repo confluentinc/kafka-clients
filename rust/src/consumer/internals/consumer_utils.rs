@@ -441,7 +441,10 @@ mod tests {
 
     #[test]
     fn configured_isolation_level_uses_config_value() {
-        let mut cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let mut cfg = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         cfg.isolation_level = "read_committed".to_string();
         assert_eq!(
             ConsumerUtils::configured_isolation_level(&cfg).unwrap(),
@@ -451,7 +454,10 @@ mod tests {
 
     #[test]
     fn create_subscription_state_accepts_valid_strategy() {
-        let mut cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let mut cfg = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         cfg.auto_offset_reset = "earliest".to_string();
         // Round-trip succeeds for valid strategies; the exact strategy
         // is asserted by the `auto_offset_reset_strategy` tests.
@@ -567,7 +573,10 @@ mod tests {
     fn refresh_committed_offsets_seeds_position_for_assigned_partition() {
         use std::collections::HashSet;
 
-        let cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let cfg = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let subs = Arc::new(Mutex::new(ConsumerUtils::create_subscription_state(&cfg).unwrap()));
         let metadata = ConsumerMetadata::with_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
 
@@ -595,7 +604,10 @@ mod tests {
 
     #[test]
     fn refresh_committed_offsets_skips_unassigned_partition() {
-        let cfg = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let cfg = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let subs = Arc::new(Mutex::new(ConsumerUtils::create_subscription_state(&cfg).unwrap()));
         let metadata = ConsumerMetadata::with_config(&cfg, Arc::clone(&subs), ClusterResourceListeners::new());
 

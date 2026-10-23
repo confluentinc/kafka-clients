@@ -21,7 +21,10 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.serialization.StringDeserializer`.
 
+use bytes::Bytes;
+
 use crate::common::Error;
+use crate::common::header::RecordHeaders;
 use crate::common::serialization::Deserializer;
 
 /// Deserializes UTF-8 encoded bytes to strings.
@@ -51,6 +54,23 @@ impl Deserializer<String> for StringDeserializer {
         // Java's `new String(data, UTF_8)` replaces malformed sequences with
         // U+FFFD; `from_utf8_lossy` reproduces that behavior exactly.
         Ok(String::from_utf8_lossy(data).into_owned())
+    }
+
+    /// Decodes the record's bytes in place, without first copying them out of
+    /// the fetched buffer.
+    ///
+    /// Translates Java's override of
+    /// `deserialize(String topic, Headers headers, ByteBuffer data)`
+    /// (`StringDeserializer.java:63-73`), which decodes the buffer's backing
+    /// array directly instead of going through the interface default's
+    /// `Utils.toNullableArray` copy. The headers are ignored, as in Java.
+    async fn deserialize_with_headers_bytes(
+        &self,
+        topic: &str,
+        _headers: &RecordHeaders,
+        data: &Bytes,
+    ) -> Result<String, Error> {
+        self.deserialize(topic, &data[..]).await
     }
 }
 

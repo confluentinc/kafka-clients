@@ -1217,8 +1217,9 @@ mod tests {
         }
         .into_iter()
         .unzip();
-        // SAFETY: As above.
-        let (lag, lag_error) = call(|e| unsafe { kafka_consumer_Consumer_current_lag(consumer, tp, e) });
+        let mut out_lag = 7;
+        // SAFETY: As above; `out_lag` outlives the call.
+        let (lag, lag_error) = call(|e| unsafe { kafka_consumer_Consumer_current_lag(consumer, tp, &mut out_lag, e) });
         // SAFETY: As above.
         let (metadata, metadata_error) = call(|e| unsafe { kafka_consumer_Consumer_group_metadata(consumer, e) });
         for error in errors.into_iter().chain([lag_error, metadata_error]) {
@@ -1227,9 +1228,10 @@ mod tests {
             assert_eq!(error.message(), "KafkaConsumer is not safe for multi-threaded access.");
         }
         assert!(
-            lists.iter().all(|list| list.is_null()) && metadata.is_null() && lag == -1,
+            lists.iter().all(|list| list.is_null()) && metadata.is_null() && lag == 0,
             "each returns its failure value"
         );
+        assert_eq!(out_lag, 7, "a failed current_lag leaves *out_lag unwritten");
         // Java's `metrics()` takes no `acquire()`: it still answers.
         // SAFETY: Test code: `consumer` is a live handle; the map is owned and destroyed once.
         unsafe {
@@ -1566,6 +1568,74 @@ mod tests {
     /// A destroy inside a tokio runtime, where `teardown`'s `block_on` would
     /// panic, returns at once and tears the handle down on its own thread: the
     /// queued `close_cb` completion fires there, once.
+    unsafe extern "C" fn record_lag(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+        // SAFETY: Test code: `opaque` is the `Mutex` the test keeps alive until the completion
+        // fired; a completion owns the error handle it receives.
+        unsafe {
+            let fired = &*(opaque as *const Mutex<Vec<(i8, i64, bool)>>);
+            fired.lock().unwrap().push((present, lag, !error.is_null()));
+            if !error.is_null() {
+                crate::ffi::common::kafka_common_Error_destroy(error);
+            }
+        }
+    }
+
+    /// Java's `MockConsumer.currentLag` (`MockConsumer.java:764-771`) is the
+    /// end offset minus the position, negative for a position past the log
+    /// end. A negative lag crosses as a present value: flag 1 with the lag in
+    /// `*out_lag`, and `present` 1 beside the lag through the `_cb` twin, which
+    /// no `-1` sentinel could tell from an empty `OptionalLong`.
+    #[test]
+    fn current_lag_reports_a_negative_lag_as_present() {
+        use crate::ffi::consumer::{kafka_consumer_Consumer_current_lag_cb, kafka_consumer_Consumer_seek_with_offset};
+        let (mock, consumer) = new_mock();
+        let (assignment, tp) = partition_list(c"topic", 0);
+        // SAFETY: Test code: `consumer` and `assignment` are live handles and `e` the valid error
+        // slot `ok` passes.
+        ok(|e| unsafe { kafka_consumer_Consumer_assign(consumer, assignment, e) });
+        let mut end = 10i64;
+        let offsets = kafka_Map_new();
+        // SAFETY: Test code: `offsets`, `tp` and `mock` are live handles, `end` outlives the call,
+        // and `offsets` is destroyed once.
+        unsafe {
+            kafka_Map_put(offsets, tp as *mut c_void, &mut end as *mut i64 as *mut c_void);
+            kafka_consumer_MockConsumer_update_end_offsets(mock, offsets);
+            kafka_Map_destroy(offsets);
+        }
+        // SAFETY: Test code: `consumer` and `tp` are live handles and `e` the valid error slot.
+        ok(|e| unsafe { kafka_consumer_Consumer_seek_with_offset(consumer, tp, 15, e) });
+
+        let mut out_lag = 0;
+        // SAFETY: Test code: `consumer` and `tp` are live handles, `out_lag` outlives the call and
+        // `e` is the valid error slot.
+        let present = ok(|e| unsafe { kafka_consumer_Consumer_current_lag(consumer, tp, &mut out_lag, e) });
+        assert_eq!((present, out_lag), (1, -5));
+
+        let fired = Mutex::new(Vec::new());
+        // SAFETY: Test code: `consumer` and `tp` are live handles and `fired` outlives the
+        // completion, run by `__execute_callbacks` below.
+        unsafe {
+            kafka_consumer_Consumer_current_lag_cb(
+                consumer,
+                tp,
+                record_lag,
+                &fired as *const Mutex<Vec<(i8, i64, bool)>> as *mut c_void,
+            );
+        }
+        wait_until("the current_lag_cb completion", || {
+            // SAFETY: Test code: `consumer` is a live handle.
+            unsafe { kafka_consumer_Consumer__execute_callbacks(consumer) };
+            !fired.lock().unwrap().is_empty()
+        });
+        assert_eq!(*fired.lock().unwrap(), [(1i8, -5i64, false)]);
+        // SAFETY: Test code: each handle is live and destroyed once.
+        unsafe {
+            kafka_List_destroy(assignment);
+            kafka_common_TopicPartition_destroy(tp);
+            kafka_consumer_MockConsumer_destroy(mock);
+        }
+    }
+
     #[test]
     fn destroy_inside_a_tokio_runtime_tears_down_on_its_own_thread() {
         use crate::ffi::common::teardown_probe::{Fired, on_fired};

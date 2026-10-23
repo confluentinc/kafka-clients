@@ -19,7 +19,7 @@
 /// Options for `Admin::describe_configs`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions")]
 pub struct DescribeConfigsOptions {
     timeout_ms: Option<i32>,

@@ -189,8 +189,8 @@ fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> Byte
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("valid consumer config"),
-            Box::new(ByteArrayDeserializer::default()),
-            Box::new(ByteArrayDeserializer::default()),
+            ByteArrayDeserializer::default(),
+            ByteArrayDeserializer::default(),
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -201,8 +201,8 @@ fn create_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let props = HashMap::from([("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string())]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("valid producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("KafkaProducer::new should succeed")
 }

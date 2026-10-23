@@ -1285,8 +1285,7 @@ impl ApplicationEventProcessor {
                 // auto-commit (Milestone-12 divergence fix, PR #176) is still
                 // pending — the member simply stays `RECONCILING` and a later
                 // bg-loop iteration `try_recv`s the stored callback ack / commit
-                // result (see `consumer-threading.md` §31, Phase 41
-                // `design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md` and
+                // result (see `consumer-threading.md` §31 / §41 and
                 // `ConsumerMembershipManager::PendingReconcile::AwaitingCommit`).
                 // It NEVER blocks the bg loop on an ack or on the commit. The
                 // `.await` here is just the async-fn call boundary, not a wait;
@@ -1657,7 +1656,10 @@ mod tests {
     }
 
     fn make_metadata(subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         Arc::new(ConsumerMetadata::with_config(&config, subs, ClusterResourceListeners::new()))
     }
 
@@ -1683,7 +1685,10 @@ mod tests {
         let subscriptions = make_subscriptions();
         let metadata = make_metadata(Arc::clone(&subscriptions));
 
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let coordinator = if with_group_id {
             Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")))
         } else {
@@ -2900,7 +2905,10 @@ mod tests {
         Arc<CoordinatorRequestManager>,
         mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let (bg_tx, bg_rx) = mpsc::unbounded_channel();
         let bg_handler = Arc::new(BackgroundEventHandler::new(bg_tx));
         let mm = Arc::new(ConsumerMembershipManager::new(
@@ -4139,7 +4147,10 @@ mod tests {
 
         let subscriptions = make_subscriptions();
         let metadata = make_metadata(Arc::clone(&subscriptions));
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let notify = Arc::new(tokio::sync::Notify::new());
         let commit = Arc::new(CommitRequestManager::new(
             &config,

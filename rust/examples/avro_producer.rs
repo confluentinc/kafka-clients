@@ -207,5 +207,5 @@ fn create_kafka_producer(
     println!("Kafka producer properties: {props:?}");
 
     let config = ProducerConfig::new(&props)?;
-    KafkaProducer::new(config, Box::new(StringSerializer::new()), Box::new(value_serializer))
+    KafkaProducer::new(config, StringSerializer::new(), value_serializer)
 }
