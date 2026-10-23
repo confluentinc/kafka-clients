@@ -7,6 +7,27 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 19 / Phase 1, merge step #2 for master `25a4d475` (#266, #195, #255, #267, #258, #263, #234): DONE (2026-10-23); not pushed. No N (done directly, without the Actor / Critic loop). Mode A.** Branch `prashah_dev_dotnet_cffi_port`. Ruled by Pranav on 2026-10-23 ("I agree on all the (My lean) picks can you go ahead now?"). The evaluation is the repo-root `MASTER-25A4D475-DOTNET-EVALUATION.md` (untracked); its decisions M1–M8 are ledger rows 161–168, and what P1.4 carries is row 169.
+  - **Commits.** `71df072c` (the merge, with the .NET changes below); this entry.
+  - **The conflict.** One conflict, the doc comment of `rust/tests/common/multilanguage_consumer_test_macro.rs`. Both sides are kept, and the count stays six wrappers. Git's auto-merge left master's new `$(#[$attr])*` (#266's `#[ignore]` pass-through) off the two .NET arms; both now carry it. The other shared files (`.semaphore/semaphore.yml`, `rust/Makefile`, the root `Makefile`, `rust/xtask/src/main.rs`, `callback_log.rs`, `consumer-threading.md`) auto-merge and keep our .NET parts.
+  - **What changed in master that .NET sees.**
+    - The C ABI is unchanged: 2354 functions and 317 `#[repr(C)]` types are identical at `3f8a5bc6` and `25a4d475`. Master does not touch `dotnet/`.
+    - #266 gives the consumer wakeup Java's empty message (`wakeup_trigger.rs:190`). The four assertions in `PublicConsumerCallbackRoutingTests.cs:328-329`, `:384-385` now expect `"-18: "`.
+    - #195's `create-release-tag.yml` refuses a promotion while a job that reports a result is not in `REQUIRED_CI_JOBS`. The four `verify-dotnet` jobs are now listed (row 162), as Python's and C's are.
+    - Comment refreshes: `semaphore.yml`'s pipeline limit (#195 sets 3 hours), and the `DOTNET_GRPC_SKIPS` note (#266's `test_ml_group_metadata_and_assignment_after_poll` reaches the `GroupMetadata` RPC outside a transaction).
+    - Shifts with no .NET change, all closer to Java (evaluation §2). Listeners and queued background errors now come only from `Poll`, `Unsubscribe` and `Close` (#267). `Unsubscribe` waits for the leave response; `Close(TimeSpan.Zero)` and a dynamic member's `RemainInGroup` close leave the group (#263). The connect is non-blocking, and `sasl.mechanism` must be `PLAIN` at config build (#258). `linger.ms` is clamped to `i32::MAX` (#234).
+  - **Red before the fix.** On the trial merge, before the four assertion edits, `FullyQualifiedName!~Admin` gave 1928 run / 1922 passed / 4 failed (exactly those four) on net8.0 and net10.0. The same filter on `51ec1028` gave 0 failed.
+  - **Gates.**
+    - On `71df072c`: `make verify-sandbox` (the hook, `RUST_TEST_THREADS=6`) exit 0, with integration 327/327 and 35/35, C 10/10.
+    - The generated headers are byte-identical to the trial merge's. Its header inputs (`rust/src`, `build.rs`, `cbindgen.toml`, `Cargo.toml` / `Cargo.lock`, `ffi-macros`) equal master's.
+    - `dotnet build -c Release` 0 warnings / 0 errors; `dotnet format --verify-no-changes` exit 0.
+    - `FullyQualifiedName!~Admin` on net8.0 and net10.0: each 1928 run / 1926 passed / 0 failed / 2 skipped, 0 `Test Run Aborted`.
+    - The merged Rust integration harness compiles (`cargo test --features integration-tests --test integration --no-run`, 0 warnings).
+  - **Still waiting for P1.4 (row 169).**
+    - The admin tests abort on the old-ABI admin imports, before and after the merge.
+    - `dotnet/grpc-server` does not compile: 8 errors, all `DescribeUserScramCredentialsEntry`. It was 9; master's `is_cordoned` fixes `LogDirDescription.IsCordoned`.
+    - No `__grpc_dotnet*` arm was run. Once the server compiles, 7 new scenarios are expected to fail on the .NET arms: pattern subscribe ×2, the timed lookups ×2, `GroupMetadata`, `CurrentLag`, and the admin `IsFenced`.
+  - **Next.** P1.4 (admin, N=100), carrying row 169; then row 163's in-callback routing step (with row 164); then transactions (PLAN §5.3a). Row 166's doc fix goes in the next comment-only commit.
 - **Milestone 19 / Phase 1, sub-phase P1.3 — "the .NET consumer on the uniform C FFI": DONE (2026-10-22); not pushed. N=99. Mode A.** Branch `prashah_dev_dotnet_cffi_port`, parity anchor `3f8a5bc6` (the master merge step, `5f583f91`). Record: `design/history/M19/P1-uniform-cffi-port/` (`PLAN.md` §5.3, `P1.3-RULE-DRAFTS.md`, `COMMENTS.DONE.99.md`); rows: the repo-root `DOTNET-PORT-DECISIONS.md`.
   - **Commits** (`5f583f91..` this entry):
     - Rules: `f2741016` (the P1.3 drafts, ledger 125), `e130ee32` (129), `fc1ad710` (136, 137, 140), `627c132f` (114, 138, 141), `3a761190` (141–144); each verbatim on Pranav's OK.
