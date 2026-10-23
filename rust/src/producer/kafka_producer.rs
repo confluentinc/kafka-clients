@@ -5376,9 +5376,10 @@ mod tests {
 
         let saw_partition = Arc::new(std::sync::Mutex::new(None::<i32>));
         let partition_slot = Arc::clone(&saw_partition);
-        let callback: Callback = Box::new(move |record_metadata, _exception| {
-            *partition_slot.lock().unwrap() = record_metadata.map(|rm| rm.partition());
-        });
+        let callback: Box<dyn Callback> =
+            Box::new(move |record_metadata: Option<&RecordMetadata>, _exception: Option<&Error>| {
+                *partition_slot.lock().unwrap() = record_metadata.map(|rm| rm.partition());
+            });
         let second: ProducerRecord<String, String> =
             ProducerRecord::with_partition_key(TOPIC.to_string(), None, None, Some("b".repeat(2_000))).unwrap();
         let future = producer
