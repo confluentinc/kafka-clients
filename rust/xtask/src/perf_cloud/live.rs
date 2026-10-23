@@ -591,7 +591,7 @@ warmup complete (100 msgs); measuring 600s now
         progress.begin_arm(RunningArm::new(&test, Arm::Rust, &dir));
         let md = progress.live_markdown().unwrap();
         assert!(md.contains("| Throughput (msg/s) | 100 | – |"), "{md}");
-        assert!(md.contains("- librdkafka has not started yet."), "{md}");
+        assert!(md.contains("| Status | running | waiting |"), "{md}");
         progress.end_arm(ArmResult {
             arm: Arm::Rust,
             outcome: Outcome::Failed("interrupted".to_string()),
@@ -649,7 +649,7 @@ warmup complete (100 msgs); measuring 600s now
         let md = fs::read_to_string(&report).unwrap();
         assert!(md.contains("In progress"), "{md}");
         assert!(md.ends_with("\n- Measurement: 10 min per client\n"), "{md}");
-        assert!(md.contains("- Rust is running and has not started measuring yet."), "{md}");
+        assert!(md.contains("| Status | running |"), "{md}");
         assert!(!dir.join(".report.md.partial").exists());
 
         // Once the test ends, nothing replaces its report.
