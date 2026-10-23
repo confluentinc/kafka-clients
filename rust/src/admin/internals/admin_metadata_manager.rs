@@ -26,7 +26,7 @@ use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
 use crate::common::utils::internals::LogContext;
 use crate::common::{Cluster, Error, Node, Uuid};
-use crate::{kafka_info, kafka_warn};
+use crate::{kafka_debug, kafka_info, kafka_trace};
 use std::collections::HashMap;
 
 /// The metadata-refresh state machine, mirroring Java's `State` enum.
@@ -183,16 +183,24 @@ impl AdminMetadataManager {
     pub(crate) fn is_ready(&self) -> Result<bool, Error> {
         let inner = self.inner.lock().unwrap();
         if let Some(err) = &inner.fatal_error {
+            kafka_debug!(self.log_context, "Metadata is not usable: failed to get metadata. {}", err);
             return Err(err.clone());
         }
         if inner.cluster.nodes().is_empty() {
-            kafka_warn!(self.log_context, "Metadata is not ready because there are no known nodes.");
+            kafka_trace!(
+                self.log_context,
+                "Metadata is not ready: bootstrap nodes have not been initialized yet."
+            );
             return Ok(false);
         }
         if inner.cluster.is_bootstrap_configured() {
-            kafka_warn!(self.log_context, "Metadata is not ready because it contains bootstrap nodes.");
+            kafka_trace!(
+                self.log_context,
+                "Metadata is not ready: we have not fetched metadata from the bootstrap nodes yet."
+            );
             return Ok(false);
         }
+        kafka_trace!(self.log_context, "Metadata is ready to use.");
         Ok(true)
     }
 

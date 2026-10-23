@@ -112,13 +112,12 @@ breaking changes.
 - **Breaking:** `ConsumerConfig::new` parses and validates every key with
   Java's `ConfigDef` (`ConsumerConfig.java`), so values Java rejects now fail
   with Java's `ConfigError` message, `Invalid value <v> for configuration
-  <key>: <reason>`: a negative `max.poll.interval.ms`,
-  `auto.commit.interval.ms`, `fetch.min.bytes`,
+  <key>: <reason>`: a negative `auto.commit.interval.ms`, `fetch.min.bytes`,
   `fetch.max.bytes`, `fetch.max.wait.ms`, `max.partition.fetch.bytes`,
   `metadata.max.age.ms`, `request.timeout.ms`, `default.api.timeout.ms`, the
   `reconnect.backoff.*` / `retry.backoff.*` keys or `metrics.sample.window.ms`;
-  `max.poll.records` or `metrics.num.samples` below `1`;
-  `send.buffer.bytes` / `receive.buffer.bytes` below `-1`; and an
+  `max.poll.interval.ms`, `max.poll.records` or `metrics.num.samples` below
+  `1`; `send.buffer.bytes` / `receive.buffer.bytes` below `-1`; and an
   `isolation.level` other than `read_committed` / `read_uncommitted` (the check
   is case-sensitive, as Java's), which used to be accepted as given.
 - **Breaking:** as in Java, `enable.auto.commit=true` without `group.id` fails
@@ -139,8 +138,6 @@ breaking changes.
   either be 'batch_optimized' or 'record_limit'."; a blank value used to be
   accepted. `share.acquire.mode` defaults to Java's `BATCH_OPTIMIZED`, which
   `get_string` returns, instead of `batch_optimized`.
-- **Breaking:** `ConsumerConfig` is no longer `Clone`: build another one
-  from the same properties with `ConsumerConfig::new`.
 - `ConsumerConfig` answers Java's `AbstractConfig` getters: `get_short`,
   `get_int`, `get_long`, `get_double`, `get_boolean`, `get_string`,
   `get_list` (each `Result<Option<T>, Error>`, `None` for Java's `null`),

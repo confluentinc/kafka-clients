@@ -126,7 +126,7 @@ impl ConfigResource {
 
 impl std::fmt::Display for ConfigResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ConfigResource(type={:?}, name='{}')", self.resource_type, self.name)
+        write!(f, "ConfigResource(type={}, name='{}')", self.resource_type, self.name)
     }
 }
 
@@ -176,5 +176,14 @@ mod tests {
         let c = ConfigResource::new(Type::Broker, "t".to_string());
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    /// Java's `toString()` prints the type's constant name.
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            ConfigResource::new(Type::ClientMetrics, "m".to_string()).to_string(),
+            "ConfigResource(type=CLIENT_METRICS, name='m')"
+        );
     }
 }

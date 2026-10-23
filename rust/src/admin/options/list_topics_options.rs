@@ -19,7 +19,7 @@
 /// Options for `Admin::list_topics`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions")]
 pub struct ListTopicsOptions {
     timeout_ms: Option<i32>,
@@ -64,6 +64,24 @@ impl ListTopicsOptions {
     }
 }
 
+impl PartialEq for ListTopicsOptions {
+    /// Java's `ListTopicsOptions.equals()` compares `listInternal` only:
+    /// `timeoutMs` is left out.
+    fn eq(&self, other: &Self) -> bool {
+        self.list_internal == other.list_internal
+    }
+}
+
+impl Eq for ListTopicsOptions {}
+
+impl std::hash::Hash for ListTopicsOptions {
+    /// Java's `ListTopicsOptions.hashCode()` is `Objects.hash(listInternal)`,
+    /// without `timeoutMs`, as `equals()`.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.list_internal.hash(state);
+    }
+}
+
 impl std::fmt::Display for ListTopicsOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ListTopicsOptions(listInternal={})", self.list_internal)
@@ -88,5 +106,23 @@ mod tests {
         assert_eq!(a, b);
         assert!(a.should_list_internal());
         assert_ne!(a, ListTopicsOptions::new());
+    }
+
+    fn hash_of(options: &ListTopicsOptions) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        options.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Java's `equals()` and `hashCode()` cover `listInternal` only and leave
+    /// out `timeoutMs`.
+    #[test]
+    fn equality_and_hash_ignore_the_timeout() {
+        let with_timeout = ListTopicsOptions::new().set_list_internal(true).set_timeout_ms(Some(500));
+        let without_timeout = ListTopicsOptions::new().set_list_internal(true);
+        assert_eq!(with_timeout, without_timeout);
+        assert_eq!(hash_of(&with_timeout), hash_of(&without_timeout));
+        assert_ne!(with_timeout, ListTopicsOptions::new().set_timeout_ms(Some(500)));
     }
 }

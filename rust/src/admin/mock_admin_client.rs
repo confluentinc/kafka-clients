@@ -3499,7 +3499,7 @@ mod tests {
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
-        assert_eq!(err.message(), "Resource ConfigResource(type=Topic, name='missing') not found.");
+        assert_eq!(err.message(), "Resource ConfigResource(type=TOPIC, name='missing') not found.");
     }
 
     #[tokio::test]

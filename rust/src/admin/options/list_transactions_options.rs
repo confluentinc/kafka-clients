@@ -23,7 +23,7 @@ use crate::admin::TransactionState;
 /// Options for `Admin::list_transactions`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions")]
 pub struct ListTransactionsOptions {
     timeout_ms: Option<i32>,
@@ -33,11 +33,24 @@ pub struct ListTransactionsOptions {
     filtered_transactional_id_pattern: Option<String>,
 }
 
+impl PartialEq for ListTransactionsOptions {
+    /// Java's `ListTransactionsOptions.equals()` compares the four filters
+    /// only: `timeoutMs` is left out.
+    fn eq(&self, other: &Self) -> bool {
+        self.filtered_states == other.filtered_states
+            && self.filtered_producer_ids == other.filtered_producer_ids
+            && self.filtered_duration_ms == other.filtered_duration_ms
+            && self.filtered_transactional_id_pattern == other.filtered_transactional_id_pattern
+    }
+}
+
+impl Eq for ListTransactionsOptions {}
+
 impl std::hash::Hash for ListTransactionsOptions {
-    /// Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of its
-    /// fields; the two filter sets hash independently of their order.
+    /// Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of the
+    /// four filters, without `timeoutMs`, as `equals()`; the two filter sets
+    /// hash independently of their order.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.timeout_ms.hash(state);
         crate::common::utils::Utils::hash_unordered(&self.filtered_states, state);
         crate::common::utils::Utils::hash_unordered(&self.filtered_producer_ids, state);
         self.filtered_duration_ms.hash(state);
@@ -215,5 +228,34 @@ mod tests {
         assert_eq!(options.filtered_producer_ids(), &HashSet::from([23423]));
         assert_eq!(options.filtered_duration(), 10);
         assert_eq!(options.filtered_transactional_id_pattern(), Some("^special-.*"));
+    }
+
+    fn hash_of(options: &ListTransactionsOptions) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        options.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Java's `equals()` and `hashCode()` cover the four filters and leave
+    /// out `timeoutMs`.
+    #[test]
+    fn equality_and_hash_ignore_the_timeout() {
+        let filtered = || {
+            ListTransactionsOptions::new()
+                .filter_states([TransactionState::Ongoing, TransactionState::PrepareCommit])
+                .filter_producer_ids([3, 12])
+                .filter_on_duration(10)
+                .filter_on_transactional_id_pattern(Some("^special-.*".to_string()))
+        };
+        let with_timeout = filtered().set_timeout_ms(Some(500));
+        let without_timeout = filtered();
+        assert_eq!(with_timeout, without_timeout);
+        assert_eq!(hash_of(&with_timeout), hash_of(&without_timeout));
+
+        assert_ne!(filtered(), filtered().filter_states([TransactionState::Ongoing]));
+        assert_ne!(filtered(), filtered().filter_producer_ids([3]));
+        assert_ne!(filtered(), filtered().filter_on_duration(11));
+        assert_ne!(filtered(), filtered().filter_on_transactional_id_pattern(None));
     }
 }

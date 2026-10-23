@@ -133,7 +133,7 @@ impl std::fmt::Display for FeatureUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "FeatureUpdate{{maxVersionLevel:{}, upgradeType:{:?}}}",
+            "FeatureUpdate{{maxVersionLevel:{}, upgradeType:{}}}",
             self.max_version_level, self.upgrade_type
         )
     }
@@ -186,5 +186,15 @@ mod tests {
     fn new_rejects_negative_version_level() {
         let err = FeatureUpdate::new(-1, UpgradeType::SafeDowngrade).unwrap_err();
         assert_eq!(err.message(), "Cannot specify a negative version level.");
+    }
+
+    /// Java's `toString()` prints the upgrade type's constant name.
+    #[test]
+    fn to_string_follows_java() {
+        let update = FeatureUpdate::new(0, UpgradeType::SafeDowngrade).unwrap();
+        assert_eq!(
+            update.to_string(),
+            "FeatureUpdate{maxVersionLevel:0, upgradeType:SAFE_DOWNGRADE}"
+        );
     }
 }
