@@ -122,7 +122,7 @@ static void test_kafka_consumer_new_with_string_deserializers(void) {
 }
 
 // The classic group protocol is not supported by this client (see
-// consumer-threading.md §20): the constructor fails with UnsupportedVersion.
+// consumer-threading.md §20): the constructor fails with LocalUnsupportedOperation.
 static void test_kafka_consumer_classic_protocol_rejected(void) {
     kafka_consumer_ConsumerConfig_t *config = create_config("classic");
     kafka_common_Error_t *err = NULL;
@@ -130,8 +130,11 @@ static void test_kafka_consumer_classic_protocol_rejected(void) {
     kafka_consumer_ConsumerConfig_destroy(config);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(kc); /* the failure value */
-    TEST_ASSERT_TRUE(kafka_common_Error_is_unsupported_version_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "Classic group protocol"));
+    TEST_ASSERT_TRUE(kafka_common_Error_is_local_unsupported_operation_error(err));
+    TEST_ASSERT_EQUAL_INT(kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION, kafka_common_Error__enum(err));
+    TEST_ASSERT_EQUAL_STRING("Classic group protocol is not yet supported in this client; "
+                             "set group.protocol=consumer (KIP-848).",
+                             kafka_common_Error_message(err));
     kafka_common_Error_destroy(err);
     err = NULL;
 
@@ -144,6 +147,75 @@ static void test_kafka_consumer_classic_protocol_rejected(void) {
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_PTR(kafka_consumer_GroupProtocol_consumer(), protocol);
     TEST_ASSERT_EQUAL_STRING("CONSUMER", kafka_consumer_GroupProtocol_name(protocol));
+}
+
+/* A C deserializer whose `close` keeps its `callback_id` and returns without
+ * reporting, so the test reports it after the constructor returned. */
+typedef struct {
+    kafka_common_serialization_Deserializer_t *handle;
+    atomic_int close_calls;
+    atomic_llong close_id;
+} late_close_deserializer_t;
+
+static void late_close_deserialize(void *self, const char *topic, kafka_Bytes_t data, int64_t callback_id) {
+    (void)topic;
+    (void)data;
+    late_close_deserializer_t *imp = self;
+    kafka_common_serialization_Deserializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+}
+
+static void late_close_close(void *self, int64_t callback_id) {
+    late_close_deserializer_t *imp = self;
+    atomic_store(&imp->close_id, callback_id);
+    atomic_fetch_add(&imp->close_calls, 1);
+}
+
+// A constructor that fails after taking the deserializers closes them, as
+// Java's does (`AsyncKafkaConsumer.java:596-603`), without waiting for a C
+// `close` to report: the report arrives after the constructor returned, on the
+// consumed handle, which stays valid for it (run under valgrind: no read of
+// freed memory, no leak).
+static void test_kafka_consumer_failed_new_keeps_a_closing_deserializer_until_it_reports(void) {
+    kafka_Map_t *props = kafka_Map_new();
+    kafka_Map_put(props, (void *)"bootstrap.servers", (void *)"localhost:9092");
+    kafka_Map_put(props, (void *)"group.id", (void *)" ");
+    kafka_Map_put(props, (void *)"group.protocol", (void *)"consumer");
+    kafka_common_Error_t *err = NULL;
+    kafka_consumer_ConsumerConfig_t *config = kafka_consumer_ConsumerConfig_new(props, &err);
+    kafka_Map_destroy(props);
+    TEST_ASSERT_NULL(err);
+
+    late_close_deserializer_t key = {0};
+    late_close_deserializer_t value = {0};
+    key.handle = kafka_common_serialization_Deserializer_new_async(&key, late_close_deserialize, NULL, NULL, NULL,
+                                                                   late_close_close);
+    value.handle = kafka_common_serialization_Deserializer_new_async(&value, late_close_deserialize, NULL, NULL,
+                                                                     NULL, late_close_close);
+    kafka_consumer_KafkaConsumer_t *kc = kafka_consumer_KafkaConsumer_new(config, key.handle, value.handle, &err);
+    kafka_consumer_ConsumerConfig_destroy(config);
+    TEST_ASSERT_NULL(kc);
+    TEST_ASSERT_NOT_NULL(err);
+    /* Java's `KafkaException("Failed to construct kafka consumer", t)` around
+     * the `InvalidGroupIdException` (`AsyncKafkaConsumer.java:596-603`). */
+    TEST_ASSERT_EQUAL_STRING("Failed to construct kafka consumer", kafka_common_Error_message(err));
+    const kafka_common_Error_t *cause = kafka_common_Error_source(err);
+    TEST_ASSERT_NOT_NULL(cause);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_invalid_group_id_error(cause));
+    TEST_ASSERT_EQUAL_STRING("The configured group.id should not be an empty string or whitespace.",
+                             kafka_common_Error_message(cause));
+    kafka_common_Error_destroy(err);
+
+    /* The key's `close` was called inside the constructor; the value's comes
+     * after the key's reports, as Java closes them one after the other. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&key.close_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&value.close_calls));
+    sleep_ms(50); /* the constructor's runtime is gone by now */
+    kafka_common_serialization_Deserializer__set_callback_result(key.handle, atomic_load(&key.close_id), NULL, NULL);
+    for (int i = 0; i < 1000 && atomic_load(&value.close_calls) == 0; i++) {
+        sleep_ms(10);
+    }
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&value.close_calls));
+    kafka_common_serialization_Deserializer__set_callback_result(value.handle, atomic_load(&value.close_id), NULL, NULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +400,7 @@ int main(void) {
     RUN_TEST(test_kafka_consumer_new_from_map);
     RUN_TEST(test_kafka_consumer_new_with_string_deserializers);
     RUN_TEST(test_kafka_consumer_classic_protocol_rejected);
+    RUN_TEST(test_kafka_consumer_failed_new_keeps_a_closing_deserializer_until_it_reports);
     RUN_TEST(test_kafka_consumer_subscribe);
     RUN_TEST(test_kafka_consumer_wakeup_before_poll);
     RUN_TEST(test_kafka_consumer_wakeup_from_other_thread);

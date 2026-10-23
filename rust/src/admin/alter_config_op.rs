@@ -21,7 +21,7 @@ use super::ConfigEntry;
 /// The operation type of an [`AlterConfigOp`].
 ///
 /// Corresponds to `AlterConfigOp.OpType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
 pub enum OpType {
@@ -99,7 +99,7 @@ impl std::fmt::Display for OpType {
 ///
 /// The derived `Debug` renders the entry through [`ConfigEntry`]'s `Debug`,
 /// which redacts a sensitive value as Java's `ConfigEntry.toString()` does.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp")]
 pub struct AlterConfigOp {
     config_entry: ConfigEntry,

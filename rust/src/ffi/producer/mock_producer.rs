@@ -1558,6 +1558,8 @@ mod tests {
                 &pending as *const _ as *mut c_void,
                 serialize_later,
                 None,
+                None,
+                None,
             );
             let builder = kafka_producer_MockProducerOptionsBuilder_new();
             kafka_producer_MockProducerOptionsBuilder_set_auto_complete(builder, 1);

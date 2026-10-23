@@ -100,6 +100,7 @@ pub struct ProducerRecordOptions<K, V> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`ProducerRecordOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds ProducerRecordOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct ProducerRecordOptionsBuilder<K, V> {
@@ -368,8 +369,8 @@ impl<K, V> ProducerRecord<K, V> {
         &self.headers
     }
 
-    /// Returns a mutable reference to the headers.
-    #[cfg(test)]
+    /// Returns a mutable reference to the headers: Java's `headers()` is
+    /// mutable, and a serializer may add to it.
     pub(crate) fn headers_mut(&mut self) -> &mut RecordHeaders {
         &mut self.headers
     }

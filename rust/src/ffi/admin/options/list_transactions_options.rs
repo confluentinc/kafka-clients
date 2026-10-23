@@ -31,7 +31,9 @@ use crate::ffi::admin::transaction_state::{
     kafka_admin_TransactionState_t, transaction_state_singleton, transaction_state_value_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_option, destroy_boxed, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{
+    box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, list_elements, owned_c_string,
+};
 
 /// Opaque handle to a [`ListTransactionsOptions`], owned by the caller and
 /// freed with [`kafka_admin_ListTransactionsOptions_destroy`].
@@ -348,6 +350,22 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactio
         .pattern_c
         .as_ref()
         .map_or(ptr::null(), |pattern| pattern.as_ptr())
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a live handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_to_string(
+    self_: *const kafka_admin_ListTransactionsOptions_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
+    // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
+    // the handle at the same time. That is what `list_transactions_options_ref` requires.
+    into_c_string(&unsafe { list_transactions_options_ref(self_) }.to_string())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

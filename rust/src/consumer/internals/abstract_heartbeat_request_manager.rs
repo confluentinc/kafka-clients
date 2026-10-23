@@ -570,7 +570,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn make_state(now: i64) -> AbstractHeartbeatRequestManager {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
@@ -687,7 +690,10 @@ mod tests {
         AbstractHeartbeatRequestManager,
         mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
     ) {
-        let config = ConsumerConfig { bootstrap_servers: vec!["localhost:9092".to_string()], ..Default::default() };
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            ..ConsumerConfig::defaults()
+        };
         let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));

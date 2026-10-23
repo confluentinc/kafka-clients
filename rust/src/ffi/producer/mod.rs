@@ -164,10 +164,9 @@
 //! When either serializer is a C implementation, the calling thread does not
 //! try the producer: a serializer registered with
 //! `kafka_common_serialization_Serializer_new_async` may report from the very
-//! thread that called `send_cb` (a single-threaded event loop), and one
-//! registered with `_new` runs on the blocking pool, so `try_send`, which
-//! awaits both serializers, would block the caller until they are done, or
-//! forever. Every record then goes to the submission task, which awaits the
+//! thread that called `send_cb` (a single-threaded event loop), so
+//! `try_send`, which awaits both serializers, would block the caller until
+//! they are done, or forever. Every record then goes to the submission task, which awaits the
 //! serializers on the runtime, and `cb` fires later, through the callback
 //! vector. The choice is made once, when the producer is built.
 //!
@@ -1609,8 +1608,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// callback vector when the record is acknowledged or fails, exactly once,
 /// with a `callback_id` it reports through
 /// [`kafka_producer_Producer__set_callback_result`] once it finished. The
-/// callback's `self` must stay alive until then; the registration handle
-/// itself is read during the call.
+/// callback's `self` must stay alive until then. The registration handle
+/// `callback` is consumed by the call, whatever its outcome (an error in
+/// `*out_err` included): the caller must not use it or pass it to
+/// `kafka_producer_Callback_destroy` afterwards.
 ///
 /// With a callback, the delivered future completes with the record's
 /// outcome only once the callback reported, as Java completes the future
@@ -1683,6 +1684,10 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// callback fires, once, when the queued send resolves the record. With a
 /// callback, the future `cb` receives completes once the callback reported,
 /// as for [`kafka_producer_Producer_send_with_callback`].
+///
+/// As there, the registration handle `callback` is consumed by the call,
+/// whatever its outcome (an error delivered to `cb` included): the caller must
+/// not use it or pass it to `kafka_producer_Callback_destroy` afterwards.
 ///
 /// # Safety
 ///

@@ -156,12 +156,13 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import (
-    ConcurrentModificationError, IllegalArgumentError, IllegalStateError, 
+    ConcurrentModificationError, IllegalArgumentError, IllegalStateError,
+    UnsupportedOperationError,
 )
 from confluent_kafka.common import Headers, KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
-from confluent_kafka.common.errors import InvalidGroupIdError, UnsupportedVersionError, WakeupError
+from confluent_kafka.common.errors import InvalidGroupIdError, WakeupError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.serialization import string_deserializer
 from confluent_kafka.consumer import (
@@ -637,7 +638,7 @@ def test_should_ignore_group_instance_id_for_empty_group_id() -> None:
 
 
 def test_classic_protocol_is_not_supported() -> None:
-    with pytest.raises(UnsupportedVersionError) as e:
+    with pytest.raises(UnsupportedOperationError) as e:
         KafkaConsumer(configs={"bootstrap.servers": "localhost:1", "group.id": GROUP_ID})
     assert str(e.value) == ("Classic group protocol is not yet supported in this client; set "
                             "group.protocol=consumer (KIP-848).")
@@ -1205,6 +1206,17 @@ def test_current_lag_waits_for_the_background_task() -> None:
         with pytest.raises(IllegalStateError) as e:
             consumer.current_lag(topic_partition=unassigned)
         assert str(e.value) == f"No current assignment for partition {unassigned}"
+
+
+def test_current_lag_reads_the_ffi_presence_flag() -> None:
+    # The FFI carries Java's OptionalLong as (present, lag): a present lag may
+    # be negative (a position past the log end) and is kept, and only the flag
+    # marks the empty one, whatever the lag beside it.
+    from confluent_kafka.consumer._base import _lag_or_none
+    assert _lag_or_none((1, -5)) == -5
+    assert _lag_or_none((1, 0)) == 0
+    assert _lag_or_none((1, 6)) == 6
+    assert _lag_or_none((0, 0)) is None
 
 
 def test_current_lag_inside_a_callback_goes_through_the_handle(

@@ -21,7 +21,7 @@
 /// Corresponds to `org.apache.kafka.clients.admin.TerminateTransactionOptions`.
 /// In Java this class only extends `AbstractOptions` (a `timeout_ms` field)
 /// with no additional fields.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionOptions")]
 pub struct TerminateTransactionOptions {
     timeout_ms: Option<i32>,
@@ -51,9 +51,29 @@ impl TerminateTransactionOptions {
     }
 }
 
+impl std::fmt::Display for TerminateTransactionOptions {
+    /// Java's `toString()`: an unset timeout prints as `null`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let timeout_ms = self.timeout_ms.map_or_else(|| "null".to_string(), |t| t.to_string());
+        write!(f, "TerminateTransactionOptions{{timeoutMs={timeout_ms}}}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            TerminateTransactionOptions::new().to_string(),
+            "TerminateTransactionOptions{timeoutMs=null}"
+        );
+        assert_eq!(
+            TerminateTransactionOptions::new().set_timeout_ms(Some(500)).to_string(),
+            "TerminateTransactionOptions{timeoutMs=500}"
+        );
+    }
 
     #[test]
     fn defaults_match_java() {

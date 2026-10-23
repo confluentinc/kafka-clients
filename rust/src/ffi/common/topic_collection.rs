@@ -164,10 +164,10 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_name),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES
             );
-            assert_eq!(
-                *topic_collection_ref(by_name),
-                TopicCollection::of_topic_names(vec!["orders".to_string()])
-            );
+            let TopicCollection::TopicNames(names_view) = topic_collection_ref(by_name) else {
+                panic!("ofTopicNames builds a TopicNameCollection");
+            };
+            assert_eq!(names_view.topic_names(), ["orders".to_string()]);
             kafka_common_TopicCollection_destroy(by_name);
 
             let ids = uuid_list([Uuid::new(1, 2)]);
@@ -177,10 +177,10 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_id),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS
             );
-            assert_eq!(
-                *topic_collection_ref(by_id),
-                TopicCollection::of_topic_ids(vec![Uuid::new(1, 2)])
-            );
+            let TopicCollection::TopicIds(ids_view) = topic_collection_ref(by_id) else {
+                panic!("ofTopicIds builds a TopicIdCollection");
+            };
+            assert_eq!(ids_view.topic_ids(), [Uuid::new(1, 2)]);
             kafka_common_TopicCollection_destroy(by_id);
             kafka_common_TopicCollection_destroy(ptr::null_mut());
         }

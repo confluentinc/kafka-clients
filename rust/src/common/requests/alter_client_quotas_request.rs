@@ -288,7 +288,11 @@ mod tests {
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = AlterClientQuotasRequest::parse(&mut readable, version).unwrap();
-        assert_eq!(parsed.entries(), alterations);
+        let view = |a: &ClientQuotaAlteration| (a.entity().clone(), a.ops().to_vec());
+        assert_eq!(
+            parsed.entries().iter().map(view).collect::<Vec<_>>(),
+            alterations.iter().map(view).collect::<Vec<_>>()
+        );
     }
 
     #[test]

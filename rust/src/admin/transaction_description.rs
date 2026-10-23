@@ -39,6 +39,20 @@ pub struct TransactionDescription {
     topic_partitions: HashSet<TopicPartition>,
 }
 
+impl std::hash::Hash for TransactionDescription {
+    /// Java's `TransactionDescription.hashCode()` is `Objects.hash` of every
+    /// field; the `topicPartitions` set hashes independently of its order.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.coordinator_id.hash(state);
+        self.state.hash(state);
+        self.producer_id.hash(state);
+        self.producer_epoch.hash(state);
+        self.transaction_timeout_ms.hash(state);
+        self.transaction_start_time_ms.hash(state);
+        crate::common::utils::Utils::hash_unordered(&self.topic_partitions, state);
+    }
+}
+
 impl TransactionDescription {
     /// Creates a new `TransactionDescription`.
     #[doc(alias = "org.apache.kafka.clients.admin.TransactionDescription#TransactionDescription")]

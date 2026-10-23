@@ -19,6 +19,7 @@
 use crate::common::LocalIllegalStateError;
 use crate::common::header::RecordHeader;
 use crate::common::header::{Header, Headers};
+use std::sync::Arc;
 
 /// A mutable ordered collection of [`RecordHeader`] objects.
 ///
@@ -34,7 +35,13 @@ use crate::common::header::{Header, Headers};
 // the only `Headers` implementation, returned by ConsumerRecord / ProducerRecord `headers()`
 #[doc(alias = "public-in-rust")]
 pub struct RecordHeaders {
-    headers: Vec<RecordHeader>,
+    /// Java's `List<Header> headers`. `None` is the empty list and allocates
+    /// nothing, which keeps a record without headers allocation-free. The list
+    /// is shared: `Clone` bumps a reference count instead of copying the
+    /// headers, so a record's headers can be lent to a C serde that answers
+    /// later without a copy, and a write copies only while another clone holds
+    /// the list (`Arc::make_mut`).
+    headers: Option<Arc<Vec<RecordHeader>>>,
     is_read_only: bool,
 }
 
@@ -47,7 +54,7 @@ impl RecordHeaders {
     /// CLAUDE.md §2 — its two siblings are suffixed below.
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn new() -> Self {
-        Self { headers: Vec::new(), is_read_only: false }
+        Self { headers: None, is_read_only: false }
     }
 
     /// Create `RecordHeaders` from a slice of headers.
@@ -65,7 +72,7 @@ impl RecordHeaders {
     /// headers so this is safe by construction.
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_slice(headers: &[RecordHeader]) -> Self {
-        Self { headers: headers.to_vec(), is_read_only: false }
+        Self::with_header_iter(headers.iter().cloned())
     }
 
     /// Create `RecordHeaders` from headers.
@@ -76,7 +83,8 @@ impl RecordHeaders {
     /// not the parameter name, supplies the suffix.
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_iter(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
-        Self { headers: headers.into_iter().collect(), is_read_only: false }
+        let headers: Vec<RecordHeader> = headers.into_iter().collect();
+        Self { headers: (!headers.is_empty()).then(|| Arc::new(headers)), is_read_only: false }
     }
 
     /// Create `RecordHeaders` by copying from another `RecordHeaders`.
@@ -89,9 +97,21 @@ impl RecordHeaders {
     /// bound. The suffix follows the type, as the sibling overloads do.
     ///
     /// The new instance is writable regardless of the source's read-only state.
+    /// It shares the source's list until either of them is written.
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_record_headers(other: &RecordHeaders) -> Self {
         Self { headers: other.headers.clone(), is_read_only: false }
+    }
+
+    /// The headers, in insertion order.
+    fn as_slice(&self) -> &[RecordHeader] {
+        self.headers.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    /// The list to write to, created on the first write and copied first when
+    /// a clone still shares it.
+    fn as_vec_mut(&mut self) -> &mut Vec<RecordHeader> {
+        Arc::make_mut(self.headers.get_or_insert_with(Default::default))
     }
 
     /// Set the headers to read-only mode.
@@ -128,7 +148,7 @@ impl Default for RecordHeaders {
 impl Headers for RecordHeaders {
     fn add_with_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError> {
         self.can_write()?;
-        self.headers.push(header);
+        self.as_vec_mut().push(header);
         Ok(())
     }
 
@@ -138,30 +158,32 @@ impl Headers for RecordHeaders {
 
     fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError> {
         self.can_write()?;
-        self.headers.retain(|h| h.key() != key);
+        if self.as_slice().iter().any(|h| h.key() == key) {
+            self.as_vec_mut().retain(|h| h.key() != key);
+        }
         Ok(())
     }
 
     fn last_header(&self, key: &str) -> Option<&RecordHeader> {
-        self.headers.iter().rev().find(|h| h.key() == key)
+        self.as_slice().iter().rev().find(|h| h.key() == key)
     }
 
     fn headers(&self, key: &str) -> Vec<&RecordHeader> {
-        self.headers.iter().filter(|h| h.key() == key).collect()
+        self.as_slice().iter().filter(|h| h.key() == key).collect()
     }
 
     fn to_array(&self) -> &[RecordHeader] {
-        &self.headers
+        self.as_slice()
     }
 
     fn iter(&self) -> std::slice::Iter<'_, RecordHeader> {
-        self.headers.iter()
+        self.as_slice().iter()
     }
 }
 
 impl PartialEq for RecordHeaders {
     fn eq(&self, other: &Self) -> bool {
-        self.headers == other.headers
+        self.as_slice() == other.as_slice()
     }
 }
 
@@ -169,7 +191,7 @@ impl Eq for RecordHeaders {}
 
 impl std::hash::Hash for RecordHeaders {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.headers.hash(state);
+        self.as_slice().hash(state);
     }
 }
 
@@ -178,7 +200,8 @@ impl std::fmt::Display for RecordHeaders {
         write!(
             f,
             "RecordHeaders(headers = {:?}, isReadOnly = {})",
-            self.headers, self.is_read_only
+            self.as_slice(),
+            self.is_read_only
         )
     }
 }
@@ -188,13 +211,13 @@ impl<'a> IntoIterator for &'a RecordHeaders {
     type IntoIter = std::slice::Iter<'a, RecordHeader>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.headers.iter()
+        self.as_slice().iter()
     }
 }
 
 impl std::iter::FromIterator<RecordHeader> for RecordHeaders {
     fn from_iter<I: IntoIterator<Item = RecordHeader>>(iter: I) -> Self {
-        Self { headers: iter.into_iter().collect(), is_read_only: false }
+        Self::with_header_iter(iter)
     }
 }
 

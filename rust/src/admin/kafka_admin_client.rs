@@ -31,10 +31,11 @@
 //! By **id** Java uses the Metadata API only (`handleDescribeTopicsByIds`), and
 //! so does this port.
 //!
-//! `bootstrap.controllers` (KIP-919) is unsupported in Phase 1, so the metadata
-//! refresh always uses the broker `Metadata` API (never `DescribeCluster`), and
-//! controller/least-loaded node selection never needs the
-//! `LeastLoadedBrokerOrActiveKController` provider.
+//! `bootstrap.controllers` (KIP-919) is not defined by [`AdminClientConfig`]
+//! until bootstrapping through the controllers is implemented, so the client
+//! always bootstraps through `bootstrap.servers`: the metadata refresh always
+//! uses the broker `Metadata` API (never `DescribeCluster`), and the
+//! `LeastLoadedBrokerOrActiveKController` provider always picks a broker.
 
 use crate::admin::CreateTopicsResult;
 use crate::common::requests::DescribeClusterRequest;
@@ -69,7 +70,6 @@ use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
-use crate::MetadataRecoveryStrategy;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -81,7 +81,6 @@ use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
-use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use crate::common::requests::{
@@ -263,6 +262,15 @@ pub struct KafkaAdminClient {
     shared: Arc<Shared>,
 }
 
+impl std::fmt::Debug for KafkaAdminClient {
+    /// The client id only, never the configuration.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaAdminClient")
+            .field("client_id", &self.shared.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl KafkaAdminClient {
     /// `KafkaAdminClient.describeFeatures(DescribeFeaturesOptions)` with its
     /// concrete return type, `InternalDescribeFeaturesResult` (KAFKA-19663),
@@ -368,7 +376,8 @@ impl KafkaAdminClient {
     ///
     /// Mirrors `KafkaAdminClient.createInternal`. Selects the channel builder
     /// from `security.protocol` + `ssl.*` / `sasl.*` (PLAINTEXT / SSL /
-    /// SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN only.
+    /// SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN only, any other one
+    /// being rejected when the `AdminClientConfig` is built.
     ///
     /// # Errors
     ///
@@ -411,13 +420,32 @@ impl KafkaAdminClient {
     }
 
     fn new_inner(config: AdminClientConfig) -> Result<Self, Error> {
+        // `Admin.create` builds the configuration with `doLog = true`
+        // (`Admin.java:136`), which logs every value; a Rust caller builds the
+        // `AdminClientConfig` itself, so the client logs them here.
+        config.log_values();
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
-        // Java's `bootstrapAddressesToUse`: `bootstrap.controllers` would be
-        // used when `determineBootstrapType` says so, but `AdminClientConfig::new`
-        // already rejected it, so it is always `bootstrap.servers`.
+        // Java's `bootstrapAddressesToUse`, chosen by `determineBootstrapType`
+        // (`KafkaAdminClient.java:533-560`, called at `:582`). `bootstrap.controllers`
+        // is not defined, so it is always `bootstrap.servers`. Java fails an
+        // empty list there, before it looks at `bootstrap.resolve.timeout.ms`
+        // (`:597`), so construction fails in both resolution modes; so does
+        // this one. Deviation: Java's message is "You must set either
+        // bootstrap.servers or bootstrap.controllers", which names a key this
+        // client does not define; this one is `ClientUtils`'s "No resolvable
+        // bootstrap urls given in bootstrap.servers", which the synchronous
+        // mode gives for an empty list anyway, as the producer and the
+        // consumer do. A whitespace-only value is an empty list, as Java's
+        // `ConfigDef` parses it.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
+        if bootstrap.is_empty() {
+            return Err(Error::config_message(format!(
+                "No resolvable bootstrap urls given in {}",
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG
+            )));
+        }
 
         // Java's `Time.SYSTEM`.
         let time: Arc<dyn Time> = Arc::new(SystemTime);
@@ -425,7 +453,7 @@ impl KafkaAdminClient {
         let metadata_manager = AdminMetadataManager::new(
             config.retry_backoff_ms(),
             config.metadata_max_age_ms(),
-            false, // `determineBootstrapType`: bootstrap.controllers is rejected by the config
+            false, // `determineBootstrapType`: bootstrap.controllers is not defined
             log_context.clone(),
         );
         // bootstrap.resolve.timeout.ms=0 resolves DNS synchronously here and primes the
@@ -441,7 +469,7 @@ impl KafkaAdminClient {
 
         // Selects the channel builder from `security.protocol` + `ssl.*` /
         // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
-        // PLAIN only. Mirrors `ClientUtils.createChannelBuilder(config, time,
+        // PLAIN only (`AdminClientConfig` rejected any other one). Mirrors `ClientUtils.createChannelBuilder(config, time,
         // logContext)` as used by `KafkaAdminClient.createInternal`.
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol(),
@@ -463,22 +491,26 @@ impl KafkaAdminClient {
         selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        let mut client = NetworkClient::with_metadata_updater(
+        // `ClientUtils.createNetworkClient` (`ClientUtils.java:291-317`): the socket
+        // buffers, `metadata.recovery.strategy` and
+        // `metadata.recovery.rebootstrap.trigger.ms` come from the config.
+        let mut client = NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
             selector,
             metadata_manager.updater(),
             &client_id,
             100, // max in-flight requests per connection (admin sends <= 1 per node)
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
-            USE_DEFAULT_BUFFER_SIZE,
-            USE_DEFAULT_BUFFER_SIZE,
+            config.send_buffer_bytes(),
+            config.receive_buffer_bytes(),
             config.request_timeout_ms(),
             config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
+            config.socket_connection_setup_timeout_max_ms(),
             true, // discover_broker_versions
             api_versions,
             DefaultHostResolver::new(),
-            MetadataRecoveryStrategy::None,
+            config.metadata_recovery_rebootstrap_trigger_ms(),
+            config.metadata_recovery_strategy(),
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
@@ -499,49 +531,12 @@ impl KafkaAdminClient {
 
         crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
+        // Java's constructor reads its settings through the config's getters,
+        // then logs what it did not read (`KafkaAdminClient.java:702`).
+        config.mark_read_keys_used();
+        config.log_unused();
         admin.spawn(runnable);
         Ok(admin)
-    }
-
-    /// Determines which bootstrap configuration to use based on the provided
-    /// lists. Validates that exactly one of `bootstrap.servers` or
-    /// `bootstrap.controllers` is configured.
-    ///
-    /// Returns `true` if using `bootstrap.controllers`, `false` if using
-    /// `bootstrap.servers`.
-    ///
-    /// Java takes the `AdminClientConfig` and reads both lists from it; the
-    /// Rust config does not keep `bootstrap.controllers` (no client can use
-    /// it), so [`AdminClientConfig::new`] calls this with both lists while it
-    /// parses them.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Config`] if both or neither bootstrap configurations are set.
-    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType")]
-    pub(crate) fn determine_bootstrap_type(
-        bootstrap_servers: &[String],
-        controller_servers: &[String],
-    ) -> Result<bool, Error> {
-        if bootstrap_servers.is_empty() {
-            if controller_servers.is_empty() {
-                Err(Error::config_message(format!(
-                    "You must set either {} or {}",
-                    AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
-                    AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
-                )))
-            } else {
-                Ok(true) // Using bootstrap.controllers
-            }
-        } else if controller_servers.is_empty() {
-            Ok(false) // Using bootstrap.servers
-        } else {
-            Err(Error::config_message(format!(
-                "You cannot set both {} and {}",
-                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG,
-                AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG
-            )))
-        }
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -581,6 +576,7 @@ impl KafkaAdminClient {
             config.retry_backoff_ms(),
             config.retries(),
             config.request_timeout_ms(),
+            config.metadata_recovery_strategy(),
             Arc::clone(&time),
             Arc::clone(&shutdown),
             log_context.clone(),
@@ -2402,7 +2398,7 @@ fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap
 ///
 /// Mirrors `KafkaAdminClient.getOffsetFromSpec`.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getOffsetFromSpec")]
-fn get_offset_from_spec(offset_spec: OffsetSpec) -> i64 {
+fn get_offset_from_spec(offset_spec: &OffsetSpec) -> i64 {
     use crate::common::requests::ListOffsetsRequest;
     match offset_spec {
         OffsetSpec::Timestamp(spec) => spec.timestamp(),
@@ -4067,8 +4063,8 @@ impl Admin for KafkaAdminClient {
         let mut all_futures: HashMap<ConfigResource, KafkaFuture<()>> = HashMap::new();
         // BROKER_LOGGER requests always go to a specific broker; a non-default
         // BROKER resource goes to that specific node; everything else goes to
-        // the least loaded broker (bootstrap.controllers is unsupported here,
-        // so the controller special-casing never triggers).
+        // the least loaded broker (bootstrap.controllers is not defined by
+        // `AdminClientConfig`, so the controller special-casing never triggers).
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
         for resource in configs.keys() {
@@ -4447,7 +4443,7 @@ impl Admin for KafkaAdminClient {
 
         let offset_queries_by_partition: HashMap<TopicPartition, i64> = topic_partition_offsets
             .iter()
-            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(*spec)))
+            .map(|(tp, spec)| (tp.clone(), get_offset_from_spec(spec)))
             .collect();
 
         let handler = ListOffsetsHandler::new(
@@ -5101,7 +5097,7 @@ impl Admin for KafkaAdminClient {
         // Snapshot the updates for the (possibly retried) request builder.
         let updates_for_request: Vec<(String, FeatureUpdate)> = feature_updates
             .iter()
-            .map(|(feature, update)| (feature.clone(), *update))
+            .map(|(feature, update)| (feature.clone(), update.clone()))
             .collect();
         let validate_only = options.validate_only();
         let create_request = Box::new(move |timeout_ms: i32| {
@@ -6288,8 +6284,8 @@ mod tests {
     /// Java sets `bootstrap.controllers`, which makes
     /// `LeastLoadedBrokerOrActiveKController` route to the active controller and
     /// refresh metadata via `DescribeCluster` between the NOT_CONTROLLER attempt
-    /// and the retry. On this branch `AdminMetadataManager` stubs
-    /// `using_bootstrap_controllers()` to `false`, so the provider behaves like
+    /// and the retry. `bootstrap.controllers` is not defined by
+    /// `AdminClientConfig`, so `using_bootstrap_controllers()` is `false` and the provider behaves like
     /// `LeastLoaded`: after clearing the controller it retries straight to a
     /// least-loaded broker (no interposed metadata call). The observable
     /// contract — retry after NOT_CONTROLLER, then success — is preserved.
@@ -6393,7 +6389,7 @@ mod tests {
     /// Translated from `KafkaAdminClientTest.testDeleteAclsToController`.
     ///
     /// As with `test_create_acls_to_controller`, `bootstrap.controllers` is
-    /// stubbed off on this branch so the NOT_CONTROLLER retry goes straight to a
+    /// not defined by `AdminClientConfig`, so the NOT_CONTROLLER retry goes straight to a
     /// least-loaded broker without an interposed metadata refresh.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testDeleteAclsToController")]
@@ -6835,6 +6831,105 @@ mod tests {
         result.all().get().await.unwrap();
         assert_eq!(result.num_partitions("myTopic").get().await.unwrap(), 1);
         assert_eq!(result.topic_id("myTopic").get().await.unwrap(), Uuid::new(0, 7));
+    }
+
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServer`
+    /// (`KafkaAdminClientTest.java:399`).
+    #[tokio::test]
+    async fn test_unreachable_bootstrap_server() {
+        verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::Rebootstrap).await;
+    }
+
+    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServerNoRebootstrap`
+    /// (`KafkaAdminClientTest.java:404`).
+    #[tokio::test]
+    async fn test_unreachable_bootstrap_server_no_rebootstrap() {
+        verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::None).await;
+    }
+
+    /// Java `verifyUnreachableBootstrapServer` (`KafkaAdminClientTest.java:1546-1574`).
+    ///
+    /// Java runs it over `Time.SYSTEM`, where the 200 ms of unreachability pass
+    /// in real time while `future.get()` waits; here the runnable is driven by
+    /// hand over a `MockTime` advanced 50 ms per iteration, so the same 200 ms
+    /// pass between iterations. The client config is Java's
+    /// `AdminClientUnitTestEnv.clientConfigs(METADATA_RECOVERY_STRATEGY_CONFIG, name)`.
+    async fn verify_unreachable_bootstrap_server(metadata_recovery_strategy: crate::MetadataRecoveryStrategy) {
+        use crate::{CommonClientConfigs, MetadataRecoveryStrategy};
+        // This tests the scenario in which the bootstrap server is unreachable for a short while,
+        // which prevents AdminClient from being able to send the initial metadata request
+
+        let address = "127.0.0.1:8121".parse().expect("a socket address");
+        let cluster = Cluster::bootstrap(&[("localhost".to_string(), address)]);
+        let bootstrap_node = cluster.nodes()[0].clone();
+        let time = mock_time(1000);
+        let client = MockClient::with_static_nodes(cluster.nodes().to_vec(), Arc::clone(&time) as Arc<dyn Time>);
+        let props = HashMap::from([
+            (
+                AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                "localhost:8121".to_string(),
+            ),
+            (AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG.to_string(), "1000".to_string()),
+            (
+                CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG.to_string(),
+                metadata_recovery_strategy.name().to_string(),
+            ),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        // `unreachableNodes.forEach(mockClient::setUnreachable)` in `AdminClientUnitTestEnv`.
+        runnable.client_mut().set_unreachable(&bootstrap_node, 200);
+
+        let (_discovered_cluster, discovered_nodes) = mock_cluster(3, 0);
+        // Bind responses to specific destinations so MockClient delivery does not depend on
+        // the iteration order of AdminClient's callsToSend map (which is keyed by Node).
+        let is_metadata = || -> crate::RequestMatcher {
+            Box::new(|body: &AbstractRequest| matches!(body, AbstractRequest::Metadata(_)))
+        };
+        let discovered_metadata = || {
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &discovered_nodes,
+                Some("mock-cluster"),
+                1,
+                Vec::new(),
+            ))
+        };
+        runnable
+            .client_mut()
+            .prepare_response_from_matcher(is_metadata(), discovered_metadata(), &bootstrap_node);
+        if metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap {
+            runnable
+                .client_mut()
+                .prepare_response_from_matcher(is_metadata(), discovered_metadata(), &bootstrap_node);
+        }
+        runnable.client_mut().prepare_response_from_matcher(
+            Box::new(|body: &AbstractRequest| matches!(body, AbstractRequest::CreateTopics(_))),
+            create_response(vec![create_result("myTopic", Errors::None, None)]),
+            &discovered_nodes[1],
+        );
+
+        let future = admin
+            .create_topics_with_options(
+                &[NewTopic::with_replicas_assignments(
+                    "myTopic",
+                    std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+                )],
+                CreateTopicsOptions::new().set_timeout_ms(Some(10000)),
+            )
+            .all();
+
+        // `future.get()`: drive the runnable until the future completes, well
+        // within the request's 10 s timeout.
+        for _ in 0..200 {
+            if future.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(50);
+        }
+        assert!(future.is_done(), "createTopics did not complete");
+        future.get().await.expect("createTopics succeeds");
     }
 
     #[tokio::test]
@@ -7584,13 +7679,55 @@ mod tests {
         let config = AdminClientConfig::new(&props).unwrap();
         assert_eq!(config.bootstrap_resolve_timeout_ms(), 0);
 
-        let error = KafkaAdminClient::new(config).err().expect("creation must fail");
+        let error = KafkaAdminClient::new(config).expect_err("creation must fail");
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         let cause: &Error = std::error::Error::source(&error)
             .and_then(|e| e.downcast_ref::<Error>())
             .expect("the cause is a crate Error");
         assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
         assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
+    /// Without `bootstrap.servers` (and with no `bootstrap.controllers`, which
+    /// `AdminClientConfig` does not define) the constructor fails, wrapped as
+    /// every construction failure is, whatever `bootstrap.resolve.timeout.ms`
+    /// is: Java's `determineBootstrapType` runs before the resolution-mode
+    /// branch. Deviation from Java's message, "You must set either
+    /// bootstrap.servers or bootstrap.controllers": with no controllers key the
+    /// message is the one `ClientUtils` gives, as the producer and consumer do.
+    #[test]
+    fn test_missing_bootstrap_fails_creation() {
+        let positive_timeout = || {
+            HashMap::from([(
+                AdminClientConfig::BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG.to_string(),
+                "1000".to_string(),
+            )])
+        };
+        let with_positive_timeout = |key: &str, value: &str| {
+            let mut props = positive_timeout();
+            props.insert(key.to_string(), value.to_string());
+            props
+        };
+        for props in [
+            HashMap::new(),
+            HashMap::from([("bootstrap.servers".to_string(), " ".to_string())]),
+            HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]),
+            // Java checks before the `bootstrap.resolve.timeout.ms` branch
+            // (`KafkaAdminClient.java:582` before `:597`), so the asynchronous
+            // mode fails at construction too.
+            positive_timeout(),
+            with_positive_timeout("bootstrap.servers", " "),
+            with_positive_timeout("bootstrap.controllers", "c:9093"),
+        ] {
+            let config = AdminClientConfig::new(&props).unwrap();
+            let error = KafkaAdminClient::new(config).expect_err("creation must fail");
+            assert_eq!(error.message(), "Failed to create new KafkaAdminClient", "{props:?}");
+            let cause: &Error = std::error::Error::source(&error)
+                .and_then(|e| e.downcast_ref::<Error>())
+                .expect("the cause is a crate Error");
+            assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+            assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+        }
     }
 
     /// A [`Call`] whose failure hook records the error it was failed with.
@@ -7753,26 +7890,6 @@ mod tests {
         );
     }
 
-    /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
-    /// messages (KIP-909 moved the check here from `AdminBootstrapAddresses`).
-    #[test]
-    fn test_determine_bootstrap_type() {
-        let servers = vec!["localhost:9092".to_string()];
-        let none: Vec<String> = Vec::new();
-        assert!(!KafkaAdminClient::determine_bootstrap_type(&servers, &none).unwrap());
-        assert!(KafkaAdminClient::determine_bootstrap_type(&none, &servers).unwrap());
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&none, &none).unwrap_err().message(),
-            "You must set either bootstrap.servers or bootstrap.controllers"
-        );
-        assert_eq!(
-            KafkaAdminClient::determine_bootstrap_type(&servers, &servers)
-                .unwrap_err()
-                .message(),
-            "You cannot set both bootstrap.servers and bootstrap.controllers"
-        );
-    }
-
     /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
     /// rethrows `new KafkaException("Failed to create new KafkaAdminClient", exc)`
     /// (`KafkaAdminClient.java:569-573` / `:592-595`), so a caller has one class and
@@ -7787,9 +7904,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
         let config = AdminClientConfig::new(&props).expect("the config itself parses");
 
-        let error = KafkaAdminClient::new(config)
-            .err()
-            .expect("an unparseable bootstrap.servers entry must fail construction");
+        let error =
+            KafkaAdminClient::new(config).expect_err("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
         // Java's replacement is a bare `KafkaException`.
@@ -7955,6 +8071,74 @@ mod tests {
             "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
              updateFailed(e) makes it"
         );
+    }
+
+    /// `makeBrokerMetadataCall.handleResponse` (`KafkaAdminClient.java:1792-1795`):
+    /// a top-level `REBOOTSTRAP_REQUIRED` calls `initiateRebootstrap()` instead of
+    /// `update(response.buildCluster(), now)`, so the next `NetworkClient` poll
+    /// rebootstraps at once whatever `metadata.recovery.rebootstrap.trigger.ms` is.
+    #[tokio::test]
+    async fn a_rebootstrap_required_metadata_response_initiates_a_rebootstrap() {
+        let (_admin, mut runnable, time, nodes) = env();
+
+        runnable.metadata_manager().request_update();
+        let mut data = crate::MetadataResponseData::new();
+        data.set_error_code(Errors::RebootstrapRequired.code());
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(MetadataResponse::with_version(
+                data,
+                crate::common::protocol::ApiKeys::METADATA.latest_version(),
+            )));
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            runnable.client_mut().num_awaiting_responses(),
+            0,
+            "the internal metadata call must have been issued and answered"
+        );
+
+        // `initiateRebootstrap` sets the attempt start to 0, which Java's
+        // wall-clock `now` puts far beyond any trigger. The mock clock started at
+        // 1000, so a trigger of `now - 1` is due only for a start before 1 ms: the
+        // attempt started at 1000 or later would not explain it.
+        let now = time.milliseconds();
+        assert!(runnable.metadata_manager().needs_rebootstrap(now, now - 1));
+        // `buildCluster()` was not applied: the cluster is still the three brokers.
+        assert_eq!(runnable.metadata_manager().node_by_id(nodes[2].id()), Some(nodes[2].clone()));
+    }
+
+    /// The counterpart: an ordinary metadata response is applied with `update`,
+    /// which clears the attempt start, so no rebootstrap is due.
+    #[tokio::test]
+    async fn an_ordinary_metadata_response_does_not_initiate_a_rebootstrap() {
+        let (_admin, mut runnable, time, nodes) = env();
+
+        runnable.metadata_manager().request_update();
+        // Two of the three brokers, so the test can see `update` ran.
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes[..2],
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )));
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        assert_eq!(runnable.client_mut().num_awaiting_responses(), 0);
+        assert_eq!(runnable.metadata_manager().node_by_id(nodes[2].id()), None, "update ran");
+        assert!(!runnable.metadata_manager().needs_rebootstrap(time.milliseconds(), 0));
     }
 
     // --- listTopics ----------------------------------------------------------
@@ -9347,7 +9531,8 @@ mod tests {
         let tp = TopicPartition::new("foo", 0);
         let result = mock.describe_producers_with_options(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `abort_transaction` mirrors Java's `UnsupportedOperationException`.
@@ -9358,7 +9543,9 @@ mod tests {
             .expect("a fresh builder has one broker");
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
         let result = mock.abort_transaction_with_options(spec, AbortTransactionOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- describeTransactions / fenceProducers -------------------------------
@@ -9586,10 +9773,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.describe_transactions_with_options(&["t".to_string()], DescribeTransactionsOptions::new());
-        assert_eq!(
-            result.description("t").unwrap().get().await.unwrap_err().error(),
-            Errors::UnsupportedVersion
-        );
+        let err = result.description("t").unwrap().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `fence_producers` mirrors Java's `UnsupportedOperationException`.
@@ -9599,7 +9785,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.fence_producers_with_options(&["t".to_string()], FenceProducersOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- listTransactions / forceTerminateTransaction ------------------------
@@ -9726,7 +9914,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.list_transactions_with_options(ListTransactionsOptions::new());
-        assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.all().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `force_terminate_transaction` mirrors Java's `UnsupportedOperationException`.
@@ -9736,7 +9926,9 @@ mod tests {
             .build()
             .expect("a fresh builder has one broker");
         let result = mock.force_terminate_transaction_with_options("t", TerminateTransactionOptions::new());
-        assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+        let err = result.result().get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- describeCluster -----------------------------------------------------
@@ -11048,7 +11240,11 @@ mod tests {
         let result = mock
             .describe_replica_log_dirs_with_options(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
         let info = result.values()[&tpr].get().await.unwrap();
-        assert_eq!(info, ReplicaLogDirInfo::default());
+        let empty = ReplicaLogDirInfo::default();
+        assert_eq!(info.current_replica_log_dir(), empty.current_replica_log_dir());
+        assert_eq!(info.current_replica_offset_lag(), empty.current_replica_offset_lag());
+        assert_eq!(info.future_replica_log_dir(), empty.future_replica_log_dir());
+        assert_eq!(info.future_replica_offset_lag(), empty.future_replica_offset_lag());
     }
 
     // --- electLeaders / (alter|list)PartitionReassignments / listOffsets -------
@@ -12531,7 +12727,8 @@ mod tests {
             .expect("a fresh builder has one broker");
         let result = mock.elect_leaders_with_options(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // ---- Group listing / describe (Tier 2 Phase 1) ----
@@ -13435,7 +13632,8 @@ mod tests {
         let result =
             mock.describe_consumer_groups_with_options(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     /// The mock's `describe_classic_groups` mirrors Java's
@@ -13448,7 +13646,8 @@ mod tests {
         let result =
             mock.describe_classic_groups_with_options(&["g1".to_string()], DescribeClassicGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
-        assert_eq!(err.error(), Errors::UnsupportedVersion);
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "Not implemented yet");
     }
 
     // --- consumer group offsets (list / alter / delete) ---------------------

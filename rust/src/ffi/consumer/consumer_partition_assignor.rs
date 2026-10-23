@@ -36,7 +36,9 @@ use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::topic_partition::{list_topic_partitions, topic_partition_list};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_string_list, c_str_to_option, kafka_Bytes_t, kafka_List_t, list_strings, owned_c_string};
+use crate::ffi::util::{
+    box_string_list, c_str_to_option, into_c_string, kafka_Bytes_t, kafka_List_t, list_strings, owned_c_string,
+};
 
 /// Opaque handle to a [`Subscription`].
 #[repr(C)]
@@ -363,6 +365,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
     unsafe { subscription_ref(self_) }.generation_id().unwrap_or(-1)
 }
 
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid subscription handle, used by no setter during the call.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string(
+    self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid subscription handle, as `subscription_ref` requires; the string is built during the call.
+    into_c_string(&unsafe { subscription_ref(self_) }.to_string())
+}
+
 /// Frees a handle; a null pointer is a no-op.
 ///
 /// # Safety
@@ -459,6 +475,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_use
     // the only use of the reference, as `assignment_ref` requires. The returned view borrows the
     // handle's bytes, which the rustdoc tells the caller.
     kafka_Bytes_t::from_option(unsafe { assignment_ref(self_) }.user_data())
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid assignment handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string(
+    self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid assignment handle, as `assignment_ref` requires; the string is built during the call.
+    into_c_string(&unsafe { assignment_ref(self_) }.to_string())
 }
 
 /// Frees a handle; a null pointer is a no-op.

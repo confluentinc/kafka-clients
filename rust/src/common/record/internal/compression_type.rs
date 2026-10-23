@@ -17,6 +17,14 @@
 //! Corresponds to Java's `org.apache.kafka.common.record.internal.CompressionType`.
 
 use crate::common::Error;
+use crate::common::config::config_def::{LambdaValidator, ParsedValue, Range, Validator, config_error};
+
+/// Java's `GZIP.MIN_LEVEL`, `Deflater.BEST_SPEED`.
+const GZIP_MIN_LEVEL: i32 = 1;
+/// Java's `GZIP.MAX_LEVEL`, `Deflater.BEST_COMPRESSION`.
+const GZIP_MAX_LEVEL: i32 = 9;
+/// Java's `GZIP.DEFAULT_LEVEL`, `Deflater.DEFAULT_COMPRESSION`.
+const GZIP_DEFAULT_LEVEL: i32 = -1;
 
 /// The compression type to use.
 ///
@@ -164,6 +172,57 @@ impl CompressionType {
             Self::Gzip => Some(9), // Deflater.BEST_COMPRESSION
             Self::Lz4 => Some(17),
             Self::Zstd => Some(22),
+            Self::None | Self::Snappy => Option::None,
+        }
+    }
+
+    /// Returns the `ConfigDef` validator of this type's level configuration
+    /// (`compression.<type>.level`).
+    ///
+    /// Returns `None` for types that do not support compression levels, where
+    /// Java's `levelValidator()` throws `UnsupportedOperationException`.
+    ///
+    /// Gzip accepts `[1,...,9]` or `-1` (Java's `Deflater.DEFAULT_COMPRESSION`)
+    /// through a `LambdaValidator`; LZ4 and Zstd accept the range from
+    /// [`Self::min_level`] to [`Self::max_level`].
+    #[doc(alias = "org.apache.kafka.common.record.internal.CompressionType#levelValidator")]
+    pub(crate) fn level_validator(self) -> Option<Box<dyn Validator>> {
+        match self {
+            Self::Gzip => Some(Box::new(LambdaValidator::with(
+                |name, value| {
+                    let Some(value) = value else {
+                        return Err(config_error(name, None, "Value must be non-null"));
+                    };
+                    // Java's `((Number) value).intValue()`: the key is an
+                    // `INT`, so `parse` hands it an `Integer`.
+                    let level = match value {
+                        ParsedValue::Int(level) => *level,
+                        ParsedValue::Short(level) => i32::from(*level),
+                        other => {
+                            return Err(Error::local_illegal_argument(format!(
+                                "class {} cannot be cast to class java.lang.Number",
+                                other.java_class_name()
+                            )));
+                        },
+                    };
+                    let (min, max, default) = (GZIP_MIN_LEVEL, GZIP_MAX_LEVEL, GZIP_DEFAULT_LEVEL);
+                    if level > max || (level < min && level != default) {
+                        return Err(config_error(
+                            name,
+                            Some(value),
+                            format!("Value must be between {min} and {max} or equal to {default}"),
+                        ));
+                    }
+                    Ok(())
+                },
+                || format!("[{GZIP_MIN_LEVEL},...,{GZIP_MAX_LEVEL}] or {GZIP_DEFAULT_LEVEL}"),
+            ))),
+            Self::Lz4 | Self::Zstd => {
+                let (Some(min), Some(max)) = (self.min_level(), self.max_level()) else {
+                    return Option::None;
+                };
+                Some(Box::new(Range::between(min, max)))
+            },
             Self::None | Self::Snappy => Option::None,
         }
     }

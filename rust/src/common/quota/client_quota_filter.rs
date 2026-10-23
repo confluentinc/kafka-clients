@@ -21,7 +21,7 @@ use crate::common::quota::ClientQuotaFilterComponent;
 /// Describes a client quota entity filter.
 ///
 /// Corresponds to `org.apache.kafka.common.quota.ClientQuotaFilter`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter")]
 pub struct ClientQuotaFilter {
     components: Vec<ClientQuotaFilterComponent>,

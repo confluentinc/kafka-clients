@@ -53,6 +53,17 @@ impl PartialEq for TopicDescription {
     }
 }
 
+impl std::hash::Hash for TopicDescription {
+    /// Hashes the fields [`PartialEq`] compares, leaving out `topic_id` as
+    /// Java's `TopicDescription.hashCode()` does.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.internal.hash(state);
+        self.partitions.hash(state);
+        self.authorized_operations.hash(state);
+    }
+}
+
 impl TopicDescription {
     /// Create an instance with name, internal flag and partitions (empty
     /// authorized operations, zero topic id).

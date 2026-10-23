@@ -1100,7 +1100,9 @@ fn get_resource_description(state: &mut State, resource: &ConfigResource) -> Res
             }
             Ok(to_config_object(&group_config))
         },
-        _ => Err(Error::unsupported_version("Not implemented yet")),
+        // Java throws `UnsupportedOperationException("Not implemented yet")`
+        // (`MockAdminClient.java:887`).
+        _ => Err(Error::local_unsupported_operation("Not implemented yet")),
     }
 }
 
@@ -1157,7 +1159,9 @@ fn handle_incremental_resource_alteration(
             state.group_configs.insert(resource_name.to_string(), new_map);
             Ok(())
         },
-        _ => Err(Error::unsupported_version("Not implemented yet")),
+        // Java returns `new UnsupportedOperationException()`, with no message
+        // (`MockAdminClient.java:1029`).
+        _ => Err(Error::local_unsupported_operation("")),
     }
 }
 
@@ -1491,7 +1495,7 @@ impl Admin for MockAdminClient {
         new_partitions: &HashMap<String, NewPartitions>,
         _options: CreatePartitionsOptions,
     ) -> CreatePartitionsResult {
-        // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:626-628)
+        // Java's `MockAdminClient.createPartitions` (MockAdminClient.java:629)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1499,7 +1503,7 @@ impl Admin for MockAdminClient {
         let mut result = HashMap::new();
         for topic in new_partitions.keys() {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             result.insert(topic.clone(), handle.future());
         }
         CreatePartitionsResult::new(result)
@@ -1510,7 +1514,7 @@ impl Admin for MockAdminClient {
         records_to_delete: &HashMap<TopicPartition, RecordsToDelete>,
         _options: DeleteRecordsOptions,
     ) -> DeleteRecordsResult {
-        // Java's `MockAdminClient.deleteRecords` (MockAdminClient.java:631-638)
+        // Java's `MockAdminClient.deleteRecords` (MockAdminClient.java:633-638)
         // returns an empty result for an empty request and otherwise throws
         // `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the non-empty case returns an
@@ -1519,7 +1523,7 @@ impl Admin for MockAdminClient {
         let mut result = HashMap::new();
         for topic_partition in records_to_delete.keys() {
             let handle: KafkaFutureImpl<DeletedRecords> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DeleteRecordsResult::new(result)
@@ -1530,7 +1534,7 @@ impl Admin for MockAdminClient {
         partitions: &[TopicPartition],
         _options: DescribeProducersOptions,
     ) -> DescribeProducersResult {
-        // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1368-1370)
+        // Java's `MockAdminClient.describeProducers` (MockAdminClient.java:1384)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1538,7 +1542,7 @@ impl Admin for MockAdminClient {
         let mut result = HashMap::new();
         for topic_partition in partitions {
             let handle: KafkaFutureImpl<PartitionProducerState> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             result.insert(topic_partition.clone(), handle.future());
         }
         DescribeProducersResult::new(result)
@@ -1566,13 +1570,13 @@ impl Admin for MockAdminClient {
         spec: AbortTransactionSpec,
         _options: AbortTransactionOptions,
     ) -> AbortTransactionResult {
-        // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1378-1381)
+        // Java's `MockAdminClient.abortTransaction` (MockAdminClient.java:1394)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
         // translation of the Java behavior).
         let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         AbortTransactionResult::new(HashMap::from([(spec.topic_partition().clone(), handle.future())]))
     }
 
@@ -1581,7 +1585,7 @@ impl Admin for MockAdminClient {
         transactional_ids: &[String],
         _options: DescribeTransactionsOptions,
     ) -> DescribeTransactionsResult {
-        // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1373-1375)
+        // Java's `MockAdminClient.describeTransactions` (MockAdminClient.java:1389)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1589,7 +1593,7 @@ impl Admin for MockAdminClient {
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<TransactionDescription> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         DescribeTransactionsResult::new(result)
@@ -1600,7 +1604,7 @@ impl Admin for MockAdminClient {
         transactional_ids: &[String],
         _options: FenceProducersOptions,
     ) -> FenceProducersResult {
-        // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1393-1395)
+        // Java's `MockAdminClient.fenceProducers` (MockAdminClient.java:1409)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock returns an
         // "unsupported" `Error` per key instead of panicking (faithful
@@ -1608,19 +1612,19 @@ impl Admin for MockAdminClient {
         let mut result = HashMap::new();
         for id in transactional_ids {
             let handle: KafkaFutureImpl<ProducerIdAndEpoch> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             result.insert(id.clone(), handle.future());
         }
         FenceProducersResult::new(result)
     }
 
     fn list_transactions_with_options(&self, _options: ListTransactionsOptions) -> ListTransactionsResult {
-        // Java's `MockAdminClient.listTransactions` (MockAdminClient.java:1388-1390)
+        // Java's `MockAdminClient.listTransactions` (MockAdminClient.java:1404)
         // throws `UnsupportedOperationException("Not implemented yet")`. Per
         // `.claude/rules/admin-client.md` §9 the Rust mock completes the
         // top-level future exceptionally instead of panicking.
         let handle: KafkaFutureImpl<HashMap<i32, KafkaFuture<Vec<TransactionListing>>>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         ListTransactionsResult::new(handle.future())
     }
 
@@ -1631,7 +1635,7 @@ impl Admin for MockAdminClient {
     ) -> TerminateTransactionResult {
         // Java's `MockAdminClient.forceTerminateTransaction` throws
         // `UnsupportedOperationException("Not implemented yet")` directly
-        // (MockAdminClient.java:1383-1386) — it does *not* delegate. It is the
+        // (MockAdminClient.java:1399) — it does *not* delegate. It is the
         // production `KafkaAdminClient.forceTerminateTransaction` that delegates
         // ("Simply leverage the existing fenceProducers implementation",
         // KafkaAdminClient.java:4848-4864). The Rust mock mirrors that production
@@ -1938,7 +1942,7 @@ impl Admin for MockAdminClient {
 
     /// Mirrors `MockAdminClient.electLeaders`, which throws
     /// `UnsupportedOperationException("Not implemented yet")`
-    /// (`MockAdminClient.java:797`). Translated to a future failed with an
+    /// (`MockAdminClient.java:799`). Translated to a future failed with an
     /// "unsupported" `Error` (CLAUDE.md §12.1: no panic in public API).
     fn elect_leaders_with_options(
         &self,
@@ -1947,7 +1951,7 @@ impl Admin for MockAdminClient {
         _options: ElectLeadersOptions,
     ) -> ElectLeadersResult {
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         ElectLeadersResult::new(handle.future())
     }
 
@@ -2017,7 +2021,7 @@ impl Admin for MockAdminClient {
     /// Mirrors `MockAdminClient.listOffsets`.
     ///
     /// Java throws `UnsupportedOperationException` for a `TimestampSpec`
-    /// (`MockAdminClient.java:1230`); since a synchronous throw is not
+    /// (`MockAdminClient.java:1233`); since a synchronous throw is not
     /// representable in this signature, the affected partition's future is
     /// failed with an "unsupported" `Error` (CLAUDE.md §12.1).
     fn list_offsets_with_options(
@@ -2031,8 +2035,8 @@ impl Admin for MockAdminClient {
             let future: KafkaFutureImpl<ListOffsetsResultInfo> = KafkaFutureImpl::new();
             match spec {
                 OffsetSpec::Timestamp(_) => {
-                    // Java's message is "Not implement yet" (sic), `MockAdminClient.java:1231`.
-                    future.complete_with_error(Error::unsupported_version("Not implement yet"));
+                    // Java's message is "Not implement yet" (sic), `MockAdminClient.java:1233`.
+                    future.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
                 },
                 OffsetSpec::Earliest => {
                     let offset = state.beginning_offsets.get(tp).copied().unwrap_or(-1);
@@ -2076,12 +2080,12 @@ impl Admin for MockAdminClient {
     ) -> DescribeConsumerGroupsResult {
         // Java's `MockAdminClient.describeConsumerGroups` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:735). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:738). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ConsumerGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeConsumerGroupsResult::new(futures)
@@ -2094,12 +2098,12 @@ impl Admin for MockAdminClient {
     ) -> DescribeClassicGroupsResult {
         // Java's `MockAdminClient.describeClassicGroups` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1478). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:1531). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<ClassicGroupDescription> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DescribeClassicGroupsResult::new(futures)
@@ -2112,14 +2116,14 @@ impl Admin for MockAdminClient {
     ) -> ListConsumerGroupOffsetsResult {
         // Java ignores the group and assumes each test works on a single group;
         // more than one group is "Not implemented yet"
-        // (MockAdminClient.java:750). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:753). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         if group_specs.len() != 1 {
             let futures = group_specs
                 .keys()
                 .map(|group| {
                     let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
-                    handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+                    handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
                     (group.clone(), handle.future())
                 })
                 .collect();
@@ -2171,11 +2175,11 @@ impl Admin for MockAdminClient {
     ) -> AlterConsumerGroupOffsetsResult {
         // Java's `MockAdminClient.alterConsumerGroupOffsets` throws
         // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1213 — note Java's own typo "implement"). Per
+        // (MockAdminClient.java:1215 — note Java's own typo "implement"). Per
         // admin-client.md §9 the Rust mock surfaces that as an exceptional
         // future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
         AlterConsumerGroupOffsetsResult::new(handle.future())
     }
 
@@ -2187,10 +2191,10 @@ impl Admin for MockAdminClient {
     ) -> DeleteConsumerGroupOffsetsResult {
         // Java's `MockAdminClient.deleteConsumerGroupOffsets` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:783). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:786). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<TopicPartition, Errors>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions.clone())
     }
 
@@ -2201,12 +2205,12 @@ impl Admin for MockAdminClient {
     ) -> DeleteConsumerGroupsResult {
         // Java's `MockAdminClient.deleteConsumerGroups` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:773-775). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:776). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future per group rather than a panic.
         let mut futures = HashMap::new();
         for group_id in group_ids {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(group_id.clone(), handle.future());
         }
         DeleteConsumerGroupsResult::new(futures)
@@ -2219,23 +2223,23 @@ impl Admin for MockAdminClient {
     ) -> RemoveMembersFromConsumerGroupResult {
         // Java's `MockAdminClient.removeMembersFromConsumerGroup` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:801-803). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:804). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<MemberIdentity, Errors>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         RemoveMembersFromConsumerGroupResult::new(handle.future(), options.members().clone())
     }
 
     fn create_acls_with_options(&self, acls: &[AclBinding], _options: CreateAclsOptions) -> CreateAclsResult {
         // Java's `MockAdminClient.createAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:806-808). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:809). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future per binding rather than a
         // panic.
         let mut futures = HashMap::new();
         for acl in acls {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(acl.clone(), handle.future());
         }
         CreateAclsResult::new(futures)
@@ -2248,22 +2252,22 @@ impl Admin for MockAdminClient {
     ) -> DescribeAclsResult {
         // Java's `MockAdminClient.describeAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:811-813). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:814). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<Vec<AclBinding>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DescribeAclsResult::new(handle.future())
     }
 
     fn delete_acls_with_options(&self, filters: &[AclBindingFilter], _options: DeleteAclsOptions) -> DeleteAclsResult {
         // Java's `MockAdminClient.deleteAcls` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:816-818). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:819). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future per filter rather than a panic.
         let mut futures = HashMap::new();
         for filter in filters {
             let handle: KafkaFutureImpl<FilterResults> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(filter.clone(), handle.future());
         }
         DeleteAclsResult::new(futures)
@@ -2276,10 +2280,10 @@ impl Admin for MockAdminClient {
     ) -> DescribeClientQuotasResult {
         // Java's `MockAdminClient.describeClientQuotas` throws
         // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1243-1245). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:1247). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<HashMap<ClientQuotaEntity, HashMap<String, f64>>> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implement yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
         DescribeClientQuotasResult::new(handle.future())
     }
 
@@ -2290,12 +2294,12 @@ impl Admin for MockAdminClient {
     ) -> AlterClientQuotasResult {
         // Java's `MockAdminClient.alterClientQuotas` throws
         // `UnsupportedOperationException("Not implement yet")`
-        // (MockAdminClient.java:1248-1250). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:1252). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future per entity rather than a panic.
         let mut futures = HashMap::new();
         for entry in entries {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implement yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implement yet"));
             futures.insert(entry.entity().clone(), handle.future());
         }
         AlterClientQuotasResult::new(futures)
@@ -2308,10 +2312,10 @@ impl Admin for MockAdminClient {
     ) -> DescribeUserScramCredentialsResult {
         // Java's `MockAdminClient.describeUserScramCredentials` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1251-1254). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:1257). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future rather than a panic.
         let handle: KafkaFutureImpl<DescribeUserScramCredentialsResponseData> = KafkaFutureImpl::new();
-        handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
         DescribeUserScramCredentialsResult::new(handle.future())
     }
 
@@ -2322,12 +2326,12 @@ impl Admin for MockAdminClient {
     ) -> AlterUserScramCredentialsResult {
         // Java's `MockAdminClient.alterUserScramCredentials` throws
         // `UnsupportedOperationException("Not implemented yet")`
-        // (MockAdminClient.java:1256-1259). Per admin-client.md §9 the Rust mock
+        // (MockAdminClient.java:1262). Per admin-client.md §9 the Rust mock
         // surfaces that as an exceptional future per user rather than a panic.
         let mut futures = HashMap::new();
         for alteration in alterations {
             let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
-            handle.complete_with_error(Error::unsupported_version("Not implemented yet"));
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
             futures.insert(alteration.user().to_string(), handle.future());
         }
         AlterUserScramCredentialsResult::new(futures)
@@ -3495,7 +3499,7 @@ mod tests {
             client.describe_configs_with_options(std::slice::from_ref(&resource), DescribeConfigsOptions::new());
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
-        assert_eq!(err.message(), "Resource ConfigResource(type=Topic, name='missing') not found.");
+        assert_eq!(err.message(), "Resource ConfigResource(type=TOPIC, name='missing') not found.");
     }
 
     #[tokio::test]
@@ -3589,6 +3593,21 @@ mod tests {
         let err = result.values()[&resource].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
         assert_eq!(err.message(), "No such topic as missing");
+    }
+
+    /// Java's `handleIncrementalResourceAlteration` returns
+    /// `new UnsupportedOperationException()`, with no message, for a resource
+    /// type it does not handle (`MockAdminClient.java:1029`).
+    #[tokio::test]
+    async fn incremental_alter_configs_broker_logger_is_unsupported_without_message() {
+        let client = admin();
+        let resource = ConfigResource::new(config_resource::Type::BrokerLogger, "0".to_string());
+        let op = AlterConfigOp::new(ConfigEntry::new("k".to_string(), Some("v".to_string())), OpType::Set);
+        let configs = HashMap::from([(resource.clone(), vec![op])]);
+        let result = client.incremental_alter_configs_with_options(&configs, AlterConfigsOptions::new());
+        let err = result.values()[&resource].get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(err.message(), "");
     }
 
     #[tokio::test]

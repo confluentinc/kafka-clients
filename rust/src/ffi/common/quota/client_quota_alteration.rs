@@ -381,7 +381,8 @@ mod tests {
             kafka_common_quota_ClientQuotaAlteration_Op_destroy(op1);
             kafka_common_quota_ClientQuotaEntity_destroy(entity_handle);
 
-            assert_eq!(*client_quota_alteration_ref(alteration), expected);
+            let view = client_quota_alteration_ref(alteration);
+            assert_eq!((view.entity(), view.ops()), (expected.entity(), expected.ops()));
             assert_eq!(
                 *client_quota_entity_ref(kafka_common_quota_ClientQuotaAlteration_entity(alteration)),
                 entity

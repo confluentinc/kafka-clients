@@ -663,12 +663,9 @@ async fn producer_perf_test() {
     let props = config.producer_props(&bootstrap_servers);
     let producer_config = ProducerConfig::new(&props).expect("Invalid producer config");
 
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
-        producer_config,
-        Box::new(ByteArraySerializer::new()),
-        Box::new(ByteArraySerializer::new()),
-    )
-    .expect("Failed to create producer");
+    let producer =
+        KafkaProducer::<Vec<u8>, Vec<u8>>::new(producer_config, ByteArraySerializer::new(), ByteArraySerializer::new())
+            .expect("Failed to create producer");
 
     // --- Consumer-side verification (VERIFY_CONSUMED) ---
     // Blocked on master: the Consumer API is not yet merged here (only on the

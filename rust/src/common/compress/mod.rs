@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(2 * 1024, Compression::snappy().build().decompression_output_size().unwrap());
         assert_eq!(2 * 1024, Compression::lz4().build().decompression_output_size().unwrap());
         let error = Compression::NONE.decompression_output_size().unwrap_err();
-        assert!(matches!(error, crate::common::Error::UnsupportedVersion(_)), "{error:?}");
+        assert!(error.is_local_unsupported_operation_error(), "{error:?}");
         assert_eq!(
             "Size of decompression buffer is not defined for this compression type=none",
             error.message()

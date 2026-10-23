@@ -19,7 +19,7 @@
 /// Represents information about deleted records.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeletedRecords`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeletedRecords")]
 pub struct DeletedRecords {
     low_watermark: i64,

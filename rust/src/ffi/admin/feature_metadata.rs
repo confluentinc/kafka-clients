@@ -101,7 +101,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
         // alive for this call, as `feature_metadata_ref` requires.
         unsafe { feature_metadata_ref(self_) }.finalized_features(),
-        |range| box_finalized_version_range(*range) as *mut c_void,
+        |range| box_finalized_version_range(range.clone()) as *mut c_void,
         destroy_finalized_version_range_element,
     )
 }
@@ -140,7 +140,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
         // alive for this call, as `feature_metadata_ref` requires.
         unsafe { feature_metadata_ref(self_) }.supported_features(),
-        |range| box_supported_version_range(*range) as *mut c_void,
+        |range| box_supported_version_range(range.clone()) as *mut c_void,
         destroy_supported_version_range_element,
     )
 }

@@ -1388,6 +1388,7 @@ mod tests {
             ),
         ] {
             let error = described.all().get().await.expect_err("the mock does not implement this");
+            assert!(error.is_local_unsupported_operation_error(), "{error:?}");
             assert_eq!(error.message(), "Not implemented yet");
         }
     }
@@ -1423,8 +1424,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(all, all_with_options);
-        assert_eq!(selected, selected_with_options);
+        // `PartitionReassignment` has no `PartialEq` (Java's does not override
+        // `equals`), so the maps are compared by their replica lists.
+        let view = |reassignments: &HashMap<TopicPartition, PartitionReassignment>| {
+            reassignments
+                .iter()
+                .map(|(partition, r)| {
+                    let lists = (
+                        r.replicas().to_vec(),
+                        r.adding_replicas().to_vec(),
+                        r.removing_replicas().to_vec(),
+                    );
+                    (partition.clone(), lists)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(view(&all), view(&all_with_options));
+        assert_eq!(view(&selected), view(&selected_with_options));
         // Nothing is reassigning in a freshly seeded mock, so both are empty —
         // what matters is that `(options)` took the `None` branch, i.e. did not
         // request the empty *set*, which the mock would answer identically here

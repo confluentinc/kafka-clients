@@ -23,6 +23,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::util::into_c_string;
 use std::ffi::c_char;
 use std::ptr;
 
@@ -129,6 +130,22 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_Deserialization
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `origin_value_of` requires.
     origin_enum_of(unsafe { origin_value_of(self_) })
+}
+
+/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
+/// with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string(
+    self_: *const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
+    // `origin_value_of` requires; the value is copied out and its name copied into an owned string.
+    into_c_string(&unsafe { origin_value_of(self_) }.to_string())
 }
 
 // ---------------------------------------------------------------------------

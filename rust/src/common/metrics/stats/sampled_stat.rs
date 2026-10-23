@@ -17,6 +17,7 @@
 
 use std::sync::Mutex;
 
+use crate::common::config::config_def::java_double_to_string;
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// The per-subclass behaviour of a [`SampledStat`].
@@ -385,9 +386,70 @@ impl Sample {
     }
 }
 
+impl std::fmt::Debug for SampledStat {
+    /// The fields Java's `toString()` prints; the stat's kind is a trait object.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().expect("sampled stat mutex poisoned");
+        f.debug_struct("SampledStat")
+            .field("initial_value", &self.initial_value)
+            .field("current", &inner.current)
+            .field("samples", &inner.samples)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for SampledStat {
+    /// Java's `SampledStat.toString()`, which `Avg`, `Max`, `Min`,
+    /// `WindowedCount` and `WindowedSum` inherit: the samples print as Java's
+    /// `List.toString()` and the doubles as Java's `Double.toString`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let inner = self.inner.lock().expect("sampled stat mutex poisoned");
+        let samples = inner.samples.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        write!(
+            f,
+            "SampledStat(initialValue={}, current={}, samples=[{}])",
+            java_double_to_string(self.initial_value),
+            inner.current,
+            samples
+        )
+    }
+}
+
+impl std::fmt::Display for Sample {
+    /// Java's `Sample.toString()`, the doubles as Java's `Double.toString`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Sample(value={}, eventCount={}, startTimeMs={}, lastEventMs={}, initialValue={}, timeWindowMs={})",
+            java_double_to_string(self.value),
+            self.event_count,
+            self.start_time_ms,
+            self.last_event_ms,
+            java_double_to_string(self.initial_value),
+            self.time_window_ms
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        assert_eq!(
+            Sample::with_time_window_ms(0.0, 5, 30).to_string(),
+            "Sample(value=0.0, eventCount=0, startTimeMs=5, lastEventMs=5, initialValue=0.0, timeWindowMs=30)"
+        );
+        let avg = Avg::new();
+        assert_eq!(avg.to_string(), "SampledStat(initialValue=0.0, current=0, samples=[])");
+        avg.record(&MetricConfig::new(), 2.5, 7);
+        assert_eq!(
+            avg.to_string(),
+            "SampledStat(initialValue=0.0, current=0, samples=[Sample(value=2.5, eventCount=1, startTimeMs=7, \
+             lastEventMs=7, initialValue=0.0, timeWindowMs=-1)])"
+        );
+    }
     use crate::common::metrics::TimeUnit;
     use crate::common::metrics::stats::{Avg, Max, Min, WindowedCount, WindowedSum};
     use crate::common::metrics::{Measurable, Stat};

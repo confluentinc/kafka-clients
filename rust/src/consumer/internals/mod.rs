@@ -80,6 +80,7 @@ pub(crate) use commit_request_manager::CommitRequestManager;
 pub(crate) use completed_fetch::CompletedFetch;
 pub(crate) use consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
 pub(crate) use consumer_interceptors::ConsumerInterceptors;
+pub(crate) use consumer_interceptors::panic_payload_message;
 pub(crate) use consumer_membership_manager::ConsumerMembershipManager;
 pub(crate) use consumer_metadata::ConsumerMetadata;
 pub(crate) use consumer_network_thread::ConsumerNetworkThread;

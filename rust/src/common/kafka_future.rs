@@ -33,8 +33,9 @@ use crate::common::Error;
 ///
 /// Java's `KafkaFuture.BaseFunction<A, B>`, a functional interface: every
 /// `Fn(A) -> Result<B, Error> + Send + Sync` closure implements it, so
-/// [`KafkaFuture::then_apply`] takes a closure as Java takes a lambda.
-/// [`BaseFunction_new`] makes one from a function explicitly.
+/// [`KafkaFuture::then_apply`] takes a closure where Java takes a lambda, its
+/// parameter type written out when the body calls a method on it (see
+/// `then_apply`). [`BaseFunction_new`] makes one from a function explicitly.
 #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
 pub trait BaseFunction<A, B>: Send + Sync {
     /// Applies this function to `a`.
@@ -236,6 +237,33 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// `CreateTopicsResult.TopicMetadataAndConfig` accessors, which call
     /// `ensureSuccess()` and rethrow a stored exception). A transform that
     /// cannot fail returns `Ok`.
+    ///
+    /// `function` is a [`BaseFunction`]: a closure, or a value from
+    /// [`BaseFunction_new`]. Rust infers a closure's parameter type only from
+    /// an `Fn` bound, not from a trait the closure gets through a blanket impl,
+    /// so a closure whose body calls a method on its argument writes the
+    /// argument's type out (`|v: T| ..`). A function held as a trait object
+    /// (`Box<dyn BaseFunction<T, R>>`, `Arc<..>`) is not itself a
+    /// `BaseFunction`; it is passed as `move |v| f.apply(v)`:
+    ///
+    /// ```
+    /// use confluent_kafka::common::KafkaFuture;
+    /// use confluent_kafka::common::kafka_future::{self, BaseFunction};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let future = KafkaFuture::completed_future(Ok("four".to_string()));
+    ///
+    /// // The body calls `len()` on `v`, so its type is written out.
+    /// let len = future.then_apply(|v: String| Ok(v.len()));
+    /// assert_eq!(len.get().await.unwrap(), 4);
+    ///
+    /// // A stored function is forwarded to through a closure.
+    /// let f: Box<dyn BaseFunction<String, usize>> = Box::new(kafka_future::BaseFunction_new(|v: String| Ok(v.len())));
+    /// let len = future.then_apply(move |v| f.apply(v));
+    /// assert_eq!(len.get().await.unwrap(), 4);
+    /// # }
+    /// ```
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
     pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
     where

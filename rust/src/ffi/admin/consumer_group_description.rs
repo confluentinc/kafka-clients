@@ -31,7 +31,7 @@ use crate::ffi::common::group_state::{self, kafka_common_GroupState_t};
 use crate::ffi::common::group_type::{self, kafka_common_GroupType_t};
 use crate::ffi::common::node::{NodeInner, kafka_common_Node_t, optional_node, optional_node_ptr};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`ConsumerGroupDescription`].
 #[repr(C)]
@@ -365,6 +365,21 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_target_assignment_
     unsafe { consumer_group_description_ref(self_) }
         .target_assignment_epoch()
         .unwrap_or(-1)
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a live consumer-group-description handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_to_string(
+    self_: *const kafka_admin_ConsumerGroupDescription_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live consumer-group-description handle, kept alive for
+    // this call, as `consumer_group_description_ref` requires.
+    into_c_string(&unsafe { consumer_group_description_ref(self_) }.to_string())
 }
 
 /// Frees an owned consumer-group-description handle; null is a no-op.

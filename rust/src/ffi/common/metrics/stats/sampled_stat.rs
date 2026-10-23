@@ -30,7 +30,7 @@
 
 #![expect(non_camel_case_types)]
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
 use crate::common::metrics::MetricConfig;
@@ -45,7 +45,7 @@ use crate::ffi::common::metrics::metric_value_provider::kafka_common_metrics_Met
 use crate::ffi::common::metrics::stat::kafka_common_metrics_Stat_t;
 use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, into_c_string, kafka_List_destroy, kafka_List_t, list_elements};
 
 // ---------------------------------------------------------------------------
 // SampledStat
@@ -171,6 +171,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableSt
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_measurable_stat()
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_to_string(
+    self_: *const kafka_common_metrics_stats_SampledStat_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, as `handle` requires; the string is built during the call.
+    into_c_string(&unsafe { handle(self_) }.stat().to_string())
 }
 
 /// Frees an owned handle; null is a no-op. A sensor, rate or meter the stat
@@ -754,6 +768,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_value
     // uses at the same time and not one of the read-only samples `combine` lends, as `sample_mut`
     // requires; the exclusive reference is used only within this call.
     unsafe { sample_mut(self_) }.set_value(value)
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid sample handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_to_string(
+    self_: *const kafka_common_metrics_stats_SampledStat_Sample_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sample handle, as `sample_ref` requires; the string is built during the call.
+    into_c_string(&unsafe { sample_ref(self_) }.to_string())
 }
 
 /// Frees an owned sample handle; null is a no-op.

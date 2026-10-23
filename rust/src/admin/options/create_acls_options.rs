@@ -19,7 +19,7 @@
 /// Options for `Admin::create_acls`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.CreateAclsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions")]
 pub struct CreateAclsOptions {
     timeout_ms: Option<i32>,

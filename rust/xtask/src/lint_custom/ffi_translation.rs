@@ -110,9 +110,9 @@
 //!     `_new` parameter is always the bare typedef name (cbindgen does not
 //!     see through `Option<alias>` in a signature); an async method's
 //!     `_fn_t` returns nothing and takes a trailing `int64_t callback_id`,
-//!     except on a dual-mode interface ([`DUAL_MODE_INTERFACES`]), whose
-//!     `_fn_t`s keep the synchronous form and which adds `_new_async` with
-//!     one reported-form `_async_fn_t` per method, `__is_async` and its own
+//!     except on an async-only interface ([`ASYNC_ONLY_INTERFACES`]), which
+//!     has no `_new` and no `_fn_t`s but `_new_async` with one reported-form
+//!     `_async_fn_t` per method, `__is_async` and its own
 //!     `__set_callback_result`;
 //!   - a client trait ([`CLIENT_TRAITS`]): `__execute_callbacks`,
 //!     `__set_callbacks_notify` with its `_callbacks_notify_fn_t`, and
@@ -122,7 +122,8 @@
 //!     underscore on all three: derived by convention, no Java counterpart);
 //!   - `impl Trait for Struct`, both with a handle:
 //!     `<struct prefix>__as_<Trait>` returning the borrowed interface view,
-//!     `*mut` on both sides when a trait method takes `&mut self`; a blanket
+//!     `*mut` on both sides when a trait method takes `&mut self` (a view
+//!     listed in [`CONST_SELF_VIEWS`] takes the handle `const`); a blanket
 //!     `impl<T: A + B> Trait for T` counts for every struct implementing `A`
 //!     and `B`;
 //!   - an `Error` variant's payload struct with a handle:
@@ -144,7 +145,9 @@
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
 //! consumer state reads the C handle's single-owner guard can refuse
-//! ([`C_GUARDED_READS`]) are fallible in C only; the factories of an error
+//! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
+//! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
+//! flag and an out-parameter instead of a `-1` sentinel; the factories of an error
 //! carrying a binding's opaque pointer ([`C_RELEASE_HOOKS`]) take a trailing
 //! nullable release hook in C only; a trait
 //! method with `where Self: Sized`
@@ -176,7 +179,7 @@ pub(super) const FFI_BASELINE: &str = "xtask/ffi-baseline.txt";
 
 /// The traits whose implementations are clients, which pump the queued
 /// callbacks (CLAUDE.md §4 rule 5).
-const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
+pub(super) const CLIENT_TRAITS: &[&str] = &["Producer", "Consumer", "Admin"];
 
 /// Public Rust types that deliberately have no C counterpart: `KafkaError`
 /// is the embedded `KafkaException` base, which never crosses the boundary on
@@ -215,25 +218,23 @@ fn is_reported(prefix: &str) -> bool {
     REPORTED_INTERFACES.iter().any(|r| r.prefix == prefix)
 }
 
-/// Interfaces a C implementation registers in one of two modes, fixed at
-/// construction: `<prefix>_new` takes the synchronous `_fn_t`s (the value
-/// returned, the error stored in `out_err`), whose functions Rust runs on a
-/// blocking task; `<prefix>_new_async` takes the `_async_fn_t`s in the
-/// reported form of an async method (`void`, a trailing `callback_id`),
-/// whose implementation reports through the interface's own
-/// `<prefix>__set_callback_result(self, callback_id, result, error)`, and
-/// `<prefix>__is_async(self)` tells the two apart. These are the serdes,
-/// called once per key and per value: a C serde that blocks must not stall
-/// the client's runtime, and one that waits on its own I/O must not hold a
-/// thread, so C chooses (CLAUDE.md §4 "Traits", §11).
-const DUAL_MODE_INTERFACES: &[&str] = &[
+/// Interfaces a C implementation registers only in the reported form:
+/// `<prefix>_new_async` takes one `_async_fn_t` per method, each returning
+/// nothing and taking a trailing `callback_id`, and the implementation
+/// reports through the interface's own
+/// `<prefix>__set_callback_result(self, callback_id, result, error)`;
+/// `<prefix>__is_async(self)` tells a C implementation from a built-in
+/// class's view. There is no `<prefix>_new` and no synchronous `_fn_t`: a C
+/// function returning its result would hold a thread for every key and value
+/// it waits on. These are the serdes (CLAUDE.md §4 "Serde interfaces").
+const ASYNC_ONLY_INTERFACES: &[&str] = &[
     "kafka_common_serialization_Serializer",
     "kafka_common_serialization_Deserializer",
 ];
 
-/// Whether the interface with C prefix `prefix` is dual-mode.
-fn is_dual_mode(prefix: &str) -> bool {
-    DUAL_MODE_INTERFACES.contains(&prefix)
+/// Whether the interface with C prefix `prefix` is async-only.
+fn is_async_only(prefix: &str) -> bool {
+    ASYNC_ONLY_INTERFACES.contains(&prefix)
 }
 
 /// C items with no Rust item behind them that CLAUDE.md §4 presupposes: a C
@@ -271,6 +272,40 @@ const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_subscription",
 ];
 
+/// Methods returning `Option<i64>` whose value domain includes `-1`, so the
+/// `-1`-for-`None` mapping of a scalar `Option` would lose a value: Java's
+/// `Consumer.currentLag` returns an `OptionalLong`, empty or any `long`,
+/// negatives included (a position past the end offset gives a negative lag,
+/// `SubscriptionState.partitionLag`). Their C form keeps both of Java's states:
+/// the blocking function takes `int64_t *<out>` (the named parameter, before
+/// `out_err`) and returns `int8_t`, 1 when the value is present and written to
+/// `*<out>`, 0 when it is empty or the call failed; the `_cb_t` typedef takes
+/// `(int8_t present, int64_t <value>, error, opaque)`.
+///
+/// The client configurations' typed getters (Java's `AbstractConfig.getShort`,
+/// `getInt`, `getLong`, `getDouble`, `getBoolean`) are listed for the same
+/// reason: a configuration value is Java's `null` or any value of its type,
+/// `-1` included (`send.buffer.bytes=-1` is the OS default).
+const C_PRESENCE_FLAG_OPTIONALS: &[(&str, &str)] = &[
+    ("kafka_consumer_Consumer_current_lag", "lag"),
+    ("kafka_consumer_ConsumerHandle_current_lag", "lag"),
+    ("kafka_admin_AdminClientConfig_get_short", "value"),
+    ("kafka_admin_AdminClientConfig_get_int", "value"),
+    ("kafka_admin_AdminClientConfig_get_long", "value"),
+    ("kafka_admin_AdminClientConfig_get_double", "value"),
+    ("kafka_admin_AdminClientConfig_get_boolean", "value"),
+    ("kafka_consumer_ConsumerConfig_get_short", "value"),
+    ("kafka_consumer_ConsumerConfig_get_int", "value"),
+    ("kafka_consumer_ConsumerConfig_get_long", "value"),
+    ("kafka_consumer_ConsumerConfig_get_double", "value"),
+    ("kafka_consumer_ConsumerConfig_get_boolean", "value"),
+    ("kafka_producer_ProducerConfig_get_short", "value"),
+    ("kafka_producer_ProducerConfig_get_int", "value"),
+    ("kafka_producer_ProducerConfig_get_long", "value"),
+    ("kafka_producer_ProducerConfig_get_double", "value"),
+    ("kafka_producer_ProducerConfig_get_boolean", "value"),
+];
+
 /// Factories taking a binding's opaque pointer whose C form adds a trailing
 /// `release` parameter, with the nullable typedef `(opaque) -> void` it is
 /// declared as. A binding's pointer may stand for an object the binding owns
@@ -284,6 +319,14 @@ const C_RELEASE_HOOKS: &[(&str, &str)] = &[(
     "kafka_common_Error_local_callback",
     "kafka_common_LocalCallbackError_release_fn_t",
 )];
+
+/// `__as_<Trait>` views of a mutable trait that take the handle `const` and
+/// still return the mutable view, as C's `strchr` does: C receives these
+/// handles read-only (a deserializer's headers, a record's `headers()`) and
+/// only the reading methods may be called on the view then, while a handle
+/// received non-`const` (a serializer's headers) may be changed through the
+/// same view. One function serves both, with no cast on the read-only side.
+const CONST_SELF_VIEWS: &[&str] = &["kafka_common_header_internals_RecordHeaders__as_Headers"];
 
 /// The handle over `common::Error`.
 const ERROR_HANDLE: &str = "kafka_common_Error_t";
@@ -1818,12 +1861,14 @@ impl FfiTranslation {
                 continue;
             }
             let Kind::Trait { mutable } = t.kind else { continue };
+            let name = format!("{}__as_{trait_name}", s.prefix);
+            let self_mutable = mutable && !CONST_SELF_VIEWS.contains(&name.as_str());
             out.add(
-                format!("{}__as_{trait_name}", s.prefix),
+                name,
                 Shape::Fn(Sig {
                     params: vec![Param::new(
                         "self",
-                        CType::Handle { prefix: s.prefix.clone(), mutable }.render(),
+                        CType::Handle { prefix: s.prefix.clone(), mutable: self_mutable }.render(),
                     )],
                     ret: Some(CType::Handle { prefix: t.prefix.clone(), mutable }.render()),
                 }),
@@ -2196,16 +2241,34 @@ fn expect_method(
 
     let mut blocking = Sig { params: params.clone(), ret: None };
     let guarded_read = C_GUARDED_READS.contains(&name.as_str());
-    match (&output, &value) {
-        (Output::Value(_), Some(v)) if guarded_read => {
+    // A listed `Option<i64>` keeps its presence apart from its value
+    // ([`C_PRESENCE_FLAG_OPTIONALS`]).
+    let presence_flag = match &output {
+        Output::Value(t) | Output::Fallible(Some(t)) if is_option(t) => C_PRESENCE_FLAG_OPTIONALS
+            .iter()
+            .find(|(f, _)| *f == name)
+            .map(|(_, value_name)| *value_name),
+        _ => None,
+    };
+    match (&output, &value, presence_flag) {
+        (_, Some(v), Some(value_name)) => {
+            blocking
+                .params
+                .push(Param::new(&format!("out_{value_name}"), format!("*mut {}", v.render())));
+            if matches!(output, Output::Fallible(_)) || guarded_read {
+                blocking.params.push(Param::out_err());
+            }
+            blocking.ret = Some("i8".to_string());
+        },
+        (Output::Value(_), Some(v), _) if guarded_read => {
             blocking.params.push(Param::out_err());
             blocking.ret = Some(v.render());
         },
-        (Output::Fallible(_), v) => {
+        (Output::Fallible(_), v, _) => {
             blocking.params.push(Param::out_err());
             blocking.ret = v.as_ref().map(CType::render);
         },
-        (Output::Value(_), Some(v)) => blocking.ret = Some(v.render()),
+        (Output::Value(_), Some(v), _) => blocking.ret = Some(v.render()),
         _ => {},
     }
     if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
@@ -2222,7 +2285,10 @@ fn expect_method(
         cb_params.push(Param::new("opaque", "*mut c_void".to_string()));
         out.add(format!("{name}_cb"), Shape::Fn(Sig { params: cb_params, ret: None }), file);
         let mut typedef = Sig::default();
-        if let Some(v) = &value {
+        if let (Some(value_name), Some(v)) = (presence_flag, &value) {
+            typedef.params.push(Param::new("present", "i8".to_string()));
+            typedef.params.push(Param::new(value_name, v.render()));
+        } else if let Some(v) = &value {
             typedef.params.push(Param::new("value", v.render()));
         }
         if matches!(output, Output::Fallible(_)) {
@@ -2234,10 +2300,10 @@ fn expect_method(
 }
 
 /// Adds the C interface of an accepted trait: `_new` and one `_fn_t` per
-/// method (CLAUDE.md §4 rule 3). A dual-mode interface
-/// ([`DUAL_MODE_INTERFACES`]) also has `_new_async` taking one `_async_fn_t`
-/// per method, `__is_async` and `__set_callback_result`, and its `_fn_t`s
-/// keep the synchronous form whether the Rust method is async or not.
+/// method (CLAUDE.md §4 rule 3). An async-only interface
+/// ([`ASYNC_ONLY_INTERFACES`]) has instead `_new_async` taking one
+/// reported-form `_async_fn_t` per method, async in Rust or not,
+/// `__is_async` and `__set_callback_result`.
 fn expect_interface<'a>(
     out: &mut Expectations,
     mapper_for: &dyn Fn(&syn::Signature) -> Mapper<'a>,
@@ -2245,7 +2311,7 @@ fn expect_interface<'a>(
     methods: &[RustMethod],
     file: &str,
 ) {
-    let dual = is_dual_mode(prefix);
+    let async_only = is_async_only(prefix);
     let mut new_params = vec![Param::new("self", "*mut c_void".to_string())];
     let mut new_async_params = new_params.clone();
     for m in methods {
@@ -2287,10 +2353,7 @@ fn expect_interface<'a>(
         };
         if failed {
             // Reported once, on the invoker, by `expect_method`.
-            out.add(fn_t, Shape::Unknown, file);
-            if dual {
-                out.add(async_fn_t, Shape::Unknown, file);
-            }
+            out.add(if async_only { async_fn_t } else { fn_t }, Shape::Unknown, file);
             continue;
         }
         // The synchronous form: the value returned, the error stored in `out_err`.
@@ -2306,8 +2369,7 @@ fn expect_interface<'a>(
         // The reported form: the result reported through `__set_callback_result`.
         let mut reported_sig = Sig { params, ret: None };
         reported_sig.params.push(Param::new("callback_id", "i64".to_string()));
-        if dual {
-            out.add(fn_t, Shape::FnPtr { sig: sync_sig, nullable: m.has_default }, file);
+        if async_only {
             out.add(async_fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
         } else if is_async || is_reported(prefix) {
             out.add(fn_t, Shape::FnPtr { sig: reported_sig, nullable: m.has_default }, file);
@@ -2316,12 +2378,13 @@ fn expect_interface<'a>(
         }
     }
     let handle = format!("*mut {prefix}_t");
-    out.add(
-        format!("{prefix}_new"),
-        Shape::Fn(Sig { params: new_params, ret: Some(handle.clone()) }),
-        file,
-    );
-    if dual {
+    if !async_only {
+        out.add(
+            format!("{prefix}_new"),
+            Shape::Fn(Sig { params: new_params, ret: Some(handle) }),
+            file,
+        );
+    } else {
         out.add(
             format!("{prefix}_new_async"),
             Shape::Fn(Sig { params: new_async_params, ret: Some(handle) }),
@@ -2492,6 +2555,11 @@ fn render_type(ty: &syn::Type) -> String {
         syn::Type::BareFn(f) => render_bare_fn(f),
         other => compact(other),
     }
+}
+
+/// Whether `ty` is an `Option<_>`.
+fn is_option(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|last| last.ident == "Option"))
 }
 
 /// The function-pointer type a typedef declares, `unsafe extern "C" fn(..)`
@@ -2920,6 +2988,7 @@ mod tests {
             overloads: Vec::new(),
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
+            enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
             kind: crate::java::JavaKind::Class,
@@ -2960,6 +3029,9 @@ mod tests {
                 ),
                 class("common.serialization", &["Serializer"]),
                 class("common.serialization", &["StringSerializer"]),
+                class("common.header", &["Headers"]),
+                class("common.header.internals", &["RecordHeaders"]),
+                class("common.header.internals", &["OtherHeaders"]),
                 class("common.metrics", &["Stat"]),
                 class("common.metrics", &["Measurable"]),
                 class("common.metrics", &["MeasurableStat"]),
@@ -3696,7 +3768,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dual_mode_interface_expects_both_constructors() {
+    fn test_async_only_interface_expects_only_the_reported_constructor() {
         let rust = r#"
             pub mod common {
                 pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
@@ -3713,15 +3785,18 @@ mod tests {
                 }
             }
         "#;
-        let findings = run("dual-mode", rust, "");
+        let findings = run("async-only", rust, "");
         let prefix = "kafka_common_serialization_Deserializer";
-        assert_eq!(
-            detail(&findings, &format!("missing {prefix}_deserialize_fn_t")),
-            format!(
-                "expected `type {prefix}_deserialize_fn_t = unsafe extern \"C\" fn(self: *mut c_void, topic: *const \
-                 c_char, data: kafka_Bytes_t, out_err: *mut *mut kafka_common_Error_t) -> *mut c_char`"
-            )
-        );
+        for absent in [
+            format!("{prefix}_new"),
+            format!("{prefix}_deserialize_fn_t"),
+            format!("{prefix}_close_fn_t"),
+        ] {
+            assert!(
+                !keys(&findings).contains(&format!("missing {absent}").as_str()),
+                "{absent} is not expected: {findings:?}"
+            );
+        }
         assert_eq!(
             detail(&findings, &format!("missing {prefix}_deserialize_async_fn_t")),
             format!(
@@ -3794,6 +3869,57 @@ mod tests {
     fn test_as_view_once_per_struct_trait_pair() {
         let findings = run("as-ok", AS_RUST, AS_FFI);
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// A view of a mutable trait returns the mutable view and takes the
+    /// handle `*mut`, unless it is listed in `CONST_SELF_VIEWS`, which takes
+    /// it `*const`.
+    #[test]
+    fn test_const_self_view_of_a_mutable_trait() {
+        let rust = r#"
+            pub mod common {
+                pub mod header {
+                    #[doc(alias = "org.apache.kafka.common.header.Headers")]
+                    pub trait Headers {
+                        fn remove(&mut self, key: &str);
+                    }
+                    pub mod internals {
+                        #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders")]
+                        pub struct RecordHeaders;
+                        impl RecordHeaders { pub fn new() -> Self { RecordHeaders } }
+                        impl super::Headers for RecordHeaders { fn remove(&mut self, key: &str) {} }
+                        #[doc(alias = "org.apache.kafka.common.header.internals.OtherHeaders")]
+                        pub struct OtherHeaders;
+                        impl OtherHeaders { pub fn new() -> Self { OtherHeaders } }
+                        impl super::Headers for OtherHeaders { fn remove(&mut self, key: &str) {} }
+                    }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_header_Headers_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_Headers_remove(this: *mut kafka_common_header_Headers_t, key: *const c_char) {}
+            #[repr(C)] pub struct kafka_common_header_internals_RecordHeaders_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafka_common_header_internals_RecordHeaders_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_destroy(this: *mut kafka_common_header_internals_RecordHeaders_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers(this: *const kafka_common_header_internals_RecordHeaders_t) -> *mut kafka_common_header_Headers_t { std::ptr::null_mut() }
+            #[repr(C)] pub struct kafka_common_header_internals_OtherHeaders_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders_new() -> *mut kafka_common_header_internals_OtherHeaders_t { std::ptr::null_mut() }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders_destroy(this: *mut kafka_common_header_internals_OtherHeaders_t) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_header_internals_OtherHeaders__as_Headers(this: *const kafka_common_header_internals_OtherHeaders_t) -> *mut kafka_common_header_Headers_t { std::ptr::null_mut() }
+        "#;
+        let findings = run("const-self-view", rust, ffi);
+        assert_eq!(
+            keys(&findings),
+            ["shape kafka_common_header_internals_OtherHeaders__as_Headers"],
+            "{findings:#?}"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_common_header_internals_OtherHeaders__as_Headers"),
+            "expected `fn(self: *mut kafka_common_header_internals_OtherHeaders_t) \
+             -> *mut kafka_common_header_Headers_t`, found `fn(this: *const \
+             kafka_common_header_internals_OtherHeaders_t) -> *mut kafka_common_header_Headers_t`"
+        );
     }
 
     #[test]
@@ -4645,6 +4771,70 @@ mod tests {
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
              found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, \
              out_err: *mut *mut kafka_common_Error_t) -> i64`"
+        );
+    }
+
+    const PRESENCE_RUST: &str = r#"
+        pub mod common {
+            pub mod error { pub enum Error { Timeout(TimeoutError) } pub struct TimeoutError; }
+            pub use error::Error;
+        }
+        pub mod consumer {
+            #[doc(alias = "org.apache.kafka.clients.consumer.Consumer")]
+            pub trait Consumer: Send + Sync {
+                fn current_lag(&mut self, partition: i32)
+                    -> impl std::future::Future<Output = Result<Option<i64>, crate::common::Error>> + Send;
+                fn client_lag(&mut self, partition: i32)
+                    -> impl std::future::Future<Output = Result<Option<i64>, crate::common::Error>> + Send;
+            }
+        }
+    "#;
+
+    const PRESENCE_FFI: &str = r#"
+        #[doc(alias = "rust-only")]
+        #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_common_Error_destroy(this: *mut kafka_common_Error_t) {}
+        #[repr(C)] pub struct kafka_consumer_Consumer_t { _p: [u8; 0] }
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_lag: *mut i64, out_err: *mut *mut kafka_common_Error_t) -> i8 { 0 }
+        pub type kafka_consumer_Consumer_current_lag_cb_t = unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_current_lag_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag(self_: *mut kafka_consumer_Consumer_t, partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64 { 0 }
+        pub type kafka_consumer_Consumer_client_lag_cb_t = unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer_client_lag_cb(self_: *mut kafka_consumer_Consumer_t, partition: i32, cb: kafka_consumer_Consumer_client_lag_cb_t, opaque: *mut c_void) {}
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *const kafka_consumer_Consumer_t) -> i32 { 0 }
+        pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+        #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_consumer_Consumer__set_callbacks_notify(self_: *const kafka_consumer_Consumer_t, notify: kafka_consumer_Consumer_callbacks_notify_fn_t, opaque: *mut c_void) {}
+    "#;
+
+    /// A method listed in `C_PRESENCE_FLAG_OPTIONALS` is expected with an
+    /// `int8_t` presence flag and an `int64_t *out_<value>` parameter, and its
+    /// `_cb_t` with `(present, <value>, error, opaque)`; an `Option<i64>` not
+    /// listed keeps the `-1`-for-`None` scalar form.
+    #[test]
+    fn test_presence_flag_optional_crosses_as_flag_and_out_parameter() {
+        let findings = run("presence-ok", PRESENCE_RUST, PRESENCE_FFI);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        let sentinel = PRESENCE_FFI
+            .replace(
+                "partition: i32, out_lag: *mut i64, out_err: *mut *mut kafka_common_Error_t) -> i8",
+                "partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64",
+            )
+            .replace("fn(present: i8, lag: i64, error:", "fn(value: i64, error:");
+        let findings = run("presence-sentinel", PRESENCE_RUST, &sentinel);
+        assert_eq!(
+            keys(&findings),
+            [
+                "shape kafka_consumer_Consumer_current_lag",
+                "shape kafka_consumer_Consumer_current_lag_cb_t"
+            ],
+            "{findings:?}"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_consumer_Consumer_current_lag"),
+            "expected `fn(self: *mut kafka_consumer_Consumer_t, partition: i32, out_lag: *mut i64, \
+             out_err: *mut *mut kafka_common_Error_t) -> i8`, found `fn(self_: *mut kafka_consumer_Consumer_t, \
+             partition: i32, out_err: *mut *mut kafka_common_Error_t) -> i64`"
         );
     }
 
