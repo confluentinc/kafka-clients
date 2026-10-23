@@ -24,12 +24,15 @@
 // implementations. Configure via the same environment variables
 // (BOOTSTRAP_SERVERS, NUM_MESSAGES, LIMIT_RPS, KEY_SIZE, VALUE_SIZE,
 // BATCH_SIZE, MAX_REQUEST_SIZE, BUFFER_MEMORY, LINGER_MS, MAX_IN_FLIGHT,
-// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, USE_DEFAULTS, WARMUP_SECONDS,
+// COMPRESSION_TYPE, ENABLE_IDEMPOTENCE, ACKS, USE_DEFAULTS, WARMUP_SECONDS,
 // TEST_DURATION_SECONDS,
 // DO_VERIFY, P99_LIMIT_MS, TOPIC_NAME, SECURITY_PROTOCOL, SASL_MECHANISM,
 // SASL_USERNAME, SASL_PASSWORD, SSL_CA_LOCATION). P99_LIMIT_MS (ms) asserts a
 // per-message p99 latency budget when > 0 (0 = off); a breach makes the test
-// exit non-zero. Needs a reachable broker; opt-in (not run under ctest).
+// exit non-zero. A counted run (LIMIT_RPS / NUM_MESSAGES) also stops after
+// TEST_DURATION_SECONDS + 10 s of measured time, printing a `capped:` line
+// (not a failure). Persistent synchronous send rejections fail the run (see
+// send_rejections). Needs a reachable broker; opt-in (not run under ctest).
 
 #include <confluent_kafka.h>
 #include <librdkafka/rdkafka.h>
@@ -79,6 +82,8 @@ static const char *SASL_USERNAME = NULL;
 static const char *SASL_PASSWORD = NULL;
 static const char *SSL_CA_LOCATION = NULL;
 static const char *ENABLE_IDEMPOTENCE = "false";
+// acks: all (default), -1, 1 or 0.
+static const char *ACKS = "all";
 static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
@@ -96,8 +101,13 @@ int64_t batch_size_bytes;
 int64_t max_request_size_bytes;
 
 static long after_ns = 0;
+// Exact per-record latency statistics (CLOCK_MONOTONIC ns) over the records
+// that recorded a latency; avg/min/max come from these, never from the
+// histogram buckets, which only feed the percentiles.
 static long total_latency = 0;
 static long max_latency = 0;
+static long min_latency = LONG_MAX;
+static long latency_samples = 0;
 static long completed_messages = 0;
 static long first_message_time = 0;
 static long verified = 0;
@@ -113,6 +123,26 @@ static bool results_write_failed = false;
 // (verified != completed, or completed != NUM_MESSAGES unless the duration cap
 // interrupted the run). Fails the run.
 static bool run_failed = false;
+// Counted runs (NUM_MESSAGES > 0) stop at NUM_MESSAGES or after
+// TEST_DURATION_S + COUNTED_RUN_GRACE_S of measured time, whichever comes
+// first. Hitting the time cap is not a failure: the run prints a `capped:` line
+// and writes its real measured numbers, and the driver's report flags a client
+// that held less than 95% of the target rate.
+#define COUNTED_RUN_GRACE_S 10
+static bool run_capped = false;
+// Synchronous send rejections: the client refused a record before enqueueing it
+// (v2: an rd_kafka_producev error other than a retried QUEUE_FULL; v3: a
+// send_with_callback error). No delivery report follows, so the record is not
+// counted and the send loop retries it. A persistent rejection (e.g.
+// MSG_SIZE_TOO_LARGE for a VALUE_SIZE above message.max.bytes) would make that
+// retry spin at 100% CPU, so the rule is: MAX_CONSECUTIVE_SEND_REJECTIONS
+// rejections in a row, with no successful send in between, stop the send loop
+// and fail the run (the summary and results.json are still written). Isolated
+// rejections are logged but do not fail the run. Written only by the sending
+// thread.
+#define MAX_CONSECUTIVE_SEND_REJECTIONS 1000
+static long send_rejections = 0;
+static long last_rejection_log_ns = 0;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
 // task is joined, so no locking is needed.
@@ -224,6 +254,19 @@ static long current_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (ts.tv_sec * 1000000000L) + ts.tv_nsec;
+}
+
+// Logs a synchronous send rejection (see send_rejections), rate-limited to the
+// first one and then at most one line per second carrying the running total, so
+// a persistent rejection cannot flood stderr.
+static void log_send_rejection(const char *reason) {
+    send_rejections++;
+    long now = current_time_ns();
+    if (send_rejections == 1 || now - last_rejection_log_ns >= 1000000000L) {
+        fprintf(stderr, "Send rejected: %s (%ld rejection(s) so far)\n",
+                reason ? reason : "Unknown error", send_rejections);
+        last_rejection_log_ns = now;
+    }
 }
 
 static bool verify_record_metadata(const kafka_producer_RecordMetadata_t* metadata) {
@@ -365,26 +408,21 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     kafka_Bytes_t value = { message->value, (int32_t)VALUE_SIZE };
     kafka_producer_ProducerRecord_t *record =
         kafka_producer_ProducerRecord_with_key(TOPIC, KEY_SIZE > 0 ? &key : NULL, &value);
-    V3Future *f = NULL;
-    do {
-        error = NULL;
-        // After a failed send the callback may still fire once, if the record
-        // reached the accumulator, so a failed attempt's V3Future is leaked
-        // rather than reused or freed.
-        f = calloc(1, sizeof(V3Future));
-        atomic_init(&f->done_ns, 0);
-        kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
-        // The send consumes the callback handle, whatever the outcome.
-        f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
-
-        if (error) {
-            const char* msg = kafka_common_Error_message(error);
-            fprintf(stderr, "Send error: %s\n", msg ? msg : "Unknown error");
-            kafka_common_Error_destroy(error);
-        }
-    } while (error && !interrupted);
+    V3Future *f = calloc(1, sizeof(V3Future));
+    atomic_init(&f->done_ns, 0);
+    kafka_producer_Callback_t *callback = kafka_producer_Callback_new(f, test_v3_dr);
+    // The send consumes the callback handle, whatever the outcome.
+    f->future = kafka_producer_Producer_send_with_callback(v3_producer_view, record, callback, &error);
     kafka_producer_ProducerRecord_destroy(record);
+    // A synchronous failure (validation error or closed producer) is not
+    // transient: report it as a rejection and let the send loop apply its
+    // bounded-rejection rule rather than retrying here forever. The callback
+    // may still fire once, if the record reached the accumulator, so the
+    // V3Future is leaked rather than freed.
     if (error || f->future == NULL) {
+        log_send_rejection(error ? kafka_common_Error_message(error)
+                                 : "send_with_callback returned no future");
+        if (error) kafka_common_Error_destroy(error);
         return NULL;
     }
     return f;
@@ -532,6 +570,9 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
         }
     }
     if (err) {
+        // Never enqueued, so no delivery report will fire: report the rejection
+        // and let the send loop apply its bounded-rejection rule.
+        log_send_rejection(rd_kafka_err2str(err));
         free(future);
         return NULL;
     }
@@ -1213,7 +1254,11 @@ static void record_completed_calls(ProducedMessage* pm) {
     if (current_latency > max_latency) {
         max_latency = current_latency;
     }
+    if (current_latency < min_latency) {
+        min_latency = current_latency;
+    }
     total_latency += current_latency;
+    latency_samples++;
 
     long latency_ms = current_latency / 1000000L;
     if (latency_ms < 0) latency_ms = 0;
@@ -1322,7 +1367,7 @@ static void run_test() {
             kafka_Map_put(properties, (void*)"max.request.size", max_request_size_str);
             kafka_Map_put(properties, (void*)"compression.type", (void*)COMPRESSION_TYPE);
             kafka_Map_put(properties, (void*)"linger.ms", (void*)LINGER_MS);
-            kafka_Map_put(properties, (void*)"acks", (void*)"all");
+            kafka_Map_put(properties, (void*)"acks", (void*)ACKS);
             kafka_Map_put(properties, (void*)"enable.idempotence", (void*)ENABLE_IDEMPOTENCE);
             kafka_Map_put(properties, (void*)"max.in.flight.requests.per.connection", (void*)MAX_IN_FLIGHT);
         }
@@ -1380,7 +1425,7 @@ static void run_test() {
             rd_kafka_conf_set(conf, "message.max.bytes", buffer, NULL, 0);
             rd_kafka_conf_set(conf, "compression.type", COMPRESSION_TYPE, NULL, 0);
             rd_kafka_conf_set(conf, "linger.ms", LINGER_MS, NULL, 0);
-            rd_kafka_conf_set(conf, "acks", "all", NULL, 0);
+            rd_kafka_conf_set(conf, "acks", ACKS, NULL, 0);
             rd_kafka_conf_set(conf, "enable.idempotence", ENABLE_IDEMPOTENCE, NULL, 0);
             rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
         }
@@ -1439,18 +1484,29 @@ static void run_test() {
         printf("Warming up for %d seconds ...\n", WARMUP_S);
         long warmup_end_time = current_time_ns() + (long)WARMUP_S * 1000000000L;
         int i = 0;
+        const char *warmup_failure = NULL;
         while (current_time_ns() < warmup_end_time) {
             Message* message = &messages[i % GENERATED_MESSAGE_COUNT];
             test_Future_t future = test_send(producer, message);
             long warmup_done_ns = 0;
-            if (future && !test_verify_future(future, &warmup_done_ns)) {
+            // The warmup fails on its first failed record, rejected or not
+            // verified: one send every 100 ms on an idle producer cannot be
+            // rejected for load, so a rejection here is one the measured run
+            // would hit too.
+            if (!future) {
+                warmup_failure = "a send was rejected (see above)";
+                warmup_succeeded = false;
+                break;
+            }
+            if (!test_verify_future(future, &warmup_done_ns)) {
+                warmup_failure = "message verification error";
                 warmup_succeeded = false;
                 break;
             }
             usleep(100000);
         }
         if (!warmup_succeeded) {
-            fprintf(stderr, "Warmup failed due to message verification error\n");
+            fprintf(stderr, "Warmup failed: %s\n", warmup_failure);
             run_failed = true;
             goto end;
         } else {
@@ -1469,6 +1525,13 @@ static void run_test() {
     metrics_set_measurement_start_ms(&metrics, current_ms);
     printf("Starting measured interval at %ld ms\n", current_ms);
 
+    // Duration bound, checked before every send attempt (rejected ones
+    // included): a counted run is capped at TEST_DURATION_S +
+    // COUNTED_RUN_GRACE_S of measured time, a time-based run ends at
+    // TEST_DURATION_S + 1 s.
+    long duration_cap_ns = (long)(TEST_DURATION_S + (NUM_MESSAGES > 0 ? COUNTED_RUN_GRACE_S : 1))
+        * 1000000000L;
+    long consecutive_rejections = 0;
     bool continue_sending;
     if (NUM_MESSAGES > 0) {
         continue_sending = messages_sent < NUM_MESSAGES;
@@ -1479,10 +1542,31 @@ static void run_test() {
         Message* message = &messages[messages_sent % GENERATED_MESSAGE_COUNT];
 
         long start_time = current_time_ns();
+        long duration = start_time - first_message_time;
+        if (duration >= duration_cap_ns) {
+            if (NUM_MESSAGES > 0) {
+                run_capped = true;
+            } else {
+                printf("Test duration reached, %ld seconds. Interrupting...\n", duration / 1000000000L);
+            }
+            interrupted = true;
+            break;
+        }
+
         test_Future_t future = test_send(producer, message);
         if (!future) {
+            // Rejected synchronously (already logged): retry the same record,
+            // unless the rejection is persistent (see send_rejections).
+            if (++consecutive_rejections >= MAX_CONSECUTIVE_SEND_REJECTIONS) {
+                fprintf(stderr,
+                    "%ld consecutive sends rejected with no successful send in between; "
+                    "stopping the run as failed\n", consecutive_rejections);
+                run_failed = true;
+                break;
+            }
             continue;
         }
+        consecutive_rejections = 0;
 
         ProducedMessage *pm = calloc(1, sizeof(ProducedMessage));
         pm->future = future;
@@ -1495,15 +1579,6 @@ static void run_test() {
                 sleep_until_rate_limit_met(messages_sent, limit_rpns);
                 next_checkpoint += checkpoint_interval;
             }
-        }
-        if (messages_sent % 10000 == 0) {
-                long duration = current_time_ns() - first_message_time;
-                long exceeded_seconds = NUM_MESSAGES > 0 ? 10 : 1;
-                if (duration > (long)((TEST_DURATION_S + exceeded_seconds) * 1000000000L)) {
-                    printf("Test duration reached, %ld seconds. Interrupting...\n", duration / 1000000000L);
-                    interrupted = true;
-                    break;
-                }
         }
 
         if (NUM_MESSAGES > 0) {
@@ -1525,16 +1600,16 @@ static void run_test() {
     // written so the run's numbers are not lost. Every queued future is
     // drained above, so a verified/completed mismatch is a real verification
     // or delivery failure and always fails. A short count is excused only when
-    // the duration cap in the send loop interrupted the run (that cap is also
-    // how a time-based run ends).
+    // the counted-run time cap stopped the run (reported by the `capped:` line
+    // below instead).
     if (verified != completed_messages) {
         fprintf(stderr, "Verified messages %ld does not match completed messages %ld\n",
             verified, completed_messages);
         run_failed = true;
-    } else if (NUM_MESSAGES > 0 && completed_messages != NUM_MESSAGES) {
+    } else if (NUM_MESSAGES > 0 && !run_capped && completed_messages != NUM_MESSAGES) {
         fprintf(stderr, "Completed messages %ld does not match produced messages %ld\n",
             completed_messages, NUM_MESSAGES);
-        if (!interrupted) run_failed = true;
+        run_failed = true;
     }
 
     metrics_set_measurement_end_ms(&metrics, after_ms);
@@ -1543,6 +1618,16 @@ static void run_test() {
     double average_cpu, average_rss;
     double message_rate = total_time_s > 0 ? completed_messages / total_time_s : 0.0;
     metrics_external_metrics_aggregations(&metrics, &average_cpu, &average_rss);
+
+    // The time cap stopped a counted run: report it (not a failure; see
+    // run_capped). The duration is the measured one written to results.json.
+    if (run_capped) {
+        printf("capped: sent %ld of %ld records in %.2f s (TEST_DURATION_SECONDS + %d s)\n",
+            messages_sent, NUM_MESSAGES, total_time_s, COUNTED_RUN_GRACE_S);
+    }
+    if (send_rejections > 0) {
+        fprintf(stderr, "Send rejections: %ld\n", send_rejections);
+    }
 
     printf("End time: %ld ms\n", after_ms);
     printf("Duration: %.2f ms\n", (double)total_time_ns / 1e6);
@@ -1565,9 +1650,15 @@ static void run_test() {
         message_rate);
     printf("Average rate MiB/s: %.2f MiB/s\n",
         total_time_s > 0 ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s : 0.0);
-    printf("Average latency: %.2f ms\n",
-        completed_messages > 0 ? (double)total_latency / completed_messages / 1e6 : 0.0);
-    printf("Max latency: %.2f ms\n", (double)max_latency / 1e6);
+    // Exact avg / min / max over the records that recorded a latency (never
+    // derived from the histogram buckets, which only feed the percentiles).
+    double avg_latency_ms = latency_samples > 0
+        ? (double)total_latency / latency_samples / 1e6
+        : 0.0;
+    double min_latency_ms = latency_samples > 0 ? (double)min_latency / 1e6 : 0.0;
+    double max_latency_ms = latency_samples > 0 ? (double)max_latency / 1e6 : 0.0;
+    printf("Average latency: %.2f ms\n", avg_latency_ms);
+    printf("Max latency: %.2f ms\n", max_latency_ms);
 
     long p99_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.99);
     printf("p99 latency: %ld ms\n", p99_ms);
@@ -1588,21 +1679,11 @@ static void run_test() {
     long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
     long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
     long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
-    long min_latency_ms = 0;
-    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
-        if (latency_hist[i] > 0) {
-            min_latency_ms = (long)i;
-            break;
-        }
-    }
     // Guard the ratios: a run that completed no messages (or measured no
     // time) must still write valid JSON, and nan / inf are not JSON numbers.
     double results_rate = total_time_s > 0 ? message_rate : 0.0;
     double results_mib_s = total_time_s > 0
         ? (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s
-        : 0.0;
-    double results_avg_latency_ms = completed_messages > 0
-        ? (double)total_latency / completed_messages / 1e6
         : 0.0;
     FILE *results_fp = fopen(RESULTS_FILE, "w");
     if (results_fp != NULL) {
@@ -1615,7 +1696,7 @@ static void run_test() {
             "  \"duration_s\": %.2f,\n"
             "  \"throughput_msg_s\": %.2f,\n"
             "  \"throughput_mib_s\": %.2f,\n"
-            "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "  \"latency_ms\": {\"min\": %.2f, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
             "  \"cpu_avg_pct\": %.2f,\n"
@@ -1628,9 +1709,9 @@ static void run_test() {
             results_rate,
             results_mib_s,
             min_latency_ms,
-            results_avg_latency_ms,
+            avg_latency_ms,
             p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
-            (double)max_latency / 1e6,
+            max_latency_ms,
             average_cpu,
             average_rss / 1024.0);
         if (fclose(results_fp) != 0) {
@@ -1840,6 +1921,11 @@ int main(int argc, char** argv) {
         ENABLE_IDEMPOTENCE = "true";
     }
 
+    const char *acks_env = getenv("ACKS");
+    if (acks_env != NULL) {
+        ACKS = acks_env;
+    }
+
     const char *max_in_flight_env = getenv("MAX_IN_FLIGHT");
     if (max_in_flight_env != NULL) {
         MAX_IN_FLIGHT = max_in_flight_env;
@@ -1934,6 +2020,7 @@ int main(int argc, char** argv) {
     printf("Value size: %ld bytes\n", VALUE_SIZE);
     printf("Bootstrap servers: %s\n", BOOTSTRAP_SERVERS);
     printf("Enable idempotence: %s\n", ENABLE_IDEMPOTENCE);
+    printf("Acks: %s\n", ACKS);
     printf("Max in flight requests: %s\n", MAX_IN_FLIGHT);
     printf("Compression type: %s\n", COMPRESSION_TYPE);
     if (buffer_memory_bytes < 0)
