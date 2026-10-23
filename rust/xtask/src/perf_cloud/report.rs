@@ -15,33 +15,38 @@
 //! `report.md` and `junit.xml` of a `perf-cloud run`.
 //!
 //! The markdown opens with the results and ends with the run's parameters, as
-//! a list. A run of one test (as CI runs) lists the test's settings there
-//! too; a run of several lists each test's settings under its results. Each
-//! test has a table with a row per metric, a column per client that ran and,
-//! after the clients, a Δ column per comparison giving a client's change
-//! against its librdkafka baseline: in the `rust` group Rust and Java each against librdkafka, in
+//! a list, the machine the clients ran on first. A run of one test (as CI
+//! runs) lists the test's settings there too; a run of several lists each
+//! test's settings under its results. Headings stay at `###` and below, which
+//! renderers draw without a rule under them. Each test has a table with a
+//! row per metric, a column per client that ran and, after the clients, a Δ
+//! column per comparison giving a client's change against its librdkafka
+//! baseline: in the `rust` group Rust and Java each against librdkafka, in
 //! the `python` group each Rust-based client against the librdkafka-based one
-//! of its mode. Never Rust against Java. Every change is banded, with no
-//! legend:
+//! of its mode. Never Rust against Java. Every change is colored by the
+//! metric's direction, with no legend and no tolerance:
 //!
-//! - 🟢 better, or at most 10 % worse;
-//! - 🔴 more than 10 % worse.
+//! - 🟢 better: higher throughput or transactions/s, lower latency, CPU or
+//!   RSS;
+//! - 🔴 worse;
+//! - no color when it rounds to no change.
 //!
-//! "Worse" follows the metric: lower throughput or transactions/s, higher
-//! latency, CPU or RSS. Counts (messages, transactions) get no Δ. A Δ is
-//! `n/a` unless both clients passed: a failed arm's numbers (from a partial
-//! run) are shown in its column, with a note, but never compared. A
-//! throughput Δ is `cluster-bound` when either client's ingress came near the
-//! cluster's limit, which then capped it rather than the client. The notes
-//! under a table name the clients that failed or did not run, and those that
-//! missed a fixed rate.
+//! Counts (messages, transactions) get no Δ. A Δ is `n/a` unless both clients
+//! passed: a failed arm's numbers (from a partial run) are shown in its
+//! column but never compared. A throughput Δ is `cluster-bound` when either
+//! client's ingress came near the cluster's limit, which then capped it
+//! rather than the client. The table's first row, Status, says how each
+//! client ended: passed, failed, or not run, and whether it missed a fixed
+//! rate (`below rate`) or its consumer load did (`load short`). The report
+//! has no notes.
 //!
 //! While a test runs, the report so far ([`Live`], written by
 //! [`super::live`]) opens with when it was written. Its running client shows
 //! the numbers it has measured so far that need no percentiles (throughput,
-//! average and maximum latency, CPU, RSS, records), its other rows `–`; the
-//! clients yet to start are noted, and a Δ either of whose clients has not
-//! finished is `pending` (`n/a` at once when the other failed).
+//! average and maximum latency, CPU, RSS, records), its other rows `–`; its
+//! Status is `running`, that of the clients yet to start `waiting`, and a Δ
+//! either of whose clients has not finished is `pending` (`n/a` at once when
+//! the other failed).
 
 use std::fmt::Write as _;
 
@@ -73,6 +78,10 @@ const HELD_RATE_SHARE: f64 = 0.95;
 
 const MIB: f64 = 1024.0 * 1024.0;
 
+/// The run facts ([`RunInfo::facts`]) naming the machine the clients ran on,
+/// listed first among the parameters.
+pub(crate) const MACHINE_FACTS: &[&str] = &["Instance", "CPU"];
+
 /// A Δ column: `candidate`'s change against `baseline`, under `header`.
 pub(crate) struct Comparison {
     pub(crate) candidate: Arm,
@@ -91,8 +100,8 @@ pub(crate) fn comparisons(group: Group) -> &'static [Comparison] {
         c(Arm::Java, Arm::Librdkafka, "Δ Java vs librdkafka"),
     ];
     const PYTHON: &[Comparison] = &[
-        c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync"),
-        c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async"),
+        c(Arm::PythonSyncRust, Arm::PythonSyncLibrdkafka, "Δ sync (Rust vs librdkafka)"),
+        c(Arm::PythonAsyncRust, Arm::PythonAsyncLibrdkafka, "Δ async (Rust vs librdkafka)"),
     ];
     match group {
         Group::Rust => RUST,
@@ -373,27 +382,23 @@ fn number(value: f64, decimals: usize) -> String {
     out
 }
 
-/// How much worse than its baseline a client can be and still be green.
-const WORSE_TOLERANCE: f64 = 0.10;
-
-/// The relative change of `candidate` against `baseline` and its band.
-/// `None` when the baseline is zero (no meaningful ratio).
-fn delta(candidate: f64, baseline: f64, better: Better) -> Option<(f64, &'static str)> {
+/// The relative change of `candidate` against `baseline` as a Δ cell: 🟢 when
+/// it is better, 🔴 when worse, uncolored when it rounds to no change. `None`
+/// when the baseline is zero (no meaningful ratio).
+fn delta(candidate: f64, baseline: f64, better: Better) -> Option<String> {
     if baseline == 0.0 || !baseline.is_finite() || !candidate.is_finite() {
         return None;
     }
-    let change = (candidate - baseline) / baseline;
-    let worse = match better {
-        Better::Higher => -change,
-        Better::Lower => change,
+    // Rounded as shown, so the color never disagrees with the number.
+    let pct = ((candidate - baseline) / baseline * 1000.0).round() / 10.0;
+    if pct == 0.0 {
+        return Some("0.0%".to_string());
+    }
+    let improved = match better {
+        Better::Higher => pct > 0.0,
+        Better::Lower => pct < 0.0,
     };
-    let band = if worse <= WORSE_TOLERANCE { "🟢" } else { "🔴" };
-    Some((change * 100.0, band))
-}
-
-/// Text safe inside a markdown table cell.
-fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace(['\n', '\r'], " ")
+    Some(format!("{} {pct:+.1}%", if improved { "🟢" } else { "🔴" }))
 }
 
 fn find(arms: &[ArmResult], arm: Arm) -> Option<&ArmResult> {
@@ -450,32 +455,39 @@ pub(crate) fn markdown(info: &RunInfo, results: &[TestResult], live: Option<&Liv
     }
     for (i, result) in results.iter().enumerate() {
         let live = live.filter(|_| i + 1 == results.len());
+        // `###` and below: renderers draw a rule under `#` and `##`, which
+        // would sit between a heading and its table.
         match single {
             Some(_) => {
-                let _ = writeln!(out, "\n## Results\n");
+                let _ = writeln!(out, "\n### Results\n");
                 results_table(&mut out, info, &columns, result, live);
             },
             None => {
-                let _ = writeln!(out, "\n## {}\n", inline(&result.test.id));
+                let _ = writeln!(out, "\n### {}\n", inline(&result.test.id));
                 results_table(&mut out, info, &columns, result, live);
-                let _ = writeln!(out, "\n### Parameters\n");
+                let _ = writeln!(out, "\n#### Parameters\n");
                 parameter_list(&mut out, &parameters(&result.test));
             },
         }
     }
 
     let clients: Vec<&str> = info.arms.iter().map(|a| a.label()).collect();
-    let mut rows = vec![
-        ("Start time".to_string(), start_time(&info.started)),
-        ("Clients".to_string(), clients.join(", ")),
-    ];
+    // The machine the clients ran on leads, as it bounds every result.
+    let (machine, facts): (Vec<_>, Vec<_>) = info
+        .facts
+        .iter()
+        .cloned()
+        .partition(|(label, _)| MACHINE_FACTS.contains(&label.as_str()));
+    let mut rows = vec![("Start time".to_string(), start_time(&info.started))];
+    rows.extend(machine);
+    rows.push(("Clients".to_string(), clients.join(", ")));
     if let Some(test) = single {
         rows.extend(parameters(test));
     }
     rows.push(("Warmup".to_string(), format!("{} min per client", info.warmup_min)));
     rows.push(("Measurement".to_string(), format!("{} min per client", info.duration_min)));
-    rows.extend(info.facts.iter().cloned());
-    let _ = writeln!(out, "\n## Parameters\n");
+    rows.extend(facts);
+    let _ = writeln!(out, "\n### Parameters\n");
     parameter_list(&mut out, &rows);
     out
 }
@@ -492,8 +504,45 @@ fn inline(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
 }
 
-/// A test's results table and the notes on it; with `live`, the test is
-/// still running.
+/// How `arm` ended in `result`'s test, as its Status cell: `passed`, `failed`
+/// or `not run`; with `live`, `running` or `waiting` until it finishes. A
+/// client that passed but missed a fixed rate is `below rate`, or `load
+/// short` when its consumer load is what fell short.
+fn status(arm: Arm, result: &TestResult, live: Option<&Live>) -> &'static str {
+    let Some(a) = find(&result.arms, arm) else {
+        return match live {
+            Some(l) if l.running.as_ref().is_some_and(|r| r.arm == arm) => "running",
+            Some(_) => "waiting",
+            None => "not run",
+        };
+    };
+    let Some(m) = a.metrics.as_ref().filter(|_| a.outcome == Outcome::Passed) else {
+        return match a.outcome {
+            Outcome::Passed => "passed",
+            Outcome::Failed(_) => "failed",
+        };
+    };
+    // The committed rate a fixed-rate test aims at: its aborted transactions'
+    // records are sent but not counted.
+    let test = &result.test;
+    let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let rate: f64 = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let target = rate * (1.0 - abort_rate);
+    // A consumer reads what its load produced: when the load fell short, so
+    // did the consumer, through no fault of its own.
+    let short_load = a
+        .load_msg_s
+        .is_some_and(|r| test.workload == Workload::Consumer && target > 0.0 && r < HELD_RATE_SHARE * target);
+    if short_load {
+        "load short"
+    } else if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
+        "below rate"
+    } else {
+        "passed"
+    }
+}
+
+/// A test's results table; with `live`, the test is still running.
 fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &TestResult, live: Option<&Live>) {
     let running = live.and_then(|l| l.running.as_ref());
     let test = &result.test;
@@ -506,6 +555,14 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
         .collect();
     let _ = writeln!(out, "| Metric | {} |", headers.join(" | "));
     let _ = writeln!(out, "|---|{}", "---:|".repeat(columns.len()));
+    let statuses: Vec<&str> = columns
+        .iter()
+        .map(|c| match c {
+            Column::Client(arm) => status(*arm, result, live),
+            Column::Delta(_) => "",
+        })
+        .collect();
+    let _ = writeln!(out, "| Status | {} |", statuses.join(" | "));
 
     let transactional = test.workload == Workload::Transactional;
     let abort_rate: f64 = test.setting("ABORT_RATE").and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -554,84 +611,13 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
                         (Some(_), Some(_)) if row.throughput && (near_ingress(candidate) || near_ingress(baseline)) => {
                             "cluster-bound".to_string()
                         },
-                        (Some(c), Some(b)) => match delta(c, b, better) {
-                            Some((pct, band)) => format!("{band} {pct:+.1}%"),
-                            None => "n/a".to_string(),
-                        },
+                        (Some(c), Some(b)) => delta(c, b, better).unwrap_or_else(|| "n/a".to_string()),
                         _ => "n/a".to_string(),
                     }
                 },
             })
             .collect();
         let _ = writeln!(out, "| {} | {} |", row.label, cells.join(" | "));
-    }
-
-    let mut notes = Vec::new();
-    let consumer = test.workload == Workload::Consumer;
-    // The committed rate a fixed-rate test aims at: its aborted transactions'
-    // records are sent but not counted.
-    let rate: f64 = test.setting("LIMIT_RPS").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    let target = rate * (1.0 - abort_rate);
-    for &arm in &info.arms {
-        let label = arm.label();
-        let Some(a) = find(&result.arms, arm) else {
-            notes.push(match running.filter(|r| r.arm == arm) {
-                Some(Running { so_far: Some(s), .. }) => {
-                    let measured = match (s.seconds / 60.0) as u64 {
-                        0 => "under 1 min".to_string(),
-                        minutes => hours_minutes(minutes),
-                    };
-                    format!(
-                        "{label} is running: {measured} of its {} measurement so far. Its other numbers come when \
-                         it finishes.",
-                        hours_minutes(info.duration_min)
-                    )
-                },
-                Some(Running { so_far: None, .. }) => format!("{label} is running and has not started measuring yet."),
-                None if live.is_some() => format!("{label} has not started yet."),
-                None => format!("{label} did not run."),
-            });
-            continue;
-        };
-        if let Outcome::Failed(reason) = &a.outcome {
-            let reason = cell(reason.trim_end_matches('.'));
-            notes.push(match a.metrics {
-                Some(_) => {
-                    format!("{label} failed: {reason}. Its results are from a partial run and are not compared.")
-                },
-                None => format!("{label} failed: {reason}."),
-            });
-            continue;
-        }
-        let Some(m) = &a.metrics else {
-            continue;
-        };
-        // A consumer reads what its load produced: when the load fell short,
-        // so did the consumer, through no fault of its own.
-        let short_load = a
-            .load_msg_s
-            .filter(|r| consumer && target > 0.0 && *r < HELD_RATE_SHARE * target);
-        if let Some(load) = short_load {
-            notes.push(format!(
-                "The load producer for {label} reached {} msg/s, below the {} msg/s target. Its throughput and \
-                 latency reflect the load, not the client.",
-                number(load, 0),
-                number(target, 0)
-            ));
-        } else if target > 0.0 && m.msg_s < HELD_RATE_SHARE * target {
-            notes.push(format!(
-                "{label} reached {} msg/s, below the {} msg/s target. Its latency is not comparable with that of \
-                 clients that held the rate.",
-                number(m.msg_s, 0),
-                number(target, 0)
-            ));
-        }
-    }
-    if !notes.is_empty() {
-        let _ = writeln!(out, "\n**Notes**\n");
-        for note in notes {
-            let _ = writeln!(out, "- {note}");
-        }
     }
 }
 
@@ -860,17 +846,20 @@ mod tests {
     }
 
     #[test]
-    fn bands_follow_the_metric_direction() {
-        // Throughput: higher is better.
-        let (pct, band) = delta(110.0, 100.0, Better::Higher).unwrap();
-        assert!((pct - 10.0).abs() < 1e-9 && band == "🟢", "{pct} {band}");
-        assert_eq!(delta(90.0, 100.0, Better::Higher).map(|d| d.1), Some("🟢"));
-        assert_eq!(delta(89.0, 100.0, Better::Higher).map(|d| d.1), Some("🔴"));
-        assert_eq!(delta(79.0, 100.0, Better::Higher).map(|d| d.1), Some("🔴"));
-        // Latency: lower is better.
-        assert_eq!(delta(5.0, 10.0, Better::Lower).map(|d| d.1), Some("🟢"));
-        assert_eq!(delta(11.0, 10.0, Better::Lower).map(|d| d.1), Some("🟢"));
-        assert_eq!(delta(11.5, 10.0, Better::Lower).map(|d| d.1), Some("🔴"));
+    fn colors_follow_the_metric_direction_with_no_tolerance() {
+        let d = |c: f64, b: f64, better: Better| delta(c, b, better).unwrap();
+        // Throughput: higher is better, and any drop is worse.
+        assert_eq!(d(110.0, 100.0, Better::Higher), "🟢 +10.0%");
+        assert_eq!(d(99.0, 100.0, Better::Higher), "🔴 -1.0%");
+        assert_eq!(d(79.0, 100.0, Better::Higher), "🔴 -21.0%");
+        // Latency, CPU, RSS: lower is better, and any rise is worse.
+        assert_eq!(d(5.0, 10.0, Better::Lower), "🟢 -50.0%");
+        assert_eq!(d(10.1, 10.0, Better::Lower), "🔴 +1.0%");
+        // No change, as shown, gets no color.
+        assert_eq!(d(100.0, 100.0, Better::Higher), "0.0%");
+        assert_eq!(d(100.04, 100.0, Better::Lower), "0.0%");
+        assert_eq!(d(99.96, 100.0, Better::Higher), "0.0%");
+        assert_eq!(d(100.06, 100.0, Better::Lower), "🔴 +0.1%");
         assert_eq!(delta(1.0, 0.0, Better::Lower), None);
     }
 
@@ -936,11 +925,13 @@ mod tests {
         }];
         let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
         let md = render(Group::Rust, &all, Some(600.0), &results);
-        // The results first, the parameters after them, as a list.
+        // The results first, the parameters after them, as a list; no heading
+        // above `###`, so none is drawn with a rule under it.
         assert!(
-            md.starts_with("# Rust client performance results\n\n## Results\n\n| Metric |"),
+            md.starts_with("# Rust client performance results\n\n### Results\n\n| Metric |"),
             "{md}"
         );
+        assert!(!md.contains("\n## "), "{md}");
         assert!(!md.contains("| Parameter |"), "{md}");
         assert!(md.contains("\n- Clients: Rust, librdkafka, Java\n"), "{md}");
         assert!(md.contains("\n- Cluster size: 2 CKU\n"), "{md}");
@@ -952,8 +943,11 @@ mod tests {
             "| Metric | Rust | librdkafka | Java | Δ Rust vs librdkafka | Δ Java vs librdkafka |"
         );
         assert_eq!(line_starting(&md, "|---|---:"), "|---|---:|---:|---:|---:|---:|");
-        // A failure is a note, not a row.
-        assert!(!md.contains("| Result |"), "{md}");
+        // How each client ended is the table's first row.
+        assert_eq!(
+            md.lines().skip_while(|l| !l.starts_with("|---|")).nth(1),
+            Some("| Status | passed | passed | failed |  |  |")
+        );
         // Rust came near the cluster's ingress limit: its throughput may be
         // the cluster's, so it is not compared.
         assert_eq!(
@@ -971,11 +965,9 @@ mod tests {
         // No transaction rows for a producer test.
         assert!(!md.contains("Transactions/s"), "{md}");
         // 500k × 1 KiB/s is 512 MB/s, 85 % of 600.
-        // The cluster-bound Δ needs no note.
-        assert!(
-            md.contains("\n**Notes**\n\n- Java failed: harness exited \\| with 1.\n\n## Parameters\n"),
-            "{md}"
-        );
+        // No notes: the table goes straight on to the parameters.
+        assert!(!md.contains("Notes"), "{md}");
+        assert!(md.contains("| – |  |  |\n\n### Parameters\n"), "{md}");
         assert_rectangular(&md);
     }
 
@@ -991,12 +983,14 @@ mod tests {
         }];
         let md = render(Group::Rust, &[Arm::Rust], Some(600.0), &results);
         assert!(
-            md.starts_with("# Rust client performance results\n\n## Results\n\n| Metric | Rust |\n"),
+            md.starts_with(
+                "# Rust client performance results\n\n### Results\n\n| Metric | Rust |\n|---|---:|\n| Status | passed |\n"
+            ),
             "{md}"
         );
         assert!(
             md.ends_with(
-                "\n## Parameters\n\n\
+                "\n### Parameters\n\n\
                  - Start time: 2026-10-14 10:00:00 UTC\n\
                  - Clients: Rust\n\
                  - Workload: Consumer\n\
@@ -1016,6 +1010,40 @@ mod tests {
     }
 
     #[test]
+    fn markdown_names_the_machine_first() {
+        let results = vec![TestResult { test: test("t python PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0"), arms: vec![] }];
+        let info = RunInfo {
+            group: Group::Python,
+            arms: vec![Arm::PythonSyncRust],
+            tests: vec![results[0].test.clone()],
+            duration_min: 5,
+            warmup_min: 1,
+            started: "2026-10-14T10:00:00Z".to_string(),
+            facts: vec![
+                ("Cluster size".to_string(), "11 CKU".to_string()),
+                ("Instance".to_string(), "m8i.4xlarge (EC2 i-0123)".to_string()),
+                ("CPU".to_string(), "Intel(R) Xeon(R) 6975P-C, 16 vCPUs".to_string()),
+            ],
+            ingress_mb_s: None,
+        };
+        let md = markdown(&info, &results, None);
+        assert!(
+            md.contains(
+                "\n### Parameters\n\n\
+                 - Start time: 2026-10-14 10:00:00 UTC\n\
+                 - Instance: m8i.4xlarge (EC2 i-0123)\n\
+                 - CPU: Intel(R) Xeon(R) 6975P-C, 16 vCPUs\n\
+                 - Clients: Python sync (Rust)\n"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.ends_with("- Measurement: 5 min per client\n- Cluster size: 11 CKU\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
     fn markdown_lists_each_tests_parameters_under_its_heading() {
         let results: Vec<TestResult> = [
             "a rust PARTITIONS=1 VALUE_SIZE=100 LIMIT_RPS=0",
@@ -1027,25 +1055,27 @@ mod tests {
         .collect();
         let md = render(Group::Rust, &[Arm::Rust], None, &results);
         assert!(
-            md.starts_with("# Rust client performance results\n\n## a\n\n| Metric | Rust |\n"),
-            "{md}"
-        );
-        assert!(
-            md.contains(
-                "- Rust did not run.\n\
-                 \n### Parameters\n\n\
-                 - Workload: Producer\n\
-                 - Partitions: 1\n\
-                 - Value size: 100 B\n\
-                 - Rate: Unbounded\n\
-                 \n## b\n\n| Metric | Rust |\n"
+            md.starts_with(
+                "# Rust client performance results\n\n### a\n\n| Metric | Rust |\n|---|---:|\n| Status | not run |\n"
             ),
             "{md}"
         );
         assert!(
             md.contains(
-                "- Rust did not run.\n\
-                 \n### Parameters\n\n\
+                "| Messages measured | – |\n\
+                 \n#### Parameters\n\n\
+                 - Workload: Producer\n\
+                 - Partitions: 1\n\
+                 - Value size: 100 B\n\
+                 - Rate: Unbounded\n\
+                 \n### b\n\n| Metric | Rust |\n|---|---:|\n| Status | not run |\n"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "| Aborted transactions | – |\n\
+                 \n#### Parameters\n\n\
                  - Workload: Transactional (EOS)\n\
                  - Partitions: 36\n\
                  - Value size: 1,024 B\n\
@@ -1053,14 +1083,13 @@ mod tests {
                  - Records per transaction: 1,000\n\
                  - Abort rate: 0.5\n\
                  - Transactional producers: 16\n\
-                 \n## Parameters\n\n- Start time:"
+                 \n### Parameters\n\n- Start time:"
             ),
             "{md}"
         );
         // The run's parameters leave the tests' to their sections.
-        let (_, run) = md.rsplit_once("\n## Parameters\n").unwrap();
+        let (_, run) = md.rsplit_once("\n### Parameters\n").unwrap();
         assert!(!run.contains("Workload"), "{md}");
-        assert_eq!(md.matches("- Rust did not run.\n").count(), 2, "{md}");
         assert_rectangular(&md);
     }
 
@@ -1138,23 +1167,17 @@ mod tests {
         assert_eq!(
             line_starting(&md, "| Metric |"),
             "| Metric | Python sync (Rust) | Python sync (librdkafka) | Python async (Rust) | Python async \
-             (librdkafka) | Δ sync | Δ async |"
+             (librdkafka) | Δ sync (Rust vs librdkafka) | Δ async (Rust vs librdkafka) |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | failed | not run | not run | not run |  |  |"
         );
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | – | – | – | – | n/a | n/a |"
         );
-        assert!(
-            md.contains(
-                "\n**Notes**\n\n\
-                 - Python sync (Rust) failed: interrupted.\n\
-                 - Python sync (librdkafka) did not run.\n\
-                 - Python async (Rust) did not run.\n\
-                 - Python async (librdkafka) did not run.\n\
-                 \n## Parameters\n"
-            ),
-            "{md}"
-        );
+        assert!(!md.contains("Notes"), "{md}");
         assert_rectangular(&md);
         assert!(render(Group::Python, python, None, &[]).contains("No test has finished yet."));
     }
@@ -1169,14 +1192,8 @@ mod tests {
             ],
         }];
         let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
-        assert!(
-            md.contains(
-                "\n- librdkafka reached 9,000 msg/s, below the 10,000 msg/s target. Its latency is not comparable \
-                 with that of clients that held the rate.\n"
-            ),
-            "{md}"
-        );
-        assert!(!md.contains("- Rust reached"), "{md}");
+        // Rust held 99.9 % of the rate; librdkafka 90 %.
+        assert_eq!(line_starting(&md, "| Status |"), "| Status | passed | below rate |  |");
     }
 
     #[test]
@@ -1207,12 +1224,8 @@ mod tests {
             "| Committed transactions | 3,000 | 2,400 |  |"
         );
         // Half the transactions abort, so 5,000 committed msg/s holds the
-        // 10,000 msg/s rate.
-        assert!(!md.contains("- Rust reached"), "{md}");
-        assert!(
-            md.contains("\n- librdkafka reached 4,000 msg/s, below the 5,000 msg/s target."),
-            "{md}"
-        );
+        // 10,000 msg/s rate, and 4,000 does not.
+        assert_eq!(line_starting(&md, "| Status |"), "| Status | passed | below rate |  |");
         assert_rectangular(&md);
     }
 
@@ -1239,13 +1252,7 @@ mod tests {
             line_starting(&md, "| Latency p99 (ms) |"),
             "| Latency p99 (ms) | 9.00 | 5.00 | n/a |"
         );
-        assert!(
-            md.contains(
-                "\n- librdkafka failed: harness exited with 1. Its results are from a partial run and are not \
-                 compared.\n"
-            ),
-            "{md}"
-        );
+        assert_eq!(line_starting(&md, "| Status |"), "| Status | passed | failed |  |");
         assert_rectangular(&md);
     }
 
@@ -1296,21 +1303,9 @@ mod tests {
             ],
         }];
         let md = render(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results);
-        // Rust's load fell short: the note names the load.
-        assert!(
-            md.contains(
-                "\n- The load producer for Rust reached 9,000 msg/s, below the 10,000 msg/s target. Its throughput \
-                 and latency reflect the load, not the client.\n"
-            ),
-            "{md}"
-        );
-        assert!(!md.contains("- Rust reached"), "{md}");
-        // librdkafka's load held: the shortfall is the client's.
-        assert!(
-            md.contains("\n- librdkafka reached 9,000 msg/s, below the 10,000 msg/s target."),
-            "{md}"
-        );
-        assert!(!md.contains("The load producer for librdkafka"), "{md}");
+        // Rust's load fell short, so its shortfall is the load's; librdkafka's
+        // load held, so its shortfall is the client's.
+        assert_eq!(line_starting(&md, "| Status |"), "| Status | load short | below rate |  |");
         // How a consumer test measures is the documentation's, not the report's.
         assert!(!md.contains("kafka-producer-perf-test.sh"), "{md}");
     }
@@ -1344,10 +1339,14 @@ mod tests {
             md.starts_with(
                 "# Rust client performance results\n\n> In progress, updated 2026-10-21 10:05:00 UTC and every 5 \
                  min while a test runs. A running client shows its throughput, average and maximum latency, CPU, \
-                 RSS and messages so far; the full report replaces this one when the test finishes.\n\n## \
+                 RSS and messages so far; the full report replaces this one when the test finishes.\n\n### \
                  Results\n"
             ),
             "{md}"
+        );
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | passed | running | waiting |  |  |"
         );
         // The finished client's numbers, the running one's so far, and no Δ
         // until both of its clients finish.
@@ -1383,16 +1382,7 @@ mod tests {
             line_starting(&md, "| Messages measured |"),
             "| Messages measured | 60,000 | 1,500,000 | – |  |  |"
         );
-        assert!(
-            md.contains(
-                "\n**Notes**\n\n\
-                 - librdkafka is running: 12 min of its 30 min measurement so far. Its other numbers come when it \
-                 finishes.\n\
-                 - Java has not started yet.\n\
-                 \n## Parameters\n"
-            ),
-            "{md}"
-        );
+        assert!(!md.contains("Notes"), "{md}");
         assert_rectangular(&md);
     }
 
@@ -1421,12 +1411,9 @@ mod tests {
         );
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 1,000 | 1,000 | – | 🟢 +0.0% | pending |"
+            "| Throughput (msg/s) | 1,000 | 1,000 | – | 0.0% | pending |"
         );
-        assert!(
-            md.contains("\n**Notes**\n\n- Java is running and has not started measuring yet.\n\n## Parameters\n"),
-            "{md}"
-        );
+        assert_eq!(line_starting(&md, "| Status |"), "| Status | passed | passed | running |  |  |");
         assert_rectangular(&md);
     }
 
@@ -1441,18 +1428,16 @@ mod tests {
         ];
         let live = Live { updated: "2026-10-21T10:05:00Z".to_string(), running: None };
         let md = render_live(Group::Rust, &[Arm::Rust, Arm::Librdkafka], None, &results, Some(&live));
-        let (a, b) = md.split_once("\n## b\n").unwrap();
+        let (a, b) = md.split_once("\n### b\n").unwrap();
         // The finished test's missing client did not run; the running test's
         // have not started.
-        assert!(a.contains("- librdkafka did not run.\n") && !a.contains("pending"), "{md}");
+        assert_eq!(line_starting(a, "| Status |"), "| Status | passed | not run |  |");
+        assert!(!a.contains("pending"), "{md}");
         assert_eq!(
             line_starting(b, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | – | – | pending |"
         );
-        assert!(
-            b.contains("- Rust has not started yet.\n- librdkafka has not started yet.\n"),
-            "{md}"
-        );
+        assert_eq!(line_starting(b, "| Status |"), "| Status | waiting | waiting |  |");
         assert_rectangular(&md);
     }
 
@@ -1477,17 +1462,10 @@ mod tests {
             line_starting(&md, "| Throughput (msg/s) |"),
             "| Throughput (msg/s) | 1,000 | 2,000 | – | n/a | pending |"
         );
-        // A running client below the rate gets no note until it finishes.
-        assert!(
-            md.contains(
-                "\n**Notes**\n\n\
-                 - Rust failed: harness exited with 1. Its results are from a partial run and are not compared.\n\
-                 - librdkafka is running: under 1 min of its 30 min measurement so far. Its other numbers come when \
-                 it finishes.\n\
-                 - Java has not started yet.\n\
-                 \n## Parameters\n"
-            ),
-            "{md}"
+        // A running client is not judged against the rate until it finishes.
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | failed | running | waiting |  |  |"
         );
         assert_rectangular(&md);
     }
@@ -1510,18 +1488,15 @@ mod tests {
         let md = render_live(Group::Python, Group::Python.arms(), None, &results, Some(&live));
         assert_eq!(
             line_starting(&md, "| Throughput (msg/s) |"),
-            "| Throughput (msg/s) | 1,000 | 1,000 | 500 | – | 🟢 +0.0% | pending |"
+            "| Throughput (msg/s) | 1,000 | 1,000 | 500 | – | 0.0% | pending |"
         );
         assert_eq!(
             line_starting(&md, "| CPU (%) |"),
-            "| CPU (%) | 50.0 | 50.0 | – | – | 🟢 +0.0% | pending |"
+            "| CPU (%) | 50.0 | 50.0 | – | – | 0.0% | pending |"
         );
-        assert!(
-            md.contains(
-                "- Python async (Rust) is running: 2 min of its 30 min measurement so far. Its other numbers come \
-                 when it finishes.\n- Python async (librdkafka) has not started yet.\n"
-            ),
-            "{md}"
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | passed | passed | running | waiting |  |  |"
         );
         assert_rectangular(&md);
     }
