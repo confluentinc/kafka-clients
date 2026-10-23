@@ -339,8 +339,8 @@ impl CommonClientConfigs {
     ///
     /// # Errors
     ///
-    /// [`Error::LocalUnsupportedOperation`] `SASL mechanism '<m>' is not
-    /// supported by this client; only PLAIN is`, or the error of a getter.
+    /// [`Error::Config`] `Invalid value <m> for configuration sasl.mechanism:
+    /// only PLAIN is supported by this client`, or the error of a getter.
     pub(crate) fn post_validate_supported_sasl_mechanism(config: &AbstractConfig) -> Result<(), Error> {
         let security_protocol = config
             .get_string(Self::SECURITY_PROTOCOL_CONFIG)?
@@ -352,8 +352,10 @@ impl CommonClientConfigs {
             return Ok(());
         }
         match config.get_string(SaslConfigs::SASL_MECHANISM)? {
-            Some(mechanism) if mechanism != SaslConfigs::PLAIN_MECHANISM => Err(Error::local_unsupported_operation(
-                format!("SASL mechanism '{mechanism}' is not supported by this client; only PLAIN is"),
+            Some(mechanism) if mechanism != SaslConfigs::PLAIN_MECHANISM => Err(Error::config_name_value_message(
+                SaslConfigs::SASL_MECHANISM,
+                mechanism,
+                format!("only {} is supported by this client", SaslConfigs::PLAIN_MECHANISM),
             )),
             _ => Ok(()),
         }

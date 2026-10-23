@@ -700,14 +700,11 @@ mod tests {
             kafka_Map_destroy(props);
             assert!(out.is_null());
             assert!(!err.is_null());
-            assert_eq!(
-                kafka_common_Error__enum(err),
-                kafka_common_Error_e::kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION
-            );
+            assert_eq!(kafka_common_Error__enum(err), kafka_common_Error_e::kafka_common_Error_CONFIG);
         }
         assert_eq!(
             take_error(&mut err),
-            "SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only PLAIN is"
+            "Invalid value SCRAM-SHA-256 for configuration sasl.mechanism: only PLAIN is supported by this client"
         );
     }
 }

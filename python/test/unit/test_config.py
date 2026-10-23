@@ -231,21 +231,23 @@ def test_bad_number_text_reaches_the_core() -> None:
 def test_unsupported_sasl_mechanism_is_rejected_by_the_core() -> None:
     # PLAIN is the only SASL mechanism the core implements: under a SASL
     # security.protocol any other one, Java's GSSAPI default included, fails
-    # the client's construction with the core's LocalUnsupportedOperationError.
-    from confluent_kafka import UnsupportedOperationError
+    # the client's construction with the core's ConfigError.
+    from confluent_kafka.common.config import ConfigError
     from confluent_kafka.producer import KafkaProducer
 
-    with pytest.raises(UnsupportedOperationError) as exc:
+    with pytest.raises(ConfigError) as exc:
         KafkaProducer(configs={"bootstrap.servers": "localhost:1",
                                "security.protocol": "SASL_PLAINTEXT",
                                "sasl.mechanism": "SCRAM-SHA-256"})
     assert str(exc.value) == (
-        "SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only PLAIN is")
-    with pytest.raises(UnsupportedOperationError) as exc:
+        "Invalid value SCRAM-SHA-256 for configuration sasl.mechanism: "
+        "only PLAIN is supported by this client")
+    with pytest.raises(ConfigError) as exc:
         KafkaProducer(configs={"bootstrap.servers": "localhost:1",
                                "security.protocol": "SASL_SSL"})
     assert str(exc.value) == (
-        "SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is")
+        "Invalid value GSSAPI for configuration sasl.mechanism: "
+        "only PLAIN is supported by this client")
 
 
 def test_an_undefined_ssl_password_is_reported_as_unused() -> None:

@@ -355,15 +355,15 @@ breaking changes.
   (`SASL_PLAINTEXT`, `SASL_SSL`), a `sasl.mechanism` other than `PLAIN`, the
   one mechanism this client implements, now fails `ProducerConfig::new`,
   `ConsumerConfig::new` and `AdminClientConfig::new` (and so the clients'
-  constructors) with `LocalUnsupportedOperationError`
-  `SASL mechanism '<m>' is not supported by this client; only PLAIN is`,
+  constructors) with `ConfigError`
+  `Invalid value <m> for configuration sasl.mechanism: only PLAIN is supported by this client`,
   instead of failing at authentication. For SCRAM over `SASL_PLAINTEXT` the old
   path sent the password in cleartext as a PLAIN token before the broker
   rejected it. `sasl.mechanism` keeps Java's `GSSAPI` default, so a SASL
   configuration that leaves it unset now fails at construction with this
   clear error, naming `GSSAPI`, instead of a misleading "requires a username"
   or a broker-side handshake failure: set `sasl.mechanism=PLAIN`. An empty
-  mechanism keeps Java's `ConfigError`.
+  mechanism keeps Java's own `ConfigError` message.
 - **Breaking (Rust, C API, Python):** `ssl.keystore.password`,
   `ssl.truststore.password` and `ssl.key.password` are no longer defined, and
   `SslConfigs::SSL_KEYSTORE_PASSWORD_CONFIG`, `SSL_TRUSTSTORE_PASSWORD_CONFIG`

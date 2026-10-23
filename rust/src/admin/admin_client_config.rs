@@ -432,9 +432,7 @@ impl AdminClientConfig {
     /// [`KafkaAdminClient`](crate::admin::KafkaAdminClient)).
     ///
     /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
-    /// returns a
-    /// [`LocalUnsupportedOperationError`](crate::common::LocalUnsupportedOperationError)
-    /// ([`Error::local_unsupported_operation`]): Java accepts any mechanism
+    /// returns a [`ConfigError`](crate::common::config::ConfigError): Java accepts any mechanism
     /// name, but this client implements only PLAIN, and a client built
     /// with another mechanism would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
@@ -846,14 +844,10 @@ mod tests {
         };
 
         let err = build("SASL_PLAINTEXT", "SCRAM-SHA-256").expect_err("SCRAM is not implemented");
-        assert!(
-            err.is_local_unsupported_operation_error(),
-            "must be a LocalUnsupportedOperationError: {err:?}"
-        );
-        assert!(
-            err.message().contains("SASL mechanism 'SCRAM-SHA-256' is not supported"),
-            "got: {}",
-            err.message()
+        assert!(err.is_config_error(), "must be a ConfigError: {err:?}");
+        assert_eq!(
+            err.message(),
+            "Invalid value SCRAM-SHA-256 for configuration sasl.mechanism: only PLAIN is supported by this client"
         );
 
         let err = build("SASL_SSL", "").expect_err("an empty mechanism is invalid with SASL");
@@ -1380,24 +1374,24 @@ mod tests {
             ("sasl.jaas.config", jaas),
         ])
         .unwrap_err();
-        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert!(err.is_config_error(), "{err:?}");
         assert_eq!(
             err.to_string(),
-            "LocalUnsupportedOperationError: SASL mechanism 'SCRAM-SHA-256' is not supported by this client; only \
-             PLAIN is"
+            "ConfigError: Invalid value SCRAM-SHA-256 for configuration sasl.mechanism: only PLAIN is supported by \
+             this client"
         );
 
         // The default mechanism is Java's `GSSAPI`.
         let err = build(&[("security.protocol", "SASL_SSL")]).unwrap_err();
-        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert!(err.is_config_error(), "{err:?}");
         assert_eq!(
             err.to_string(),
-            "LocalUnsupportedOperationError: SASL mechanism 'GSSAPI' is not supported by this client; only PLAIN is"
+            "ConfigError: Invalid value GSSAPI for configuration sasl.mechanism: only PLAIN is supported by this client"
         );
 
         // Case-sensitive, as Java's mechanism names are.
         let err = build(&[("security.protocol", "SASL_PLAINTEXT"), ("sasl.mechanism", "plain")]).unwrap_err();
-        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert!(err.is_config_error(), "{err:?}");
 
         build(&[("security.protocol", "PLAINTEXT")]).unwrap();
         build(&[
