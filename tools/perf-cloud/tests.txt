@@ -62,17 +62,17 @@ producer-max-1kb-36p-lz4  rust,python  PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0
 # Unbounded 1 KiB values with 100 B keys: the keyed partitioning path.
 producer-max-1kb-200p-key100b  rust,python  PARTITIONS=200 VALUE_SIZE=1024 KEY_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024
 
-# 1 KiB values produced as fast as one producer can and read as they are
-# produced, the librdkafka clients polling one record at a time: end-to-end
-# latency at the highest load. Python only: the other consumer harnesses count
-# their warmup in records at a fixed rate.
-consumer-max-1kb-200p-librdkafka-poll  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 LIBRDKAFKA_BATCH=0
+# 250k msg/s of 1 KiB values (~256 MB/s) read as they are produced, the
+# librdkafka clients polling one record at a time: end-to-end latency at a
+# high load. Python only, for the Python consumer batch.
+consumer-fixed-250k-1kb-200p-librdkafka-poll  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=250000 LIBRDKAFKA_BATCH=0
 
 # 500 msg/s of 10 KiB values (~5 MB/s), the librdkafka clients polling one
 # record at a time: end-to-end latency of larger records at a low load.
 consumer-fixed-500-10kb-200p-librdkafka-poll  rust,python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=10240 LIMIT_RPS=500 LIBRDKAFKA_BATCH=0
 
-# The unbounded load with fetches tuned for throughput: 4 MiB fetch.min.bytes
-# and max.partition.fetch.bytes, the Rust-backed clients polling up to 4,500
-# records, the librdkafka ones consuming batches of 4,000. Python only, as above.
-consumer-max-1kb-200p-fetch-tuned  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+# The same 250k msg/s load with fetches tuned for throughput: 4 MiB
+# fetch.min.bytes and max.partition.fetch.bytes, the Rust-backed clients
+# polling up to 4,500 records, the librdkafka ones consuming batches of 4,000.
+# Python only, as above.
+consumer-fixed-250k-1kb-200p-fetch-tuned  python  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=250000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
