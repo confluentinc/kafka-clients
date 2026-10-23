@@ -16,13 +16,16 @@ process's **CPU and RSS** at a regular interval.
    throughput. Consumer-first ordering is guaranteed because the producer is a
    child process spawned only after assignment.
 4. Polls in a tight loop, recording each record's latency into a fixed-bucket
-   **streaming histogram** (1 ms buckets, 0–60 s; O(1) memory, **no per-record
-   allocation**). Key/value bytes are never copied — the deserializer returns
+   **streaming histogram** (1 ms buckets, 0–600 s; allocated once, zeroed, so
+   only the buckets written are ever resident; **no per-record allocation**). Key/value bytes are never copied — the deserializer returns
    the byte *length*.
 5. Every `--interval` seconds: samples CPU% + RSS, prints a line, and appends a
-   JSONL metric record; resets the per-interval histogram.
-6. After `--duration` seconds of measurement, stops the producer, closes the
-   consumer, and writes a final summary.
+   JSONL metric record; resets the per-interval histogram in place, clearing
+   only the buckets it wrote.
+6. After `--duration` seconds of measurement, stops the producer, writes the
+   final summary and results, and only then closes the consumer: a close
+   error is printed as a warning and changes neither the results nor the exit
+   status.
 
 Warmup messages are consumed but excluded from measurement (connection ramp,
 cache warm-up).
@@ -93,6 +96,7 @@ python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
 | `--offset-reset` | `latest` | `latest` (live) or `earliest` (drains backlog) |
 | `--kafka-bin` | `~/dev/opensource/kafka/bin` | Kafka CLI scripts dir |
 | `--results-dir` | `consumer-perf/results` | output directory |
+| `--results-file` | (none) | also write the summary there in the `cargo xtask perf-cloud` `results.json` format, when records were measured |
 | `--no-produce` | (off) | don't launch a producer |
 | `--no-create-topic` | (off) | don't create/verify the topic |
 | `--compression-type` | (producer default) | producer `compression.type`: `none` / `gzip` / `snappy` / `lz4` / `zstd` |
