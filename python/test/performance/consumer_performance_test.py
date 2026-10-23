@@ -38,7 +38,9 @@ share the top-level name ``confluent_kafka``, so each runs in its own venv (see
 Load generation (like ``consumer-perf/compare/librdkafka_e2e.py``): if
 ``KAFKA_BIN`` is set, spawn ``kafka-producer-perf-test.sh`` and kill it at the
 end; otherwise run consume-only (an external producer must feed the topic — the
-in-suite pytest entry produces inside the broker container).
+in-suite pytest entry produces inside the broker container). ``COMPRESSION_TYPE``
+(``none``/``gzip``/``snappy``/``lz4``/``zstd``) sets the spawned producer's
+``compression.type``; unset keeps its default.
 
 Run modes:
   * Manual / full:  ``python consumer_performance_test.py`` (env-driven), via the
@@ -133,6 +135,11 @@ class Config:
         self.join_timeout_s = _env_int("JOIN_TIMEOUT_SECONDS", 120)
         self.settle_timeout_s = _env_int("SETTLE_TIMEOUT_SECONDS", 15)
         self.kafka_bin = os.getenv("KAFKA_BIN")  # set => self-spawn producer
+        # compression.type of the self-spawned producer; unset => its default.
+        self.compression_type = os.getenv("COMPRESSION_TYPE") or None
+        if self.compression_type not in (None, "none", "gzip", "snappy", "lz4", "zstd"):
+            raise ValueError(f"COMPRESSION_TYPE must be one of none, gzip, snappy, lz4, zstd; "
+                             f"got {self.compression_type!r}")
         self.fetch_min_bytes = _env_int("FETCH_MIN_BYTES", 4 * 1024 * 1024)
         self.fetch_max_bytes = _env_int("MAX_PARTITION_FETCH_BYTES", 4 * 1024 * 1024)
         # Batch size per poll, applied to BOTH backends so they batch
@@ -416,6 +423,8 @@ def spawn_producer(cfg, total_records):
     # SASL uses the Java form (security.protocol, sasl.mechanism, sasl.jaas.config)
     # so the Java producer authenticates against the same SASL broker as the consumer.
     props = {"bootstrap.servers": cfg.bootstrap_servers, "acks": "1"}
+    if cfg.compression_type:
+        props["compression.type"] = cfg.compression_type
     props.update(sasl_config_from_env(v2=False))
     fd, props_path = tempfile.mkstemp(prefix="producer_perf_", suffix=".properties")
     with os.fdopen(fd, "w") as f:
@@ -435,7 +444,8 @@ def spawn_producer(cfg, total_records):
         "--producer.config", props_path,
     ]
     print(f">>> Launching producer: throughput={cfg.throughput} msg/s, "
-          f"{cfg.message_size} bytes, ~{total_records} records", flush=True)
+          f"{cfg.message_size} bytes, ~{total_records} records, "
+          f"compression={cfg.compression_type or 'default'}", flush=True)
     # Capture producer output to a file (cwd is the results dir) instead of
     # discarding it: a silent producer failure looks identical to "no data" on
     # the consumer side, so its stdout/stderr must remain inspectable.
