@@ -1140,8 +1140,9 @@ mod tests {
         let bytes = kafka_Bytes_t::from_slice(b"v");
         let delivered = std::sync::Mutex::new(Vec::<Result<i64, String>>::new());
         // SAFETY: Test code: `err` is a valid slot pointing at null before each call (no call
-        // fails), `props`, `config`, `record`, `callback` and the producer are live from their
-        // constructor to their single destroy below, each future is read and destroyed once, the
+        // fails), `props`, `config`, `record` and the producer are live from their constructor to
+        // their single destroy below, each callback is consumed by the send it is passed to, each
+        // future is read and destroyed once, the
         // value `get` returns is the future's own record-metadata handle, read before the future is
         // destroyed, and `delivered` outlives the destroy that runs the callbacks writing it.
         unsafe {
@@ -1153,14 +1154,14 @@ mod tests {
                 kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
             assert!(err.is_null());
             kafka_producer_ProducerConfig_destroy(config);
-            let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
-                &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
-                record_delivery,
-            );
             let record =
                 kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
             let mut futures = Vec::new();
             for _ in 0..SENDS {
+                let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
+                    &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
+                    record_delivery,
+                );
                 futures.push(kafka_producer_KafkaProducer_send(producer, record, callback, &raw mut err));
                 assert!(err.is_null());
             }
@@ -1182,7 +1183,6 @@ mod tests {
                 );
                 kafka_common_KafkaFuture_destroy(future);
             }
-            crate::ffi::producer::callback::kafka_producer_Callback_destroy(callback);
             kafka_producer_ProducerRecord_destroy(record);
         }
     }
