@@ -19,30 +19,20 @@ using System.Globalization;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// New partitions for one topic in a call to <see cref="IAdmin.CreatePartitions"/> — the
-/// .NET realization of Java's <c>org.apache.kafka.clients.admin.NewPartitions</c>.
+/// New partitions for one topic in a call to <see cref="IAdmin.CreatePartitions"/> — Java's
+/// <c>org.apache.kafka.clients.admin.NewPartitions</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b><see langword="null"/> assignments and <em>empty</em> assignments are two
-/// different requests, and the difference reaches the broker.</b>
-/// <see cref="IncreaseTo(int)"/> leaves <see cref="Assignments"/> <see langword="null"/>
-/// — the broker chooses the replica placement. <see cref="IncreaseTo(int, IReadOnlyList{IReadOnlyList{int}})"/>
-/// with an <b>empty</b> list is legal Java (<c>increaseTo(n, emptyList())</c>) and sends a
-/// <em>present but empty</em> assignment list, which the broker <b>rejects</b> with
-/// <c>INVALID_REPLICA_ASSIGNMENT</c> where a null one succeeds:
-/// <c>CreatePartitionsRequest.json:36</c> marks <c>Assignments</c>
-/// <c>"nullableVersions": "0+"</c>. The ABI carries the distinction as an explicit
-/// <c>has_assignments</c> discriminant for exactly this reason, so nothing on this path
-/// may coalesce the two — a <c>?? Array.Empty&lt;…&gt;()</c> would silently turn a
-/// broker-rejected request into an accepted one.
+/// <see langword="null"/> assignments and empty assignments are different requests: with
+/// <see langword="null"/> the broker places the replicas, while an empty list, legal in Java,
+/// is sent as a present but empty list, which the broker rejects with
+/// <c>INVALID_REPLICA_ASSIGNMENT</c>.
 /// </para>
 /// <para>
-/// A <see langword="null"/> assignment list is accepted and is the same request as
-/// <see cref="IncreaseTo(int)"/>, as Java's <c>increaseTo(totalCount, null)</c> is
-/// <c>increaseTo(totalCount)</c> — both build <c>new NewPartitions(totalCount, null)</c>
-/// (<c>NewPartitions.java:42-44, :71-73</c>). Only a <see langword="null"/> <em>inner</em>
-/// list is rejected, because the ABI would drop it rather than report it.
+/// A <see langword="null"/> assignment list is the same request as
+/// <see cref="IncreaseTo(int)"/>, as in Java. A <see langword="null"/> inner list throws,
+/// because the core would drop it, which would shift every later partition's assignment.
 /// </para>
 /// </remarks>
 public sealed class NewPartitions
@@ -57,7 +47,7 @@ public sealed class NewPartitions
 
     /// <summary>
     /// The total number of partitions after the operation succeeds — Java's
-    /// <c>totalCount()</c>. This is the total, <b>not</b> the number added.
+    /// <c>totalCount()</c>. This is the total, not the number added.
     /// </summary>
     public int TotalCount { get; }
 
@@ -66,8 +56,7 @@ public sealed class NewPartitions
     /// controller will decide — Java's <c>assignments()</c>.
     /// </summary>
     /// <remarks>
-    /// An <b>empty</b> (non-null) list is a distinct, meaningful state — see the
-    /// null-versus-empty note in the type remarks.
+    /// An empty list is a request of its own: see the type remarks.
     /// </remarks>
     public IReadOnlyList<IReadOnlyList<int>>? Assignments => _newAssignments;
 
@@ -91,13 +80,13 @@ public sealed class NewPartitions
     /// reassigned), each holding that partition's replica broker ids with the preferred
     /// leader first. Its length should be <paramref name="totalCount"/> minus the topic's
     /// current partition count, and each inner list should have the topic's replication
-    /// factor many entries. An <b>empty</b> outer list is meaningful and preserved — see
-    /// the null-versus-empty note in the type remarks. <see langword="null"/> lets the
-    /// broker decide, exactly as <see cref="IncreaseTo(int)"/> does.
+    /// factor many entries. An empty outer list is a request of its own (see the type
+    /// remarks); <see langword="null"/> lets the broker decide, as <see cref="IncreaseTo(int)"/>
+    /// does.
     /// </param>
     /// <returns>
-    /// The request entry, with <see cref="Assignments"/> non-null — or
-    /// <see langword="null"/> when <paramref name="newAssignments"/> is.
+    /// The request entry; its <see cref="Assignments"/> is <see langword="null"/> when
+    /// <paramref name="newAssignments"/> is.
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="newAssignments"/> contains a null inner list.
@@ -106,14 +95,9 @@ public sealed class NewPartitions
     {
         if (newAssignments is null)
         {
-            // Java's increaseTo(totalCount, null) is increaseTo(totalCount): the same
-            // `new NewPartitions(totalCount, null)`, i.e. the controller decides.
             return new NewPartitions(totalCount, null);
         }
 
-        // Copy + validate BEFORE anything native (ffi §B5): the ABI silently no-ops on a
-        // null broker-id array, so a null inner list would be dropped rather than
-        // reported — and dropping one assignment shifts every later partition's.
         List<IReadOnlyList<int>> copy = new List<IReadOnlyList<int>>(newAssignments.Count);
         foreach (IReadOnlyList<int> assignment in newAssignments)
         {
@@ -126,8 +110,6 @@ public sealed class NewPartitions
             copy.Add(new List<int>(assignment));
         }
 
-        // NOT `copy.Count == 0 ? null : copy` — an empty list is the present-but-empty
-        // request, which is not the same as no assignments at all (type remarks).
         return new NewPartitions(totalCount, copy);
     }
 
@@ -144,7 +126,6 @@ public sealed class NewPartitions
     {
         if (assignments is null)
         {
-            // Java prints the null list as "null" (String.valueOf on the field).
             return "null";
         }
 

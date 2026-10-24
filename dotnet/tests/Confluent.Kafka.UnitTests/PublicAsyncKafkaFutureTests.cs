@@ -26,9 +26,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Tests the public <see cref="AsyncKafkaFuture{T}"/> over a <see cref="KafkaFutureImpl{T}"/> or a delivery
-/// <see cref="Task{TResult}"/>: the default-value guard, the same-instance contract of <c>Get()</c>, <c>ConfigureAwait</c>
-/// on the task, identity equality, the conversion to <see cref="AsyncKafkaFuture"/>, and the member set.
+/// Tests the public <see cref="AsyncKafkaFuture{T}"/> over a <see cref="KafkaFutureImpl{T}"/>: the default-value guard,
+/// the same-instance contract of <c>Get()</c>, <c>ConfigureAwait</c> on the task, identity equality, the conversion to
+/// <see cref="AsyncKafkaFuture"/>, and the member set.
 /// </summary>
 public sealed class PublicAsyncKafkaFutureTests
 {
@@ -60,52 +60,51 @@ public sealed class PublicAsyncKafkaFutureTests
     [InlineData("completed")]
     [InlineData("faulted")]
     [InlineData("canceled")]
-    public void Get_ReturnsTheWrappedTask_TheSameInstanceOnEveryCall(string state)
+    public void Get_ReturnsTheSameTaskOnEveryCall(string state)
     {
-        Task<RecordMetadata> delivery = DeliveryIn(state);
+        KafkaFutureImpl<RecordMetadata> delivery = DeliveryIn(state);
         AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery);
 
         Task<RecordMetadata> first = future.Get();
         Task<RecordMetadata> second = future.Get();
 
-        Assert.Same(delivery, first);
+        Assert.Same(delivery.GetAsync(), first);
         Assert.Same(first, second);
 
-        _ = delivery.Exception;
+        _ = first.Exception;
     }
 
     [Fact]
     public async Task Get_ConfigureAwait_FlowsThroughTheTask()
     {
         RecordMetadata metadata = NewMetadata();
-        TaskCompletionSource<RecordMetadata> completion =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(completion.Task);
+        KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(completion);
 
         Task<RecordMetadata> awaiting = AwaitGetWithoutContext(future);
         Assert.False(awaiting.IsCompleted);
-        completion.SetResult(metadata);
+        Assert.True(completion.Complete(metadata));
 
         Assert.Same(metadata, await awaiting);
     }
 
     [Fact]
-    public void Equality_IsReferenceIdentityOfTheDeliveryTask()
+    public void Equality_IsReferenceIdentityOfTheImpl()
     {
-        Task<RecordMetadata> task = Delivered(NewMetadata());
-        AsyncKafkaFuture<RecordMetadata> a = new AsyncKafkaFuture<RecordMetadata>(task);
-        AsyncKafkaFuture<RecordMetadata> sameTask = new AsyncKafkaFuture<RecordMetadata>(task);
-        Assert.True(a.Equals(sameTask));
-        Assert.True(a == sameTask);
-        Assert.False(a != sameTask);
-        Assert.Equal(a.GetHashCode(), sameTask.GetHashCode());
+        KafkaFutureImpl<RecordMetadata> impl = Delivered(NewMetadata());
+        AsyncKafkaFuture<RecordMetadata> a = new AsyncKafkaFuture<RecordMetadata>(impl);
+        AsyncKafkaFuture<RecordMetadata> sameImpl = new AsyncKafkaFuture<RecordMetadata>(impl);
+        Assert.True(a.Equals(sameImpl));
+        Assert.True(a == sameImpl);
+        Assert.False(a != sameImpl);
+        Assert.Equal(a.GetHashCode(), sameImpl.GetHashCode());
 
         RecordMetadata shared = NewMetadata();
-        Task<RecordMetadata> firstTask = Delivered(shared);
-        Task<RecordMetadata> secondTask = Delivered(shared);
-        Assert.NotSame(firstTask, secondTask);
-        AsyncKafkaFuture<RecordMetadata> x = new AsyncKafkaFuture<RecordMetadata>(firstTask);
-        AsyncKafkaFuture<RecordMetadata> y = new AsyncKafkaFuture<RecordMetadata>(secondTask);
+        KafkaFutureImpl<RecordMetadata> firstImpl = Delivered(shared);
+        KafkaFutureImpl<RecordMetadata> secondImpl = Delivered(shared);
+        Assert.NotSame(firstImpl, secondImpl);
+        AsyncKafkaFuture<RecordMetadata> x = new AsyncKafkaFuture<RecordMetadata>(firstImpl);
+        AsyncKafkaFuture<RecordMetadata> y = new AsyncKafkaFuture<RecordMetadata>(secondImpl);
         Assert.False(x.Equals(y));
         Assert.False(x == y);
         Assert.True(x != y);
@@ -122,12 +121,12 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.True(a != d1);
         Assert.False(d1 == a);
 
-        object boxedEqual = sameTask;
+        object boxedEqual = sameImpl;
         object boxedDifferent = y;
-        object rawTask = task;
+        object rawImpl = impl;
         Assert.True(a.Equals(boxedEqual));
         Assert.False(x.Equals(boxedDifferent));
-        Assert.False(a.Equals(rawTask));
+        Assert.False(a.Equals(rawImpl));
         Assert.False(a.Equals("not a future"));
         Assert.False(a.Equals(null));
     }
@@ -161,7 +160,6 @@ public sealed class PublicAsyncKafkaFutureTests
         {
             default(AsyncKafkaFuture<RecordMetadata>),
             new AsyncKafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>()),
-            new AsyncKafkaFuture<RecordMetadata>(DeliveryIn("pending")),
         };
         foreach (AsyncKafkaFuture<RecordMetadata> future in futures)
         {
@@ -175,21 +173,15 @@ public sealed class PublicAsyncKafkaFutureTests
     [Theory]
     [InlineData("succeeded")]
     [InlineData("failed")]
-    public void OverADelivery_TheMembersThatBuildADependant_ThrowNotSupportedException_OnlyWhilePending(string outcome)
+    public void OnceDone_ThenApplyWhenCompleteAndAllOf_RunInsideTheCall(string outcome)
     {
         RecordMetadata metadata = NewMetadata();
         InvalidOperationException failure = new InvalidOperationException("delivery failed");
-        TaskCompletionSource<RecordMetadata> delivery =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery.Task);
+        KafkaFutureImpl<RecordMetadata> delivery = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        AssertNotSupported("ThenApply", () => future.ThenApply(value => 1));
-        AssertNotSupported("WhenComplete", () => future.WhenComplete((value, error) => { }));
-        AssertNotSupported("AllOf", () => AsyncKafkaFuture.AllOf(future));
-        AssertNotSupported("AllOf", () => AsyncKafkaFuture.AllOf(AsyncKafkaFuture.CompletedFuture(1), future));
-
-        Assert.True(outcome == "succeeded" ? delivery.TrySetResult(metadata) : delivery.TrySetException(failure));
+        Assert.True(outcome == "succeeded" ? delivery.Complete(metadata) : delivery.CompleteWithError(failure));
         cancellation.Cancel();
         int caller = Environment.CurrentManagedThreadId;
         int appliedOn = 0;
@@ -214,9 +206,9 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.True(completed.IsDone);
         Assert.True(all.IsDone);
         Assert.Equal(caller, completedOn);
-        Assert.Same(delivery.Task, future.Get(TimeSpan.Zero));
-        Assert.Same(delivery.Task, future.Get(TimeSpan.FromSeconds(1)));
-        Assert.Same(delivery.Task, future.Get(cancellation.Token));
+        Assert.Same(future.Get(), future.Get(TimeSpan.Zero));
+        Assert.Same(future.Get(), future.Get(TimeSpan.FromSeconds(1)));
+        Assert.Same(future.Get(), future.Get(cancellation.Token));
         if (outcome == "succeeded")
         {
             Assert.Equal(caller, appliedOn);
@@ -235,7 +227,7 @@ public sealed class PublicAsyncKafkaFutureTests
             Assert.Same(failure, seenError);
             AssertFailsWith(failure, () => completed.GetNow(NewMetadata()));
             AssertFailsWith(failure, () => all.GetNow());
-            _ = delivery.Task.Exception;
+            _ = future.Get().Exception;
         }
     }
 
@@ -244,26 +236,24 @@ public sealed class PublicAsyncKafkaFutureTests
     {
         RecordMetadata metadata = NewMetadata();
         InvalidOperationException failure = new InvalidOperationException("delivery failed");
-        TaskCompletionSource<RecordMetadata> delivery =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery.Task);
+        KafkaFutureImpl<RecordMetadata> delivery = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery);
 
-        Assert.Same(delivery.Task, future.Get(Timeout.InfiniteTimeSpan));
+        Assert.Same(future.Get(), future.Get(Timeout.InfiniteTimeSpan));
         await AssertTimesOut(future.Get(TimeSpan.Zero));
         await AssertTimesOut(future.Get(TimeSpan.FromMilliseconds(-5)));
         await AssertTimesOut(future.Get(TimeSpan.FromMilliseconds(50)));
 
         Task<RecordMetadata> waiting = future.Get(BlockingCall.Deadline);
         Assert.False(waiting.IsCompleted);
-        Assert.True(delivery.TrySetResult(metadata));
+        Assert.True(delivery.Complete(metadata));
         Assert.Same(metadata, await TestTimeout.Run(() => waiting, BlockingCall.Deadline));
 
-        TaskCompletionSource<RecordMetadata> failing =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+        KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
         Task<RecordMetadata> waitingForFailure =
-            new AsyncKafkaFuture<RecordMetadata>(failing.Task).Get(BlockingCall.Deadline);
+            new AsyncKafkaFuture<RecordMetadata>(failing).Get(BlockingCall.Deadline);
         Assert.False(waitingForFailure.IsCompleted);
-        Assert.True(failing.TrySetException(failure));
+        Assert.True(failing.CompleteWithError(failure));
         InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
             () => TestTimeout.Run(() => waitingForFailure, BlockingCall.Deadline));
         Assert.Same(failure, thrown);
@@ -274,15 +264,14 @@ public sealed class PublicAsyncKafkaFutureTests
     public async Task OverAPendingDelivery_TheCancellableGet_AnswersFromTheTask()
     {
         RecordMetadata metadata = NewMetadata();
-        TaskCompletionSource<RecordMetadata> delivery =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery.Task);
+        KafkaFutureImpl<RecordMetadata> delivery = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery);
         using CancellationTokenSource preCanceled = new CancellationTokenSource();
         preCanceled.Cancel();
         using CancellationTokenSource firing = new CancellationTokenSource();
         using CancellationTokenSource unfired = new CancellationTokenSource();
 
-        Assert.Same(delivery.Task, future.Get(CancellationToken.None));
+        Assert.Same(future.Get(), future.Get(CancellationToken.None));
         Task<RecordMetadata> canceledAtOnce = future.Get(preCanceled.Token);
         Assert.True(canceledAtOnce.IsCanceled);
         await AssertCanceledBy(preCanceled.Token, canceledAtOnce);
@@ -291,11 +280,11 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.False(canceledLater.IsCompleted);
         firing.Cancel();
         await AssertCanceledBy(firing.Token, canceledLater);
-        Assert.False(delivery.Task.IsCompleted);
+        Assert.False(delivery.IsDone);
 
         Task<RecordMetadata> waiting = future.Get(unfired.Token);
         Assert.False(waiting.IsCompleted);
-        Assert.True(delivery.TrySetResult(metadata));
+        Assert.True(delivery.Complete(metadata));
         Assert.Same(metadata, await TestTimeout.Run(() => waiting, BlockingCall.Deadline));
     }
 
@@ -308,22 +297,22 @@ public sealed class PublicAsyncKafkaFutureTests
     {
         RecordMetadata metadata = NewMetadata();
         InvalidOperationException failure = new InvalidOperationException("delivery failed");
-        TaskCompletionSource<RecordMetadata> delivery =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+        OperationCanceledException cancellation = new OperationCanceledException("The delivery was canceled.");
+        KafkaFutureImpl<RecordMetadata> delivery = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
         switch (state)
         {
             case "completed":
-                Assert.True(delivery.TrySetResult(metadata));
+                Assert.True(delivery.Complete(metadata));
                 break;
             case "faulted":
-                Assert.True(delivery.TrySetException(failure));
+                Assert.True(delivery.CompleteWithError(failure));
                 break;
             case "canceled":
-                Assert.True(delivery.TrySetCanceled());
+                Assert.True(delivery.CompleteWithError(cancellation));
                 break;
         }
 
-        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery.Task);
+        AsyncKafkaFuture<RecordMetadata> future = new AsyncKafkaFuture<RecordMetadata>(delivery);
         RecordMetadata absent = NewMetadata();
 
         Assert.False(future.Cancel(true));
@@ -331,7 +320,7 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Equal(state != "pending", future.IsDone);
         Assert.False(future.IsCancelled);
         Assert.Equal(state == "faulted" || state == "canceled", future.IsCompletedExceptionally);
-        Assert.Same(delivery.Task, future.Get());
+        Assert.Same(delivery.GetAsync(), future.Get());
         switch (state)
         {
             case "pending":
@@ -349,24 +338,23 @@ public sealed class PublicAsyncKafkaFutureTests
                     future.ToString());
                 break;
             default:
-                TaskCanceledException canceled = Assert.Throws<TaskCanceledException>(() => future.GetNow(absent));
+                Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.GetNow(absent)));
                 Assert.Equal(
-                    "KafkaFuture{value=null,exception=System.Threading.Tasks.TaskCanceledException: "
-                        + canceled.Message + ",done=true}",
+                    "KafkaFuture{value=null,exception=System.OperationCanceledException: The delivery was canceled.,"
+                        + "done=true}",
                     future.ToString());
                 break;
         }
 
         Assert.False(future.IsCancelled);
-        _ = delivery.Task.Exception;
+        _ = future.Get().Exception;
     }
 
     [Fact]
-    public void ToCompletionStage_IsTheTaskGetReturns_OverEitherSource()
+    public void ToCompletionStage_IsTheTaskGetReturns()
     {
-        Task<RecordMetadata> delivery = DeliveryIn("pending");
-        AsyncKafkaFuture<RecordMetadata> overDelivery = new AsyncKafkaFuture<RecordMetadata>(delivery);
-        Assert.Same(delivery, overDelivery.ToCompletionStage());
+        AsyncKafkaFuture<RecordMetadata> overDelivery = new AsyncKafkaFuture<RecordMetadata>(DeliveryIn("pending"));
+        Assert.Same(overDelivery.Get(), overDelivery.ToCompletionStage());
 
         AsyncKafkaFuture<RecordMetadata> overImpl =
             new AsyncKafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
@@ -374,7 +362,7 @@ public sealed class PublicAsyncKafkaFutureTests
     }
 
     [Fact]
-    public async Task Conversion_ToAsyncKafkaFuture_IsTheSameFuture_OverEitherSource()
+    public async Task Conversion_ToAsyncKafkaFuture_IsTheSameFuture()
     {
         KafkaFutureImpl<RecordMetadata> impl = new KafkaFutureImpl<RecordMetadata>();
         AsyncKafkaFuture<RecordMetadata> typed = new AsyncKafkaFuture<RecordMetadata>(impl);
@@ -393,37 +381,24 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.True(failing.CompleteWithError(cause));
         Assert.Same(cause, Assert.Throws<KafkaException>(() => erasedFailure.GetNow()));
         Assert.True(erasedFailure.IsCompletedExceptionally);
-
-        Task<RecordMetadata> delivery = DeliveryIn("pending");
-        AsyncKafkaFuture<RecordMetadata> overDelivery = new AsyncKafkaFuture<RecordMetadata>(delivery);
-        AsyncKafkaFuture erasedDelivery = overDelivery;
-        Assert.True(erasedDelivery == new AsyncKafkaFuture(delivery));
-        Assert.Same(delivery, erasedDelivery.Get());
-        Assert.Equal(overDelivery.GetHashCode(), erasedDelivery.GetHashCode());
     }
 
     [Fact]
-    public void Equality_BetweenATypedFutureAndTheValueItConvertsTo_IsSymmetric_OverEitherSource()
+    public void Equality_BetweenATypedFutureAndTheValueItConvertsTo_IsSymmetric()
     {
         AsyncKafkaFuture<RecordMetadata> overImpl =
             new AsyncKafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
-        AsyncKafkaFuture<RecordMetadata> overDelivery = new AsyncKafkaFuture<RecordMetadata>(DeliveryIn("pending"));
         AsyncKafkaFuture<RecordMetadata> otherImpl =
             new AsyncKafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
-        AsyncKafkaFuture<RecordMetadata> otherDelivery = new AsyncKafkaFuture<RecordMetadata>(DeliveryIn("pending"));
         AsyncKafkaFuture<RecordMetadata> none = default;
 
         AssertTypedAndErasedEquality(overImpl, overImpl, equal: true);
-        AssertTypedAndErasedEquality(overDelivery, overDelivery, equal: true);
         AssertTypedAndErasedEquality(none, none, equal: true);
         AssertTypedAndErasedEquality(none, default(AsyncKafkaFuture), equal: true);
 
         AssertTypedAndErasedEquality(overImpl, otherImpl, equal: false);
-        AssertTypedAndErasedEquality(overDelivery, otherDelivery, equal: false);
-        AssertTypedAndErasedEquality(overImpl, overDelivery, equal: false);
-        AssertTypedAndErasedEquality(overDelivery, overImpl, equal: false);
         AssertTypedAndErasedEquality(overImpl, none, equal: false);
-        AssertTypedAndErasedEquality(none, overDelivery, equal: false);
+        AssertTypedAndErasedEquality(none, otherImpl, equal: false);
 
         AsyncKafkaFuture<int> otherType = new AsyncKafkaFuture<int>(new KafkaFutureImpl<int>());
         Assert.False(((object)overImpl).Equals(otherType));
@@ -455,8 +430,7 @@ public sealed class PublicAsyncKafkaFutureTests
         AsyncKafkaFuture<int>[] live =
         {
             new AsyncKafkaFuture<int>(new KafkaFutureImpl<int>()),
-            new AsyncKafkaFuture<int>(
-                new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously).Task),
+            new AsyncKafkaFuture<int>(new KafkaFutureImpl<int>(mayCancel: false)),
         };
         foreach (AsyncKafkaFuture<int> future in live)
         {
@@ -612,7 +586,7 @@ public sealed class PublicAsyncKafkaFutureTests
         ConstructorInfo[] constructors = type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.All(constructors, constructor => Assert.True(constructor.IsAssembly));
         Assert.Equal(
-            new[] { typeof(KafkaFutureImpl<RecordMetadata>).ToString(), typeof(Task<RecordMetadata>).ToString() },
+            new[] { typeof(KafkaFutureImpl<RecordMetadata>).ToString() },
             constructors
                 .Select(constructor => Assert.Single(constructor.GetParameters()).ParameterType.ToString())
                 .OrderBy(name => name, StringComparer.Ordinal)
@@ -635,7 +609,7 @@ public sealed class PublicAsyncKafkaFutureTests
             Assert.True(field.IsInitOnly);
         });
         Assert.Equal(
-            new[] { typeof(KafkaFutureImpl<RecordMetadata>) + " _impl", typeof(Task<RecordMetadata>) + " _delivery" },
+            new[] { typeof(KafkaFutureImpl<RecordMetadata>) + " _impl" },
             fields.Select(field => field.FieldType + " " + field.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
     }
 
@@ -668,14 +642,6 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Null(error);
         threadId = id;
         return result;
-    }
-
-    private static void AssertNotSupported(string member, Func<object?> call)
-    {
-        NotSupportedException thrown = Assert.Throws<NotSupportedException>(() => { _ = call(); });
-        Assert.Equal(
-            "AsyncKafkaFuture." + member + " is not supported on a pending future returned by an IAsyncAdmin result.",
-            thrown.Message);
     }
 
     private static void AssertTypedAndErasedEquality(
@@ -740,36 +706,34 @@ public sealed class PublicAsyncKafkaFutureTests
     private static async Task<RecordMetadata> AwaitGetWithoutContext(AsyncKafkaFuture<RecordMetadata> future) =>
         await future.Get().ConfigureAwait(false);
 
-    private static Task<RecordMetadata> DeliveryIn(string state)
+    private static KafkaFutureImpl<RecordMetadata> DeliveryIn(string state)
     {
-        TaskCompletionSource<RecordMetadata> completion =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+        KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
         switch (state)
         {
             case "pending":
                 break;
             case "completed":
-                completion.SetResult(NewMetadata());
+                Assert.True(completion.Complete(NewMetadata()));
                 break;
             case "faulted":
-                completion.SetException(new InvalidOperationException("delivery failed"));
+                Assert.True(completion.CompleteWithError(new InvalidOperationException("delivery failed")));
                 break;
             case "canceled":
-                completion.SetCanceled();
+                Assert.True(completion.CompleteWithError(new OperationCanceledException("The delivery was canceled.")));
                 break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(state), state, "unknown task state");
+                throw new ArgumentOutOfRangeException(nameof(state), state, "unknown future state");
         }
 
-        return completion.Task;
+        return completion;
     }
 
-    private static Task<RecordMetadata> Delivered(RecordMetadata metadata)
+    private static KafkaFutureImpl<RecordMetadata> Delivered(RecordMetadata metadata)
     {
-        TaskCompletionSource<RecordMetadata> completion =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-        completion.SetResult(metadata);
-        return completion.Task;
+        KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>(mayCancel: false);
+        Assert.True(completion.Complete(metadata));
+        return completion;
     }
 
     private static RecordMetadata NewMetadata() => new RecordMetadata("future-topic", 3, 42L, 1_700_000_000_000L);

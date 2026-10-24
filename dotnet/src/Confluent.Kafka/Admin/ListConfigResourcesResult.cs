@@ -14,76 +14,49 @@
 
 using System.Collections.Generic;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListConfigResources"/> — the .NET realization of Java's
-/// <c>ListConfigResourcesResult</c>: <b>one</b> future over the whole listing, handed
-/// back the moment the request is submitted (<c>ListConfigResourcesResult.java:42</c>).
+/// The result of <see cref="IAdmin.ListConfigResources"/> — Java's
+/// <c>org.apache.kafka.clients.admin.ListConfigResourcesResult</c>: one future over the whole
+/// listing.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>Exactly one accessor, because Java declares exactly one.</b> Java's class holds a
-/// single <c>KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;</c> field and exposes it
-/// through <c>all()</c> — there is no per-resource view and no map. Adding a second
-/// projection would be public surface Java does not have
-/// (<c>definition-of-done.md</c> §7).
-/// </para>
-/// <para>
-/// ⚠ <b>A <em>collection</em>, not a map — which is why the walker gained a callable.</b>
-/// <c>kafka_admin_ListConfigResourcesResult_t</c> exposes <c>count</c> / <c>get_type</c> /
-/// <c>get_name</c> / <c>destroy</c>: no key, and no <c>get_error</c> of any kind. The
-/// absence of the error accessor is the ABI stating the semantics — either the call fails,
-/// through the callback's own <c>error</c>, or the whole listing succeeds. See
-/// <c>KeyedResultMarshal.CompleteList</c>.
-/// </para>
-/// <para>
-/// <b>Order.</b> Entries arrive sorted by <c>(type id, name)</c> and are handed on
-/// unchanged. Java returns a <c>Collection</c>, so order is not part of the contract —
-/// do not rely on it, but nothing here shuffles or re-sorts it either.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
-/// no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
-/// </para>
+/// Java declares only <c>all()</c>, so there is no per-resource view. The order of the entries is
+/// not part of the contract, as Java returns a <c>Collection</c>.
 /// </remarks>
 /// <seealso cref="AsyncListConfigResourcesResult"/>
 public sealed class ListConfigResourcesResult
 {
     private readonly KafkaFuture<IReadOnlyCollection<ConfigResource>> _future;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps the single future — Java's package-private
-    /// <c>ListConfigResourcesResult(KafkaFuture&lt;Collection&lt;ConfigResource&gt;&gt;)</c>
-    /// (<c>:32</c>).
-    /// </summary>
     internal ListConfigResourcesResult(KafkaFuture<IReadOnlyCollection<ConfigResource>> future)
     {
         _future = future;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static ListConfigResourcesResult From(
-        SingleAdminOperation<IReadOnlyCollection<ConfigResource>> operation) =>
-        new ListConfigResourcesResult(new KafkaFuture<IReadOnlyCollection<ConfigResource>>(operation.SyncSource));
+    private ListConfigResourcesResult(
+        KafkaFuture<IReadOnlyCollection<ConfigResource>> future, SafeAdminResultHandle native)
+    {
+        _future = future;
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
-    /// The full set of config resources — Java's <c>all()</c> (<c>:42</c>).
+    /// The full set of config resources — Java's <c>all()</c>.
     /// </summary>
     /// <returns>
-    /// A future yielding the resources, or failing with the call's own
+    /// A new future on each call, yielding the resources, or failing with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
-    /// <remarks>
-    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
-    /// completion. Java's <c>all()</c> re-wraps the
-    /// field in a fresh <c>KafkaFutureImpl</c> via <c>whenComplete</c> (<c>:43-51</c>),
-    /// which yields an identical outcome; returning the source directly is the shipped
-    /// <see cref="ListTopicsResult.NamesToListings"/> reading of the same pattern.
-    /// </remarks>
-    public KafkaFuture<IReadOnlyCollection<ConfigResource>> All() => _future;
+    public KafkaFuture<IReadOnlyCollection<ConfigResource>> All() => _future.ThenApply(static resources => resources);
+
+    internal static ListConfigResourcesResult OfClient(
+        (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native) =>
+        new ListConfigResourcesResult(new KafkaFuture<IReadOnlyCollection<ConfigResource>>(native.All), native.Result);
 }

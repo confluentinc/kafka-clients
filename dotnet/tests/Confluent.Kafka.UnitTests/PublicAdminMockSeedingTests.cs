@@ -23,24 +23,21 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M15/P12's five <see cref="MockAdminClient"/> seeding members. Each test asserts the
-/// seed <b>changes what a subsequent <see cref="IAdmin"/> RPC returns</b> — a binding that
-/// P/Invokes but whose effect is unobserved is not tested.
+/// The <see cref="MockAdminClient"/> seeding members and its <see cref="MockAdminClient.Builder"/>'s feature levels:
+/// each test asserts that the seed changes what a later RPC returns.
 /// </summary>
 public class PublicAdminMockSeedingTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The offset the mock reports for a partition it has no seed for.</summary>
     private const long Unseeded = -1;
 
     [Fact]
     public async Task TimeoutNextRequest_TimesOutExactlyThatManyOperations()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        // Baseline: the same call succeeds when nothing is seeded.
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-a", 1, 1) }).All().Get(), s_deadline);
 
@@ -52,7 +49,6 @@ public class PublicAdminMockSeedingTests
             s_deadline);
         Assert.Equal("The mock timed out the request.", failure.Message);
 
-        // The counter is consumed, so the next call succeeds again.
         await TestTimeout.Run(
             () => admin.CreateTopics(new[] { new NewTopic("seed-timeout-c", 1, 1) }).All().Get(), s_deadline);
     }
@@ -60,7 +56,7 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateBeginningOffsets_ChangesWhatListOffsetsEarliestReports()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition seeded = new TopicPartition("seed-begin", 0);
         TopicPartition unseeded = new TopicPartition("seed-begin", 1);
@@ -72,7 +68,7 @@ public class PublicAdminMockSeedingTests
         Assert.Equal(42, await EarliestOffset(admin, seeded));
         Assert.Equal(Unseeded, await EarliestOffset(admin, unseeded));
 
-        // Merges rather than replaces (the header's contract for this setter).
+        // The seeder merges rather than replaces.
         admin.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [unseeded] = 7 });
         Assert.Equal(42, await EarliestOffset(admin, seeded));
         Assert.Equal(7, await EarliestOffset(admin, unseeded));
@@ -81,7 +77,7 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public async Task UpdateEndOffsets_ChangesWhatListOffsetsLatestReports()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = new TopicPartition("seed-end", 0);
 
@@ -91,14 +87,13 @@ public class PublicAdminMockSeedingTests
 
         Assert.Equal(99, await LatestOffset(admin, partition));
 
-        // End offsets are a separate map from the beginning offsets.
         Assert.Equal(Unseeded, await EarliestOffset(admin, partition));
     }
 
     [Fact]
     public async Task UpdateConsumerGroupOffsets_ChangesWhatListConsumerGroupOffsetsReports()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = new TopicPartition("seed-committed", 3);
 
@@ -116,26 +111,25 @@ public class PublicAdminMockSeedingTests
     }
 
     [Fact]
-    public async Task SetFeatureLevels_ChangesWhatDescribeFeaturesReports()
+    public async Task BuilderFeatureLevels_ChangeWhatDescribeFeaturesReports()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
+        AsyncMockAdminClient unseeded = AsyncMockAdminClient.Create().Build();
+        using IDisposable unseededDisposal = TestTimeout.Disposal(unseeded);
         FeatureMetadata before = await TestTimeout.Run(
-            () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
+            () => unseeded.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
         Assert.Empty(before.FinalizedFeatures);
         Assert.Empty(before.SupportedFeatures);
 
-        admin.SetFeatureLevels(
-            new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)
-            {
-                ["metadata.version"] = (5, 1, 9),
-            });
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create()
+            .FeatureLevels(new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 5 })
+            .MinSupportedFeatureLevels(new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 1 })
+            .MaxSupportedFeatureLevels(new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 9 })
+            .Build();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         FeatureMetadata after = await TestTimeout.Run(
             () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
 
-        // All three levels reach the core — a single-level binding would lose min/max.
         FinalizedVersionRange finalized = Assert.Contains("metadata.version", after.FinalizedFeatures);
         Assert.Equal(5, finalized.MinVersionLevel);
         Assert.Equal(5, finalized.MaxVersionLevel);
@@ -143,40 +137,24 @@ public class PublicAdminMockSeedingTests
         SupportedVersionRange supported = Assert.Contains("metadata.version", after.SupportedFeatures);
         Assert.Equal(1, supported.MinVersion);
         Assert.Equal(9, supported.MaxVersion);
-
-        // Replaces rather than merges (the header's contract for this setter).
-        admin.SetFeatureLevels(
-            new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)
-            {
-                ["group.version"] = (2, 0, 3),
-            });
-
-        FeatureMetadata replaced = await TestTimeout.Run(
-            () => admin.DescribeFeatures().FeatureMetadata().Get(), s_deadline);
-        Assert.DoesNotContain("metadata.version", replaced.FinalizedFeatures);
-        Assert.Contains("group.version", replaced.FinalizedFeatures);
     }
 
     [Fact]
     public void SeedingRejectsANullMapBeforeAnyNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        Assert.Throws<ArgumentNullException>(() => admin.UpdateBeginningOffsets(null!));
-        Assert.Throws<ArgumentNullException>(() => admin.UpdateEndOffsets(null!));
-        Assert.Throws<ArgumentNullException>(() => admin.UpdateConsumerGroupOffsets(null!));
-        Assert.Throws<ArgumentNullException>(() => admin.SetFeatureLevels(null!));
+        Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => admin.UpdateBeginningOffsets(null!)).ParamName);
+        Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => admin.UpdateEndOffsets(null!)).ParamName);
+        Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => admin.UpdateConsumerGroupOffsets(null!)).ParamName);
+        Assert.Throws<ArgumentNullException>(() => MockAdminClient.Create().FeatureLevels(null!));
     }
 
-    /// <summary>
-    /// A null topic is SKIPPED by the core, which would silently drop the entry, so the
-    /// binding rejects it first (ffi §B5).
-    /// </summary>
     [Fact]
     public void SeedingRejectsANullTopicBeforeAnyNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Dictionary<TopicPartition, long> withNullTopic =
             new Dictionary<TopicPartition, long> { [default] = 1 };
@@ -186,17 +164,11 @@ public class PublicAdminMockSeedingTests
         Assert.Throws<ArgumentException>(() => admin.UpdateConsumerGroupOffsets(withNullTopic));
     }
 
-    /// <summary>
-    /// The same guard, reached through a <c>new TopicPartition(null!, 0)</c> — constructible
-    /// since M15/P13.2 G3-4, as in Java — with the exact message and parameter name. The seed
-    /// is rejected as a whole: a valid entry enumerated before the null one is not applied
-    /// either, which is the witness that nothing reached the core.
-    /// </summary>
     [Fact]
     public async Task SeedingRejectsAConstructedNullTopic_AndSeedsNothing()
     {
         const string Message = "The offsets map must not contain a topic partition with a null topic.";
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition valid = new TopicPartition("seed-null-topic", 0);
         Dictionary<TopicPartition, long> withNullTopic = new Dictionary<TopicPartition, long>
@@ -213,7 +185,7 @@ public class PublicAdminMockSeedingTests
         })
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(seed);
-            Assert.Equal("offsets", rejected.ParamName);
+            Assert.Equal("newOffsets", rejected.ParamName);
             Assert.StartsWith(Message, rejected.Message, StringComparison.Ordinal);
         }
 
@@ -224,7 +196,7 @@ public class PublicAdminMockSeedingTests
     [Fact]
     public void SeedingAfterDisposeThrowsObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.TimeoutNextRequest(1));
@@ -234,9 +206,6 @@ public class PublicAdminMockSeedingTests
             () => admin.UpdateEndOffsets(new Dictionary<TopicPartition, long>()));
         Assert.Throws<ObjectDisposedException>(
             () => admin.UpdateConsumerGroupOffsets(new Dictionary<TopicPartition, long>()));
-        Assert.Throws<ObjectDisposedException>(
-            () => admin.SetFeatureLevels(
-                new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)));
     }
 
     private static async Task<long> EarliestOffset(IAsyncAdmin admin, TopicPartition partition) =>

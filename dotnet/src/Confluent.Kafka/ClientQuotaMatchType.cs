@@ -15,22 +15,18 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// How a <see cref="ClientQuotaFilterComponent"/> matches entity names. The values are the C ABI's
-/// <c>match_types</c> wire constants, which make explicit the third state Java encodes as a null
-/// <c>Optional</c> reference (PLAN D37).
+/// How a <see cref="ClientQuotaFilterComponent"/> matches entity names. The values are Java's
+/// <c>DescribeClientQuotasRequest</c> match-type constants; the third is the state Java encodes as a
+/// null <c>Optional</c> reference.
 /// </summary>
 public enum ClientQuotaMatchType
 {
-    /// <summary>Match the component's name exactly — Java's <c>ofEntity</c> (<c>:51</c>).</summary>
+    /// <summary>Match the component's name exactly — Java's <c>ofEntity</c>.</summary>
     Exact = 0,
 
-    /// <summary>
-    /// Match the built-in default entity for the type — Java's <c>ofDefaultEntity</c> (<c>:61</c>).
-    /// </summary>
+    /// <summary>Match the built-in default entity for the type — Java's <c>ofDefaultEntity</c>.</summary>
     Default = 1,
 
-    /// <summary>
-    /// Match any <em>named</em> entity of the type — Java's <c>ofEntityType</c> (<c>:71</c>).
-    /// </summary>
+    /// <summary>Match any <em>named</em> entity of the type — Java's <c>ofEntityType</c>.</summary>
     Specified = 2,
 }

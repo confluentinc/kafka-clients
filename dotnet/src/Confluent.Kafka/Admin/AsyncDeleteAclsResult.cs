@@ -13,89 +13,69 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteAcls"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DeleteAclsResult</c>: one future <b>per filter</b>,
-/// each resolving to the list of ACLs that filter matched.
+/// The result of <see cref="IAsyncAdmin.DeleteAcls"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DeleteAclsResult</c>: one future per filter, each resolving
+/// to the ACLs that filter matched.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>There are two independent error channels, and only one of them is a fault.</b> A
-/// <em>filter</em> that failed — nothing was deleted for it — faults that filter's
-/// <see cref="AsyncKafkaFuture"/>. An individual matched ACL that could not be deleted is reported as a
-/// <b>value</b>, in <see cref="DeleteAclsResult.FilterResult.Exception"/>, inside a <see cref="DeleteAclsResult.FilterResults"/>
-/// whose <see cref="AsyncKafkaFuture"/> completed <em>successfully</em>. So
-/// <c>Values[filter]</c> succeeding and <see cref="All"/> faulting is the correct, intended
-/// outcome of an inner failure — the two are supposed to disagree.
-/// </para>
+/// A filter that failed faults its own future. A matched ACL that could not be deleted is reported
+/// as a value, in <see cref="DeleteAclsResult.FilterResult.Exception"/>, inside a
+/// <see cref="DeleteAclsResult.FilterResults"/> whose future completed, so <c>Values[filter]</c>
+/// can succeed while <see cref="All"/> faults.
 /// </remarks>
 /// <seealso cref="DeleteAclsResult"/>
 public sealed class AsyncDeleteAclsResult
 {
-    private readonly IReadOnlyDictionary<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> _values;
     private readonly IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> _futures;
+    private readonly IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> _nativeFutures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>Wraps the bridge's per-filter futures, which are already Java-shaped.</summary>
-    internal AsyncDeleteAclsResult(IReadOnlyDictionary<AclBindingFilter, Task<DeleteAclsResult.FilterResults>> values)
+    private AsyncDeleteAclsResult(
+        IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> futures,
+        IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        _values = values;
-        _futures = AsyncAdminFutures.Wrap(values);
+        _futures = futures;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDeleteAclsResult From(
-        KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation) =>
-        new AsyncDeleteAclsResult(operation.Tasks);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// One future per requested filter, keyed by the filter — Java's <c>values()</c>
-    /// (<c>:91</c>).
+    /// One future per requested filter, keyed by the filter — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> Values => _futures;
 
     /// <summary>
-    /// Every ACL deleted across every filter — Java's <c>all()</c> (<c>:99</c>).
+    /// Every ACL deleted across every filter — Java's <c>all()</c>.
     /// </summary>
     /// <returns>
-    /// The deleted bindings. Faults if any <em>filter</em> failed, or with the first
-    /// <see cref="DeleteAclsResult.FilterResult.Exception"/> encountered in filter order. Filters that matched
-    /// nothing are not an error (<c>DeleteAclsResult.java:97-98</c>) — the result is then a
+    /// The deleted bindings. Faults if any <em>filter</em> failed (with the first failure to complete), or with
+    /// the first <see cref="DeleteAclsResult.FilterResult.Exception"/> encountered in filter order. Filters that
+    /// matched nothing are not an error — the result is then a
     /// successful empty collection.
     /// </returns>
     public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> All() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(AllCore());
+        new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(DeleteAclsResult.AllOf(_nativeFutures));
 
-    private async Task<IReadOnlyCollection<AclBinding>> AllCore()
+    internal static AsyncDeleteAclsResult OfClient(
+        (IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> Values,
+        SafeAdminResultHandle Result) native)
     {
-        // Java derives all() from the per-filter futures rather than re-reading the result:
-        // allOf(futures.values()).thenApply(v -> getAclBindings(futures)) (:99-121).
-        Task<DeleteAclsResult.FilterResults>[] pending = _values.Values.ToArray();
-        DeleteAclsResult.FilterResults[] resolved = await Task.WhenAll(pending).ConfigureAwait(false);
-
-        List<AclBinding> bindings = new List<AclBinding>();
-        foreach (DeleteAclsResult.FilterResults results in resolved)
+        Dictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> futures =
+            new Dictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>>(native.Values.Count);
+        foreach (KeyValuePair<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> entry in native.Values)
         {
-            foreach (DeleteAclsResult.FilterResult result in results.Values)
-            {
-                if (result.Exception is not null)
-                {
-                    // Java: `if (result.exception() != null) throw result.exception();`
-                    throw result.Exception;
-                }
-
-                bindings.Add(result.Binding!);
-            }
+            futures.Add(entry.Key, new AsyncKafkaFuture<DeleteAclsResult.FilterResults>(entry.Value));
         }
 
-        return bindings;
+        return new AsyncDeleteAclsResult(futures, native.Values, native.Result);
     }
 }

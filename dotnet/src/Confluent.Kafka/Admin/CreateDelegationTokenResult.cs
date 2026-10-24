@@ -13,7 +13,7 @@
 // limitations under the License.
 
 using Confluent.Kafka.Internal;
-
+using Confluent.Kafka.Internal.Interop;
 using Token = Confluent.Kafka.DelegationToken;
 
 namespace Confluent.Kafka.Admin;
@@ -21,34 +21,27 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAdmin.CreateDelegationToken"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreateDelegationTokenResult</c>: one future over the
-/// issued token (<c>:27</c>).
+/// issued token.
 /// </summary>
-/// <remarks>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the token has been issued, and
-/// needs no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
-/// </remarks>
 /// <seealso cref="AsyncCreateDelegationTokenResult"/>
 public sealed class CreateDelegationTokenResult
 {
-    private readonly KafkaFuture<Token> _token;
+    private readonly KafkaFutureImpl<Token> _token;
+    private readonly SafeAdminResultHandle _native;
 
-    internal CreateDelegationTokenResult(KafkaFuture<Token> token)
+    private CreateDelegationTokenResult(KafkaFutureImpl<Token> token, SafeAdminResultHandle native)
     {
         _token = token;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static CreateDelegationTokenResult From(SingleAdminOperation<DelegationToken> operation) =>
-        new CreateDelegationTokenResult(new KafkaFuture<Token>(operation.SyncSource));
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>The issued token — Java's <c>delegationToken()</c> (<c>:36</c>).</summary>
+    /// <summary>The issued token — Java's <c>delegationToken()</c>.</summary>
     /// <returns>A future over the token.</returns>
-    /// <remarks>
-    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
-    /// completion.
-    /// </remarks>
-    public KafkaFuture<Token> DelegationToken() => _token;
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
+    public KafkaFuture<Token> DelegationToken() => new KafkaFuture<Token>(_token);
+
+    internal static CreateDelegationTokenResult OfClient((KafkaFutureImpl<Token> Token, SafeAdminResultHandle Result) native) =>
+        new CreateDelegationTokenResult(native.Token, native.Result);
 }

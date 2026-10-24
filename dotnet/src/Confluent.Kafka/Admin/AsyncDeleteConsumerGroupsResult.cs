@@ -14,68 +14,72 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroups"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsResult</c>: one future
-/// <b>per group id</b>, handed back the moment the request is submitted.
+/// The result of <see cref="IAsyncAdmin.DeleteConsumerGroups"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DeleteConsumerGroupsResult</c>: one future per group id.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Java stores <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt; futures</c>
-/// (<c>DeleteConsumerGroupsResult.java:30</c>), so awaiting one of these tells you whether
-/// that group was deleted and hands back nothing; a group that fails faults only
-/// <em>its own</em> <see cref="AsyncKafkaFuture"/> — Java's <c>deletedGroups()</c> (<c>:36-44</c>).
-/// </para>
-/// </remarks>
 /// <seealso cref="DeleteConsumerGroupsResult"/>
 public sealed class AsyncDeleteConsumerGroupsResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _deletedGroups;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal success
-    /// token (result shape 2 — the ABI has no <c>get_value</c> here, so a null per-key error
-    /// <em>is</em> the success value) and must not reach the public surface.
-    /// </summary>
-    /// <remarks>
-    /// Each entry wraps the <b>same</b> task as the bridge's — no second task whose fault could
-    /// go unobserved. It reuses the bridge's own comparer so the view and the sources cannot
-    /// disagree about key identity.
-    /// </remarks>
-    internal AsyncDeleteConsumerGroupsResult(
-        IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer)
+    internal AsyncDeleteConsumerGroupsResult(IReadOnlyDictionary<string, AsyncKafkaFuture> deletedGroups)
     {
-        Dictionary<string, AsyncKafkaFuture> erased = new Dictionary<string, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, Task<bool>> entry in values)
+        if (deletedGroups is null)
         {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            throw new ArgumentNullException(nameof(deletedGroups));
         }
 
-        _deletedGroups = erased;
+        _deletedGroups = deletedGroups;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDeleteConsumerGroupsResult From(VoidKeyedAdminOperation<string> operation) =>
-        new AsyncDeleteConsumerGroupsResult(operation.Tasks, operation.KeyComparer);
+    private AsyncDeleteConsumerGroupsResult(IReadOnlyDictionary<string, AsyncKafkaFuture> deletedGroups, SafeAdminResultHandle native)
+    {
+        _deletedGroups = deletedGroups;
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
-    /// One future per requested group id, keyed by group id — Java's <c>deletedGroups()</c>.
+    /// One future per requested group id, keyed by group id — Java's <c>deletedGroups()</c>. A group that fails fails
+    /// only its own future.
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> DeletedGroups => _deletedGroups;
 
     /// <summary>
-    /// Completes when <b>every</b> group has been deleted, and faults with the first failure
-    /// if any group failed — Java's <c>all()</c> (<c>KafkaFuture.allOf</c>).
+    /// Completes when every group has been deleted, and fails with the first failure to complete otherwise — Java's
+    /// <c>all()</c>. Each call builds a new future.
     /// </summary>
-    /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_deletedGroups.Values));
+    /// <returns>A future over the whole batch.</returns>
+    public AsyncKafkaFuture All()
+    {
+        AsyncKafkaFuture[] values = new AsyncKafkaFuture[_deletedGroups.Count];
+        int next = 0;
+        foreach (AsyncKafkaFuture future in _deletedGroups.Values)
+        {
+            values[next++] = future;
+        }
+
+        return AsyncKafkaFuture.AllOf(values);
+    }
+
+    internal static AsyncDeleteConsumerGroupsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> DeletedGroups, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(native.DeletedGroups.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.DeletedGroups)
+        {
+            futures.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+        }
+
+        return new AsyncDeleteConsumerGroupsResult(futures, native.Result);
+    }
 }

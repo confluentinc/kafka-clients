@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,19 +22,34 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class ExpireDelegationTokenOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+    private long _expiryTimePeriodMs = -1L;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
-    /// How long until the token expires, in milliseconds; negative expires it immediately, and
-    /// <c>-1</c> is the default — Java's <c>expiryTimePeriodMs()</c> (<c>:38</c>). Java's own
-    /// sentinel, passed through verbatim.
+    /// How long until the token expires, in milliseconds — Java's
+    /// <c>expiryTimePeriodMs()</c>. Defaults to <c>-1</c>, as Java's does; a negative value
+    /// expires it immediately.
     /// </summary>
-    public long ExpiryTimePeriodMs { get; set; } = -1L;
+    public long ExpiryTimePeriodMs
+    {
+        get => _expiryTimePeriodMs;
+        set
+        {
+            _expiryTimePeriodMs = value;
+            Setters.Ran(nameof(ExpiryTimePeriodMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

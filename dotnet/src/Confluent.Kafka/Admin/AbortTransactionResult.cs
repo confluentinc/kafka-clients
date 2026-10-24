@@ -13,52 +13,40 @@
 // limitations under the License.
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.AbortTransaction"/> — Java's
-/// <c>org.apache.kafka.clients.admin.AbortTransactionResult</c> (<c>:27</c>).
+/// <c>org.apache.kafka.clients.admin.AbortTransactionResult</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Java retains a single-entry <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>
-/// (<c>:28</c>) but publishes only <see cref="All"/> (<c>:41</c>), so there is no per-partition
-/// view to restore and the ABI exposes no result handle.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the abort has completed, and needs no
-/// thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
-/// </para>
+/// Java publishes only <see cref="All"/>, so there is no per-partition view.
 /// </remarks>
 /// <seealso cref="AsyncAbortTransactionResult"/>
 public sealed class AbortTransactionResult
 {
-    private readonly KafkaFuture _all;
+    private readonly KafkaFutureImpl<object?> _future;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AbortTransactionResult(KafkaFuture all)
+    private AbortTransactionResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
-        _all = all;
+        _future = future;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    /// <remarks>
-    /// The <c>bool</c> is the void bridge's internal success token: the future waits on the same latch and does not
-    /// carry it.
-    /// </remarks>
-    internal static AbortTransactionResult From(SingleAdminOperation<bool> operation) =>
-        new AbortTransactionResult(new KafkaFuture(operation.SyncSource));
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// Whether the transaction was aborted — Java's <c>all()</c> (<c>:41</c>).
+    /// Whether the transaction was aborted — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future that completes when the abort has.</returns>
     /// <remarks>
-    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
-    /// completion.
+    /// Each call builds a new future over the call's one future, as Java's <c>allOf</c> over its map does.
     /// </remarks>
-    public KafkaFuture All() => _all;
+    public KafkaFuture All() => KafkaFuture.AllOf(new KafkaFuture(_future));
+
+    internal static AbortTransactionResult OfClient((KafkaFutureImpl<object?> All, SafeAdminResultHandle Result) native) =>
+        new AbortTransactionResult(native.All, native.Result);
 }

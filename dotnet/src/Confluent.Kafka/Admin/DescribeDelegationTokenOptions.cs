@@ -14,6 +14,8 @@
 
 using System.Collections.Generic;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -22,26 +24,36 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class DescribeDelegationTokenOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+    private IReadOnlyList<KafkaPrincipal>? _owners;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
-    /// The owners to filter by — Java's <c>owners()</c> (<c>:41</c>).
-    /// <para>
-    /// ⚠⚠ <b><see langword="null"/> and an empty list are DIFFERENT requests.</b>
-    /// <see langword="null"/> is "describe every token I am allowed to see"; an empty list
-    /// filters by nothing and matches none. Java's field has no initializer (<c>:28</c>), so
-    /// it really is null when unset — unlike
-    /// <see cref="CreateDelegationTokenOptions.Renewers"/>, which defaults to empty. The ABI
-    /// carries the distinction in <c>has_owners_filter</c>
-    /// (header, <c>kafka_admin_AdminClient_describe_delegation_token</c>), never in the count.
-    /// </para>
+    /// The owners to filter by — Java's <c>owners()</c>.
     /// </summary>
-    public IReadOnlyList<KafkaPrincipal>? Owners { get; set; }
+    /// <remarks>
+    /// <see langword="null"/>, the default as in Java, describes every token the caller may
+    /// see; an empty list matches none.
+    /// </remarks>
+    public IReadOnlyList<KafkaPrincipal>? Owners
+    {
+        get => _owners;
+        set
+        {
+            _owners = value;
+            Setters.Ran(nameof(Owners));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

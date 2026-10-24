@@ -25,20 +25,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P3 Stage 3's surface against the Java classes it
-/// mirrors.
+/// The public shape of the log-dirs surface (<c>DescribeLogDirs</c>, <c>AlterReplicaLogDirs</c>,
+/// <c>DescribeReplicaLogDirs</c>, their options, results and value types) against the Java classes it mirrors.
 /// </summary>
 /// <remarks>
-/// ⚠ <b>C# upcasts and widens silently, so these have to be reflection assertions.</b> A
-/// behavioural test passes equally against <c>Task</c> and <c>Task&lt;Map&gt;</c>, against a
-/// property and a method, and against <c>T</c> and <c>T?</c>.
+/// These are reflection assertions: a behavioural test passes equally against a property and a method, or against
+/// <c>T</c> and <c>T?</c>.
 /// </remarks>
 public sealed class PublicAdminLogDirsShapeParityTests
 {
-    /// <summary>
-    /// The three new RPCs return their <c>*Result</c> <b>synchronously</b>
-    /// (<c>admin-client.md</c> §1), with Java's parameter shape.
-    /// </summary>
     [Fact]
     public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
@@ -50,13 +45,10 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(typeof(AlterReplicaLogDirsResult), alter.ReturnType);
         Assert.Equal(typeof(DescribeReplicaLogDirsResult), describeReplicas.ReturnType);
 
-        // describeLogDirs(Collection<Integer>, DescribeLogDirsOptions) — Java's element type
-        // is Integer, so the .NET element is the value type int, not a nullable or a string.
         Assert.Equal(
             new[] { typeof(IReadOnlyCollection<int>), typeof(DescribeLogDirsOptions) },
             describeLogDirs.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // alterReplicaLogDirs(Map<TopicPartitionReplica, String>, AlterReplicaLogDirsOptions)
         Assert.Equal(
             new[]
             {
@@ -65,7 +57,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
             },
             alter.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // describeReplicaLogDirs(Collection<TopicPartitionReplica>, DescribeReplicaLogDirsOptions)
         Assert.Equal(
             new[]
             {
@@ -74,7 +65,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
             },
             describeReplicas.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // The options parameter is optional and nullable on each; the required one is not.
         foreach (MethodInfo rpc in new[] { describeLogDirs, alter, describeReplicas })
         {
             ParameterInfo[] parameters = rpc.GetParameters();
@@ -84,29 +74,18 @@ public sealed class PublicAdminLogDirsShapeParityTests
             Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(parameters[1]));
         }
 
-        // IAdmin has NO Task-returning member (Close is void since M15/P14 S5g; IAsyncAdmin is the async twin).
         Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
                 .Select(method => method.Name));
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="DescribeLogDirsResult"/>'s two accessors are named for the
-    /// DESCRIPTIONS, not <c>values</c>/<c>all</c></b> — Java names them
-    /// <c>descriptions()</c> and <c>allDescriptions()</c>
-    /// (<c>DescribeLogDirsResult.java:41, :50</c>) and has no others, so borrowing the
-    /// sibling results' names would invent a surface Java does not have. Since M15/P14 S5a the
-    /// futures are <see cref="KafkaFuture{T}"/>.
-    /// </summary>
     [Fact]
     public void DescribeLogDirsResult_MatchesJavasTwoAccessors()
     {
         PropertyInfo descriptions =
             typeof(DescribeLogDirsResult).GetProperty(nameof(DescribeLogDirsResult.Descriptions))!;
 
-        // ⚠ The key is a BARE int — Java's Map<Integer, …> — not a TopicPartition or a
-        // string, and the value is a whole map per broker.
         Assert.Equal(
             typeof(IReadOnlyDictionary<int, KafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>),
             descriptions.PropertyType);
@@ -118,11 +97,8 @@ public sealed class PublicAdminLogDirsShapeParityTests
             typeof(KafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>),
             allDescriptions.ReturnType);
 
-        // Java's constructor is package-private; nothing public builds one.
         Assert.Empty(typeof(DescribeLogDirsResult).GetConstructors());
 
-        // ⚠ The WHOLE declared surface, named — so a stray `Values`/`All` borrowed from a
-        // sibling result turns this red rather than merely changing a count.
         Assert.Equal(
             new[] { nameof(DescribeLogDirsResult.AllDescriptions) },
             DeclaredPublicMethodNames(typeof(DescribeLogDirsResult)));
@@ -131,27 +107,18 @@ public sealed class PublicAdminLogDirsShapeParityTests
             PropertyNames(typeof(DescribeLogDirsResult)));
     }
 
-    /// <summary>
-    /// ⚠ <b>The two replica results differ exactly as Java's do</b>:
-    /// <see cref="AlterReplicaLogDirsResult"/> is <c>KafkaFuture&lt;Void&gt;</c> per replica
-    /// while <see cref="DescribeReplicaLogDirsResult"/> carries a value. Both shapes are
-    /// pinned together, because that is where the confusion lives. Since M15/P14 S5a the futures
-    /// are <see cref="KafkaFuture"/> / <see cref="KafkaFuture{T}"/>.
-    /// </summary>
     [Fact]
     public void TheTwoReplicaResults_DifferExactlyAsJavasDo()
     {
         PropertyInfo alterValues =
             typeof(AlterReplicaLogDirsResult).GetProperty(nameof(AlterReplicaLogDirsResult.Values))!;
 
-        // ⚠ KafkaFuture, not KafkaFuture<bool>: the void bridge's success token must not leak out.
         Assert.Equal(typeof(IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture>), alterValues.PropertyType);
         Assert.Null(alterValues.SetMethod);
 
         MethodInfo alterAll =
             typeof(AlterReplicaLogDirsResult).GetMethod(nameof(AlterReplicaLogDirsResult.All), Type.EmptyTypes)!;
 
-        // ⚠ A BARE KafkaFuture — this is the line that differs from the describe result.
         Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
         PropertyInfo describeValues =
@@ -170,37 +137,13 @@ public sealed class PublicAdminLogDirsShapeParityTests
 
         foreach (Type type in new[] { typeof(AlterReplicaLogDirsResult), typeof(DescribeReplicaLogDirsResult) })
         {
-            // Java's constructors are package-private; nothing public builds one.
             Assert.Empty(type.GetConstructors());
 
-            // The whole declared surface, named — Java's values() and all(), nothing else.
             Assert.Equal(new[] { "All" }, DeclaredPublicMethodNames(type));
             Assert.Equal(new[] { "Values" }, PropertyNames(type));
         }
     }
 
-    /// <summary>
-    /// ⚠ <b><c>ReplicaLogDirInfo</c> stays NESTED, and keeps Java's <c>Get*</c>
-    /// prefixes</b> — decision D17.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Nesting is Java's (<c>DescribeReplicaLogDirsResult.java:64</c>), and nothing forces
-    /// it out: the enclosing type has no member named <c>ReplicaLogDirInfo</c>, so there is
-    /// no <c>CS0102</c> collision of the kind that moved <see cref="AlterConfigOpType"/> out
-    /// of <see cref="AlterConfigOp"/>. That forcing condition is asserted rather than
-    /// asserted-in-prose.
-    /// </para>
-    /// <para>
-    /// ⚠ They are <b>methods</b> rather than properties — Java names them
-    /// <c>getCurrentReplicaLogDir()</c> and friends where the rest of the admin API uses the
-    /// bare <c>foo()</c> style, and D17 preserves that rather than silently normalising it.
-    /// Turning them into <c>CurrentReplicaLogDir</c> properties would be a rename, not a
-    /// casing adjustment. That this bean style stays confined to these four is not narrated
-    /// but <b>asserted</b>, by
-    /// <see cref="TheBeanAccessorStyle_IsConfinedToReplicaLogDirInfo"/>.
-    /// </para>
-    /// </remarks>
     [Fact]
     public void ReplicaLogDirInfo_IsNested_WithJavasBeanAccessors()
     {
@@ -209,11 +152,9 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Same(typeof(DescribeReplicaLogDirsResult), info.DeclaringType);
         Assert.Same(info, typeof(DescribeReplicaLogDirsResult).GetNestedType("ReplicaLogDirInfo"));
 
-        // The forcing condition that would have moved it out, asserted: there is none.
         Assert.Null(typeof(DescribeReplicaLogDirsResult).GetProperty("ReplicaLogDirInfo"));
         Assert.Null(typeof(DescribeReplicaLogDirsResult).GetMethod("ReplicaLogDirInfo"));
 
-        // ⚠ Methods, not properties — and no property may shadow one of them.
         Assert.Empty(info.GetProperties());
         Assert.Equal(
             new[]
@@ -223,11 +164,9 @@ public sealed class PublicAdminLogDirsShapeParityTests
             },
             DeclaredPublicMethodNames(info));
 
-        // Java's package-private constructor; nothing public builds one.
         Assert.Empty(info.GetConstructors());
 
-        // ⚠ Both directory accessors are genuinely nullable (Java :86-88, :101-103); both
-        // lags are plain longs, and -1 there is a VALUE, not an absence marker.
+        // Both directory accessors are nullable; both lags are plain longs, where -1 is a value, not an absence.
         Assert.Equal(typeof(string), info.GetMethod("GetCurrentReplicaLogDir")!.ReturnType);
         Assert.Equal(
             NullableAnnotation.Annotated,
@@ -239,32 +178,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.Equal(typeof(long), info.GetMethod("GetFutureReplicaOffsetLag")!.ReturnType);
     }
 
-    /// <summary>
-    /// ⚠ <b>The Java-bean <c>Get*</c> style is confined to <c>ReplicaLogDirInfo</c>'s four
-    /// accessors</b> — asserted over the whole exported surface, so D17's deviation stays a
-    /// deviation instead of spreading.
-    /// </summary>
-    /// <remarks>
-    /// The rest of the binding maps Java's <c>foo()</c> accessors to properties (decision
-    /// D18), so a stray <c>GetFoo()</c> elsewhere would mean either a second, unrecorded
-    /// deviation or a Java bean name copied by reflex.
-    /// <para>
-    /// ⚠ <b>Two kinds of <c>Get*</c> are excluded, and both structurally (decision D20) —
-    /// never by listing their names.</b> <see cref="object.GetHashCode"/> and friends are
-    /// excluded by asking whether the method's base definition is declared on
-    /// <see cref="object"/>; <c>GetEnumerator</c> is excluded by asking whether the method
-    /// <em>implements a member of a <c>System.*</c> interface</em>, read off the type's
-    /// interface map. The second is the load-bearing one: those names are chosen by the
-    /// framework contract, not by this binding, so they are not a naming decision at all.
-    /// A <c>name != "GetEnumerator"</c> filter would have been the easy way to green, and it
-    /// would also hide a genuine bean accessor that happened to be called that.
-    /// </para>
-    /// <para>
-    /// A bean accessor takes no parameters and returns a value, so only that shape is
-    /// counted: Java's own <c>getNow(valueIfAbsent)</c> (<c>KafkaFuture.GetNow</c>) is a
-    /// Java method name, not an accessor.
-    /// </para>
-    /// </remarks>
     [Fact]
     public void TheBeanAccessorStyle_IsConfinedToReplicaLogDirInfo()
     {
@@ -305,12 +218,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
             beanAccessors.OrderBy(name => name, StringComparer.Ordinal));
     }
 
-    /// <summary>
-    /// The type's methods that exist to satisfy a <c>System.*</c> interface — their names
-    /// are the framework's choice, not this binding's.
-    /// </summary>
-    /// <param name="type">The type to inspect.</param>
-    /// <returns>The implementing methods.</returns>
     private static HashSet<MethodInfo> FrameworkInterfaceImplementations(Type type)
     {
         HashSet<MethodInfo> implementations = new HashSet<MethodInfo>();
@@ -336,23 +243,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
         return implementations;
     }
 
-    /// <summary>
-    /// <c>IsCordoned</c> is present and public — Java's <c>isCordoned()</c>
-    /// (<c>LogDirDescription.java:94</c>), carried by the C ABI's
-    /// <c>kafka_admin_LogDirDescription_is_cordoned</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <b>The sweep carries its own positive control.</b> An assertion over a member walk
-    /// is vacuously true if the walk finds nothing at all, so
-    /// <see cref="LogDirDescription.TotalBytes"/> and <see cref="LogDirDescription.Error"/>
-    /// are asserted to be found by the <em>same</em> walk.
-    /// </para>
-    /// <para>
-    /// The constructors are public with Java's three arities since M15/P13.5 G3-8; that is
-    /// pinned by <see cref="PublicAdminLogDirsTests"/>, not here.
-    /// </para>
-    /// </remarks>
     [Fact]
     public void LogDirDescription_HasTheCordonedMember_AndTheSweepThatProvesItFindsTheOthers()
     {
@@ -364,8 +254,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
             .Select(member => member.Name)
             .ToArray();
 
-        // ⚠ THE ASSERTION THIS TEST EXISTS FOR — the Java member is present, public, and a
-        // plain bool rather than a nullable one.
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.IsCordoned), StringComparison.Ordinal));
         PropertyInfo? cordoned = typeof(LogDirDescription).GetProperty(
             nameof(LogDirDescription.IsCordoned),
@@ -373,23 +261,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
         Assert.NotNull(cordoned);
         Assert.Equal(typeof(bool), cordoned!.PropertyType);
 
-        // The positive control: the same walk does find the other members, so the assertion
-        // above is about this member rather than about a walk that returns everything.
+        // A control: the same walk finds the other members.
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.TotalBytes), StringComparison.Ordinal));
         Assert.Contains(members, name => string.Equals(name, nameof(LogDirDescription.Error), StringComparison.Ordinal));
     }
 
-    /// <summary>
-    /// The three copied-out value types expose Java's accessors as <b>properties</b>
-    /// (decision D18) — each is a pure managed field read that does no P/Invoke and cannot
-    /// throw, which is CLAUDE.md §3's "non-blocking getter → sync property" row.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The one deliberate exception in this stage is
-    /// <c>ReplicaLogDirInfo</c>'s four <c>Get*</c> methods (D17), pinned separately by
-    /// <see cref="ReplicaLogDirInfo_IsNested_WithJavasBeanAccessors"/>. Two conventions in
-    /// one stage is intentional, and each is asserted where it applies.
-    /// </remarks>
     [Fact]
     public void TheValueTypes_ExposeJavasAccessorsAsProperties()
     {
@@ -409,16 +285,13 @@ public sealed class PublicAdminLogDirsShapeParityTests
             new[] { "Error", "IsCordoned", "ReplicaInfos", "TotalBytes", "UsableBytes" },
             PropertyNames(typeof(LogDirDescription)));
 
-        // ⚠ Java's isCordoned() (:94) is a plain boolean, not an Optional — so bool, not bool?.
         Assert.Equal(typeof(bool), typeof(LogDirDescription).GetProperty("IsCordoned")!.PropertyType);
 
-        // ⚠ Java's OptionalLong has no netstandard2.0 equivalent, so the mapping is long? —
-        // and the ABI's -1 becomes null. A plain long would erase the empty case.
+        // Java's OptionalLong maps to long?, the ABI's -1 becoming null: a plain long would erase the empty case.
         Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("TotalBytes")!.PropertyType);
         Assert.Equal(typeof(long?), typeof(LogDirDescription).GetProperty("UsableBytes")!.PropertyType);
 
-        // Java's error() is an ApiException, mapped to this binding's flat KafkaException
-        // (ffi §A5) and nullable, because a healthy directory has none.
+        // Java's ApiException maps to the binding's one KafkaException, null for a healthy directory.
         Assert.Equal(typeof(KafkaException), typeof(LogDirDescription).GetProperty("Error")!.PropertyType);
         Assert.Equal(
             NullableAnnotation.Annotated,
@@ -428,40 +301,26 @@ public sealed class PublicAdminLogDirsShapeParityTests
             typeof(IReadOnlyDictionary<TopicPartition, ReplicaInfo>),
             typeof(LogDirDescription).GetProperty("ReplicaInfos")!.PropertyType);
 
-        // Every one is read-only: Java's are accessors over final fields.
         foreach (Type type in new[] { typeof(TopicPartitionReplica), typeof(ReplicaInfo), typeof(LogDirDescription) })
         {
             Assert.All(type.GetProperties(), property => Assert.Null(property.SetMethod));
         }
     }
 
-    /// <summary>
-    /// <see cref="ReplicaInfo"/>'s and <see cref="TopicPartitionReplica"/>'s constructors are
-    /// public, as Java's are. <see cref="LogDirDescription"/>'s three are public too since
-    /// M15/P13.5 G3-8, pinned by <see cref="PublicAdminLogDirsTests"/>.
-    /// </summary>
     [Fact]
     public void TheConstructorVisibility_FollowsJava()
     {
-        // Java's ReplicaInfo(long, long, boolean) is public (ReplicaInfo.java:28), and this
-        // type can carry every field it takes.
         ConstructorInfo replicaInfo = Assert.Single(typeof(ReplicaInfo).GetConstructors());
         Assert.Equal(
             new[] { typeof(long), typeof(long), typeof(bool) },
             replicaInfo.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // Java's TopicPartitionReplica(String, int, int) is public (:33).
         ConstructorInfo replica = Assert.Single(typeof(TopicPartitionReplica).GetConstructors());
         Assert.Equal(
             new[] { typeof(string), typeof(int), typeof(int) },
             replica.GetParameters().Select(parameter => parameter.ParameterType));
     }
 
-    /// <summary>
-    /// The three new options types match Java's fields and defaults exactly — each is an
-    /// empty <c>AbstractOptions</c> subclass in Java, so the inherited timeout is the whole
-    /// surface.
-    /// </summary>
     [Fact]
     public void Options_MatchJavasFieldsAndDefaults()
     {
@@ -478,16 +337,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
             Assert.Equal(typeof(int?), timeout.PropertyType);
             Assert.NotNull(timeout.SetMethod);
 
-            // Java's default is "use the client default", which is null here rather than 0.
+            // Java's default is the client default, which is null here, not 0.
             Assert.Null((int?)timeout.GetValue(Activator.CreateInstance(type)));
         }
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="TopicPartitionReplica"/> sits at the ROOT namespace</b> — Java's
-    /// package is <c>org.apache.kafka.common</c>, not <c>clients.admin</c> (decision D13) —
-    /// while everything else this stage adds is under <c>Confluent.Kafka.Admin</c>.
-    /// </summary>
     [Fact]
     public void TheNamespaceSplit_FollowsJavasPackages()
     {
@@ -505,11 +359,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// ⚠ <b>No <c>ReplicaInfo_t</c>-shaped handle type leaked into the public surface</b>,
-    /// and no <c>LogDirDescriptionMap</c> type was invented for the ABI's intermediate
-    /// handle. Java has neither: the map is a plain <c>Map&lt;String, LogDirDescription&gt;</c>.
-    /// </summary>
     [Fact]
     public void NoAbiIntermediateType_LeakedIntoThePublicSurface()
     {
@@ -518,19 +367,6 @@ public sealed class PublicAdminLogDirsShapeParityTests
             type => type.Name.IndexOf("LogDirDescriptionMap", StringComparison.Ordinal) >= 0);
     }
 
-    /// <summary>
-    /// The type's own public instance methods — <see cref="BindingFlags.DeclaredOnly"/>, so
-    /// <see cref="object"/>'s inherited members do not count, and without the compiler's
-    /// property accessors, which are methods too.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The accessors are excluded <b>structurally</b>, by
-    /// <see cref="MethodBase.IsSpecialName"/> — the flag the compiler stamps on
-    /// <c>get_</c>/<c>set_</c> accessors and operators — and never by a name predicate
-    /// (decision D20). A <c>StartsWith("get_")</c> filter would also swallow a real Java
-    /// accessor: <c>ReplicaLogDirInfo</c>'s four <c>Get*</c> methods are exactly the shape
-    /// such a filter mis-reads.
-    /// </remarks>
     private static string[] DeclaredPublicMethodNames(Type type) =>
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method => !method.IsSpecialName)

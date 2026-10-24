@@ -19,48 +19,18 @@ using System.Collections.ObjectModel;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A collection of topics identified <b>either</b> by name <b>or</b> by id — the .NET
-/// realization of Java's <c>org.apache.kafka.common.TopicCollection</c>. It is the
-/// argument type of <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
+/// A collection of topics identified either by name or by id — Java's
+/// <c>org.apache.kafka.common.TopicCollection</c>, the argument type of
+/// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
 /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Why a type rather than two overloads.</b> "Names xor ids" is an invariant, and this
-/// shape makes it unrepresentable to violate: the two nested subclasses are the only
-/// inhabitants, so an RPC can dispatch on the runtime type and pick the matching ABI
-/// entry point without a runtime "which one did you mean" check. The C ABI expresses the
-/// same invariant by giving each form its own function
-/// (<c>..._delete_topics</c> / <c>..._delete_topics_by_ids</c>) rather than a tagged
-/// input struct.
-/// </para>
-/// <para>
-/// <b>Namespace.</b> Java puts this in <c>org.apache.kafka.common</c>, not
-/// <c>…clients.admin</c>, so it lives at the root <c>Confluent.Kafka</c> namespace beside
-/// <see cref="Uuid"/> and <see cref="Node"/> rather than under
-/// <c>Confluent.Kafka.Admin</c>.
-/// </para>
-/// <para>
-/// <b>Subclassing is blocked, but by a slightly different mechanism than Java's.</b>
-/// Java makes the outer constructor <c>private</c> and the two nested constructors
-/// <c>private</c> too — legal there because Java's private access is symmetric across a
-/// whole top-level class, so the outer static factories can still call the nested
-/// constructors. C# is <b>not</b> symmetric: a nested type may reach its containing
-/// type's private members, but the containing type may <em>not</em> reach a nested type's
-/// (measured — it is a CS0122). So the outer constructor stays <c>private</c>, which is
-/// what actually blocks subclassing from outside, and the two nested constructors are
-/// <c>internal</c> — the closest reachable form, and still not constructible by a caller
-/// outside this assembly. Java's javadoc — <em>"Subclassing this class beyond the classes
-/// provided here is not supported"</em> — therefore remains a compile-time fact for every
-/// consumer of the package, which is what it is there to guarantee.
-/// </para>
+/// The two nested classes are the only subclasses: the outer constructor is private, as in
+/// Java. The nested constructors are internal, where Java's are private, because C# does not let
+/// the outer factories reach a nested type's private constructor.
 /// </remarks>
 public abstract class TopicCollection
 {
-    /// <summary>
-    /// Private, so the only subclasses are the two nested ones (Java's
-    /// <c>TopicCollection()</c> is <c>private</c> for the same reason).
-    /// </summary>
     private TopicCollection()
     {
     }
@@ -80,15 +50,12 @@ public abstract class TopicCollection
     /// <returns>The collection.</returns>
     /// <exception cref="System.ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <remarks>
-    /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicNames</c>
-    /// accepts one. ⚠ The RPC it is handed to is <b>stricter than Java</b>:
+    /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicNames</c> accepts
+    /// one. A recorded deviation:
     /// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions?)"/> and
     /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions?)"/>
-    /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails
-    /// only that key's future with <c>InvalidTopicException</c>
-    /// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>, used at
-    /// <c>:1924</c> and <c>:2334</c>). That is the binding's settled rule for null keys — see
-    /// the <see cref="Admin.IAdmin"/> remarks.
+    /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails only
+    /// that key's future with <c>InvalidTopicException</c>.
     /// </remarks>
     public static TopicNameCollection OfTopicNames(IEnumerable<string> topics) =>
         new TopicNameCollection(topics);
@@ -100,23 +67,6 @@ public abstract class TopicCollection
     {
         private readonly ReadOnlyCollection<Uuid> _topicIds;
 
-        /// <summary>
-        /// Copies the caller's collection, as Java's <c>new ArrayList&lt;&gt;(topics)</c>
-        /// does — a request must not be able to change under the caller's feet.
-        /// <c>internal</c>, not <c>private</c>: see the subclassing note in the type
-        /// remarks.
-        /// </summary>
-        /// <param name="topics">The topic ids. Must not be null.</param>
-        /// <exception cref="System.ArgumentNullException"><paramref name="topics"/> is null.</exception>
-        /// <remarks>
-        /// The guard is explicit rather than left to <c>List&lt;T&gt;</c>'s own throw: the BCL
-        /// constructor names <em>its</em> parameter (<c>collection</c>), which is an
-        /// implementation detail of the copy and not a parameter this API has. The binding
-        /// names its own parameter everywhere else — including the sibling types this phase
-        /// ships — and callers filter on <c>ParamName</c>. The parameter is also named
-        /// <c>topics</c>, not <c>topicIds</c>, so the name reported is the one the public
-        /// factory documents whichever path reaches here.
-        /// </remarks>
         internal TopicIdCollection(IEnumerable<Uuid> topics)
         {
             if (topics is null)
@@ -127,16 +77,8 @@ public abstract class TopicCollection
             _topicIds = new ReadOnlyCollection<Uuid>(new List<Uuid>(topics));
         }
 
-        /// <summary>
-        /// The topic ids — Java's <c>topicIds()</c>. A <b>method</b>, not a property,
-        /// because Java's is a method and it hands back a snapshot view.
-        /// </summary>
-        /// <returns>
-        /// The topic ids, in the order supplied, as a read-only view: Java returns
-        /// <c>Collections.unmodifiableCollection(topicIds)</c>
-        /// (<c>TopicCollection.java:58-59</c>), so the view cannot be cast back to a mutable
-        /// list and changed. The wrapper is built once, over the constructor's copy.
-        /// </returns>
+        /// <summary>The topic ids — Java's <c>topicIds()</c>.</summary>
+        /// <returns>The topic ids, in the order supplied, as a read-only view, as Java's.</returns>
         public IReadOnlyCollection<Uuid> TopicIds() => _topicIds;
     }
 
@@ -147,7 +89,6 @@ public abstract class TopicCollection
     {
         private readonly ReadOnlyCollection<string> _topicNames;
 
-        /// <inheritdoc cref="TopicIdCollection(IEnumerable{Uuid})"/>
         internal TopicNameCollection(IEnumerable<string> topics)
         {
             if (topics is null)
@@ -158,15 +99,8 @@ public abstract class TopicCollection
             _topicNames = new ReadOnlyCollection<string>(new List<string>(topics));
         }
 
-        /// <summary>
-        /// The topic names — Java's <c>topicNames()</c>. A <b>method</b>, not a property,
-        /// for the same reason as <see cref="TopicIdCollection.TopicIds"/>.
-        /// </summary>
-        /// <returns>
-        /// The topic names, in the order supplied, as a read-only view — Java's
-        /// <c>Collections.unmodifiableCollection(topicNames)</c>
-        /// (<c>TopicCollection.java:77-78</c>); see <see cref="TopicIdCollection.TopicIds"/>.
-        /// </returns>
+        /// <summary>The topic names — Java's <c>topicNames()</c>.</summary>
+        /// <returns>The topic names, in the order supplied, as a read-only view, as Java's.</returns>
         public IReadOnlyCollection<string> TopicNames() => _topicNames;
     }
 }

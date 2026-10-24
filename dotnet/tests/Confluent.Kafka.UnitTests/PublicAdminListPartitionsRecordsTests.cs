@@ -15,9 +15,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
@@ -25,43 +28,23 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The end-to-end behaviour of M15/P2b's three RPCs against <see cref="MockAdminClient"/>
-/// — no broker.
+/// <c>ListTopics</c>, <c>CreatePartitions</c> and <c>DeleteRecords</c> end to end against the mocks. Java's mock
+/// refuses <c>createPartitions</c> and a non-empty <c>deleteRecords</c>, so the tests assert its own message per key;
+/// an empty <c>deleteRecords</c> succeeds. With <see cref="NewPartitions"/>' null versus empty assignments and the C
+/// options.
 /// </summary>
-/// <remarks>
-/// ⚠ <b>Two of the three have no success path in the mock, and that is FAITHFUL, not a
-/// gap.</b> The Rust <c>MockAdminClient</c> completes every key of
-/// <c>createPartitions</c> — and of a <em>non-empty</em> <c>deleteRecords</c> — with
-/// <c>unsupported_version("Not implemented yet")</c>, translating Java's own
-/// <c>MockAdminClient.java:626-628</c> / <c>:631-638</c>, which throw
-/// <c>UnsupportedOperationException("Not implemented yet")</c> there
-/// (<c>admin-client.md</c> §9). So the tests below assert that <b>exact message</b>
-/// (<c>definition-of-done.md</c> §3) rather than routing around it or inventing mock
-/// behaviour the core does not have. An <b>empty</b> <c>deleteRecords</c> does succeed,
-/// mirroring Java, and is tested as such.
-/// </remarks>
 public sealed class PublicAdminListPartitionsRecordsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The C code Kafka assigns to <c>UNSUPPORTED_VERSION</c>.</summary>
     private const int UnsupportedVersionCode = 35;
 
-    /// <summary>
-    /// The exact message Java's <c>MockAdminClient</c> throws and the Rust mock
-    /// translates.
-    /// </summary>
     private const string NotImplemented = "Not implemented yet";
 
-    /// <summary>
-    /// <c>listTopics</c> round-trips through the mock, and the three projections are views
-    /// of the <b>same</b> completed map — asserted together, on one result, because that is
-    /// the property that would be lost if they were three independent requests.
-    /// </summary>
     [Fact]
     public async Task ListTopics_ReturnsTheCreatedTopics_AndTheThreeProjectionsAgree()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
@@ -79,7 +62,6 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Contains("p2b-list-a", map.Keys);
         Assert.Contains("p2b-list-b", map.Keys);
 
-        // The projections cannot disagree with the map they are derived from.
         Assert.Equal(map.Count, listings.Count);
         Assert.Equal(map.Count, names.Count);
         Assert.Equal(
@@ -89,82 +71,16 @@ public sealed class PublicAdminListPartitionsRecordsTests
             map.Values.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal),
             listings.Select(listing => listing.Name).OrderBy(name => name, StringComparer.Ordinal));
 
-        // The listing's fields survive the result root being destroyed: everything here is
-        // owned managed state copied out during the walk (ffi §B4).
         TopicListing a = map["p2b-list-a"];
         Assert.Equal("p2b-list-a", a.Name);
         Assert.False(a.IsInternal);
         Assert.NotEqual(Uuid.Zero, a.TopicId);
     }
 
-    /// <summary>
-    /// <see cref="ListTopicsOptions.ListInternal"/> reaches the ABI: the flag crosses as
-    /// the <c>list_internal</c> parameter rather than being dropped.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Asserted at the submit boundary rather than through the mock's topic set, because
-    /// the mock has no internal topics to filter — so a behavioural assertion would pass
-    /// whichever value crossed. What this pins is the managed half: the option reaches the
-    /// submit as its own argument, in the right position, rather than being dropped or
-    /// swapped with the timeout beside it.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>It does NOT test <c>MarshalAs(I1)</c>, and an earlier version of this comment
-    /// claimed it did.</b> The injected submit never crosses the P/Invoke, so no
-    /// marshalling happens here at all — measured by deleting the attribute, which left
-    /// this test green. The attribute is pinned structurally instead, in
-    /// <c>AdminNativeMethodsMarshallingTests</c>.
-    /// </para>
-    /// </remarks>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void ListTopics_ListInternalCrossesTheBoundary(bool listInternal)
-    {
-        Confluent.Kafka.Internal.NativeAdminClient admin =
-            Confluent.Kafka.Internal.NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        bool? captured = null;
-        int capturedTimeout = int.MinValue;
-        AsyncListTopicsResult result = AsyncListTopicsResult.From(admin.ListTopics(
-            new ListTopicsOptions { ListInternal = listInternal, TimeoutMs = 4321 },
-            Confluent.Kafka.Internal.AdminFlavour.Async,
-            (nativeHandle, timeoutMs, flag, callback, userData) =>
-            {
-                captured = flag;
-                capturedTimeout = timeoutMs;
-
-                // The operation must still be completed, or its GCHandle and span-the-op
-                // reference would leak. ⚠ It is completed with an ERROR, not with
-                // `(IntPtr.Zero, IntPtr.Zero)`: the ABI states "exactly one of result /
-                // error is non-null", so a both-null callback is outside the contract and
-                // feeds `ListTopicsResult_count` a NULL — which ABORTS the test host
-                // rather than failing an assertion.
-                using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("probe");
-                AdminCallbacks.ListTopics(
-                    IntPtr.Zero, NativeMethods.KafkaErrorNew(1, message.Pointer), userData);
-            }));
-
-        Assert.Equal(listInternal, captured);
-
-        // The argument after the bool is intact — the I1 marshalling guard.
-        Assert.Equal(4321, capturedTimeout);
-
-        // Observe the fault so the awaiter is not left unobserved.
-        Assert.True(result.NamesToListings().Get().IsFaulted);
-    }
-
-    /// <summary>
-    /// ⚠ <b><c>createPartitions</c> against the mock fails per key with Java's exact
-    /// message.</b> This is the faithful translation of Java's own mock, not a hole to
-    /// route around — see the type remarks.
-    /// </summary>
     [Fact]
     public async Task CreatePartitions_AgainstTheMock_FailsPerTopicWithJavasExactMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
@@ -173,7 +89,6 @@ public sealed class PublicAdminListPartitionsRecordsTests
         AsyncCreatePartitionsResult result = admin.CreatePartitions(
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
-        // Per-KEY, not a call failure: the awaitable for that topic is what carries it.
         Task perTopic = Assert.Single(result.Values).Value.Get();
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
@@ -181,19 +96,13 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
-        // all() aggregates the same failure.
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// An <b>empty</b> <c>deleteRecords</c> succeeds with an empty result — Java's mock
-    /// returns an empty result for an empty request, and only the non-empty path is
-    /// unsupported.
-    /// </summary>
     [Fact]
     public async Task DeleteRecords_WithAnEmptyRequest_SucceedsWithAnEmptyResult()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDeleteRecordsResult result = admin.DeleteRecords(
@@ -201,19 +110,14 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         Assert.Empty(result.LowWatermarks);
 
-        // Task.WhenAll over nothing completes, so the empty batch really does succeed.
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal(TaskStatus.RanToCompletion, result.All().Get().Status);
     }
 
-    /// <summary>
-    /// ⚠ A <b>non-empty</b> <c>deleteRecords</c> against the mock fails per partition with
-    /// Java's exact message — the other half of Java's mock behaviour.
-    /// </summary>
     [Fact]
     public async Task DeleteRecords_AgainstTheMock_FailsPerPartitionWithJavasExactMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         TopicPartition partition = new TopicPartition("p2b-delete", 0);
@@ -230,33 +134,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
-        // The composite key survived the round trip into the result's dictionary.
         Assert.Equal(partition, Assert.Single(result.LowWatermarks).Key);
     }
 
-    /// <summary>
-    /// ⚠ <b><c>increaseTo(n)</c> and <c>increaseTo(n, emptyList())</c> are DIFFERENT
-    /// requests, and the difference must reach the ABI.</b>
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Java's <c>increaseTo(n)</c> leaves <c>newAssignments</c> <b>null</b>, which the
-    /// broker reads as "you choose"; <c>increaseTo(n, emptyList())</c> sends a
-    /// <em>present but empty</em> list, which the broker rejects with
-    /// <c>INVALID_REPLICA_ASSIGNMENT</c> (<c>CreatePartitionsRequest.json:36</c> marks
-    /// <c>Assignments</c> <c>"nullableVersions": "0+"</c>). A
-    /// <c>?? Array.Empty&lt;…&gt;()</c> anywhere on this path silently rewrites one request
-    /// into the other.
-    /// </para>
-    /// <para>
-    /// The ABI carries the distinction as the <c>has_assignments</c> discriminant and
-    /// exposes <b>no getter</b> for it, so the flag cannot be read back once it has
-    /// crossed. The assertion is therefore made on production's own decision function,
-    /// <see cref="NewPartitionsMarshal.HasAssignments"/> — the value <c>Build</c> is about
-    /// to pass — together with the public property it is derived from
-    /// (<c>definition-of-done.md</c> §12).
-    /// </para>
-    /// </remarks>
     [Fact]
     public void NewPartitions_NullAndEmptyAssignments_ProduceDifferentRequests()
     {
@@ -264,46 +144,126 @@ public sealed class PublicAdminListPartitionsRecordsTests
         NewPartitions empty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
         NewPartitions explicitAssignment = NewPartitions.IncreaseTo(3, new[] { new[] { 0 } });
 
-        // The public shape keeps them apart…
         Assert.Null(broker.Assignments);
         Assert.NotNull(empty.Assignments);
         Assert.Empty(empty.Assignments!);
         Assert.Single(explicitAssignment.Assignments!);
 
-        // …and so does the value that crosses the boundary. THIS is the assertion that
-        // fails if the two are ever coalesced.
         Assert.False(NewPartitionsMarshal.HasAssignments(broker));
         Assert.True(NewPartitionsMarshal.HasAssignments(empty));
         Assert.True(NewPartitionsMarshal.HasAssignments(explicitAssignment));
 
-        // Java's increaseTo(n, null) is increaseTo(n) (M15/P13.2 G1-4): the null list is
-        // the broker-chooses request, not the present-but-empty one.
+        // Java's increaseTo(n, null) is increaseTo(n): a null list asks the broker to choose, not for no assignments.
         NewPartitions viaNull = NewPartitions.IncreaseTo(3, null);
         Assert.Null(viaNull.Assignments);
         Assert.False(NewPartitionsMarshal.HasAssignments(viaNull));
 
-        // A count-based discriminant would agree with the flag for the third case and
-        // disagree for the second — which is exactly what makes the second the probe.
         Assert.Empty(empty.Assignments!);
 
-        // The assignment list is defensively copied, so a caller mutating theirs afterwards
-        // cannot change what was requested.
+        Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(broker));
+        Assert.Equal((3, (IReadOnlyList<IReadOnlyList<int>>?)null), ReadBack(viaNull));
+        (int emptyCount, IReadOnlyList<IReadOnlyList<int>>? emptySent) = ReadBack(empty);
+        Assert.Equal(3, emptyCount);
+        Assert.NotNull(emptySent);
+        Assert.Empty(emptySent!);
+        (int explicitCount, IReadOnlyList<IReadOnlyList<int>>? explicitSent) = ReadBack(explicitAssignment);
+        Assert.Equal(3, explicitCount);
+        Assert.Equal(new[] { 0 }, Assert.Single(explicitSent!));
+        (int orderedCount, IReadOnlyList<IReadOnlyList<int>>? orderedSent) =
+            ReadBack(NewPartitions.IncreaseTo(5, new[] { new[] { 2, 1 }, new[] { 3 } }));
+        Assert.Equal(5, orderedCount);
+        Assert.Equal(2, orderedSent!.Count);
+        Assert.Equal(new[] { 2, 1 }, orderedSent[0]);
+        Assert.Equal(new[] { 3 }, orderedSent[1]);
+
         List<IReadOnlyList<int>> mutable = new List<IReadOnlyList<int>> { new[] { 1, 2 } };
         NewPartitions copied = NewPartitions.IncreaseTo(4, mutable);
         mutable.Clear();
         Assert.Equal(new[] { 1, 2 }, Assert.Single(copied.Assignments!));
     }
 
-    /// <summary>
-    /// Preconditions are validated <b>before</b> any pin / marshal / P-Invoke (ffi §B5):
-    /// the ABI does not validate them, and it silently <em>skips</em> a pair with a null
-    /// side rather than reporting it — so a dropped topic would surface only as a
-    /// "result contained no entry" fault much later.
-    /// </summary>
+    [Fact]
+    public async Task RepeatedKeys_YieldOneEntry_AndTheFirstEntryIsSent()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+        const string Topic = "p2b-dedup";
+
+        Dictionary<string, NewPartitions> grow = new Dictionary<string, NewPartitions>(ReferenceComparer<string>.Instance)
+        {
+            [Copy(Topic)] = NewPartitions.IncreaseTo(2),
+            [Copy(Topic)] = NewPartitions.IncreaseTo(3),
+        };
+        Assert.Equal(2, grow.Count);
+        Assert.Equal(Topic, Assert.Single(admin.CreatePartitions(grow).Values).Key);
+
+        Dictionary<TopicPartition, RecordsToDelete> delete =
+            new Dictionary<TopicPartition, RecordsToDelete>(TopicIdentityComparer.Instance)
+            {
+                [new TopicPartition(Copy(Topic), 0)] = RecordsToDelete.BeforeOffset(1),
+                [new TopicPartition(Copy(Topic), 0)] = RecordsToDelete.BeforeOffset(2),
+            };
+        Assert.Equal(2, delete.Count);
+        Assert.Equal(new TopicPartition(Topic, 0), Assert.Single(admin.DeleteRecords(delete).LowWatermarks).Key);
+
+        Dictionary<TopicPartition, OffsetSpec> offsets =
+            new Dictionary<TopicPartition, OffsetSpec>(TopicIdentityComparer.Instance)
+            {
+                [new TopicPartition(Copy(Topic), 0)] = OffsetSpec.ForTimestamp(1),
+                [new TopicPartition(Copy(Topic), 0)] = OffsetSpec.Latest(),
+            };
+        Assert.Equal(2, offsets.Count);
+        AsyncListOffsetsResult listed = admin.ListOffsets(offsets);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => listed.PartitionResult(new TopicPartition(Topic, 0)).Get(), s_deadline));
+        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        Assert.Equal("Not implement yet", failure.Message);
+    }
+
+    [Fact]
+    public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
+    {
+        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack((CreatePartitionsOptions?)null));
+        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions()));
+        Assert.Empty(new CreatePartitionsOptions().Setters.InOrder);
+
+        Assert.Equal(-1, ReadBack((DeleteRecordsOptions?)null));
+        Assert.Equal(-1, ReadBack(new DeleteRecordsOptions()));
+        Assert.Empty(new DeleteRecordsOptions().Setters.InOrder);
+    }
+
+    [Fact]
+    public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
+    {
+        Assert.Equal((0, (sbyte)0, (sbyte)1), ReadBack(new CreatePartitionsOptions { TimeoutMs = -5 }));
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreatePartitionsOptions { ValidateOnly = true }));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreatePartitionsOptions { RetryOnQuotaViolation = false }));
+
+        CreatePartitionsOptions create = new CreatePartitionsOptions
+        {
+            TimeoutMs = 10,
+            ValidateOnly = true,
+            RetryOnQuotaViolation = false,
+        };
+        create.TimeoutMs = 20;
+        create.ValidateOnly = false;
+        create.RetryOnQuotaViolation = true;
+        Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(create));
+        create.TimeoutMs = null;
+        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(create));
+
+        Assert.Equal(0, ReadBack(new DeleteRecordsOptions { TimeoutMs = -5 }));
+        DeleteRecordsOptions delete = new DeleteRecordsOptions { TimeoutMs = 10 };
+        delete.TimeoutMs = 30;
+        Assert.Equal(30, ReadBack(delete));
+        delete.TimeoutMs = null;
+        Assert.Equal(-1, ReadBack(delete));
+    }
+
     [Fact]
     public void Preconditions_AreRejectedBeforeAnyNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.CreatePartitions(null!));
@@ -328,8 +288,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 }));
         Assert.Equal("recordsToDelete", nullTopic.ParamName);
 
-        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0, Java's
-        // calcDeadlineMs clamp, so it fails through the result rather than synchronously.
+        // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         foreach (Action negative in new Action[]
                  {
                      () => admin.ListTopics(new ListTopicsOptions { TimeoutMs = -1 }),
@@ -345,13 +304,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
         }
     }
 
-    /// <summary>
-    /// Every new RPC is guarded against use after close, like the P1/P2a ones.
-    /// </summary>
     [Fact]
     public void AfterClose_EveryNewRpcThrowsObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
@@ -361,17 +317,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
             () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()));
     }
 
-    /// <summary>
-    /// A non-ASCII topic survives the round trip through <c>listTopics</c>' key and its
-    /// listing — the manual UTF-8 marshalling guard (ffi §B3; an <c>LPStr</c> mistake
-    /// corrupts non-ASCII silently and hides in ASCII-only tests).
-    /// </summary>
     [Fact]
     public async Task NonAsciiTopic_RoundTripsThroughListTopics()
     {
         const string Topic = "témas-日本語-🎉";
 
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
@@ -384,14 +335,10 @@ public sealed class PublicAdminListPartitionsRecordsTests
         Assert.Equal(Topic, map[Topic].Name);
     }
 
-    /// <summary>
-    /// The TFM-matrix smoke leg for P2b: the three new RPCs load and round-trip on
-    /// whichever framework is executing (net462 via netstandard2.0, net8.0, net10.0).
-    /// </summary>
     [Fact]
     public async Task TfmSmoke_TheThreeNewRpcsWorkOnThisFramework()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
@@ -407,5 +354,143 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         await TestTimeout.Run(
             () => admin.DeleteRecords(new Dictionary<TopicPartition, RecordsToDelete>()).All().Get(), s_deadline);
+    }
+
+    private static (int TotalCount, IReadOnlyList<IReadOnlyList<int>>? Assignments) ReadBack(NewPartitions partitions)
+    {
+        IntPtr native = NewPartitionsMarshal.Build(partitions);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int totalCount = Native.NewPartitionsTotalCount(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr outer = Native.NewPartitionsAssignments(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            if (outer == IntPtr.Zero)
+            {
+                return (totalCount, null);
+            }
+
+            try
+            {
+                int size = NativeMethods.ListSize(outer, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                List<IReadOnlyList<int>> assignments = new List<IReadOnlyList<int>>(size);
+                for (int i = 0; i < size; i++)
+                {
+                    IntPtr brokers = NativeMethods.ListGet(outer, i, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    int count = NativeMethods.ListSize(brokers, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    int[] ids = new int[count];
+                    for (int j = 0; j < count; j++)
+                    {
+                        IntPtr id = NativeMethods.ListGet(brokers, j, ref outErr);
+                        KafkaException.ThrowIfFfiFailed(ref outErr);
+                        ids[j] = Marshal.ReadInt32(id);
+                    }
+
+                    assignments.Add(ids);
+                }
+
+                return (totalCount, assignments);
+            }
+            finally
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.ListDestroy(outer, ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref destroyErr);
+            }
+        }
+        finally
+        {
+            NewPartitionsMarshal.Destroy(native);
+        }
+    }
+
+    private static (int TimeoutMs, sbyte ValidateOnly, sbyte RetryOnQuotaViolation) ReadBack(
+        CreatePartitionsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewCreatePartitionsOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.CreatePartitionsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte validateOnly = Native.CreatePartitionsOptionsValidateOnly(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte retry = Native.CreatePartitionsOptionsShouldRetryOnQuotaViolation(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return (timeoutMs, validateOnly, retry);
+        }
+        finally
+        {
+            NativeAdminClient.FreeCreatePartitionsOptions(native);
+        }
+    }
+
+    private static int ReadBack(DeleteRecordsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDeleteRecordsOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.DeleteRecordsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return timeoutMs;
+        }
+        finally
+        {
+            NativeAdminClient.FreeDeleteRecordsOptions(native);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string Copy(string value) => new string(value.ToCharArray());
+
+    /// <summary>Reference equality, so two equal strings stay two keys.</summary>
+    private sealed class ReferenceComparer<T> : IEqualityComparer<T>
+        where T : class
+    {
+        public static readonly ReferenceComparer<T> Instance = new ReferenceComparer<T>();
+
+        public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
+
+        public int GetHashCode(T obj) => RuntimeHelpers.GetHashCode(obj);
+    }
+
+    /// <summary>Compares the topic by string identity, so two equal partitions stay two keys.</summary>
+    private sealed class TopicIdentityComparer : IEqualityComparer<TopicPartition>
+    {
+        public static readonly TopicIdentityComparer Instance = new TopicIdentityComparer();
+
+        public bool Equals(TopicPartition x, TopicPartition y) =>
+            ReferenceEquals(x.Topic, y.Topic) && x.Partition == y.Partition;
+
+        public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic) ^ obj.Partition;
+    }
+
+    /// <summary>The getters the binding never reads, declared for the read-back tests.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewPartitions_total_count_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int NewPartitionsTotalCount(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewPartitions_assignments_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr NewPartitionsAssignments(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int CreatePartitionsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsOptions_validate_only_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte CreatePartitionsOptionsValidateOnly(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreatePartitionsOptions_should_retry_on_quota_violation_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte CreatePartitionsOptionsShouldRetryOnQuotaViolation(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteRecordsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DeleteRecordsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
     }
 }

@@ -14,107 +14,112 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Builds the ABI's <c>kafka_admin_NewPartitions_t</c> input handle from the public
-/// <see cref="NewPartitions"/>. The second and last <b>input</b> handle type in the whole
-/// admin ABI (every other input crosses as parallel arrays).
+/// Builds the owned <c>kafka_admin_NewPartitions_t</c> for one <see cref="NewPartitions"/>, through
+/// <c>increase_to</c> or <c>increase_to_with_new_assignments</c>; the caller destroys it once the submit, which
+/// copies it, has returned.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Ownership: the caller retains it.</b> The ABI copies out of these entries during
-/// the submit and the header states the caller keeps ownership — so every handle built
-/// here must be destroyed after the submit returns, or each call leaks one per topic.
-/// Same contract as <see cref="NewTopicMarshal"/>.
-/// </para>
-/// <para>
-/// ⚠ <b>The <c>has_assignments</c> discriminant is taken from whether
-/// <see cref="NewPartitions.Assignments"/> is <see langword="null"/>, never from how many
-/// assignments there are.</b> <c>increaseTo(n, emptyList())</c> is legal Java and is a
-/// <em>different wire request</em> from <c>increaseTo(n)</c>: the broker rejects a
-/// present-but-empty assignment list with <c>INVALID_REPLICA_ASSIGNMENT</c> where a null
-/// one succeeds. So an empty list must still set the flag — deriving it from
-/// <c>Count &gt; 0</c> would silently rewrite the caller's request into the other one.
-/// </para>
-/// </remarks>
 internal static class NewPartitionsMarshal
 {
-    /// <summary>
-    /// The ABI's <c>has_assignments</c> discriminant for one request entry: <b>presence</b>
-    /// of the assignment list, never its length.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Named and separated out because it is the single decision that distinguishes
-    /// <c>increaseTo(n)</c> from <c>increaseTo(n, emptyList())</c> — two different wire
-    /// requests, one of which the broker rejects with <c>INVALID_REPLICA_ASSIGNMENT</c>.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>It is also the only place that decision is observable from managed code.</b>
-    /// The ABI exposes no getter on <c>kafka_admin_NewPartitions_t</c>, so once the flag
-    /// has crossed into native nothing can read it back — a test can only assert the value
-    /// <see cref="Build"/> is about to pass. Keeping that value behind a named function
-    /// production itself calls is what lets the test pin it rather than reimplement it
-    /// (<c>definition-of-done.md</c> §12).
-    /// </para>
-    /// </remarks>
-    /// <param name="partitions">The request entry.</param>
-    /// <returns>
-    /// <see langword="true"/> when Java's <c>newAssignments</c> is non-null — including
-    /// when it is present and <b>empty</b>.
-    /// </returns>
+    // Presence of the list, never its count: the broker rejects Java's increaseTo(n, emptyList()) with
+    // INVALID_REPLICA_ASSIGNMENT, where it accepts increaseTo(n).
     internal static bool HasAssignments(NewPartitions partitions) => partitions.Assignments is not null;
 
-    /// <summary>
-    /// Builds one native entry. On any failure after allocation the handle is destroyed
-    /// before rethrowing, so a partially built entry never leaks.
-    /// </summary>
-    /// <param name="partitions">The request entry. Already validated by its factory.</param>
-    /// <returns>An owned <c>kafka_admin_NewPartitions_t</c> the caller must destroy.</returns>
-    /// <exception cref="KafkaException">The ABI refused to allocate the entry.</exception>
     internal static IntPtr Build(NewPartitions partitions)
     {
-        IReadOnlyList<IReadOnlyList<int>>? assignments = partitions.Assignments;
-
-        // The discriminant is presence, NOT count — see HasAssignments and the class remarks.
-        IntPtr handle = NativeMethods.NewPartitionsNew(partitions.TotalCount, HasAssignments(partitions));
-        if (handle == IntPtr.Zero)
+        IntPtr outErr = IntPtr.Zero;
+        if (!HasAssignments(partitions))
         {
-            // The header documents a non-null return unconditionally, so reaching here is
-            // a core contract violation — surfaced as an operational error rather than a
-            // null dereference.
-            throw new KafkaException(
-                $"kafka_admin_NewPartitions_new returned a null handle for a total count of {partitions.TotalCount}.");
+            IntPtr increased = NativeMethods.NewPartitionsIncreaseTo(partitions.TotalCount, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return increased;
         }
 
+        IReadOnlyList<IReadOnlyList<int>> assignments = partitions.Assignments!;
+        int count = 0;
+        foreach (IReadOnlyList<int> assignment in assignments)
+        {
+            count += assignment.Count;
+        }
+
+        int[] ids = new int[count];
+        GCHandle pinned = GCHandle.Alloc(ids, GCHandleType.Pinned);
+        List<IntPtr> lists = new List<IntPtr>(assignments.Count);
+        IntPtr outer = IntPtr.Zero;
         try
         {
-            if (assignments is not null)
+            IntPtr first = pinned.AddrOfPinnedObject();
+            outer = NativeMethods.ListNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            int next = 0;
+            foreach (IReadOnlyList<int> assignment in assignments)
             {
-                foreach (IReadOnlyList<int> assignment in assignments)
+                IntPtr brokers = NativeMethods.ListNew(ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                lists.Add(brokers);
+                foreach (int broker in assignment)
                 {
-                    int[] brokerIds = new int[assignment.Count];
-                    for (int i = 0; i < brokerIds.Length; i++)
-                    {
-                        brokerIds[i] = assignment[i];
-                    }
-
-                    // The blittable int[] is pinned by the marshaller for the duration of
-                    // the call; the ABI copies out during it (ffi §A4 call-scoped).
-                    NativeMethods.NewPartitionsAddAssignment(handle, brokerIds, brokerIds.Length);
+                    ids[next] = broker;
+                    NativeMethods.ListAdd(brokers, IntPtr.Add(first, next * sizeof(int)), ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    next++;
                 }
+
+                NativeMethods.ListAdd(outer, brokers, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
             }
+
+            IntPtr native = NativeMethods.NewPartitionsIncreaseToWithNewAssignments(partitions.TotalCount, outer, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return native;
         }
-        catch
+        finally
         {
-            NativeMethods.NewPartitionsDestroy(handle);
-            throw;
+            DestroyList(outer);
+            foreach (IntPtr brokers in lists)
+            {
+                DestroyList(brokers);
+            }
+
+            pinned.Free();
+        }
+    }
+
+    internal static void Destroy(IntPtr native)
+    {
+        if (native == IntPtr.Zero)
+        {
+            return;
         }
 
-        return handle;
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.NewPartitionsDestroy(native, ref outErr);
+        ReleaseError(outErr);
+    }
+
+    private static void DestroyList(IntPtr list)
+    {
+        if (list == IntPtr.Zero)
+        {
+            return;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ListDestroy(list, ref outErr);
+        ReleaseError(outErr);
+    }
+
+    private static void ReleaseError(IntPtr error)
+    {
+        if (error != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(error);
+        }
     }
 }

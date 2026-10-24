@@ -19,17 +19,14 @@ using System.Globalization;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A configuration alteration to be made to a client quota entity — the .NET realization of
-/// Java's <c>org.apache.kafka.common.quota.ClientQuotaAlteration</c> (<c>:26</c>).
+/// A configuration alteration to be made to a client quota entity — Java's
+/// <c>org.apache.kafka.common.quota.ClientQuotaAlteration</c>.
 /// </summary>
 public sealed class ClientQuotaAlteration
 {
     private readonly Op[] _ops;
 
-    /// <summary>
-    /// Creates an alteration — Java's <c>ClientQuotaAlteration(ClientQuotaEntity, Collection)</c>
-    /// (<c>:83</c>).
-    /// </summary>
+    /// <summary>Creates an alteration — Java's constructor.</summary>
     /// <param name="entity">The entity whose configuration will be modified.</param>
     /// <param name="ops">The alterations to perform.</param>
     /// <exception cref="ArgumentNullException">
@@ -45,8 +42,6 @@ public sealed class ClientQuotaAlteration
             throw new ArgumentNullException(nameof(ops));
         }
 
-        // Copied so the alteration is immutable; null elements are rejected here rather than at
-        // the FFI boundary (ffi-marshalling.md §A5).
         _ops = new Op[ops.Count];
         int i = 0;
         foreach (Op op in ops)
@@ -55,20 +50,16 @@ public sealed class ClientQuotaAlteration
         }
     }
 
-    /// <summary>The entity whose configuration will be modified — Java's <c>entity()</c> (<c>:91</c>).</summary>
+    /// <summary>The entity whose configuration will be modified — Java's <c>entity()</c>.</summary>
     public ClientQuotaEntity Entity { get; }
 
-    /// <summary>The alterations to perform — Java's <c>ops()</c> (<c>:98</c>).</summary>
+    /// <summary>The alterations to perform — Java's <c>ops()</c>.</summary>
     public IReadOnlyCollection<Op> Ops => _ops;
 
-    // No Equals / GetHashCode override: Java declares neither on ClientQuotaAlteration (only on
-    // Op, :58/:66), so reference equality is the faithful surface. Unlike ClientQuotaEntity this
-    // type is never a result key (PLAN D39 names it not).
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:103</c>). It
-    /// embeds <see cref="Op.ToString"/>, so a whole-number value prints as <c>1</c> where Java
-    /// prints <c>1.0</c>.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>, each op as
+    /// <see cref="Op.ToString"/> renders it.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
@@ -87,22 +78,18 @@ public sealed class ClientQuotaAlteration
             "])");
     }
 
-    /// <summary>
-    /// A single quota alteration — Java's nested <c>ClientQuotaAlteration.Op</c> (<c>:28</c>).
-    /// </summary>
+    /// <summary>A single quota alteration — Java's nested <c>ClientQuotaAlteration.Op</c>.</summary>
     public sealed class Op
     {
         /// <summary>
-        /// Creates an alteration op — Java's <c>Op(String, Double)</c> (<c>:37</c>). A null
-        /// <paramref name="value"/> <em>clears</em> the quota; <c>0.0</c> is a legal quota value,
-        /// so the two are distinct.
+        /// Creates an alteration op — Java's constructor. A null <paramref name="value"/> clears
+        /// the quota; <c>0.0</c> is a legal quota value, so the two are distinct.
         /// </summary>
         /// <param name="key">The quota type to alter.</param>
         /// <param name="value">The new value, or null to clear the quota.</param>
         /// <exception cref="ArgumentNullException">
-        /// <paramref name="key"/> is null — stricter than Java, whose constructor accepts it and
-        /// whose <c>alterClientQuotas</c> call then fails; the binding's rule for null keys (see
-        /// the <see cref="Admin.IAdmin"/> remarks).
+        /// <paramref name="key"/> is null: stricter than Java, whose constructor accepts it and
+        /// whose <c>alterClientQuotas</c> call then fails, a recorded deviation.
         /// </exception>
         public Op(string key, double? value)
         {
@@ -110,18 +97,17 @@ public sealed class ClientQuotaAlteration
             Value = value;
         }
 
-        /// <summary>The quota type to alter — Java's <c>key()</c> (<c>:45</c>).</summary>
+        /// <summary>The quota type to alter — Java's <c>key()</c>.</summary>
         public string Key { get; }
 
         /// <summary>
-        /// The new value, or null to clear the quota — Java's boxed <c>Double value()</c>
-        /// (<c>:53</c>).
+        /// The new value, or null to clear the quota — Java's boxed <c>Double value()</c>.
         /// </summary>
         public double? Value { get; }
 
         /// <summary>
-        /// Value equality over the key and the value — Java's <c>equals</c> (<c>:58</c>); a null
-        /// value is not equal to <c>0.0</c>.
+        /// Value equality over the key and the value — Java's <c>equals</c>; a null value is not
+        /// equal to <c>0.0</c>.
         /// </summary>
         /// <param name="obj">The object to compare with.</param>
         /// <returns>Whether the two describe the same op.</returns>
@@ -131,9 +117,8 @@ public sealed class ClientQuotaAlteration
             && Value.Equals(other.Value);
 
         /// <summary>
-        /// The hash of the key and the value — Java's <c>hashCode</c> (<c>:66</c>), same
-        /// <c>31 *</c> fold as <c>Objects.hash</c>. Like Java, a null value folds in as 0 and so
-        /// shares a bucket with <c>0.0</c>; <see cref="Equals(object?)"/> still separates them.
+        /// The hash of the key and the value — Java's <c>hashCode</c>. A null value hashes as 0,
+        /// as in Java; <see cref="Equals(object?)"/> still separates it from <c>0.0</c>.
         /// </summary>
         /// <returns>The hash code.</returns>
         public override int GetHashCode()
@@ -148,9 +133,8 @@ public sealed class ClientQuotaAlteration
         }
 
         /// <summary>
-        /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:71</c>).
-        /// ⚠ The shape only, not the exact text: a whole-number value prints as <c>1</c>, where
-        /// Java's <c>Double</c> prints <c>1.0</c>.
+        /// A diagnostic rendering in the shape of Java's <c>toString()</c>. A whole-number value
+        /// prints as <c>1</c>, where Java's <c>Double</c> prints <c>1.0</c>.
         /// </summary>
         /// <returns>The rendering.</returns>
         public override string ToString() =>

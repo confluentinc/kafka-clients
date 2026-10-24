@@ -19,18 +19,18 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The description of one ongoing transaction — Java's
-/// <c>org.apache.kafka.clients.admin.TransactionDescription</c> (<c>:25</c>).
+/// <c>org.apache.kafka.clients.admin.TransactionDescription</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ <see cref="TransactionStartTimeMs"/> is Java's <c>OptionalLong</c> (<c>:31</c>): absent is
+/// <see cref="TransactionStartTimeMs"/> is Java's <c>OptionalLong</c>: absent is
 /// <see langword="null"/>, never <c>0</c> or <c>-1</c>. <see cref="TransactionTimeoutMs"/> is a
-/// <see langword="long"/> because Java's is (<c>:30</c>), although the wire field is an int.
+/// <see langword="long"/> because Java's is, although the wire field is an int.
 /// </remarks>
 public sealed class TransactionDescription
 {
     private readonly List<TopicPartition> _topicPartitions;
 
-    /// <summary>Creates a transaction description — Java's constructor (<c>:34-50</c>).</summary>
+    /// <summary>Creates a transaction description — Java's constructor.</summary>
     /// <param name="coordinatorId">The id of the transaction coordinator broker.</param>
     /// <param name="state">The transaction state.</param>
     /// <param name="producerId">The producer id.</param>
@@ -41,11 +41,9 @@ public sealed class TransactionDescription
     /// </param>
     /// <param name="topicPartitions">The partitions enlisted in the transaction; null means none.</param>
     /// <remarks>
-    /// ⚠ <b>Normalises where Java stores as given</b> (<c>:34-50</c>, no checks):
-    /// a null <paramref name="topicPartitions"/> becomes an empty
-    /// <see cref="TopicPartitions"/>, where Java's <c>topicPartitions()</c> would return
-    /// null, and repeated partitions are kept once, as Java's <c>Set</c> field keeps them.
-    /// This only affects descriptions a caller builds; the client never passes null.
+    /// A null <paramref name="topicPartitions"/> becomes an empty <see cref="TopicPartitions"/>,
+    /// where Java's <c>topicPartitions()</c> would return null: a recorded deviation. Repeated
+    /// partitions are kept once, as Java's <c>Set</c> field keeps them.
     /// </remarks>
     public TransactionDescription(
         int coordinatorId,
@@ -63,8 +61,6 @@ public sealed class TransactionDescription
         TransactionTimeoutMs = transactionTimeoutMs;
         TransactionStartTimeMs = transactionStartTimeMs;
 
-        // Java's field is a Set (:32); de-duplicate into an owned list so the published
-        // collection keeps set semantics (the MemberAssignment precedent).
         _topicPartitions = new List<TopicPartition>();
         if (topicPartitions is not null)
         {
@@ -79,34 +75,34 @@ public sealed class TransactionDescription
         }
     }
 
-    /// <summary>The coordinator broker id — Java's <c>coordinatorId()</c> (<c>:52</c>).</summary>
+    /// <summary>The coordinator broker id — Java's <c>coordinatorId()</c>.</summary>
     public int CoordinatorId { get; }
 
-    /// <summary>The transaction state — Java's <c>state()</c> (<c>:56</c>).</summary>
+    /// <summary>The transaction state — Java's <c>state()</c>.</summary>
     public TransactionState State { get; }
 
-    /// <summary>The producer id — Java's <c>producerId()</c> (<c>:60</c>).</summary>
+    /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
     public long ProducerId { get; }
 
-    /// <summary>The producer epoch — Java's <c>producerEpoch()</c> (<c>:64</c>).</summary>
+    /// <summary>The producer epoch — Java's <c>producerEpoch()</c>.</summary>
     public int ProducerEpoch { get; }
 
-    /// <summary>The transaction timeout in ms — Java's <c>transactionTimeoutMs()</c> (<c>:68</c>).</summary>
+    /// <summary>The transaction timeout in ms — Java's <c>transactionTimeoutMs()</c>.</summary>
     public long TransactionTimeoutMs { get; }
 
     /// <summary>
     /// When the transaction started in ms, or <see langword="null"/> when absent — Java's
-    /// <c>transactionStartTimeMs()</c> (<c>:72</c>, <c>OptionalLong</c>).
+    /// <c>transactionStartTimeMs()</c>.
     /// </summary>
     public long? TransactionStartTimeMs { get; }
 
     /// <summary>
-    /// The partitions enlisted in the transaction — Java's <c>topicPartitions()</c> (<c>:76</c>).
-    /// Never <see langword="null"/>.
+    /// The partitions enlisted in the transaction — Java's <c>topicPartitions()</c>. Never
+    /// <see langword="null"/>.
     /// </summary>
     public IReadOnlyCollection<TopicPartition> TopicPartitions => _topicPartitions;
 
-    /// <summary>Value equality over all seven fields — Java's <c>equals</c> (<c>:81</c>).</summary>
+    /// <summary>Value equality over all seven fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same transaction.</returns>
     public override bool Equals(object? obj) =>
@@ -120,7 +116,7 @@ public sealed class TransactionDescription
         && _topicPartitions.Count == other._topicPartitions.Count
         && new HashSet<TopicPartition>(_topicPartitions).SetEquals(other._topicPartitions);
 
-    /// <summary>The hash of all seven fields — Java's <c>hashCode</c> (<c>:95</c>).</summary>
+    /// <summary>The hash of all seven fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -133,7 +129,6 @@ public sealed class TransactionDescription
             hash = (hash * 31) + TransactionTimeoutMs.GetHashCode();
             hash = (hash * 31) + (TransactionStartTimeMs?.GetHashCode() ?? 0);
 
-            // Order-independent, matching the Set the hash mirrors.
             int partitions = 0;
             foreach (TopicPartition topicPartition in _topicPartitions)
             {
@@ -145,9 +140,8 @@ public sealed class TransactionDescription
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:100-110</c>), where
-    /// <c>transactionStartTimeMs</c> is an <c>OptionalLong</c>, so it prints as
-    /// <c>OptionalLong[5]</c> or <c>OptionalLong.empty</c>.
+    /// A diagnostic rendering — Java's <c>toString()</c>, where <c>transactionStartTimeMs</c>
+    /// prints as Java's <c>OptionalLong[5]</c> or <c>OptionalLong.empty</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

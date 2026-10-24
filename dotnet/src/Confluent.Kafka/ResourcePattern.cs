@@ -20,71 +20,54 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A pattern naming the resource(s) an ACL applies to — the .NET realization of Java's
-/// <c>org.apache.kafka.common.resource.ResourcePattern</c> (<c>:43</c>).
+/// A pattern naming the resource(s) an ACL applies to — Java's
+/// <c>org.apache.kafka.common.resource.ResourcePattern</c>.
 /// </summary>
 /// <remarks>
-/// A <b>concrete</b> pattern: <see cref="Name"/> is never null, and the filter-only enum
-/// values (<see cref="ResourceType.Any"/>, <see cref="PatternType.Any"/>,
-/// <see cref="PatternType.Match"/>) are rejected by the constructor, as in Java. Use
-/// <see cref="ResourcePatternFilter"/> where those are wanted. An enum value that is not a
-/// defined member is stored as its enum's <c>Unknown</c>, so <see cref="ResourceType"/> and
-/// <see cref="PatternType"/> only ever hold a defined member — as a Java pattern does.
+/// A concrete pattern: <see cref="Name"/> is never null, and the filter-only values
+/// (<see cref="ResourceType.Any"/>, <see cref="PatternType.Any"/>, <see cref="PatternType.Match"/>)
+/// are rejected by the constructor, as in Java; use <see cref="ResourcePatternFilter"/> for them.
+/// <see cref="ResourceType"/> and <see cref="PatternType"/> only ever hold a defined member, as a
+/// Java pattern does.
 /// </remarks>
 public sealed class ResourcePattern
 {
     /// <summary>
     /// The literal resource name meaning "all resources of this type" — Java's
-    /// <c>WILDCARD_RESOURCE</c> (<c>:30</c>).
+    /// <c>WILDCARD_RESOURCE</c>.
     /// </summary>
     public const string WildcardResource = "*";
 
-    /// <summary>
-    /// Creates a resource pattern — Java's
-    /// <c>ResourcePattern(ResourceType, String, PatternType)</c> (<c>:43</c>).
-    /// </summary>
+    /// <summary>Creates a resource pattern — Java's constructor.</summary>
     /// <param name="resourceType">
-    /// The specific resource type; <see cref="ResourceType.Any"/> is rejected. ⚠ A value that
-    /// is not a defined <see cref="Confluent.Kafka.ResourceType"/> member — reachable only
-    /// through an unchecked <c>int</c> cast — is stored as <see cref="ResourceType.Unknown"/>,
-    /// exactly as Java's <c>ResourceType.fromCode</c> maps a code it has no member for
-    /// (<c>ResourceType.java:94</c>).
+    /// The specific resource type; <see cref="ResourceType.Any"/> is rejected. A value that is not
+    /// a defined <see cref="Confluent.Kafka.ResourceType"/> member is stored as
+    /// <see cref="ResourceType.Unknown"/>, as Java's <c>ResourceType.fromCode</c> maps a code it
+    /// has no member for, so a request and its answer key the same pattern.
     /// </param>
     /// <param name="name">The resource name, which may be <see cref="WildcardResource"/>.</param>
     /// <param name="patternType">
-    /// The specific pattern type; <see cref="PatternType.Any"/> and <see cref="PatternType.Match"/> are rejected.
-    /// ⚠ A value that is not a defined <see cref="Confluent.Kafka.PatternType"/> member is stored as
-    /// <see cref="PatternType.Unknown"/>, as Java's <c>PatternType.fromCode</c> maps it
-    /// (<c>PatternType.java:111</c>).
+    /// The specific pattern type; <see cref="PatternType.Any"/> and <see cref="PatternType.Match"/>
+    /// are rejected. A value that is not a defined <see cref="Confluent.Kafka.PatternType"/> member
+    /// is stored as <see cref="PatternType.Unknown"/>, as Java's <c>PatternType.fromCode</c> maps
+    /// it.
     /// </param>
-    /// <remarks>
-    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
-    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
-    /// <c>createAcls</c> answer for this pattern's binding by the <c>Unknown</c> it became.
-    /// Storing the raw value would key the binding's awaitable on a value the answer never
-    /// names, and two bindings differing only in undefined codes would be two keys where the
-    /// core answers one. Normalizing here serves the request key and the key read back alike,
-    /// because both are built by this constructor.
-    /// </remarks>
-    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null (Java's <c>:45</c>).</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="name"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="resourceType"/> is <see cref="ResourceType.Any"/> (Java's <c>:48-50</c>), or
-    /// <paramref name="patternType"/> is <see cref="PatternType.Any"/> / <see cref="PatternType.Match"/>
-    /// (Java's <c>:52-54</c>).
+    /// <paramref name="resourceType"/> is <see cref="ResourceType.Any"/>, or
+    /// <paramref name="patternType"/> is <see cref="PatternType.Any"/> or
+    /// <see cref="PatternType.Match"/>.
     /// </exception>
     public ResourcePattern(ResourceType resourceType, string name, PatternType patternType)
     {
-        // Java also requireNonNull's the two enums; a C# enum has no null to reject.
         Name = name ?? throw new ArgumentNullException(nameof(name));
 
-        // Java's fromCode fallback (F8). Any and Match are defined members, so folding an
-        // undefined value first cannot change which of the checks below fires.
         resourceType = AclEnumCodes.DefinedOrUnknown(resourceType);
         patternType = AclEnumCodes.DefinedOrUnknown(patternType);
 
         if (resourceType == ResourceType.Any)
         {
-            // Java's text with the C# member spelling (dotnet/.claude/rules/bindings.md §2.2 casing rule).
+            // Java's message, with the C# member name.
             throw new ArgumentException("resourceType must not be Any", nameof(resourceType));
         }
 
@@ -99,29 +82,23 @@ public sealed class ResourcePattern
         PatternType = patternType;
     }
 
-    /// <summary>The resource type this pattern matches — Java's <c>resourceType()</c> (<c>:60</c>).</summary>
+    /// <summary>The resource type this pattern matches — Java's <c>resourceType()</c>.</summary>
     public ResourceType ResourceType { get; }
 
-    /// <summary>The resource name — Java's <c>name()</c> (<c>:67</c>).</summary>
+    /// <summary>The resource name — Java's <c>name()</c>.</summary>
     public string Name { get; }
 
-    /// <summary>The pattern type — Java's <c>patternType()</c> (<c>:74</c>).</summary>
+    /// <summary>The pattern type — Java's <c>patternType()</c>.</summary>
     public PatternType PatternType { get; }
 
-    /// <summary>
-    /// Whether any component is <c>Unknown</c> — Java's <c>isUnknown()</c> (<c>:93</c>).
-    /// </summary>
+    /// <summary>Whether any component is <c>Unknown</c> — Java's <c>isUnknown()</c>.</summary>
     public bool IsUnknown => ResourceType == ResourceType.Unknown || PatternType == PatternType.Unknown;
 
-    /// <summary>
-    /// A filter matching only this pattern — Java's <c>toFilter()</c> (<c>:81</c>).
-    /// </summary>
+    /// <summary>A filter matching only this pattern — Java's <c>toFilter()</c>.</summary>
     /// <returns>The filter.</returns>
     public ResourcePatternFilter ToFilter() => new ResourcePatternFilter(ResourceType, Name, PatternType);
 
-    /// <summary>
-    /// Value equality over all three components — Java's <c>equals</c> (<c>:98</c>).
-    /// </summary>
+    /// <summary>Value equality over all three components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same pattern.</returns>
     public override bool Equals(object? obj) =>
@@ -130,10 +107,7 @@ public sealed class ResourcePattern
         && string.Equals(Name, other.Name, StringComparison.Ordinal)
         && PatternType == other.PatternType;
 
-    /// <summary>
-    /// The hash of all three components — Java's <c>hashCode</c> (<c>:111</c>), same fields and
-    /// same <c>31 *</c> fold as <c>Objects.hash</c>.
-    /// </summary>
+    /// <summary>The hash of all three components — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -148,9 +122,9 @@ public sealed class ResourcePattern
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:86</c>).
-    /// ⚠ The shape only, not the exact text: the resource and pattern types print with their .NET
-    /// names (<c>Topic</c>, <c>Literal</c>), where Java prints its constants (<c>TOPIC</c>, <c>LITERAL</c>).
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>; the types print with
+    /// their .NET names (<c>Topic</c>, <c>Literal</c>), where Java prints its constants
+    /// (<c>TOPIC</c>, <c>LITERAL</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

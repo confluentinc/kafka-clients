@@ -21,87 +21,37 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A detailed description of a single consumer group in the cluster — the .NET realization
-/// of Java's <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>
-/// (<c>ConsumerGroupDescription.java:37, :103, :126, :143, :151, :158, :165, :172, :180,
-/// :197, :204, :211, :220, :229, :234</c>).
+/// A detailed description of a single consumer group in the cluster — Java's
+/// <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The type is not deprecated</b>: Java's class carries no <c>@Deprecated</c>, so no
-/// <see cref="ObsoleteAttribute"/> appears on it.
+/// Java's deprecated <c>state()</c> accessor and its three deprecated constructors are not
+/// translated; read <see cref="GroupState"/>, as Java's deprecation note says.
 /// </para>
 /// <para>
-/// ⚠ <b>Java's deprecated <c>state()</c> accessor is deliberately not translated.</b> It is
-/// <c>@Deprecated(since = "4.0", forRemoval = true)</c> (<c>:189</c>) and is only a lossy
-/// projection of <see cref="GroupState"/> onto Java's equally deprecated
-/// <c>ConsumerGroupState</c> (<c>ConsumerGroupState.parse(groupState.toString())</c>,
-/// <c>:191</c>), and the C ABI no longer exports it. Read <see cref="GroupState"/>, which is
-/// what Java's own deprecation note points callers at.
+/// <see cref="AuthorizedOperations"/> is <see langword="null"/> when the broker reported none at
+/// all, and empty when it reported that none are authorized, as in Java.
 /// </para>
 /// <para>
-/// ⚠ <b>Java's three deprecated constructors are deliberately not translated</b> — the
-/// standing ruling this phase applied to <see cref="MemberDescription"/>'s four, for the
-/// same reason. All three (<c>:54</c>, <c>:68</c> and <c>:83</c>, every one
-/// <c>since = "4.0", forRemoval = true</c>) take Java's superseded <c>ConsumerGroupState</c>,
-/// which this binding does not carry, and fill the arguments they omit with fixed values —
-/// <c>Collections.emptySet()</c>, <c>GroupType.CLASSIC</c> and two <c>Optional.empty()</c>.
-/// A caller can pass those same values to the current constructor and get the identical
-/// object. Nothing expressible is lost.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="Type"/> and <see cref="GroupState"/> are <em>not</em> optional here,
-/// although the same two members are optional on <see cref="GroupListing"/>.</b>
-/// Java's accessors return a bare <c>GroupType</c> / <c>GroupState</c> (<c>:180</c>,
-/// <c>:197</c>) where that class returns <c>Optional</c>, so these are non-nullable enums.
-/// The asymmetry is Java's and is mirrored rather than normalized. Java's field could still
-/// hold <see langword="null"/> — the constructor stores it raw — but a C# enum is a value
-/// type with no null to store, so the difference is unreachable from this surface. Java's
-/// own "defaults to Classic if not provided by the server" (<c>:177-178</c>) happens on the
-/// decode path, not in the constructor.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="AuthorizedOperations"/> distinguishes <em>absent</em> from
-/// <em>empty</em>.</b> Java's accessor documents "or <b>null</b> if that information is not
-/// known" (<c>:209</c>), which is the case where the broker was never asked or did not
-/// answer — <em>not</em> the case where it answered "none are authorized". The C ABI
-/// carries the discriminant explicitly (a <c>has_authorized_operations</c> flag beside the
-/// count) because a count of 0 covers both, so collapsing <see langword="null"/> into an
-/// empty collection would discard information the ABI deliberately preserved. The same
-/// reading <see cref="TopicDescription.AuthorizedOperations"/> already makes.
-/// </para>
-/// <para>
-/// <b>Java's <c>Optional&lt;Integer&gt;</c> becomes a C# nullable.</b>
 /// <see cref="GroupEpoch"/> and <see cref="TargetAssignmentEpoch"/> are set for a
-/// <see cref="GroupType.Consumer"/> group and empty for a <see cref="GroupType.Classic"/>
-/// one (<c>:217-218</c>), and the C ABI reports each as a presence flag beside the value —
-/// so they are nullable rather than carrying a sentinel: no epoch value could stand in for
-/// "absent".
+/// <see cref="GroupType.Consumer"/> group and <see langword="null"/>, Java's empty
+/// <c>Optional</c>, for a <see cref="GroupType.Classic"/> one.
 /// </para>
 /// <para>
-/// ⚠ <b>Null arguments are accepted and coalesced, not rejected — but only three of
-/// them.</b> <see cref="GroupId"/> and <see cref="PartitionAssignor"/> become the empty
-/// string and <see cref="Members"/> becomes an empty collection, mirroring Java
-/// <c>:113-116</c>. The remaining six are stored exactly as given, which is what makes the
-/// absent-versus-empty and absent-versus-zero distinctions above survive. As on
-/// <see cref="MemberDescription"/>, this differs from the
-/// <see cref="ArgumentNullException"/> guard <see cref="GroupListing"/> applies
-/// because Java itself differs — coalescing here, rejecting there.
+/// Null arguments are coalesced as in Java: <see cref="GroupId"/> and
+/// <see cref="PartitionAssignor"/> become the empty string and <see cref="Members"/> an empty
+/// collection.
 /// </para>
 /// </remarks>
 public sealed class ConsumerGroupDescription
 {
-    // Java stores List.copyOf(members) (:115), so this is ordered and its equality is
-    // positional — see the note on Members.
     private readonly List<MemberDescription> _members;
 
-    // Null means "the broker reported nothing", which is not the same as an empty set —
-    // see the absent-versus-empty note in the type remarks.
     private readonly List<AclOperation>? _authorizedOperations;
 
     /// <summary>
-    /// Creates a description — Java's current constructor
-    /// (<c>ConsumerGroupDescription.java:103</c>).
+    /// Creates a description — Java's current constructor.
     /// </summary>
     /// <param name="groupId">The group id. Null becomes the empty string.</param>
     /// <param name="isSimpleConsumerGroup">Whether the group is a simple consumer group.</param>
@@ -119,8 +69,7 @@ public sealed class ConsumerGroupDescription
     /// </param>
     /// <param name="authorizedOperations">
     /// The authorized operations, or <see langword="null"/> if the broker reported none at
-    /// all. Duplicates are collapsed and the collection is copied; see the
-    /// absent-versus-empty note in the type remarks.
+    /// all. Duplicates are collapsed and the collection is copied.
     /// </param>
     /// <param name="groupEpoch">
     /// The group epoch, or <see langword="null"/> for a classic group.
@@ -140,8 +89,6 @@ public sealed class ConsumerGroupDescription
         int? groupEpoch,
         int? targetAssignmentEpoch)
     {
-        // Java :113-122 — the id, the members and the assignor coalesce; the other six are
-        // stored as given.
         GroupId = groupId ?? string.Empty;
         IsSimpleConsumerGroup = isSimpleConsumerGroup;
         _members = members is null
@@ -157,108 +104,80 @@ public sealed class ConsumerGroupDescription
     }
 
     /// <summary>
-    /// The id of the consumer group — Java's <c>groupId()</c> (<c>:151</c>). Never
-    /// <see langword="null"/>.
+    /// The id of the consumer group — Java's <c>groupId()</c>. Never <see langword="null"/>.
     /// </summary>
     public string GroupId { get; }
 
     /// <summary>
-    /// Whether the consumer group is simple — Java's <c>isSimpleConsumerGroup()</c>
-    /// (<c>:158</c>).
+    /// Whether the consumer group is simple — Java's <c>isSimpleConsumerGroup()</c>.
     /// </summary>
     public bool IsSimpleConsumerGroup { get; }
 
     /// <summary>
-    /// The members of the consumer group — Java's <c>members()</c> (<c>:165</c>). Never
+    /// The members of the consumer group — Java's <c>members()</c>. Never
     /// <see langword="null"/>.
     /// </summary>
     /// <remarks>
-    /// Java's accessor declares a <c>Collection</c>, so this is an
-    /// <c>IReadOnlyCollection&lt;T&gt;</c> rather than a list. The value Java stores is a
-    /// <c>List.copyOf(...)</c> (<c>:115</c>) all the same, which is why
-    /// <see cref="Equals(object)"/> compares the members <b>positionally</b> — Java's
-    /// <c>Objects.equals</c> reaches <c>List.equals</c> there, and a list is order-sensitive
-    /// where a set would not be.
+    /// Java stores a <c>List.copyOf(...)</c>, so <see cref="Equals(object)"/> compares the members
+    /// positionally.
     /// </remarks>
     public IReadOnlyCollection<MemberDescription> Members => _members;
 
     /// <summary>
-    /// The consumer group partition assignor — Java's <c>partitionAssignor()</c>
-    /// (<c>:172</c>). Never <see langword="null"/>.
+    /// The consumer group partition assignor — Java's <c>partitionAssignor()</c>. Never
+    /// <see langword="null"/>.
     /// </summary>
     public string PartitionAssignor { get; }
 
     /// <summary>
-    /// The group type (or the protocol) of this consumer group — Java's <c>type()</c>
-    /// (<c>:180</c>). It defaults to <see cref="GroupType.Classic"/> if not provided by the
-    /// server. Not optional; see the asymmetry note in the type remarks.
+    /// The group type (or the protocol) of this consumer group — Java's <c>type()</c>. It
+    /// defaults to <see cref="GroupType.Classic"/> if not provided by the server.
     /// </summary>
     public GroupType Type { get; }
 
     /// <summary>
     /// The group state, or <see cref="Confluent.Kafka.GroupState.Unknown"/> if the state is
-    /// too new for this client to parse — Java's <c>groupState()</c> (<c>:197</c>). Not
-    /// optional; see the asymmetry note in the type remarks.
+    /// too new for this client to parse — Java's <c>groupState()</c>.
     /// </summary>
     public GroupState GroupState { get; }
 
     /// <summary>
     /// The consumer group coordinator, or <see langword="null"/> if the coordinator is not
-    /// known — Java's <c>coordinator()</c> (<c>:204</c>).
+    /// known — Java's <c>coordinator()</c>.
     /// </summary>
     public Node? Coordinator { get; }
 
     /// <summary>
     /// The operations the caller is authorized to perform on this group, or
     /// <see langword="null"/> if the broker reported none at all — Java's
-    /// <c>authorizedOperations()</c> (<c>:211</c>). An <b>empty</b> collection means
-    /// "reported, and none are authorized"; see the absent-versus-empty note in the type
-    /// remarks.
+    /// <c>authorizedOperations()</c>. An empty collection means "reported, and none are authorized".
     /// </summary>
     /// <remarks>
-    /// Java returns a <c>Set</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates the netstandard2.0
-    /// floor, so this is an <c>IReadOnlyCollection&lt;T&gt;</c> — the same substitution
-    /// <see cref="TopicDescription.AuthorizedOperations"/> and
-    /// <see cref="MemberAssignment.TopicPartitions"/> already make. The <em>set</em>
-    /// semantics are not lost: the constructor collapses duplicates, and
-    /// <see cref="Equals(object)"/> / <see cref="GetHashCode"/> compare and hash this member
-    /// order-insensitively, exactly as a Java <c>Set</c> does.
+    /// Duplicates are collapsed, and <see cref="Equals(object)"/> and <see cref="GetHashCode"/> treat
+    /// this member as a set, as Java's <c>Set</c> is.
     /// </remarks>
     public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
 
     /// <summary>
     /// The epoch of the consumer group, or <see langword="null"/> for a classic group —
-    /// Java's <c>groupEpoch()</c> (<c>:220</c>).
+    /// Java's <c>groupEpoch()</c>.
     /// </summary>
     public int? GroupEpoch { get; }
 
     /// <summary>
     /// The epoch of the target assignment, or <see langword="null"/> for a classic group —
-    /// Java's <c>targetAssignmentEpoch()</c> (<c>:229</c>).
+    /// Java's <c>targetAssignmentEpoch()</c>.
     /// </summary>
     public int? TargetAssignmentEpoch { get; }
 
     /// <summary>
-    /// Compares all ten stored members — Java's <c>equals</c> (<c>:126</c>).
+    /// Compares all ten stored members — Java's <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare against.</param>
     /// <returns>True when every member matches.</returns>
     /// <remarks>
-    /// <para>
-    /// Java's <c>getClass() != o.getClass()</c> check (<c>:128</c>) is met by the type being
-    /// <see langword="sealed"/>. Strings compare ordinally, as Java's <c>String.equals</c>
-    /// does.
-    /// </para>
-    /// <para>
-    /// ⚠ <b><see cref="Coordinator"/> is compared field-by-field here rather than through
-    /// <see cref="object.Equals(object)"/>.</b> Java's <c>Objects.equals(coordinator, ...)</c>
-    /// reaches <c>Node.equals</c>, which compares by value (<c>Node.java:143-154</c>), but
-    /// this binding's <see cref="Node"/> deliberately carries no value equality — a recorded
-    /// choice on that type, which this slice does not re-author. Performing the comparison
-    /// here restores Java's answer for this class without changing a shipped type; it covers
-    /// all five of Java's members, <see cref="Node.IsFenced"/> included since M15/P13.3 (D12)
-    /// gave it a counterpart.
-    /// </para>
+    /// <see cref="Coordinator"/> is compared by value over all of Java's <c>Node</c> fields, as Java's
+    /// <c>Node.equals</c> does, although <see cref="Node"/> itself has no value equality.
     /// </remarks>
     public override bool Equals(object? obj)
     {
@@ -281,17 +200,10 @@ public sealed class ConsumerGroupDescription
     }
 
     /// <summary>
-    /// The hash of the same ten members — Java's <c>Objects.hash(...)</c> (<c>:144</c>),
-    /// whose 31-fold this reproduces in Java's argument order.
+    /// The hash of the same ten members — Java's <c>Objects.hash(...)</c>, whose 31-fold this
+    /// reproduces in Java's argument order.
     /// </summary>
     /// <returns>The hash code.</returns>
-    /// <remarks>
-    /// The two collections fold the way Java's own collections hash: the members
-    /// positionally (Java holds a <c>List</c>) and the authorized operations as a sum (Java
-    /// holds a <c>Set</c>), so each agrees with the corresponding half of
-    /// <see cref="Equals(object)"/>. An absent nullable hashes 0, which is what
-    /// <c>Objects.hash</c> gives an empty <c>Optional</c> and a null reference alike.
-    /// </remarks>
     public override int GetHashCode()
     {
         unchecked
@@ -311,40 +223,12 @@ public sealed class ConsumerGroupDescription
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:234</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     /// <remarks>
-    /// <para>
-    /// ⚠ <b>Java renders absence three different ways in this one method, and each is
-    /// mirrored.</b> The members join each element's own <c>toString()</c> with <c>","</c>
-    /// and no space (<c>:237</c>), so an empty group renders as <c>members=</c>. An absent
-    /// coordinator or authorized-operations set concatenates as the bare text <c>null</c>
-    /// (<c>:241-242</c>), because Java is concatenating a null <em>reference</em>. The two
-    /// epochs go through <c>orElse(null)</c> (<c>:243-244</c>), whose null result
-    /// concatenates as that same text — the same spelling reached by a different route, and
-    /// <b>not</b> the <c>Optional.empty</c> that <see cref="MemberDescription"/> emits for
-    /// members Java concatenates raw. Normalizing
-    /// any of them would produce a diagnostic string that no longer matches the Java
-    /// client's.
-    /// </para>
-    /// <para>
-    /// <see cref="Type"/> and <see cref="GroupState"/> render through the shared name tables,
-    /// which reproduce Java's <c>toString()</c> for those enums (<c>Classic</c>,
-    /// <c>Stable</c>, …) rather than the C# member spelling; a value no member defines takes
-    /// <c>Unknown</c>, the answer those tables give it everywhere else.
-    /// <see cref="IsSimpleConsumerGroup"/> renders lowercase, as Java's
-    /// <c>Boolean.toString()</c> does.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The authorized operations render with their C# member names</b> —
-    /// <c>[Read, Write]</c> where Java prints <c>[READ, WRITE]</c>, its <c>AclOperation</c>
-    /// having no <c>toString()</c> override and so falling back to the constant name. This
-    /// is the one place the rendering is <em>not</em> Java's spelling, and it is deliberate:
-    /// <see cref="TopicDescription.ToString"/> already renders this same Java field this way,
-    /// and a second spelling for one field across two sibling description types would be
-    /// worse than one uniform approximation. There is no ACL name table to share, and adding
-    /// one belongs with the ACL RPCs that bring the rest of that family.
-    /// </para>
+    /// The authorized operations render with their C# member names (<c>[Read, Write]</c> where Java
+    /// prints <c>[READ, WRITE]</c>), as <see cref="TopicDescription.ToString"/> renders them: a
+    /// recorded deviation.
     /// </remarks>
     public override string ToString() =>
         string.Format(
@@ -365,13 +249,6 @@ public sealed class ConsumerGroupDescription
                 ? "null"
                 : TargetAssignmentEpoch.Value.ToString(CultureInfo.InvariantCulture));
 
-    /// <summary>
-    /// Copies an authorized-operations argument the way Java's <c>Set</c> parameter behaves —
-    /// absent stays absent, and duplicates collapse while first-seen order is kept for
-    /// rendering.
-    /// </summary>
-    /// <param name="operations">The operations, or null for absent.</param>
-    /// <returns>The copy, or null when the argument was absent.</returns>
     private static List<AclOperation>? CopyAsSet(IEnumerable<AclOperation>? operations)
     {
         if (operations is null)
@@ -392,13 +269,6 @@ public sealed class ConsumerGroupDescription
         return copy;
     }
 
-    /// <summary>
-    /// Compares two possibly-absent coordinators by value, mirroring Java's
-    /// <c>Node.equals</c> over all five of its members (<c>Node.java:143-154</c>).
-    /// </summary>
-    /// <param name="left">The first coordinator, or null for absent.</param>
-    /// <param name="right">The second coordinator, or null for absent.</param>
-    /// <returns>True when both are absent or both are present and equal.</returns>
     private static bool CoordinatorsMatch(Node? left, Node? right)
     {
         if (ReferenceEquals(left, right))
@@ -415,12 +285,6 @@ public sealed class ConsumerGroupDescription
             && left.IsFenced == right.IsFenced;
     }
 
-    /// <summary>
-    /// The hash of a possibly-absent coordinator, over the same members
-    /// <see cref="CoordinatorsMatch(Node, Node)"/> compares.
-    /// </summary>
-    /// <param name="coordinator">The coordinator, or null for absent.</param>
-    /// <returns>The hash code, or 0 when absent.</returns>
     private static int CoordinatorHash(Node? coordinator)
     {
         if (coordinator is null)
@@ -441,14 +305,6 @@ public sealed class ConsumerGroupDescription
         }
     }
 
-    /// <summary>
-    /// Compares two possibly-absent authorized-operations sets the way Java's
-    /// <c>Objects.equals</c> over a <c>Set</c> does — absent equals absent, and two present
-    /// ones compare order-insensitively.
-    /// </summary>
-    /// <param name="left">The first set, or null for absent.</param>
-    /// <param name="right">The second set, or null for absent.</param>
-    /// <returns>True when both are absent or both are present and hold the same elements.</returns>
     private static bool OperationsMatch(List<AclOperation>? left, List<AclOperation>? right)
     {
         if (left is null || right is null)
@@ -459,12 +315,6 @@ public sealed class ConsumerGroupDescription
         return left.Count == right.Count && new HashSet<AclOperation>(left).SetEquals(right);
     }
 
-    /// <summary>
-    /// The positional 31-fold Java's <c>List.hashCode()</c> specifies, so that it agrees
-    /// with the order-sensitive member comparison in <see cref="Equals(object)"/>.
-    /// </summary>
-    /// <param name="members">The members to hash.</param>
-    /// <returns>The hash code.</returns>
     private static int MembersHash(List<MemberDescription> members)
     {
         unchecked
@@ -479,12 +329,6 @@ public sealed class ConsumerGroupDescription
         }
     }
 
-    /// <summary>
-    /// The element-hash sum Java's <c>Set.hashCode()</c> specifies — order-insensitive, so
-    /// that it agrees with <see cref="OperationsMatch(List{AclOperation}, List{AclOperation})"/>.
-    /// </summary>
-    /// <param name="operations">The operations to hash, or null for absent.</param>
-    /// <returns>The hash code, or 0 when absent.</returns>
     private static int OperationsHash(List<AclOperation>? operations)
     {
         if (operations is null)

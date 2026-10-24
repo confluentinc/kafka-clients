@@ -12,55 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for listing a consumer group's committed offsets — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions</c>
-/// (<c>ListConsumerGroupOffsetsOptions.java:24</c>).
+/// Java's <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// <b>Java declares exactly one option of its own</b> — the fluent setter
-/// <c>requireStable(boolean)</c> (<c>:31</c>) and its getter <c>requireStable()</c>
-/// (<c>:36</c>) — which collapse into the single property <see cref="RequireStable"/>, the
-/// pairing <see cref="CreateTopicsOptions"/> rules for every options type in this binding.
-/// Everything else on the Java class is inherited from
-/// <c>AbstractOptions&lt;ListConsumerGroupOffsetsOptions&gt;</c>, which contributes only the
-/// timeout; C# has no <c>extends</c> to mirror here because the options types in this
-/// binding are flat POCOs, so <see cref="TimeoutMs"/> is declared directly — the same call
-/// every sibling options type already makes.
-/// </para>
-/// <para>
-/// ⚠ <b>This type gates <em>how</em> the offsets are read, not <em>which</em> ones.</b>
-/// The selection lives in <see cref="ListConsumerGroupOffsetsSpec"/>, one per group, and
-/// the two are handed to the call together — so an unset
-/// <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> is what asks for every
-/// partition, never anything here.
-/// </para>
-/// <para>
-/// ⚠ <b>Java's class is <em>not</em> deprecated</b>: <c>listConsumerGroupOffsets</c> has no
-/// generation-newer replacement — the newer group protocol reads its committed offsets
-/// through this same call. So no <see cref="System.ObsoleteAttribute"/> appears here, and a
-/// test asserts that absence rather than leaving it implicit.
-/// </para>
 /// </remarks>
 public sealed class ListConsumerGroupOffsetsOptions
 {
+    private int? _timeoutMs;
+    private bool _requireStable;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Wait for any in-progress transaction on a partition to resolve before reporting its
-    /// committed offset — Java's <c>requireStable()</c> (<c>:36</c>). Defaults to
-    /// <see langword="false"/>, as Java's explicitly initialized field does (<c>:26</c>).
+    /// committed offset — Java's <c>requireStable()</c>. Defaults to
+    /// <see langword="false"/>, as Java's explicitly initialized field does.
     /// </summary>
     /// <remarks>
-    /// While this is <see langword="false"/> the broker answers immediately with the last
-    /// committed offset, which for a partition with an open transaction may be superseded
-    /// moments later. Setting it to <see langword="true"/> trades that promptness for a
-    /// read that no in-flight transaction can still change.
+    /// While this is <see langword="false"/> the broker answers at once with the last
+    /// committed offset, which an open transaction on the partition may still change.
     /// </remarks>
-    public bool RequireStable { get; set; }
+    public bool RequireStable
+    {
+        get => _requireStable;
+        set
+        {
+            _requireStable = value;
+            Setters.Ran(nameof(RequireStable));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

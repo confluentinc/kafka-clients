@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -41,5 +42,30 @@ internal static class NodeMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
         return new Node(id, Utf8Marshal.PtrToString(host) ?? string.Empty, port, Utf8Marshal.PtrToString(rack), isFenced);
+    }
+
+    internal static List<Node>? CopyOutList(IntPtr list)
+    {
+        if (list == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(list, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        List<Node> nodes = new List<Node>(count);
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr node = NativeMethods.ListGet(list, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            Node? copy = CopyOut(node);
+            if (copy is not null)
+            {
+                nodes.Add(copy);
+            }
+        }
+
+        return nodes;
     }
 }

@@ -69,6 +69,14 @@ internal sealed class BlockingCall
 
     internal static object? RunWait(Action call) => StartWait(call).Join();
 
+    internal static KafkaException AssertThrew(object? outcome, int code, string message)
+    {
+        KafkaException failure = Assert.IsType<KafkaException>(outcome);
+        Assert.Equal(code, failure.Code);
+        Assert.Equal(message, failure.Message);
+        return failure;
+    }
+
     internal void AssertBlocked()
     {
         Assert.True(

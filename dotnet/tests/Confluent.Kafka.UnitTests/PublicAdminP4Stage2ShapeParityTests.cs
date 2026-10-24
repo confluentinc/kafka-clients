@@ -26,37 +26,19 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P4 Stage 2's surface —
-/// <c>listPartitionReassignments</c> and <c>listOffsets</c> — against the Java classes it
-/// mirrors.
+/// The public shape of <c>ListPartitionReassignments</c> and <c>ListOffsets</c>, their options, results and value
+/// types, against the Java classes they mirror, with all seven <see cref="OffsetSpec"/> kinds walked explicitly.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>Stage 2 is Stage 1's hazard inverted, and this file is where that is pinned.</b>
-/// In Stage 1 two result types had <em>identical accessor sets</em> and different shapes.
-/// Here two RPCs have <em>near-identical names</em> and differ in both:
-/// <c>alterPartitionReassignments</c> is per-key void,
-/// <c>listPartitionReassignments</c> is one aggregate future with no per-key error, and
-/// <c>listOffsets</c> is per-key with <b>both</b> a value and an error. Three shapes across
-/// two similarly-named families, so the member sets are asserted rather than assumed.
-/// </para>
-/// <para>
-/// ⚠ <b>All seven <see cref="OffsetSpec"/> kinds are walked explicitly.</b> Six of them
-/// project onto overlapping numbers, so a sampled check would very plausibly miss the one
-/// collision that matters.
-/// </para>
+/// Three shapes across two similarly named families: <c>AlterPartitionReassignments</c> is per-key void,
+/// <c>ListPartitionReassignments</c> one aggregate future, and <c>ListOffsets</c> per key with a value and an error,
+/// so the member sets are asserted.
 /// </remarks>
 public sealed class PublicAdminP4Stage2ShapeParityTests
 {
-    /// <summary>
-    /// The two new RPCs return their <c>*Result</c> <b>synchronously</b>, with Java's
-    /// parameter shape — <c>admin-client.md</c> §1, and DoD §11's spirit for admin.
-    /// </summary>
     [Fact]
     public void IAdmin_TheTwoNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        // The partitions-taking form; the options-only one (M15/P13.5 G3-7) is pinned by
-        // PublicAdminReassignmentsOffsetsTests.
         MethodInfo listReassignments = typeof(IAdmin).GetMethod(
             nameof(IAdmin.ListPartitionReassignments),
             new[] { typeof(IReadOnlyCollection<TopicPartition>), typeof(ListPartitionReassignmentsOptions) })!;
@@ -72,14 +54,13 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             new[] { typeof(IReadOnlyDictionary<TopicPartition, OffsetSpec>), typeof(ListOffsetsOptions) },
             listOffsets.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // ⚠ The selection is NULLABLE: null is Java's Optional.empty() — "every ongoing
-        // reassignment". It is OPTIONAL too since M15/P13.5 G3-7: Java's zero-argument
-        // listPartitionReassignments() (Admin.java:1193) is `()` here.
+        // The selection is nullable and optional: null is Java's Optional.empty(), every ongoing reassignment, and Java's
+        // zero-argument listPartitionReassignments() is () here.
         ParameterInfo selection = listReassignments.GetParameters()[0];
         Assert.True(selection.IsOptional, "the selection defaults, as Java's zero-arg overload");
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(selection));
 
-        // …whereas listOffsets' map is required AND non-nullable, matching Java.
+        // ListOffsets' map is required and non-nullable, as in Java.
         ParameterInfo offsets = listOffsets.GetParameters()[0];
         Assert.False(offsets.IsOptional);
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(offsets, 0));
@@ -91,33 +72,23 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(options));
         }
 
-        // IAdmin has NO Task-returning member (Close is void since M15/P14 S5g; IAsyncAdmin is the async twin).
         Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
                 .Select(method => method.Name));
     }
 
-    /// <summary>
-    /// <see cref="ListPartitionReassignmentsResult"/> publishes Java's <b>single</b>
-    /// accessor and nothing else (<c>ListPartitionReassignmentsResult.java:40</c>).
-    /// </summary>
     [Fact]
     public void ListPartitionReassignmentsResult_PublishesExactlyOneAccessor()
     {
         MethodInfo reassignments = typeof(ListPartitionReassignmentsResult).GetMethod(
             nameof(ListPartitionReassignmentsResult.Reassignments), Type.EmptyTypes)!;
 
-        // M15/P14 S5b: the sync flavour hands out a KafkaFuture; the async twin keeps the awaitable.
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>),
             reassignments.ReturnType);
 
-        // Positions of KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>:
-        // 0 = the KafkaFuture (a generic struct, so oblivious — its own nullability is the CLR
-        // type asserted above), 1 = the dictionary, 2 = the VALUE (TopicPartition, a non-generic
-        // value type, takes no position). Neither 1 nor 2 is nullable — a missing reassignment is
-        // an absent KEY, not a null value.
+        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = its value.
         Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(reassignments.ReturnParameter, 0));
         for (int position = 1; position <= 2; position++)
         {
@@ -126,21 +97,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
                 NullableAnnotation.Flag(reassignments.ReturnParameter, position));
         }
 
-        // ⚠ No `Values`, no `All` — Java declares one accessor and the plan says not to add
-        // a second view.
         Assert.Equal(
             new[] { nameof(ListPartitionReassignmentsResult.Reassignments) },
             DeclaredPublicMethodNames(typeof(ListPartitionReassignmentsResult)));
         Assert.Empty(DeclaredPublicPropertyNames(typeof(ListPartitionReassignmentsResult)));
     }
 
-    /// <summary>
-    /// <see cref="ListOffsetsResult"/> publishes Java's <c>partitionResult</c> and <c>all</c> —
-    /// and <c>all</c> yields the MAP, unlike <see cref="DeleteRecordsResult.All"/>. Java makes
-    /// its constructor <b>public</b> (<c>ListOffsetsResult.java:34</c>); since M15/P14 S5b this
-    /// one is <b>internal on purpose</b>, a recorded Java-parity deviation (follow-up FU-5), so
-    /// the test pins the internal constructor's shape instead.
-    /// </summary>
     [Fact]
     public void ListOffsetsResult_PublishesJavasTwoAccessors_AndItsConstructorIsInternal()
     {
@@ -148,8 +110,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         ConstructorInfo only = Assert.Single(
             typeof(ListOffsetsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
             candidate => candidate.IsAssembly);
-        // ⚠ KafkaFuture<Info>, not Info — Java's is Map<TopicPartition, KafkaFuture<Info>> (:34).
-        // The futures ARE the value; a map of plain values would be a different contract.
+        // KafkaFuture<Info>, not Info: Java's is Map<TopicPartition, KafkaFuture<Info>>, so the futures are the value.
         Assert.Equal(
             new[]
             {
@@ -167,8 +128,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             typeof(KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>), partitionResult.ReturnType);
         Assert.Equal(new[] { typeof(TopicPartition) }, partitionResult.GetParameters().Select(p => p.ParameterType));
 
-        // ⚠ Java's all() is KafkaFuture<Map<…>>, NOT KafkaFuture<Void> — the opposite of
-        // DeleteRecordsResult.All(), which they otherwise resemble.
+        // Java's all() is KafkaFuture<Map<...>>, not KafkaFuture<Void>.
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>),
             all.ReturnType);
@@ -179,16 +139,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             DeclaredPublicMethodNames(typeof(ListOffsetsResult)));
     }
 
-    /// <summary>
-    /// <c>ListOffsetsResultInfo</c> is <b>NESTED</b> inside <see cref="ListOffsetsResult"/>
-    /// (decision D17), with the three Java accessors as properties (D18) and a nullable
-    /// leader epoch.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The roadmap lists it as a flat type; Java declares it <c>public static class</c>
-    /// at <c>ListOffsetsResult.java:70</c>, and Java wins.</b> The nesting is asserted
-    /// structurally so a later "tidy-up" that flattens it fails here.
-    /// </remarks>
     [Fact]
     public void ListOffsetsResultInfo_IsNested_WithJavasThreeAccessors()
     {
@@ -207,24 +157,19 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Offset))!.PropertyType);
         Assert.Equal(typeof(long), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.Timestamp))!.PropertyType);
 
-        // ⚠ int? — Java's Optional<Integer>. A plain int could not express Optional.empty()
-        // at all, which is what forces the ABI's bool to be read rather than a sentinel.
+        // int? is Java's Optional<Integer>, which a plain int cannot express.
         Assert.Equal(
             typeof(int?), info.GetProperty(nameof(ListOffsetsResult.ListOffsetsResultInfo.LeaderEpoch))!.PropertyType);
 
         Assert.Equal(
             new[] { "LeaderEpoch", "Offset", "Timestamp" }, DeclaredPublicPropertyNames(info));
 
-        // No Java-shaped methods beyond the three properties…
         Assert.Empty(DeclaredPublicMethodNames(info));
 
-        // …and ToString is overridden, which the helper deliberately does not report
-        // because it filters `object`'s members. Java declares one at :95, so it is pinned
-        // here rather than left to the filtered set.
+        // ToString is overridden, as Java declares one; the helper filters object's members, so it is pinned here.
         Assert.Same(info, info.GetMethod("ToString", Type.EmptyTypes)!.DeclaringType);
 
-        // A present epoch of -1 is PRESENT. This is the type-level half of the claim; the
-        // marshaller half is in Interop.AdminP4Stage2ResultMarshalTests.
+        // A present epoch of -1 is present.
         ListOffsetsResult.ListOffsetsResultInfo negative =
             new ListOffsetsResult.ListOffsetsResultInfo(5, 7, -1);
         Assert.Equal(-1, negative.LeaderEpoch);
@@ -236,14 +181,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal("ListOffsetsResultInfo(offset=5, timestamp=7, leaderEpoch=Optional.empty)", absent.ToString());
     }
 
-    /// <summary>
-    /// ⚠⚠ <see cref="OffsetSpec"/> publishes <b>all seven</b> of Java's kinds and
-    /// <b>all seven</b> factories, and each factory yields its own kind.
-    /// </summary>
-    /// <remarks>
-    /// Walked exhaustively rather than sampled: six of the seven project onto overlapping
-    /// wire numbers, so the one pair that collides is exactly what a sample would miss.
-    /// </remarks>
     [Fact]
     public void OffsetSpec_PublishesAllSevenJavaKinds()
     {
@@ -265,12 +202,9 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             },
             nested.Select(type => type.Name));
 
-        // Every kind derives from OffsetSpec and is sealed — Java's are leaf classes.
         Assert.All(nested, type => Assert.Same(typeof(OffsetSpec), type.BaseType));
         Assert.All(nested, type => Assert.True(type.IsSealed, $"{type.Name} must be sealed"));
 
-        // The seven factories, each yielding its own kind. A factory wired to the wrong
-        // kind would send the wrong sentinel and is caught right here.
         Assert.IsType<OffsetSpec.LatestSpec>(OffsetSpec.Latest());
         Assert.IsType<OffsetSpec.EarliestSpec>(OffsetSpec.Earliest());
         Assert.IsType<OffsetSpec.MaxTimestampSpec>(OffsetSpec.MaxTimestamp());
@@ -291,22 +225,16 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
                 .Select(method => method.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
 
-        // ⚠ Java's TimestampSpec.timestamp() is package-private (:39), so the value is not
-        // public here either — the seven kinds carry no public instance surface at all.
+        // Java's TimestampSpec.timestamp() is package-private, so the kinds carry no public instance surface.
         Assert.All(nested, type => Assert.Empty(DeclaredPublicMethodNames(type)));
         Assert.All(nested, type => Assert.Empty(DeclaredPublicPropertyNames(type)));
 
-        // The recorded deviation: the hierarchy is CLOSED, so an external subclass — which
-        // Java's own encoder would silently query as latest() — is not expressible.
+        // The recorded deviation: the hierarchy is closed, so an external subclass, which Java's encoder would query as
+        // latest(), is not expressible.
         Assert.Empty(
             typeof(OffsetSpec).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
     }
 
-    /// <summary>
-    /// <see cref="IsolationLevel"/>'s members carry Java's <c>id()</c> values, not
-    /// C#-assigned ordinals — they cross the ABI as <c>int32_t</c> and any other id is
-    /// rejected.
-    /// </summary>
     [Theory]
     [InlineData(IsolationLevel.ReadUncommitted, 0)]
     [InlineData(IsolationLevel.ReadCommitted, 1)]
@@ -316,7 +244,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal(level, (IsolationLevel)id);
     }
 
-    /// <summary>The enum has exactly Java's two members, in the root namespace (D13).</summary>
     [Fact]
     public void IsolationLevel_HasExactlyJavasTwoMembers()
     {
@@ -326,11 +253,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal("Confluent.Kafka", typeof(IsolationLevel).Namespace);
     }
 
-    /// <summary>
-    /// <see cref="PartitionReassignment"/> mirrors Java's constructor and three accessors —
-    /// and is a <b>different type</b> from <see cref="NewPartitionReassignment"/>, which
-    /// Stage 1 bound.
-    /// </summary>
     [Fact]
     public void PartitionReassignment_MirrorsJavasShape()
     {
@@ -344,8 +266,7 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             DeclaredPublicPropertyNames(typeof(PartitionReassignment)));
         Assert.Empty(DeclaredPublicMethodNames(typeof(PartitionReassignment)));
 
-        // Java declares a toString at :62; pinned directly, since the helper filters
-        // `object`'s members.
+        // Java declares a toString; pinned directly, since the helper filters object's members.
         Assert.Same(
             typeof(PartitionReassignment),
             typeof(PartitionReassignment).GetMethod("ToString", Type.EmptyTypes)!.DeclaringType);
@@ -357,7 +278,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         Assert.Equal(new[] { 3 }, reassignment.AddingReplicas);
         Assert.Empty(reassignment.RemovingReplicas);
 
-        // Collections.unmodifiableList semantics: the caller's list cannot mutate the value.
         replicas.Add(9);
         Assert.Equal(new[] { 1, 2, 3 }, reassignment.Replicas);
 
@@ -372,17 +292,12 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
                 Assert.Throws<ArgumentNullException>(() => Build(parameter)).ParamName);
         }
 
-        // The Stage-1 input type and this report type are distinct, despite the names.
         Assert.NotEqual(typeof(NewPartitionReassignment), typeof(PartitionReassignment));
     }
 
-    /// <summary>
-    /// The two new options types match Java's fields and defaults exactly.
-    /// </summary>
     [Fact]
     public void Options_MatchJavasFieldsAndDefaults()
     {
-        // Java's ListPartitionReassignmentsOptions declares NO members of its own.
         ListPartitionReassignmentsOptions reassignments = new ListPartitionReassignmentsOptions();
         Assert.Null(reassignments.TimeoutMs);
         Assert.Equal(
@@ -410,7 +325,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
         nullParameter == "addingReplicas" ? null! : Array.Empty<int>(),
         nullParameter == "removingReplicas" ? null! : Array.Empty<int>());
 
-    /// <inheritdoc cref="PublicAdminP4ShapeParityTests"/>
     private static string[] DeclaredPublicMethodNames(Type type) =>
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method =>
@@ -421,7 +335,6 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
-    /// <inheritdoc cref="DeclaredPublicMethodNames"/>
     private static string[] DeclaredPublicPropertyNames(Type type) =>
         type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))

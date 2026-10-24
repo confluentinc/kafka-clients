@@ -23,12 +23,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The TFM-matrix smoke test for the M15/P1 admin surface: construct a
-/// <see cref="MockAdminClient"/>, run <c>CreateTopics</c> end to end through the per-key
-/// bridge, read a derived accessor, then close. It uses only APIs available on the
-/// netstandard2.0 floor so it <b>compiles on net462</b> (via ns2.0) as well as net8.0 /
-/// net10.0 — the net462 leg's <em>build</em> must pass locally even though its
-/// <em>run</em> is Windows/CI-only.
+/// The TFM-matrix smoke test for the admin surface: the async mock's <c>CreateTopics</c>, <c>DescribeTopics</c> and
+/// <c>DeleteTopics</c> by name and by id, the sync mock's blocking dispose, and a real client's disposal. Only
+/// netstandard2.0 APIs are used, so the net462 leg builds it, though it runs only on Windows.
 /// </summary>
 public sealed class PublicAdminTfmSmokeTests
 {
@@ -39,7 +36,7 @@ public sealed class PublicAdminTfmSmokeTests
     [Fact]
     public async Task MockAdminClient_CreateTopicsClose_RoundTrips()
     {
-        IAsyncAdmin admin = new AsyncMockAdminClient(1);
+        IAsyncAdmin admin = AsyncMockAdminClient.Create().Build();
         try
         {
             AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -65,8 +62,7 @@ public sealed class PublicAdminTfmSmokeTests
     [Fact]
     public void MockAdminClient_ViaSyncDispose_RoundTrips()
     {
-        // The blocking teardown (sync AdminClient_close → destroy) on the TFM matrix.
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
 
         TestTimeout.Run(admin.Dispose, s_deadline);
     }
@@ -80,18 +76,13 @@ public sealed class PublicAdminTfmSmokeTests
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
     }
 
-    /// <summary>
-    /// M15/P2a's two RPCs on every TFM in the matrix (net462 via netstandard2.0, net8.0,
-    /// net10.0). Both key forms, because the by-id path marshals a base64 string the
-    /// by-name path does not.
-    /// </summary>
     [Fact]
     public async Task MockAdminClient_DeleteAndDescribeTopics_RoundTripOnEveryTfm()
     {
         const string Named = "tfm-p2a-by-name";
         const string Identified = "tfm-p2a-by-id";
 
-        IAsyncAdmin admin = new AsyncMockAdminClient(1);
+        IAsyncAdmin admin = AsyncMockAdminClient.Create().Build();
         try
         {
             await TestTimeout.Run(

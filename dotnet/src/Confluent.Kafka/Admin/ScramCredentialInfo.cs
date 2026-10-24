@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class ScramCredentialInfo
 {
-    /// <summary>Creates a credential description — Java's <c>:36</c>.</summary>
+    /// <summary>Creates a credential description — Java's constructor.</summary>
     /// <param name="mechanism">The mechanism.</param>
     /// <param name="iterations">The iteration count used when creating the credential.</param>
     public ScramCredentialInfo(ScramMechanism mechanism, int iterations)
@@ -31,13 +31,13 @@ public sealed class ScramCredentialInfo
         Iterations = iterations;
     }
 
-    /// <summary>The mechanism — Java's <c>mechanism()</c> (<c>:45</c>).</summary>
+    /// <summary>The mechanism — Java's <c>mechanism()</c>.</summary>
     public ScramMechanism Mechanism { get; }
 
-    /// <summary>The iteration count — Java's <c>iterations()</c> (<c>:53</c>).</summary>
+    /// <summary>The iteration count — Java's <c>iterations()</c>.</summary>
     public int Iterations { get; }
 
-    /// <summary>Value equality over both fields — Java's <c>equals</c> (<c>:66</c>).</summary>
+    /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same credential.</returns>
     public override bool Equals(object? obj) =>
@@ -45,7 +45,7 @@ public sealed class ScramCredentialInfo
         && Mechanism == other.Mechanism
         && Iterations == other.Iterations;
 
-    /// <summary>The hash of both fields — Java's <c>hashCode</c> (<c>:75</c>).</summary>
+    /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -56,9 +56,8 @@ public sealed class ScramCredentialInfo
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:58</c>).
-    /// ⚠ The shape only, not the exact text: the mechanism prints with its .NET
-    /// name (<c>ScramSha256</c>), where Java prints its constant (<c>SCRAM_SHA_256</c>).
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>. The mechanism prints with
+    /// its .NET name (<c>ScramSha256</c>), where Java prints its constant (<c>SCRAM_SHA_256</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

@@ -25,27 +25,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>describeClientQuotas</c> end to end against <see cref="MockAdminClient"/>, no broker
-/// (M15/P6).
+/// <c>DescribeClientQuotas</c> end to end against the mocks, whose one future fails with the mock's own answer, as
+/// Java's mock does: the result has <c>Entities</c> and no <c>All</c>, every match type reaches the core, the
+/// preconditions, the result type and the options.
 /// </summary>
-/// <remarks>
-/// Java's <c>MockAdminClient.describeClientQuotas</c> throws
-/// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
-/// (<c>MockAdminClient.java:1244-1246</c>) — and the Rust mock surfaces it as one exceptional
-/// future for the whole call. Because the result carries no per-entity error channel, that
-/// failure faults the single task, which is the contract asserted here; the entity and quota
-/// readers are covered by injection in <c>AdminP6ResultMarshalTests</c>.
-/// </remarks>
 public sealed class PublicAdminDescribeClientQuotasTests
 {
     private const string NotImplemented = "Not implement yet";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// The type publishes <c>Entities()</c> and <b>no</b> <c>All()</c> — Java declares none
-    /// (<c>DescribeClientQuotasResult.java:46</c>).
-    /// </summary>
     [Fact]
     public void Surface_IsEntitiesOnly_WithNoAll()
     {
@@ -53,12 +42,11 @@ public sealed class PublicAdminDescribeClientQuotasTests
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .ToArray();
 
-        // Control-positive: the reflection really sees this type's own methods.
+        // A control: the reflection sees this type's own methods.
         Assert.Contains(
             declared, method => method.Name == nameof(DescribeClientQuotasResult.Entities));
         Assert.DoesNotContain(declared, method => method.Name == "All");
 
-        // M15/P14 S5d: the sync flavour hands out a KafkaFuture, its async twin an AsyncKafkaFuture.
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>),
             typeof(DescribeClientQuotasResult)
@@ -71,14 +59,10 @@ public sealed class PublicAdminDescribeClientQuotasTests
                 .ReturnType);
     }
 
-    /// <summary>
-    /// A whole-call failure faults the <b>single</b> task, with the message and code the core
-    /// reported.
-    /// </summary>
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
@@ -89,14 +73,10 @@ public sealed class PublicAdminDescribeClientQuotasTests
         Assert.NotEqual(0, failure.Code);
     }
 
-    /// <summary>
-    /// <c>Entities()</c> hands back the <b>same</b> task instance every call, so a fault can
-    /// never go unobserved on a second projection.
-    /// </summary>
     [Fact]
     public async Task Entities_IsTheSameTaskEveryCall()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
@@ -106,17 +86,13 @@ public sealed class PublicAdminDescribeClientQuotasTests
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// All three component factories reach the core rather than being screened out — no enum
-    /// combination is rejected binding-side.
-    /// </summary>
     [Theory]
     [InlineData(ClientQuotaMatchType.Exact)]
     [InlineData(ClientQuotaMatchType.Default)]
     [InlineData(ClientQuotaMatchType.Specified)]
     public async Task EveryMatchType_ReachesTheCore(ClientQuotaMatchType matchType)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaFilterComponent component = matchType switch
@@ -131,19 +107,15 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
-        // It reached the core and came back as a call-level failure, not an argument error.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// Preconditions are .NET exceptions raised before any native call (ffi §B5).
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
@@ -151,29 +123,22 @@ public sealed class PublicAdminDescribeClientQuotasTests
             Assert.Throws<ArgumentNullException>(
                 () => admin.DescribeClientQuotas(null!)).ParamName);
 
-        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0.
+        // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DescribeClientQuotas(
                 ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>A call after <c>Dispose</c> throws <see cref="ObjectDisposedException"/>.</summary>
     [Fact]
     public void AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.DescribeClientQuotas(ClientQuotaFilter.All()));
     }
 
-    /// <summary>
-    /// Java's constructor is <b>public</b> (<c>DescribeClientQuotasResult.java:39</c>); the sync one here is
-    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
-    /// <see cref="KafkaFuture{T}"/>, and it still rejects a default future, bound to no source, before anything can
-    /// read it (reached through <c>InternalsVisibleTo</c>).
-    /// </summary>
     [Fact]
     public void Constructor_IsInternalAndRejectsDefault()
     {
@@ -191,7 +156,6 @@ public sealed class PublicAdminDescribeClientQuotasTests
         Assert.Equal(new ArgumentNullException("entities").Message, error.Message);
     }
 
-    /// <summary>The options default to Java's defaults — an unset timeout.</summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() =>
         Assert.Null(new DescribeClientQuotasOptions().TimeoutMs);

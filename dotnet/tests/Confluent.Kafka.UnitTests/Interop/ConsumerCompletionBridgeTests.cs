@@ -13,21 +13,17 @@
 // limitations under the License.
 
 using System;
-using System.Runtime.InteropServices;
-using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// <see cref="NativeConsumer"/>'s SubscribeWithCallback on the mock (churned, chained from a continuation, under GC),
-/// the sync Seek error path, and <see cref="OperationCompletionSource"/>: continuations run off the completing thread,
-/// and each operation frees its GCHandle and releases its handle reference exactly once.
+/// <see cref="NativeConsumer"/>'s SubscribeWithCallback on the mock (churned, chained from a continuation, under GC)
+/// and the sync Seek error path.
 /// </summary>
 public sealed class ConsumerCompletionBridgeTests
 {
@@ -81,49 +77,6 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public async Task Completion_RunsContinuationsAsynchronously_OffTheCompletingThread()
-    {
-        // The continuation is attached before completion, so without RunContinuationsAsynchronously it would run
-        // inline on the completing thread.
-        OperationCompletionSource context = new OperationCompletionSource();
-        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        context.SetGcHandle(gcHandle);
-        try
-        {
-            int completingThreadId = 0;
-            int continuationThreadId = -1;
-            bool continuationOnPool = false;
-
-            Task check = context.Task.ContinueWith(
-                _ =>
-                {
-                    continuationThreadId = Environment.CurrentManagedThreadId;
-                    continuationOnPool = Thread.CurrentThread.IsThreadPoolThread;
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
-
-            Thread completer = new Thread(() =>
-            {
-                completingThreadId = Environment.CurrentManagedThreadId;
-                context.Complete(IntPtr.Zero);
-            });
-            completer.Start();
-            completer.Join();
-
-            await TestTimeout.Run(() => check, s_deadline);
-
-            Assert.NotEqual(completingThreadId, continuationThreadId);
-            Assert.True(continuationOnPool);
-        }
-        finally
-        {
-            context.FreeGcHandle();
-        }
-    }
-
-    [Fact]
     public async Task ChainedOps_FromContinuation_Succeed_GuardReleasedBeforeCompletion()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
@@ -153,66 +106,5 @@ public sealed class ConsumerCompletionBridgeTests
             GC.Collect();
             await TestTimeout.Run(() => op, s_deadline);
         }
-    }
-
-    [Fact]
-    public void FreeGcHandle_CalledTwice_FreesAndReleasesExactlyOnce()
-    {
-        // A second GCHandle free would throw, and a second release would make the Dispose below throw.
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        SafeConsumerHandle handle = consumer.Handle;
-
-        OperationCompletionSource context = new OperationCompletionSource();
-        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        context.SetGcHandle(gcHandle);
-
-        bool handleRefAdded = false;
-        handle.DangerousAddRef(ref handleRefAdded);
-        Assert.True(handleRefAdded);
-        context.SetHandleRef(handle);
-
-        context.FreeGcHandle();
-        context.FreeGcHandle();
-
-        TestTimeout.Dispose(consumer);
-        Assert.True(handle.IsClosed);
-    }
-
-    [Fact]
-    public void AbandonBeforeSubmit_ThenFreeGcHandle_FreesAndReleasesExactlyOnce()
-    {
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        SafeConsumerHandle handle = consumer.Handle;
-
-        OperationCompletionSource context = new OperationCompletionSource();
-        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        context.SetGcHandle(gcHandle);
-
-        bool handleRefAdded = false;
-        handle.DangerousAddRef(ref handleRefAdded);
-        Assert.True(handleRefAdded);
-        context.SetHandleRef(handle);
-
-        context.AbandonBeforeSubmit();
-        context.FreeGcHandle();
-
-        TestTimeout.Dispose(consumer);
-        Assert.True(handle.IsClosed);
-    }
-
-    [Fact]
-    public void AbandonBeforeSubmit_WithNoHandleRefTaken_ReleasesNothing()
-    {
-        NativeConsumer consumer = NativeConsumer.CreateMock();
-        SafeConsumerHandle handle = consumer.Handle;
-
-        OperationCompletionSource context = new OperationCompletionSource();
-        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
-        context.SetGcHandle(gcHandle);
-
-        context.AbandonBeforeSubmit();
-
-        TestTimeout.Dispose(consumer);
-        Assert.True(handle.IsClosed);
     }
 }

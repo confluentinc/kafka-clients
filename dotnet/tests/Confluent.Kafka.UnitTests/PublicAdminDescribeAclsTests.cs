@@ -25,27 +25,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>describeAcls</c> end to end against <see cref="MockAdminClient"/>, no broker (M15/P6).
+/// <c>DescribeAcls</c> end to end against the mocks, whose one future fails with the mock's own answer, as Java's
+/// mock does: the result has <c>Values</c> and no <c>All</c>, the preconditions and the options.
 /// </summary>
-/// <remarks>
-/// Java's <c>MockAdminClient.describeAcls</c> throws
-/// <c>UnsupportedOperationException("Not implemented yet")</c>
-/// (<c>MockAdminClient.java:811-813</c>), mirrored by the Rust mock as one exceptional future
-/// for the whole call. Because the result carries no per-key error channel, that failure
-/// arrives as the callback's own <b>owned</b> error and faults the single task — which is
-/// exactly the contract being asserted here.
-/// </remarks>
 public sealed class PublicAdminDescribeAclsTests
 {
     private const string NotImplemented = "Not implemented yet";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// ⚠⚠ <b>T-N7.</b> The type publishes <c>Values()</c> and <b>no</b> <c>All()</c> — Java
-    /// declares none (<c>DescribeAclsResult.java:39</c>), so adding one would be public
-    /// surface Java does not have.
-    /// </summary>
     [Fact]
     public void Surface_IsValuesOnly_WithNoAll()
     {
@@ -53,12 +41,10 @@ public sealed class PublicAdminDescribeAclsTests
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .ToArray();
 
-        // Control-positive: the reflection really sees this type's own methods, so a lookup
-        // returning nothing could not make the absence assertion pass vacuously.
+        // A control: the reflection sees this type's own methods, so the absence below is not vacuous.
         Assert.Contains(declared, method => method.Name == nameof(DescribeAclsResult.Values));
         Assert.DoesNotContain(declared, method => method.Name == "All");
 
-        // M15/P14 S5d: the sync flavour hands out a KafkaFuture, its async twin an AsyncKafkaFuture.
         Assert.Equal(
             typeof(KafkaFuture<IReadOnlyCollection<AclBinding>>),
             typeof(DescribeAclsResult)
@@ -71,14 +57,10 @@ public sealed class PublicAdminDescribeAclsTests
                 .ReturnType);
     }
 
-    /// <summary>
-    /// A whole-call failure faults the <b>single</b> task, with the message and code the core
-    /// reported — there is no per-key channel to absorb it.
-    /// </summary>
     [Fact]
     public async Task WholeCallFailure_FaultsTheSingleTask()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
@@ -89,14 +71,10 @@ public sealed class PublicAdminDescribeAclsTests
         Assert.NotEqual(0, failure.Code);
     }
 
-    /// <summary>
-    /// <c>Values()</c> hands back the <b>same</b> task instance every call, so a fault can
-    /// never go unobserved on a second projection.
-    /// </summary>
     [Fact]
     public async Task Values_IsTheSameTaskEveryCall()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
@@ -106,15 +84,10 @@ public sealed class PublicAdminDescribeAclsTests
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// A wildcard filter — nulls and ANY everywhere — is accepted rather than screened out:
-    /// the ABI rejects no combination (header, <c>kafka_admin_AdminClient_describe_acls</c>), as
-    /// Java's filter constructors do not.
-    /// </summary>
     [Fact]
     public async Task WildcardFilter_IsAccepted_NotRejected()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(
@@ -122,42 +95,36 @@ public sealed class PublicAdminDescribeAclsTests
                 new ResourcePatternFilter(ResourceType.Any, null, PatternType.Any),
                 new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any)));
 
-        // It reached the core and came back as a call-level failure, not an argument error.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// Preconditions are .NET exceptions raised before any native call (ffi §B5).
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
             "filter",
             Assert.Throws<ArgumentNullException>(() => admin.DescribeAcls(null!)).ParamName);
 
-        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0.
+        // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DescribeAcls(
                 Filter("t"), new DescribeAclsOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>A call after <c>Dispose</c> throws <see cref="ObjectDisposedException"/>.</summary>
     [Fact]
     public void AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeAcls(Filter("gone")));
     }
 
-    /// <summary>The options default to Java's defaults — an unset timeout.</summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() => Assert.Null(new DescribeAclsOptions().TimeoutMs);
 

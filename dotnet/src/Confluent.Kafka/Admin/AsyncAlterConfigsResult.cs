@@ -13,84 +13,64 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.IncrementalAlterConfigs"/> — the .NET realization of
-/// Java's <c>AlterConfigsResult</c>: one future <b>per resource</b>, handed back the
-/// moment the request is submitted (<c>AlterConfigsResult.java:39, :46</c>).
+/// The result of <see cref="IAsyncAdmin.IncrementalAlterConfigs"/> — Java's
+/// <c>org.apache.kafka.clients.admin.AlterConfigsResult</c>: one future per resource.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b><see cref="All"/> here is a bare <see cref="AsyncKafkaFuture"/></b> — Java's
-/// <c>KafkaFuture&lt;Void&gt;</c> — whereas <see cref="AsyncDescribeConfigsResult.All"/> yields
-/// the whole map. The two results are otherwise the same shape.
-/// </para>
-/// <para>
-/// ⚠ <b>The type is named for Java's return type, not for the RPC.</b> Java's signature is
-/// <c>AlterConfigsResult incrementalAlterConfigs(...)</c> (<c>Admin.java:501, :530</c>),
-/// and the ABI agrees — its result handle is
-/// <c>kafka_admin_AlterConfigsResult_t</c>, with no symbol named for
-/// <c>IncrementalAlterConfigs</c> at all.
-/// </para>
-/// <para>
-/// Java publishes <c>Map&lt;ConfigResource, KafkaFuture&lt;Void&gt;&gt; values()</c>, so
-/// awaiting one of these tells you whether that resource was altered and hands back
-/// nothing; a resource that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/>. The
-/// per-resource error is <b>owned</b>: it arrives with that resource's own callback and is
-/// freed once it has been copied into the <see cref="KafkaException"/>.
-/// </para>
+/// The type is named for Java's return type, not for the RPC. A resource that fails faults only
+/// its own future, and <see cref="All"/> is a bare <see cref="AsyncKafkaFuture"/>, as in Java.
 /// </remarks>
 /// <seealso cref="AlterConfigsResult"/>
 public sealed class AsyncAlterConfigsResult
 {
     private readonly IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal
-    /// success token (result shape 2 — the ABI has no <c>get_value</c> here, which its own
-    /// header states, so a null per-key error <em>is</em> the success value) and must not
-    /// reach the public surface.
-    /// </summary>
-    /// <remarks>
-    /// Each entry wraps the <b>same</b> task as the bridge's — no second
-    /// task whose fault could go unobserved. It reuses the bridge's own comparer so the
-    /// view and the sources cannot disagree about key identity.
-    /// </remarks>
-    internal AsyncAlterConfigsResult(
-        IReadOnlyDictionary<ConfigResource, Task<bool>> values, IEqualityComparer<ConfigResource> comparer)
+
+    private AsyncAlterConfigsResult(
+        IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        Dictionary<ConfigResource, AsyncKafkaFuture> erased = new Dictionary<ConfigResource, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<ConfigResource, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncAlterConfigsResult From(VoidKeyedAdminOperation<ConfigResource> operation) =>
-        new AsyncAlterConfigsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// One future per requested resource, keyed by resource — Java's <c>values()</c>
-    /// (<c>:39</c>).
+    /// One future per requested resource, keyed by resource — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> resource has been altered, and faults with the first
-    /// failure if any resource failed — Java's <c>all()</c> (<c>:46</c>,
-    /// <c>KafkaFuture.allOf</c>).
+    /// Completes when every resource has been altered, and faults with the first failure if
+    /// any resource failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() =>
+        new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+
+    internal static AsyncAlterConfigsResult OfClient(
+        (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<ConfigResource, AsyncKafkaFuture> values =
+            new Dictionary<ConfigResource, AsyncKafkaFuture>(native.Values.Count, EqualityComparer<ConfigResource>.Default);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<ConfigResource, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncAlterConfigsResult(values, nativeFutures, native.Result);
+    }
 }

@@ -15,9 +15,9 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// How a resource pattern's name is matched against resource names — the .NET realization of
-/// Java's <c>org.apache.kafka.common.resource.PatternType</c>. Each member's value is the
-/// Kafka <b>wire</b> code (Java's <c>code()</c>), not a C#-assigned ordinal.
+/// How a resource pattern's name is matched against resource names — Java's
+/// <c>org.apache.kafka.common.resource.PatternType</c>. Each member's value is the Kafka wire
+/// code (Java's <c>code()</c>), not an ordinal.
 /// </summary>
 public enum PatternType
 {

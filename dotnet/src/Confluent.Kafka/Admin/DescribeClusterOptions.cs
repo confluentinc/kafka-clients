@@ -12,26 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.DescribeCluster"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DescribeClusterOptions</c>
-/// (<c>DescribeClusterOptions.java:23-64</c>).
+/// <c>org.apache.kafka.clients.admin.DescribeClusterOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java declares exactly two fields of its own — <c>includeAuthorizedOperations</c>
-/// (<c>:25, :54</c>) and <c>includeFencedBrokers</c> (<c>:27, :62</c>) — beside the
-/// inherited timeout, and the ABI's <c>describe_cluster_async</c> takes exactly those two
-/// booleans plus <c>timeout_ms</c>.
-/// </para>
 /// </remarks>
 public sealed class DescribeClusterOptions
 {
+    private int? _timeoutMs;
+
+    private bool _includeAuthorizedOperations;
+
+    private bool _includeFencedBrokers;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Ask the broker to report the cluster's authorized operations — Java's
@@ -39,17 +48,33 @@ public sealed class DescribeClusterOptions
     /// Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
     /// <remarks>
-    /// ⚠ Even when this is set, an older broker may not supply the information (Java says
-    /// so at <c>:51-53</c>) — which is exactly why
-    /// <see cref="DescribeClusterResult.AuthorizedOperations"/> yields
-    /// <see langword="null"/> rather than an empty collection in that case.
+    /// Even when this is set, an older broker may not supply the information; then
+    /// <see cref="DescribeClusterResult.AuthorizedOperations"/> yields <see langword="null"/>.
     /// </remarks>
-    public bool IncludeAuthorizedOperations { get; set; }
+    public bool IncludeAuthorizedOperations
+    {
+        get => _includeAuthorizedOperations;
+        set
+        {
+            _includeAuthorizedOperations = value;
+            Setters.Ran(nameof(IncludeAuthorizedOperations));
+        }
+    }
 
     /// <summary>
     /// Include fenced brokers in the reported node set — Java's
     /// <c>includeFencedBrokers(boolean)</c> / <c>includeFencedBrokers()</c>. Defaults to
     /// <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool IncludeFencedBrokers { get; set; }
+    public bool IncludeFencedBrokers
+    {
+        get => _includeFencedBrokers;
+        set
+        {
+            _includeFencedBrokers = value;
+            Setters.Ran(nameof(IncludeFencedBrokers));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

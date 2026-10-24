@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,18 +22,33 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class UpdateFeaturesOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+    private bool _validateOnly;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
-    /// Whether to validate the updates without applying them — Java's <c>validateOnly()</c>
-    /// (<c>:27</c>), default <see langword="false"/>.
+    /// Whether to validate the updates without applying them — Java's <c>validateOnly()</c>,
+    /// default <see langword="false"/>.
     /// </summary>
-    public bool ValidateOnly { get; set; }
+    public bool ValidateOnly
+    {
+        get => _validateOnly;
+        set
+        {
+            _validateOnly = value;
+            Setters.Ran(nameof(ValidateOnly));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

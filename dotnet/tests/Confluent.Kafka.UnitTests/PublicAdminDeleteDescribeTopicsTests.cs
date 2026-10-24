@@ -16,39 +16,28 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>deleteTopics</c> and <c>describeTopics</c> end to end against
-/// <see cref="MockAdminClient"/> — both key forms, no broker.
+/// <c>DeleteTopics</c> and <c>DescribeTopics</c> end to end against the mocks, by topic id and by name, with the
+/// name-collection overloads and the C options the calls build.
 /// </summary>
 public sealed class PublicAdminDeleteDescribeTopicsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// The base64 topic-id round trip in full: a <see cref="Uuid"/> goes out as Java's
-    /// <c>Uuid.toString()</c> text, the ABI hands the same text back as the result key,
-    /// and it parses to the <b>identical</b> <see cref="Uuid"/> — which is why the per-key
-    /// bridge's key type had to become generic at all.
-    /// </summary>
-    /// <remarks>
-    /// The id is not invented: it is the one the broker assigned, read back through
-    /// <c>describeTopics</c> by name. So the assertion covers the ABI's own round trip
-    /// (<c>topic_id</c> out of a description, then in as a request key, then out again as
-    /// a result key), not just <see cref="Uuid.Parse"/> against
-    /// <see cref="Uuid.ToString"/>.
-    /// </remarks>
     [Fact]
-    public async Task TopicId_RoundTripsThroughTheAbiAsBase64_AndComesBackAsTheSameUuid()
+    public async Task TopicId_RoundTripsThroughTheAbi_AndComesBackAsTheSameUuid()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-roundtrip";
 
@@ -60,7 +49,6 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Uuid topicId = described.TopicId;
         Assert.NotEqual(Uuid.Zero, topicId);
 
-        // Out as base64, back as the same Uuid — the result is keyed by the parsed id.
         AsyncDescribeTopicsResult byId = admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { topicId }));
         Assert.True(byId.TopicIdValues!.ContainsKey(topicId));
 
@@ -68,24 +56,15 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Equal(Topic, again.Name);
         Assert.Equal(topicId, again.TopicId);
 
-        // …and the same for deleteTopics, whose key reader is a different delegate.
         AsyncDeleteTopicsResult deleted = admin.DeleteTopics(TopicCollection.OfTopicIds(new[] { topicId }));
         Assert.True(deleted.TopicIdValues!.ContainsKey(topicId));
         await TestTimeout.Run(() => deleted.TopicIdValues![topicId].Get(), s_deadline);
     }
 
-    /// <summary>
-    /// ⚠ <b>Decision D8 — a wrong-accessor read returns <see langword="null"/></b>, in
-    /// both directions and on both result types. Java's javadoc says so
-    /// (<c>DeleteTopicsResult.java:51-67</c>, <c>DescribeTopicsResult.java:54-72</c>), and
-    /// every C# instinct says otherwise: throwing or returning an empty map both look
-    /// tidier and both silently break a caller ported from Java, who wrote
-    /// <c>if (result.topicIdValues() != null)</c>.
-    /// </summary>
     [Fact]
     public async Task WrongAccessor_ReturnsNull_BothDirections_BothResultTypes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Alpha = "p2a-d8-alpha";
         const string Beta = "p2a-d8-beta";
@@ -124,15 +103,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         await TestTimeout.Run(() => deletedById.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The discriminator against "fault everything as soon as any key fails": one topic
-    /// succeeds and one fails <b>in the same batch</b>, each carrying its own outcome, and
-    /// the aggregate faults.
-    /// </summary>
     [Fact]
     public async Task MixedOutcome_EachKeyCarriesItsOwnResult()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Present = "p2a-mixed-present";
         const string Absent = "p2a-mixed-absent";
@@ -153,10 +127,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", failure.Message);
 
-        // all() aggregates the failure rather than hanging or reporting success.
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => deleted.All().Get(), s_deadline));
 
-        // …and the same shape on describeTopics, where success also carries a value.
         AsyncDescribeTopicsResult described =
             admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Absent, StillPresent }));
         Assert.Equal(StillPresent, (await TestTimeout.Run(
@@ -170,17 +142,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
     }
 
-    /// <summary>
-    /// The description tree is fully <b>copied out</b> of the native result before its
-    /// root is destroyed, so every string, node and flag read here is owned managed state
-    /// rather than a pointer into freed memory. The result root is destroyed by the
-    /// completion trampoline's <c>finally</c>, which has already run by the time the
-    /// awaited value is observable.
-    /// </summary>
     [Fact]
     public async Task DescriptionTree_IsCopiedOut_AndOutlivesTheResultRoot()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-tree";
 
@@ -198,37 +163,16 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.NotNull(partition.Leader);
         Assert.Equal(3, partition.Replicas.Count);
 
-        // The Node tree came through the shipped consumer-side NodeMarshal, so its
-        // host/port are the mock's own broker records rather than defaults.
         Assert.NotEmpty(partition.Leader!.Host);
         Assert.True(partition.Leader.Port > 0);
 
-        // ToString touches every branch, including the absent-set spelling, so a stale
-        // pointer anywhere in the tree would surface here rather than silently.
         Assert.Contains("partition=0", partition.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// ⚠ <b>Absent and empty are different facts, and the marshaller must read the
-    /// <c>has_*</c> discriminant rather than the count.</b> The mock reports
-    /// <em>present-but-empty</em> sets for all three (Java's mock likewise passes
-    /// <c>Collections.emptySet()</c>), so this pins the direction the mock <em>can</em>
-    /// reach: a count of 0 with the discriminant true must yield a <b>non-null empty</b>
-    /// collection, never <see langword="null"/>. An implementation that derived
-    /// nullability from <c>count == 0</c> — the natural shortcut — goes red here.
-    /// </summary>
-    /// <remarks>
-    /// The other direction (<c>has_* == false</c> ⇒ <see langword="null"/>) has <b>no
-    /// broker-free vehicle</b>: the mock always reports the sets, and the ABI exposes no
-    /// way to fabricate a <c>TopicDescription_t</c>. It is covered by the nullable
-    /// annotations pinned in <see cref="PublicAdminP2aShapeParityTests"/> and by the
-    /// marshaller reading the discriminant, not by a test — stated rather than papered
-    /// over.
-    /// </remarks>
     [Fact]
     public async Task ReportedButEmptySets_AreEmptyCollections_NotNull()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-empty-sets";
 
@@ -251,14 +195,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.NotNull(partition.InSyncReplicas);
     }
 
-    /// <summary>
-    /// A repeated key yields one entry, as Java's map-keyed result does — for both key
-    /// forms, since the two take different de-duplication paths.
-    /// </summary>
     [Fact]
     public async Task RepeatedKeys_YieldOneEntry()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-dedup";
 
@@ -275,24 +215,24 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Single(byId.TopicIdValues!);
     }
 
-    /// <summary>
-    /// Preconditions are validated <b>before</b> any native call (ffi §B5) and raise .NET
-    /// exceptions, never <see cref="KafkaException"/>. The negative
-    /// <c>PartitionSizeLimitPerResponse</c> guard is deliberately stricter than Java, because
-    /// the ABI silently rereads a negative as "unset" — the caller would never learn the value
-    /// they asked for was discarded. A negative <c>TimeoutMs</c> is not rejected (M15/P13.5 X2):
-    /// it is sent as 0, Java's <c>calcDeadlineMs</c> clamp.
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeAnyNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        // The cast picks the TopicCollection overload: a lone literal null matches the
-        // name-collection one too (CS0121) since M15/P13.5 G1-10.
-        Assert.Throws<ArgumentNullException>(() => admin.DeleteTopics((TopicCollection)null!));
-        Assert.Throws<ArgumentNullException>(() => admin.DescribeTopics((TopicCollection)null!));
+        // The cast picks the TopicCollection overload: a lone literal null matches the name-collection one too (CS0121).
+        ArgumentException nullDelete = Assert.Throws<ArgumentException>(() => admin.DeleteTopics((TopicCollection)null!));
+        Assert.Equal(
+            "The TopicCollection: null provided did not match any supported classes for deleteTopics.",
+            nullDelete.Message);
+        Assert.Null(nullDelete.ParamName);
+        ArgumentException nullDescribe =
+            Assert.Throws<ArgumentException>(() => admin.DescribeTopics((TopicCollection)null!));
+        Assert.Equal(
+            "The TopicCollection: null provided did not match any supported classes for describeTopics.",
+            nullDescribe.Message);
+        Assert.Null(nullDescribe.ParamName);
 
         ArgumentException nullName = Assert.Throws<ArgumentException>(
             () => admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "alpha", null! })));
@@ -309,28 +249,58 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
                 new DescribeTopicsOptions { TimeoutMs = -5 })));
 
-        ArgumentOutOfRangeException limit = Assert.Throws<ArgumentOutOfRangeException>(
+        Assert.Null(Record.Exception(
             () => admin.DescribeTopics(
                 TopicCollection.OfTopicNames(new[] { "alpha" }),
-                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 }));
-        Assert.StartsWith(
-            "DescribeTopicsOptions.PartitionSizeLimitPerResponse must not be negative.",
-            limit.Message,
-            StringComparison.Ordinal);
-
-        // Zero is passed through untouched, as Java would — only a negative is rejected.
-        admin.DescribeTopics(
-            TopicCollection.OfTopicNames(new[] { "alpha" }),
-            new DescribeTopicsOptions { PartitionSizeLimitPerResponse = 0 });
+                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 })));
+        Assert.Null(Record.Exception(
+            () => admin.DescribeTopics(
+                TopicCollection.OfTopicNames(new[] { "alpha" }),
+                new DescribeTopicsOptions { PartitionSizeLimitPerResponse = 0 })));
     }
 
-    /// <summary>
-    /// Both RPCs reject use after close, like <c>CreateTopics</c>.
-    /// </summary>
+    [Fact]
+    public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
+    {
+        Assert.Equal((-1, (sbyte)1), ReadBack((DeleteTopicsOptions?)null));
+        Assert.Equal((-1, (sbyte)1), ReadBack(new DeleteTopicsOptions()));
+        Assert.Empty(new DeleteTopicsOptions().Setters.InOrder);
+
+        Assert.Equal((-1, (sbyte)0, 2000), ReadBack((DescribeTopicsOptions?)null));
+        Assert.Equal((-1, (sbyte)0, 2000), ReadBack(new DescribeTopicsOptions()));
+        Assert.Empty(new DescribeTopicsOptions().Setters.InOrder);
+    }
+
+    [Fact]
+    public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
+    {
+        Assert.Equal((0, (sbyte)1), ReadBack(new DeleteTopicsOptions { TimeoutMs = -5 }));
+        Assert.Equal((-1, (sbyte)0), ReadBack(new DeleteTopicsOptions { RetryOnQuotaViolation = false }));
+
+        DeleteTopicsOptions delete = new DeleteTopicsOptions { TimeoutMs = 10, RetryOnQuotaViolation = false };
+        delete.TimeoutMs = 20;
+        delete.RetryOnQuotaViolation = true;
+        Assert.Equal((20, (sbyte)1), ReadBack(delete));
+
+        Assert.Equal((-1, (sbyte)1, 2000), ReadBack(new DescribeTopicsOptions { IncludeAuthorizedOperations = true }));
+        Assert.Equal((-1, (sbyte)0, -7), ReadBack(new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -7 }));
+
+        DescribeTopicsOptions describe = new DescribeTopicsOptions
+        {
+            TimeoutMs = 10,
+            IncludeAuthorizedOperations = true,
+            PartitionSizeLimitPerResponse = 5,
+        };
+        describe.TimeoutMs = null;
+        describe.IncludeAuthorizedOperations = false;
+        describe.PartitionSizeLimitPerResponse = 6;
+        Assert.Equal((-1, (sbyte)0, 6), ReadBack(describe));
+    }
+
     [Fact]
     public void AfterClose_BothRpcsThrowObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
@@ -339,16 +309,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             () => admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "alpha" })));
     }
 
-    /// <summary>
-    /// A non-ASCII topic name survives both directions of the hand-rolled UTF-8
-    /// marshalling — out as a pinned NUL-terminated request key, back as the borrowed
-    /// result key and as <see cref="TopicDescription.Name"/> (ffi §B3; the <c>LPStr</c>
-    /// guard, which corrupts silently in an ASCII-only suite).
-    /// </summary>
     [Fact]
     public async Task NonAsciiTopicName_RoundTripsThroughBothRpcs()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         const string Topic = "p2a-témas-日本語";
 
@@ -363,14 +327,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         await TestTimeout.Run(() => deleted.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The whole surface works through the <see cref="IAdmin"/> interface, on the real
-    /// client type as well as the mock — the two clients differ only in construction.
-    /// </summary>
     [Fact]
     public void BothClientsImplementTheRpcs()
     {
-        IAdmin mock = new MockAdminClient(1);
+        IAdmin mock = MockAdminClient.Create().Build();
         try
         {
             Assert.NotNull(mock.DescribeTopics(TopicCollection.OfTopicNames(Array.Empty<string>())));
@@ -384,7 +344,6 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
         try
         {
-            // No broker is contacted: an empty collection has no key to submit for.
             Assert.NotNull(real.DeleteTopics(TopicCollection.OfTopicNames(Array.Empty<string>())));
         }
         finally
@@ -393,14 +352,6 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
     }
 
-    /// <summary>
-    /// M15/P13.5 G1-10: Java's name-collection overloads — <c>deleteTopics(Collection&lt;String&gt;)</c>
-    /// / <c>(…, DeleteTopicsOptions)</c> and <c>describeTopics(Collection&lt;String&gt;)</c> /
-    /// <c>(…, DescribeTopicsOptions)</c> (<c>Admin.java:212</c>, <c>:226</c>, <c>:295</c>,
-    /// <c>:306</c>) — exist on <see cref="IAdmin"/> and on both clients, each as one member
-    /// whose options default to <see langword="null"/>.
-    /// </summary>
-    /// <param name="type">The type the overloads must be declared on.</param>
     [Theory]
     [InlineData(typeof(IAdmin))]
     [InlineData(typeof(KafkaAdminClient))]
@@ -428,21 +379,14 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             Assert.Null(parameters[1].DefaultValue);
         }
 
-        // Each RPC now has exactly the two forms: TopicCollection and the name collection.
         Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DeleteTopics)));
         Assert.Equal(2, type.GetMethods().Count(method => method.Name == nameof(IAdmin.DescribeTopics)));
     }
 
-    /// <summary>
-    /// M15/P13.5 G1-10: the name-collection forms do exactly what the
-    /// <see cref="TopicCollection"/> form does with <see cref="TopicCollection.OfTopicNames"/>
-    /// — the same per-name keys, the same success values, the same failures — through the
-    /// <see cref="IAsyncAdmin"/> interface.
-    /// </summary>
     [Fact]
     public async Task G1_10_TheNameCollectionForms_BehaveAsTheTopicCollectionForm()
     {
-        AsyncMockAdminClient mock = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient mock = AsyncMockAdminClient.Create().Build();
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncAdmin admin = mock;
         const string Present = "p135-g110-present";
@@ -475,44 +419,20 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
             () => TestTimeout.Run(() => deleted.TopicNameValues![Absent].Get(), s_deadline));
         Assert.Equal($"Topic {Absent} does not exist.", deleteFailure.Message);
 
-        // The delete took effect: describing the topic by name now fails.
         AsyncDescribeTopicsResult afterDelete = admin.DescribeTopics(new[] { Present }, new DescribeTopicsOptions());
         KafkaException gone = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => afterDelete.TopicNameValues![Present].Get(), s_deadline));
         Assert.Equal($"Topic {Present} not found.", gone.Message);
     }
 
-    /// <summary>
-    /// M15/P13.5 G1-10: the name-collection forms hand their options through. Each call is
-    /// compared with the <see cref="TopicCollection"/> form given the same options, so the
-    /// assertion is about forwarding, not about what any one option does.
-    /// </summary>
-    /// <remarks>
-    /// The <c>PartitionSizeLimitPerResponse</c> rejection is synchronous, so it is compared on
-    /// both clients. A negative <c>TimeoutMs</c> no longer is (M15/P13.5 X2 sends it as 0), so it
-    /// is compared through the outcome instead, on the real client only: with no broker, both
-    /// forms fail through the result with the same timeout error, while a form that dropped its
-    /// options would wait out the client default and fail the bound. The mock ignores timeouts,
-    /// so there the timeout has no outcome to compare.
-    /// </remarks>
     [Fact]
     public async Task G1_10_TheNameCollectionForms_ForwardTheirOptions()
     {
-        IAsyncAdmin mock = new AsyncMockAdminClient(1);
         IAsyncAdmin real = new AsyncKafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "127.0.0.1:1" });
         try
         {
             string[] names = { "alpha" };
-            foreach (IAsyncAdmin admin in new[] { mock, real })
-            {
-                DescribeTopicsOptions badLimit = new DescribeTopicsOptions { PartitionSizeLimitPerResponse = -1 };
-                string? described = Rejection(() => admin.DescribeTopics(names, badLimit));
-                Assert.Equal(
-                    Rejection(() => admin.DescribeTopics(TopicCollection.OfTopicNames(names), badLimit)), described);
-                Assert.NotNull(described);
-            }
-
             DeleteTopicsOptions deleteTimeout = new DeleteTopicsOptions { TimeoutMs = -1 };
             AssertSameTimeout(
                 await Failure(() => real.DeleteTopics(TopicCollection.OfTopicNames(names), deleteTimeout).All().Get()),
@@ -525,18 +445,13 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
         finally
         {
-            TestTimeout.Dispose(mock);
             TestTimeout.Dispose(real);
         }
     }
 
-    /// <summary>The failure an awaited call faults with, bounded by the test deadline.</summary>
     private static Task<KafkaException> Failure(Func<Task> call) =>
         TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(call), s_deadline);
 
-    /// <summary>
-    /// Both failures are the core's timeout error (REQUEST_TIMED_OUT), and they are the same one.
-    /// </summary>
     private static void AssertSameTimeout(KafkaException expected, KafkaException actual)
     {
         Assert.Equal(7, expected.Code);
@@ -544,14 +459,10 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Equal(expected.Message, actual.Message);
     }
 
-    /// <summary>
-    /// M15/P13.5 G1-10: a null name collection is rejected before anything is forwarded, with
-    /// the overload's own parameter name — on both clients, through <see cref="IAdmin"/>.
-    /// </summary>
     [Fact]
     public void G1_10_ANullNameCollection_IsRejectedWithItsParameterName()
     {
-        IAdmin mock = new MockAdminClient(1);
+        IAdmin mock = MockAdminClient.Create().Build();
         IAdmin real = new KafkaAdminClient(
             new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
         try
@@ -576,20 +487,63 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         }
     }
 
-    /// <summary>
-    /// What a call threw, as one comparable string, or <see langword="null"/> if it did not
-    /// throw.
-    /// </summary>
-    private static string? Rejection(Action call)
+    private static (int TimeoutMs, sbyte RetryOnQuotaViolation) ReadBack(DeleteTopicsOptions? options)
     {
+        IntPtr native = NativeAdminClient.NewDeleteTopicsOptions(options);
         try
         {
-            call();
-            return null;
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.DeleteTopicsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte retry = Native.DeleteTopicsOptionsShouldRetryOnQuotaViolation(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return (timeoutMs, retry);
         }
-        catch (Exception thrown)
+        finally
         {
-            return $"{thrown.GetType().FullName}|{(thrown as ArgumentException)?.ParamName}|{thrown.Message}";
+            NativeAdminClient.FreeDeleteTopicsOptions(native);
         }
+    }
+
+    private static (int TimeoutMs, sbyte IncludeAuthorizedOperations, int PartitionSizeLimitPerResponse) ReadBack(
+        DescribeTopicsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeTopicsOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.DescribeTopicsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte include = Native.DescribeTopicsOptionsIncludeAuthorizedOperations(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            int limit = Native.DescribeTopicsOptionsPartitionSizeLimitPerResponse(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return (timeoutMs, include, limit);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeTopicsOptions(native);
+        }
+    }
+
+    /// <summary>The options getters the binding never reads, declared for the read-back tests.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DeleteTopicsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsOptions_should_retry_on_quota_violation_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte DeleteTopicsOptionsShouldRetryOnQuotaViolation(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeTopicsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsOptions_include_authorized_operations_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte DescribeTopicsOptionsIncludeAuthorizedOperations(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeTopicsOptions_partition_size_limit_per_response_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeTopicsOptionsPartitionSizeLimitPerResponse(IntPtr self, ref IntPtr outErr);
     }
 }

@@ -18,16 +18,16 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The state of one active producer on a partition — Java's
-/// <c>org.apache.kafka.clients.admin.ProducerState</c> (<c>:23</c>).
+/// <c>org.apache.kafka.clients.admin.ProducerState</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ The two nullable properties are Java's <c>OptionalInt</c>/<c>OptionalLong</c> (<c>:28-29</c>):
-/// absent is <see langword="null"/>, never <c>0</c> or <c>-1</c>. The four scalar siblings do
-/// use <c>-1</c> as their out-of-range sentinel, so the two encodings must not be conflated.
+/// The two nullable properties are Java's <c>OptionalInt</c> and <c>OptionalLong</c>: absent is
+/// <see langword="null"/>, never <c>0</c> or <c>-1</c>, although the four scalar properties use
+/// <c>-1</c> as their sentinel.
 /// </remarks>
 public sealed class ProducerState
 {
-    /// <summary>Creates a producer state — Java's constructor (<c>:31-45</c>).</summary>
+    /// <summary>Creates a producer state — Java's constructor.</summary>
     /// <param name="producerId">The producer id.</param>
     /// <param name="producerEpoch">The producer epoch.</param>
     /// <param name="lastSequence">The last sequence number written by this producer.</param>
@@ -52,34 +52,34 @@ public sealed class ProducerState
         CurrentTransactionStartOffset = currentTransactionStartOffset;
     }
 
-    /// <summary>The producer id — Java's <c>producerId()</c> (<c>:47</c>).</summary>
+    /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
     public long ProducerId { get; }
 
     /// <summary>
-    /// The producer epoch — Java's <c>producerEpoch()</c> (<c>:51</c>), an <see langword="int"/>
-    /// here as in Java, unlike <see cref="AbortTransactionSpec.ProducerEpoch"/>.
+    /// The producer epoch — Java's <c>producerEpoch()</c>, an <see langword="int"/> here as in
+    /// Java, unlike <see cref="AbortTransactionSpec.ProducerEpoch"/>.
     /// </summary>
     public int ProducerEpoch { get; }
 
-    /// <summary>The last written sequence number — Java's <c>lastSequence()</c> (<c>:55</c>).</summary>
+    /// <summary>The last written sequence number — Java's <c>lastSequence()</c>.</summary>
     public int LastSequence { get; }
 
-    /// <summary>The last written timestamp — Java's <c>lastTimestamp()</c> (<c>:59</c>).</summary>
+    /// <summary>The last written timestamp — Java's <c>lastTimestamp()</c>.</summary>
     public long LastTimestamp { get; }
 
     /// <summary>
     /// The first offset of the in-progress transaction, or <see langword="null"/> when none is
-    /// in progress — Java's <c>currentTransactionStartOffset()</c> (<c>:63</c>, <c>OptionalLong</c>).
+    /// in progress — Java's <c>currentTransactionStartOffset()</c>.
     /// </summary>
     public long? CurrentTransactionStartOffset { get; }
 
     /// <summary>
     /// The transaction coordinator epoch, or <see langword="null"/> when absent — Java's
-    /// <c>coordinatorEpoch()</c> (<c>:67</c>, <c>OptionalInt</c>).
+    /// <c>coordinatorEpoch()</c>.
     /// </summary>
     public int? CoordinatorEpoch { get; }
 
-    /// <summary>Value equality over all six fields — Java's <c>equals</c> (<c>:72</c>).</summary>
+    /// <summary>Value equality over all six fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same producer state.</returns>
     public override bool Equals(object? obj) =>
@@ -91,7 +91,7 @@ public sealed class ProducerState
         && CoordinatorEpoch == other.CoordinatorEpoch
         && CurrentTransactionStartOffset == other.CurrentTransactionStartOffset;
 
-    /// <summary>The hash of all six fields — Java's <c>hashCode</c> (<c>:85</c>).</summary>
+    /// <summary>The hash of all six fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -107,10 +107,8 @@ public sealed class ProducerState
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:91-100</c>), where
-    /// <c>coordinatorEpoch</c> is an <c>OptionalInt</c> and
-    /// <c>currentTransactionStartOffset</c> an <c>OptionalLong</c>, so each prints as, for
-    /// example, <c>OptionalInt[55]</c> or <c>OptionalInt.empty</c>.
+    /// A diagnostic rendering — Java's <c>toString()</c>, where the two optional fields print
+    /// as Java's <c>OptionalInt[55]</c> or <c>OptionalInt.empty</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

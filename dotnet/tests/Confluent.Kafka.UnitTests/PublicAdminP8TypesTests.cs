@@ -25,17 +25,13 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the twelve producer/transaction value and options types of M15/P8 against their Java
-/// counterparts.
+/// The twelve producer and transaction value and options types against their Java counterparts.
 /// </summary>
 /// <remarks>
-/// ⚠ Every value assertion uses a <b>distinct</b> per-field value, so a transposition between
-/// two same-typed fields fails rather than cancelling out.
+/// Every value assertion uses a distinct value per field, so a transposition between two same-typed fields fails.
 /// </remarks>
 public sealed class PublicAdminP8TypesTests
 {
-    // ---- TransactionState ------------------------------------------------------------
-
     [Fact]
     public void TransactionState_HasJavasEightConstantsInDeclarationOrder()
     {
@@ -57,20 +53,17 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void TransactionState_HasNoDeadMember()
     {
-        // The broker-side coordinator.transaction.TransactionState has a ninth DEAD constant
-        // with no client counterpart; the client enum is this binding's contract.
+        // The broker-side TransactionState has a ninth DEAD constant with no client counterpart; the client enum is the
+        // contract.
         Assert.DoesNotContain("Dead", Enum.GetNames(typeof(TransactionState)));
     }
 
     [Fact]
     public void TransactionState_LivesInTheAdminNamespace()
     {
-        // Java's package is org.apache.kafka.clients.admin (not common), so the .NET home is
-        // Confluent.Kafka.Admin — the mapping every other admin type follows.
+        // Java's package is org.apache.kafka.clients.admin, so the .NET home is Confluent.Kafka.Admin.
         Assert.Equal("Confluent.Kafka.Admin", typeof(TransactionState).Namespace);
     }
-
-    // ---- ProducerState ---------------------------------------------------------------
 
     [Fact]
     public void ProducerState_ExposesEveryFieldWithJavasWidths()
@@ -149,8 +142,6 @@ public sealed class PublicAdminP8TypesTests
             new ProducerState(11L, 22, 33, 44L, null, null).ToString());
     }
 
-    // ---- TransactionListing ----------------------------------------------------------
-
     [Fact]
     public void TransactionListing_ExposesJavasThreeAccessors()
     {
@@ -160,7 +151,7 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(77L, listing.ProducerId);
         Assert.Equal(TransactionState.PrepareCommit, listing.State);
 
-        // Java names the accessor state() although the field is transactionState (:44).
+        // Java names the accessor state() although the field is transactionState.
         Assert.Contains("State", DeclaredPublicPropertyNames(typeof(TransactionListing)));
         Assert.DoesNotContain("TransactionState", DeclaredPublicPropertyNames(typeof(TransactionListing)));
     }
@@ -195,8 +186,6 @@ public sealed class PublicAdminP8TypesTests
             "TransactionListing(transactionalId='txn-1', producerId=77, transactionState=Ongoing)",
             new TransactionListing("txn-1", 77L, TransactionState.Ongoing).ToString());
 
-    // ---- TransactionDescription ------------------------------------------------------
-
     [Fact]
     public void TransactionDescription_ExposesEveryFieldWithJavasWidths()
     {
@@ -217,8 +206,8 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(1_700_000_000_000L, description.TransactionStartTimeMs);
         Assert.Equal(new[] { new TopicPartition("orders", 7) }, description.TopicPartitions);
 
-        // transactionTimeoutMs is a long in Java (:30) although the wire field is an int, and
-        // producerEpoch is an int here but a short on AbortTransactionSpec.
+        // transactionTimeoutMs is a long in Java although the wire field is an int, and producerEpoch is an int here but a
+        // short on AbortTransactionSpec.
         Assert.Equal(
             typeof(long),
             Property(typeof(TransactionDescription), nameof(TransactionDescription.TransactionTimeoutMs)));
@@ -321,8 +310,6 @@ public sealed class PublicAdminP8TypesTests
             new TransactionDescription(1, TransactionState.Ongoing, 2L, 3, 4L, null, null).ToString());
     }
 
-    // ---- AbortTransactionSpec --------------------------------------------------------
-
     [Fact]
     public void AbortTransactionSpec_ProducerEpochIsAShortUnlikeItsSiblings()
     {
@@ -367,8 +354,6 @@ public sealed class PublicAdminP8TypesTests
             "AbortTransactionSpec(topicPartition=orders-4, producerId=11, producerEpoch=22, coordinatorEpoch=33)",
             new AbortTransactionSpec(new TopicPartition("orders", 4), 11L, 22, 33).ToString());
 
-    // ---- Options: defaults -----------------------------------------------------------
-
     [Fact]
     public void EveryP8OptionsTypeDefaultsItsTimeoutToNull()
     {
@@ -396,7 +381,7 @@ public sealed class PublicAdminP8TypesTests
 
         Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 4, TimeoutMs = 500 });
 
-        // Java's equals (:43-44) includes timeoutMs — the opposite of ListTransactionsOptions.
+        // Java's equals includes timeoutMs, the opposite of ListTransactionsOptions.
         Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3, TimeoutMs = 501 });
         Assert.NotEqual(baseline, new DescribeProducersOptions { BrokerId = 3 });
     }
@@ -430,12 +415,10 @@ public sealed class PublicAdminP8TypesTests
             new FenceProducersOptions { TimeoutMs = 7 }.ToString());
     }
 
-    // ---- ListTransactionsOptions: the three neutral encodings -------------------------
-
     [Fact]
     public void ListTransactionsOptions_DurationDefaultsToMinusOneNotZero()
     {
-        // A 0 would be a real "longer than 0 ms" filter; -1 (:33) is the neutral value.
+        // A 0 would be a real "longer than 0 ms" filter; -1 is the neutral value.
         Assert.Equal(-1L, new ListTransactionsOptions().FilteredDuration);
     }
 
@@ -490,7 +473,6 @@ public sealed class PublicAdminP8TypesTests
 
         Assert.Equal(2, options.FilteredStates.Count);
 
-        // The stored copy does not track a later mutation of the caller's collection.
         states.Add(TransactionState.Empty);
         Assert.Equal(2, options.FilteredStates.Count);
         Assert.NotSame(states, options.FilteredStates);
@@ -517,7 +499,7 @@ public sealed class PublicAdminP8TypesTests
             TimeoutMs = 999,
         };
 
-        // Java's equals (:142-145) deliberately omits timeoutMs.
+        // Java's equals deliberately omits timeoutMs.
         Assert.Equal(baseline, differentTimeout);
         Assert.Equal(baseline.GetHashCode(), differentTimeout.GetHashCode());
 
@@ -541,8 +523,6 @@ public sealed class PublicAdminP8TypesTests
                 FilteredTransactionalIdPattern = "txn-.*",
                 TimeoutMs = 500,
             }.ToString());
-
-    // ---- Surface pins ----------------------------------------------------------------
 
     [Fact]
     public void P8TypesPublishExactlyTheirJavaAccessors()
@@ -610,8 +590,8 @@ public sealed class PublicAdminP8TypesTests
     [Fact]
     public void P8ValueTypesDeclareNoMethodsBeyondTheObjectOverrides()
     {
-        // Java's value classes declare only accessors plus equals/hashCode/toString; the
-        // accessors are properties here, so the method set must be empty.
+        // Java's value classes declare only accessors and equals/hashCode/toString; the accessors are properties here, so the
+        // method set is empty.
         Assert.Empty(DeclaredPublicMethodNames(typeof(ProducerState)));
         Assert.Empty(DeclaredPublicMethodNames(typeof(TransactionListing)));
         Assert.Empty(DeclaredPublicMethodNames(typeof(TransactionDescription)));
@@ -640,13 +620,6 @@ public sealed class PublicAdminP8TypesTests
     private static Type Property(Type type, string name) =>
         type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance)!.PropertyType;
 
-    /// <summary>
-    /// The type's own public instance methods, by name — selected by
-    /// <see cref="BindingFlags"/> plus <see cref="CompilerGeneratedAttribute"/> and
-    /// <see cref="MethodBase.IsSpecialName"/>, never by a name predicate.
-    /// </summary>
-    /// <param name="type">The type to inspect.</param>
-    /// <returns>The sorted method names.</returns>
     private static string[] DeclaredPublicMethodNames(Type type) =>
         type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(method =>
@@ -657,7 +630,6 @@ public sealed class PublicAdminP8TypesTests
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
-    /// <inheritdoc cref="DeclaredPublicMethodNames"/>
     private static string[] DeclaredPublicPropertyNames(Type type) =>
         type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(property => !property.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false))

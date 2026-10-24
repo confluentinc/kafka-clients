@@ -18,75 +18,31 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The Kafka admin client — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.Admin</c>. Implemented by
-/// <see cref="KafkaAdminClient"/> and, for broker-less tests, by
-/// <see cref="MockAdminClient"/>.
+/// The synchronous Kafka admin client, Java's <c>org.apache.kafka.clients.admin.Admin</c>, implemented by
+/// <see cref="KafkaAdminClient"/> and the broker-free <see cref="MockAdminClient"/>. <see cref="IAsyncAdmin"/> is its
+/// asynchronous sibling over the same native client.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This is the synchronous flavour; <see cref="IAsyncAdmin"/> is its asynchronous
-/// twin.</b> Both are siblings over the same native client — the producer and consumer
-/// ship the same sync/async pair — and differ only in how a caller waits.
+/// Every RPC returns its <c>*Result</c> at once, as Java's do, holding one future per key; a future's <c>Get()</c>
+/// blocks the calling thread, as Java's <c>KafkaFuture.get()</c> does. <see cref="Close(TimeSpan)"/>,
+/// <see cref="Close()"/> and <see cref="IDisposable.Dispose"/> block too, as Java's <c>close</c> joins the background
+/// thread; async callers use <see cref="IAsyncAdmin"/>.
 /// </para>
 /// <para>
-/// <b>Every RPC returns its <c>*Result</c> at once, holding one future per key.</b>
-/// Java's <c>Admin</c> methods do not block: <c>createTopics</c> hands work to a
-/// background thread and returns instantly with a result object whose
-/// <see cref="KafkaFuture{T}"/>s the caller waits on individually. So the methods here do not
-/// block either, and the wait lives on the futures <em>inside</em> the result — one
-/// <see cref="KafkaFuture{T}"/> (or <see cref="KafkaFuture"/>) per key, never collapsed
-/// into one. Their <c>Get()</c> is Java's <c>KafkaFuture.get()</c>: it <b>blocks the
-/// calling thread</b> on a latch the completion sets directly, so it needs no
-/// thread-pool thread and still returns while the pool is saturated.
+/// Concurrent calls on one client are allowed. Disposing while a call is in flight defers the native release until
+/// the call completes.
 /// </para>
 /// <para>
-/// <see cref="Close(TimeSpan)"/> and <see cref="IDisposable.Dispose"/> <b>block</b> too:
-/// Java's <c>close(Duration)</c> joins the background thread. Calling any of these blocking
-/// members from <c>async</c> code ties up a pool thread for as long as it waits; async
-/// callers should use <see cref="IAsyncAdmin"/>, whose futures' <c>Get()</c> and <c>Close</c> are
-/// awaitable.
+/// A string that cannot cross the C ABI unchanged is rejected: where a method's <see cref="ArgumentException"/>
+/// entry says so, a string containing a NUL character or an unpaired UTF-16 surrogate throws before anything is
+/// sent. The native client receives NUL-terminated UTF-8, so <c>"a\0b"</c> would name <c>"a"</c>. Java has no such
+/// limit.
 /// </para>
 /// <para>
-/// <b>Thread safety.</b> Concurrent operations on one client are permitted — the admin
-/// ABI has no single-owner access guard, unlike the consumer. Disposing while an
-/// operation is in flight is safe and simply defers the native release until that
-/// operation completes.
-/// </para>
-/// <para>
-/// ⚠ <b>A string that cannot cross the C ABI unchanged is rejected.</b> Where a method's
-/// <see cref="ArgumentException"/> entry says so, a string the caller passes throws
-/// <see cref="ArgumentException"/> when it contains a NUL character (<c>'\0'</c>) or an
-/// unpaired UTF-16 surrogate, before anything is sent. That covers the strings that make up
-/// a result key — a topic name (also inside a <see cref="TopicPartition"/> or
-/// <see cref="TopicPartitionReplica"/>), a config resource name, a group id, a transactional
-/// id, a feature name, a SCRAM user name, a quota entity type or name, or an ACL resource
-/// name, principal or host — and every other request string: a config name or value, a
-/// log-directory path, an ACL or quota filter string, a quota name, a delegation-token
-/// principal, offset metadata, a removal reason, a group instance id, a protocol type, a
-/// transactional-id pattern, and the user name
-/// <see cref="DescribeUserScramCredentialsResult.Description(string)"/> looks up. The native
-/// client receives every string as NUL-terminated UTF-8, where such a string would arrive
-/// truncated or altered — so <c>"a\0b"</c> would name <c>"a"</c>: the request would act on
-/// a different target than the one the caller named, and two different keys could arrive as
-/// one, leaving the call unable to complete. Java has no such limit, because it
-/// length-prefixes every string on the wire.
-/// </para>
-/// <para>
-/// ⚠ <b>A null key, element or argument is rejected up front, for the whole call.</b>
-/// Where a method's <see cref="ArgumentNullException"/> or <see cref="ArgumentException"/>
-/// entry names a null — a null topic, group id, transactional id or other key, a null
-/// element of a key collection, or a null operation, spec, update or HMAC — the method
-/// throws before anything is sent, so the valid keys in the same call are not sent either.
-/// This is <b>stricter than Java</b>. Java's per-key RPCs treat a null name as
-/// unrepresentable and fail only that key's future, with <c>InvalidTopicException</c>
-/// (<c>topicNameIsUnrepresentable</c>, <c>KafkaAdminClient.java:1739</c>) or
-/// <c>InvalidGroupIdException</c> (<c>CoordinatorStrategy.java:70-99</c>), and still send
-/// the other keys; elsewhere Java hits a <c>NullPointerException</c> on its admin thread,
-/// which fails that call's futures. It is this binding's settled rule, not an open gap
-/// (audit X10): the C ABI cannot carry a null key — it would skip such a row or refuse
-/// it — and the binding checks its preconditions before any native call. To get Java's
-/// outcome for the other keys, leave the null ones out of the call.
+/// A null key, element or argument is rejected for the whole call, before anything is sent, so the valid keys in the
+/// same call are not sent either. This is stricter than Java, which fails only that key's future, because the C ABI
+/// cannot carry a null key. To get Java's outcome for the other keys, leave the null ones out of the call.
 /// </para>
 /// </remarks>
 /// <seealso cref="IAsyncAdmin"/>
@@ -113,13 +69,9 @@ public interface IAdmin : IDisposable
     /// <exception cref="ArgumentException">
     /// <paramref name="newTopics"/> contains a null element, or a topic name, a configuration
     /// name or a configuration value containing a NUL character or an unpaired surrogate
-    /// (see the <see cref="IAdmin"/> remarks). A null configuration value is <em>not</em>
-    /// rejected: it is sent as Java's null (see
-    /// <see cref="NewTopic.Configs"/>). A topic with a null <em>name</em> never reaches this
-    /// call: the <see cref="NewTopic"/> constructor rejects one, stricter than Java, whose
-    /// <c>createTopics</c> fails only that topic's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1787</c>) — the binding's rule for
-    /// null keys (see the <see cref="IAdmin"/> remarks).
+    /// (see the <see cref="IAdmin"/> remarks), or a null configuration value, which the native
+    /// client cannot send (see <see cref="NewTopic.Configs"/>). A null topic name is rejected
+    /// by the <see cref="NewTopic"/> constructor.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.CreateTopics"/>
@@ -147,21 +99,11 @@ public interface IAdmin : IDisposable
     /// One future per topic. A topic that fails fails only <em>its own</em>
     /// future; a partially failed batch is not a failed call.
     /// </returns>
-    /// <remarks>
-    /// Java's name-collection convenience overloads
-    /// (<c>deleteTopics(Collection&lt;String&gt;)</c> and
-    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>,
-    /// <c>Admin.java:212</c> and <c>:226</c>) are
-    /// <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
-    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
-    /// remarks). The null element is rejected stricter than Java, whose
-    /// <c>deleteTopics</c> fails only that key's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:1924</c>) — the binding's rule for
-    /// null keys (see the <see cref="IAdmin"/> remarks).
+    /// remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>
@@ -169,8 +111,7 @@ public interface IAdmin : IDisposable
 
     /// <summary>
     /// Deletes topics by name — Java's <c>deleteTopics(Collection&lt;String&gt;)</c> and
-    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>
-    /// (<c>Admin.java:212</c>, <c>:226</c>). Like Java's, it wraps the names in
+    /// <c>deleteTopics(Collection&lt;String&gt;, DeleteTopicsOptions)</c>. Like Java's, it wraps the names in
     /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
     /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>.
     /// </summary>
@@ -182,23 +123,13 @@ public interface IAdmin : IDisposable
     /// One future per topic, in <see cref="DeleteTopicsResult.TopicNameValues"/>.
     /// </returns>
     /// <remarks>
-    /// <para>
-    /// Java's overloads are <c>default</c> interface methods. C# default interface methods
-    /// need .NET Standard 2.1 and this binding's floor is netstandard2.0 — the constraint that
-    /// put <c>onPartitionsLost</c>'s default on <see cref="ConsumerRebalanceListenerBase"/> —
-    /// so this is an ordinary interface member that each client class forwards.
-    /// </para>
-    /// <para>
-    /// ⚠ A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
+    /// A lone literal <see langword="null"/> argument matches both <c>DeleteTopics</c>
     /// overloads and does not compile (CS0121); cast it to the parameter type meant.
-    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
-    /// character or an unpaired surrogate — as
-    /// <see cref="DeleteTopics(TopicCollection, DeleteTopicsOptions?)"/>, which records how
-    /// that is stricter than Java.
+    /// character or an unpaired surrogate.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>
@@ -227,25 +158,11 @@ public interface IAdmin : IDisposable
     /// One future per topic, each carrying that topic's own
     /// <see cref="TopicDescription"/> or its own failure.
     /// </returns>
-    /// <remarks>
-    /// Java's name-collection convenience overloads
-    /// (<c>describeTopics(Collection&lt;String&gt;)</c> and
-    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>,
-    /// <c>Admin.java:295</c> and <c>:306</c>) are
-    /// <see cref="DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions?)"/>.
-    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topics"/> is a name collection containing a null element, or a
     /// name containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/>
-    /// remarks). The null element is rejected stricter than Java, whose
-    /// <c>describeTopics</c> fails only that key's future with <c>InvalidTopicException</c>
-    /// (<c>KafkaAdminClient.java:1739</c>, used at <c>:2334</c>) — the binding's rule for
-    /// null keys (see the <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.PartitionSizeLimitPerResponse</c> is negative — the ABI reads a negative
-    /// as "unset" and would silently substitute a default.
+    /// remarks).
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>
@@ -253,8 +170,7 @@ public interface IAdmin : IDisposable
 
     /// <summary>
     /// Describes topics by name — Java's <c>describeTopics(Collection&lt;String&gt;)</c> and
-    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>
-    /// (<c>Admin.java:295</c>, <c>:306</c>). Like Java's, it wraps the names in
+    /// <c>describeTopics(Collection&lt;String&gt;, DescribeTopicsOptions)</c>. Like Java's, it wraps the names in
     /// <see cref="TopicCollection.OfTopicNames"/> and is otherwise
     /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
     /// </summary>
@@ -266,20 +182,13 @@ public interface IAdmin : IDisposable
     /// One future per topic, in <see cref="DescribeTopicsResult.TopicNameValues"/>.
     /// </returns>
     /// <remarks>
-    /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
-    /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>;
-    /// a lone literal <see langword="null"/> argument likewise does not compile (CS0121).
+    /// A lone literal <see langword="null"/> argument matches both <c>DescribeTopics</c>
+    /// overloads and does not compile (CS0121); cast it to the parameter type meant.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topicNames"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicNames"/> contains a null element, or a name containing a NUL
-    /// character or an unpaired surrogate — as
-    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>, which records
-    /// how that is stricter than Java.
-    /// </exception>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <c>options.PartitionSizeLimitPerResponse</c> is negative — as
-    /// <see cref="DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/>.
+    /// character or an unpaired surrogate.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.DescribeTopics(IReadOnlyCollection{string}, DescribeTopicsOptions?)"/>
@@ -298,10 +207,7 @@ public interface IAdmin : IDisposable
     /// topics such as <c>__consumer_offsets</c> are excluded.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> future over the whole listing, rather than one per key. There is no
-    /// per-topic outcome to report — the request carries no topic list, and
-    /// <c>kafka_admin_ListTopicsResult_t</c> declares no per-key error accessor — so either
-    /// the call fails and the future fails, or the whole map succeeds.
+    /// <b>One</b> future over the whole listing: either the call fails, or the whole map succeeds.
     /// </returns>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListTopics"/>
@@ -385,9 +291,8 @@ public interface IAdmin : IDisposable
     /// yields <see langword="null"/>.
     /// </param>
     /// <returns>
-    /// ⚠ <b>Four</b> futures — one per cluster attribute — rather than one per key. Three
-    /// of them are genuinely nullable — <see cref="DescribeClusterResult.Controller"/>,
-    /// <see cref="DescribeClusterResult.ClusterId"/> and
+    /// ⚠ <b>Four</b> futures — one per cluster attribute — rather than one per key. Two
+    /// of them are nullable — <see cref="DescribeClusterResult.Controller"/> and
     /// <see cref="DescribeClusterResult.AuthorizedOperations"/>: see
     /// <see cref="DescribeClusterResult"/>.
     /// </returns>
@@ -404,9 +309,8 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="configResourceTypes">
     /// The resource types to list. ⚠ <see langword="null"/> or an <b>empty</b> collection
-    /// means <b>every supported type</b> — that is Java's own default, whose no-argument
-    /// <c>listConfigResources()</c> delegates with <c>Set.of()</c>
-    /// (<c>Admin.java:1812</c>) — so neither is rejected. Java's parameter is a
+    /// means <b>every supported type</b>, as Java's no-argument <c>listConfigResources()</c>
+    /// delegates with <c>Set.of()</c>, so neither is rejected. Java's parameter is a
     /// <c>Set</c>, so a repeated type is one entry.
     /// </param>
     /// <param name="options">
@@ -418,10 +322,7 @@ public interface IAdmin : IDisposable
     /// future fails, or the whole listing succeeds.
     /// </returns>
     /// <remarks>
-    /// Java also declares a no-argument <c>listConfigResources()</c> convenience overload,
-    /// collapsed here into the two optional parameters — the same treatment the other RPCs
-    /// give Java's <c>default</c> overloads, and for the same reason (C# default interface
-    /// methods need .NET Standard 2.1, above this binding's floor).
+    /// Java's no-argument <c>listConfigResources()</c> is this method with both parameters left out.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListConfigResources"/>
@@ -483,9 +384,8 @@ public interface IAdmin : IDisposable
     /// altered — Java's per-resource future is a <see cref="KafkaFuture"/>, which carries no value.
     /// </returns>
     /// <remarks>
-    /// ⚠ <b>The result type is named for Java's return type</b>,
-    /// <see cref="AlterConfigsResult"/> (<c>Admin.java:501, :530</c>) — there is no
-    /// <c>IncrementalAlterConfigsResult</c> in Java or in the ABI.
+    /// The result type is Java's return type, <see cref="AlterConfigsResult"/>; there is no
+    /// <c>IncrementalAlterConfigsResult</c> in Java.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -538,9 +438,8 @@ public interface IAdmin : IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="replicaAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory —
-    /// the ABI would silently skip such a row, leaving the caller holding a future for a
-    /// replica the broker was never asked about. Also thrown for a replica whose topic, or a
+    /// <paramref name="replicaAssignment"/> contains a null replica or a null log directory.
+    /// Also thrown for a replica whose topic, or a
     /// log directory, contains a NUL character or an unpaired surrogate (see the
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
@@ -584,8 +483,8 @@ public interface IAdmin : IDisposable
     /// <param name="electionType">The kind of election to conduct.</param>
     /// <param name="partitions">
     /// The partitions to elect leaders for, or <see langword="null"/> for <b>every
-    /// partition in the cluster</b> — Java's null <c>Set</c>
-    /// (<c>Admin.java:1099-1100</c>). ⚠ <see langword="null"/> and an <b>empty</b>
+    /// partition in the cluster</b> — Java's null <c>Set</c>.
+    /// ⚠ <see langword="null"/> and an <b>empty</b>
     /// collection are <em>different requests</em>: empty asks for an election over no
     /// partitions. Java's parameter is a <c>Set</c>, so a repeated partition is one entry.
     /// </param>
@@ -624,8 +523,8 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="reassignments">
     /// Topic partition → its new target replicas, or <see langword="null"/> to
-    /// <b>revert</b> that partition's reassignment — Java's <c>Optional.empty()</c>
-    /// (<c>Admin.java:1142-1143</c>). ⚠ Reverting is <em>not</em> the same as an empty
+    /// <b>revert</b> that partition's reassignment — Java's <c>Optional.empty()</c>.
+    /// ⚠ Reverting is <em>not</em> the same as an empty
     /// replica list: <see cref="NewPartitionReassignment"/> rejects an empty list, as Java
     /// does, and the two travel on separate wires to the broker.
     /// </param>
@@ -732,8 +631,8 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="partitions">
     /// The partitions to ask about, or <see langword="null"/> for <b>every ongoing
-    /// reassignment in the cluster</b> — Java's <c>Optional.empty()</c>
-    /// (<c>Admin.java:1248-1249</c>). ⚠ <see langword="null"/> and an <b>empty</b>
+    /// reassignment in the cluster</b> — Java's <c>Optional.empty()</c>.
+    /// ⚠ <see langword="null"/> and an <b>empty</b>
     /// collection are <em>different requests</em>. Java's parameter is a <c>Set</c>, so a
     /// repeated partition is one entry.
     /// </param>
@@ -741,10 +640,8 @@ public interface IAdmin : IDisposable
     /// Request options, or <see langword="null"/> for Java's defaults.
     /// </param>
     /// <returns>
-    /// ⚠ <b>One</b> future over the whole listing, rather than one per key — Java holds
-    /// a single future here. ⚠ A requested partition with <b>no</b> ongoing reassignment is
-    /// simply <b>absent</b> from the map, so the result can be shorter than the request;
-    /// that is not an error.
+    /// <b>One</b> future over the whole listing, as Java's. A requested partition with no
+    /// ongoing reassignment is absent from the map; that is not an error.
     /// </returns>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a null topic, or with a
@@ -752,16 +649,10 @@ public interface IAdmin : IDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <remarks>
-    /// <paramref name="partitions"/> defaults to <see langword="null"/>, so
     /// <c>ListPartitionReassignments()</c> is Java's zero-argument
-    /// <c>listPartitionReassignments()</c> (<c>Admin.java:1193</c>), and Java's
-    /// options-only form is
-    /// <see cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>.
-    /// ⚠ Because of that overload a lone literal <see langword="null"/> argument binds to
-    /// the options-only form, not to <paramref name="partitions"/>: C# prefers the candidate
-    /// that needs no default argument. A <see langword="null"/> options means defaults, so it
-    /// still lists every reassignment, but it is a nullable-annotation warning (CS8625).
-    /// Write <c>ListPartitionReassignments()</c> for "every reassignment".
+    /// <c>listPartitionReassignments()</c>. A lone literal <see langword="null"/> argument binds
+    /// to <see cref="ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>, not to
+    /// <paramref name="partitions"/>: it still lists every reassignment, with a CS8625 warning.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
@@ -771,8 +662,8 @@ public interface IAdmin : IDisposable
 
     /// <summary>
     /// Lists <b>every</b> ongoing partition reassignment in the cluster with the given
-    /// options — Java's <c>listPartitionReassignments(ListPartitionReassignmentsOptions)</c>
-    /// (<c>Admin.java:1248</c>), which passes <c>Optional.empty()</c> for the partitions.
+    /// options — Java's <c>listPartitionReassignments(ListPartitionReassignmentsOptions)</c>,
+    /// which passes <c>Optional.empty()</c> for the partitions.
     /// Exactly
     /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
     /// with a <see langword="null"/> partition set: the result carries one
@@ -787,10 +678,6 @@ public interface IAdmin : IDisposable
     /// One future over the whole listing — see
     /// <see cref="ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
     /// </returns>
-    /// <remarks>
-    /// An ordinary interface member rather than a Java-style <c>default</c> method, for the
-    /// reason given on <see cref="DeleteTopics(IReadOnlyCollection{string}, DeleteTopicsOptions?)"/>.
-    /// </remarks>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ListPartitionReassignments(ListPartitionReassignmentsOptions)"/>
     ListPartitionReassignmentsResult ListPartitionReassignments(
@@ -808,8 +695,8 @@ public interface IAdmin : IDisposable
     /// <see cref="OffsetSpec.ForTimestamp"/> with a value that happens to equal a wire
     /// sentinel sends the <b>same</b> request as the no-argument kind sharing that number —
     /// <c>ForTimestamp(-2)</c> and <see cref="OffsetSpec.Earliest"/> both become <c>-2</c>,
-    /// as Java's <c>getOffsetFromSpec</c> collapses them before building the request
-    /// (<c>KafkaAdminClient.java:5176-5192</c>). The two differ only up to that point, and
+    /// as Java's <c>getOffsetFromSpec</c> collapses them before building the request.
+    /// The two differ only up to that point, and
     /// on a <see cref="MockAdminClient"/>, which tells them apart.
     /// </param>
     /// <param name="options">
@@ -825,8 +712,9 @@ public interface IAdmin : IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topicPartitionOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="topicPartitionOffsets"/> contains a topic partition with a null
-    /// topic, or a null spec, or a topic containing a NUL character or an unpaired surrogate (see
-    /// the <see cref="IAdmin"/> remarks).
+    /// topic, or a topic containing a NUL character or an unpaired surrogate (see the
+    /// <see cref="IAdmin"/> remarks). A null spec is not rejected: it reads as
+    /// <see cref="OffsetSpec.Latest"/>, as in Java.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <c>options.IsolationLevel</c> is not one of
@@ -861,10 +749,7 @@ public interface IAdmin : IDisposable
     /// error into a failure.
     /// </returns>
     /// <remarks>
-    /// Java also declares a no-argument <c>listGroups()</c> convenience overload, collapsed
-    /// here into the optional parameter — the same treatment the other RPCs give Java's
-    /// <c>default</c> overloads, and for the same reason (C# default interface methods need
-    /// .NET Standard 2.1, above this binding's floor).
+    /// Java's no-argument <c>listGroups()</c> is this method with the options left out.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
     /// A filter holds a <see cref="GroupState"/> / <see cref="GroupType"/> value no member
@@ -886,11 +771,7 @@ public interface IAdmin : IDisposable
     /// thread until that group completes.
     /// </summary>
     /// <remarks>
-    /// Java also declares a <c>describeConsumerGroups(Collection&lt;String&gt;)</c>
-    /// convenience overload (<c>Admin.java:878-879</c>), collapsed here into the optional
-    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
-    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
-    /// this binding's floor).
+    /// Java's <c>describeConsumerGroups(Collection&lt;String&gt;)</c> is this method with the options left out.
     /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
@@ -924,11 +805,7 @@ public interface IAdmin : IDisposable
     /// thread until that group completes.
     /// </summary>
     /// <remarks>
-    /// Java also declares a <c>describeClassicGroups(Collection&lt;String&gt;)</c>
-    /// convenience overload (<c>Admin.java:2098-2099</c>), collapsed here into the optional
-    /// parameter — the same treatment the other RPCs give Java's <c>default</c> overloads,
-    /// and for the same reason (C# default interface methods need .NET Standard 2.1, above
-    /// this binding's floor).
+    /// Java's <c>describeClassicGroups(Collection&lt;String&gt;)</c> is this method with the options left out.
     /// </remarks>
     /// <param name="groupIds">
     /// The IDs of the groups to describe. Duplicates are collapsed ordinally, so the
@@ -962,12 +839,8 @@ public interface IAdmin : IDisposable
     /// <c>Get()</c> blocks the calling thread until the group completes.
     /// </summary>
     /// <remarks>
-    /// Java also declares a <c>listConsumerGroupOffsets(String)</c> convenience overload
-    /// (<c>Admin.java:928-930</c>), collapsed here into the optional parameter — the same
-    /// treatment the other RPCs give Java's <c>default</c> overloads, and for the same
-    /// reason (C# default interface methods need .NET Standard 2.1, above this binding's
-    /// floor). Like Java (<c>Admin.java:912-918</c>) this delegates to the batched form
-    /// with a fresh <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
+    /// Java's <c>listConsumerGroupOffsets(String)</c> is this method with the options left out. Like Java's, it
+    /// delegates to the batched form with a fresh <see cref="ListConsumerGroupOffsetsSpec"/>, so every committed
     /// partition of the group is returned.
     /// </remarks>
     /// <param name="groupId">The ID of the group whose committed offsets to list.</param>
@@ -996,10 +869,8 @@ public interface IAdmin : IDisposable
     /// <c>Get()</c> blocks the calling thread until that group completes.
     /// </summary>
     /// <remarks>
-    /// Java also declares a
-    /// <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;)</c>
-    /// convenience overload (<c>Admin.java:951-953</c>), collapsed here into the optional
-    /// parameter, for the same netstandard2.0 reason as above.
+    /// Java's <c>listConsumerGroupOffsets(Map&lt;String, ListConsumerGroupOffsetsSpec&gt;)</c> is this method with
+    /// the options left out.
     /// </remarks>
     /// <param name="groupSpecs">
     /// The groups to query, each with the partitions to restrict its result to. A spec
@@ -1065,7 +936,7 @@ public interface IAdmin : IDisposable
     /// The members to remove, or a no-argument
     /// <see cref="RemoveMembersFromConsumerGroupOptions"/> to remove every member of the
     /// group. Unlike every other RPC on this interface, Java has <b>no</b> options-free
-    /// overload for this one (<c>Admin.java:1269</c>) — <paramref name="options"/> is
+    /// overload for this one — <paramref name="options"/> is
     /// therefore required here too, not optional.
     /// </param>
     /// <returns>
@@ -1102,9 +973,8 @@ public interface IAdmin : IDisposable
     /// map. <see cref="ResourcePattern"/> and <see cref="AccessControlEntry"/> reject the ANY
     /// and MATCH values at construction. Those constructors also store an enum value that is
     /// not a defined member as <c>Unknown</c>, as Java's <c>fromCode</c> does, so two bindings
-    /// that differ only in such values are duplicates (M15/P13.3 F8). A binding with an
-    /// <c>Unknown</c> field still constructs, and fails its own future, as in Java
-    /// (<c>KafkaAdminClient.java:2615-2621</c>).
+    /// that differ only in such values are duplicates. A binding with an
+    /// <c>Unknown</c> field still constructs, and fails its own future, as in Java.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1137,7 +1007,7 @@ public interface IAdmin : IDisposable
     /// distinct from <c>""</c>, which filters on the literal empty string. The filter
     /// constructors store an enum value that is not a defined member as <c>Unknown</c>, as
     /// Java's <c>fromCode</c> does, so two filters that differ only in such values are
-    /// duplicates (M15/P13.3 F8).
+    /// duplicates.
     /// </param>
     /// <param name="options">
     /// Request options, or <see langword="null"/> for Java's defaults.
@@ -1230,8 +1100,8 @@ public interface IAdmin : IDisposable
     /// <param name="entries">
     /// The alterations to apply. An <see cref="ClientQuotaAlteration.Op"/> with a null
     /// <see cref="ClientQuotaAlteration.Op.Value"/> <em>removes</em> that quota, while
-    /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it
-    /// (<c>KafkaAdminClient.java:4314-4318</c>): every alteration is sent, in order, and the
+    /// <c>0.0</c> sets it to zero. A <b>repeated entity</b> is accepted, as Java accepts it:
+    /// every alteration is sent, in order, and the
     /// entity has one future in the result, as Java's per-entity future map collapses it.
     /// An alteration whose entity has <b>no</b> entity types is sent as given, as Java does,
     /// and is answered for that entity alone.
@@ -1263,8 +1133,8 @@ public interface IAdmin : IDisposable
     /// </summary>
     /// <param name="users">
     /// The users to describe, or <see langword="null"/> (or empty) to describe <b>every</b>
-    /// user — Java's no-argument overload. A null element is skipped, as Java skips it
-    /// (<c>KafkaAdminClient.java:4357-4360</c>), so a list of only nulls describes every user
+    /// user — Java's no-argument overload. A null element is skipped, as Java skips it,
+    /// so a list of only nulls describes every user
     /// too.
     /// </param>
     /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
@@ -1346,7 +1216,10 @@ public interface IAdmin : IDisposable
     /// <returns>
     /// One future over the new expiry timestamp. See <see cref="RenewDelegationTokenResult"/>.
     /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="hmac"/> is null, on a real client; a mock fails the future with the core's
+    /// <c>DelegationTokenNotFound</c> error instead, as Java's mock does.
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.RenewDelegationToken"/>
     RenewDelegationTokenResult RenewDelegationToken(
@@ -1366,7 +1239,10 @@ public interface IAdmin : IDisposable
     /// <returns>
     /// One future over the expiry timestamp. See <see cref="ExpireDelegationTokenResult"/>.
     /// </returns>
-    /// <exception cref="ArgumentNullException"><paramref name="hmac"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="hmac"/> is null, on a real client; a mock fails the future with the core's
+    /// <c>DelegationTokenNotFound</c> error instead, as Java's mock does.
+    /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.ExpireDelegationToken"/>
     ExpireDelegationTokenResult ExpireDelegationToken(
@@ -1427,26 +1303,38 @@ public interface IAdmin : IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="featureUpdates"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="featureUpdates"/> is empty on a <see cref="KafkaAdminClient"/>, or contains
-    /// a blank or null name (Java's <c>Utils.isBlank</c> treats null as blank, so both get
-    /// Java's blank-name message), or a null update — the two Java rejects before enqueuing
-    /// anything (<c>KafkaAdminClient.java:4590-4592</c>, <c>:4597-4599</c>) — or a feature name
-    /// containing a NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks).
-    /// A <see cref="MockAdminClient"/> accepts an empty map and returns an empty result, and
-    /// accepts a blank (but not a null) name, as Java's mock checks no names
-    /// (<c>MockAdminClient.java:1286-1300</c>).
-    /// </exception>
-    /// <exception cref="KafkaException">
-    /// The native client refused the request before submitting anything — as Java's
-    /// <c>updateFeatures</c> throws from the call itself — so no result is returned. Through
-    /// this surface that is a feature name <paramref name="featureUpdates"/>' own comparer lets
-    /// appear twice (<see cref="KafkaException.Code"/> <c>-3</c>, local illegal argument).
+    /// <paramref name="featureUpdates"/> contains a null name, a null update, a name containing a
+    /// NUL character or an unpaired surrogate (see the <see cref="IAdmin"/> remarks), or a name its
+    /// own comparer lets appear twice; or, on a <see cref="KafkaAdminClient"/>, it is empty or contains a
+    /// blank name, the two Java rejects before enqueuing anything. A <see cref="MockAdminClient"/> accepts
+    /// an empty map, and returns an empty result, and a blank name, as Java's mock checks no names.
     /// </exception>
     /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.UpdateFeatures"/>
     UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null);
+
+    /// <summary>
+    /// Unregisters a controller — Java's
+    /// <c>unregisterController(int, UnregisterControllerOptions)</c>, which Java marks unstable.
+    /// Returns <b>immediately</b>, without waiting for the controller; the result carries one
+    /// <see cref="KafkaFuture"/>, whose <c>Get()</c> blocks the calling thread until the call
+    /// completes.
+    /// </summary>
+    /// <param name="controllerId">The id of the controller to unregister.</param>
+    /// <param name="options">Request options, or <see langword="null"/> for Java's defaults.</param>
+    /// <returns>The <b>single</b> future Java publishes. See <see cref="UnregisterControllerResult"/>.</returns>
+    /// <remarks>
+    /// The future fails with a <see cref="KafkaException"/> carrying Java's code when the request
+    /// times out, the broker is too old, the id is not a registered controller, the request does
+    /// not reach the active controller, or it names the active controller. A
+    /// <see cref="MockAdminClient"/> fails it with the UnsupportedVersion code (35) and an empty
+    /// message unless it uses a raft controller, as Java's mock does.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
+    /// <seealso cref="IAsyncAdmin.UnregisterController"/>
+    UnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions? options = null);
 
     /// <summary>
     /// Fences out every active producer using the given transactional ids — Java's
@@ -1598,24 +1486,26 @@ public interface IAdmin : IDisposable
     /// without error.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// Operations still pending when the timeout passes are failed by the core, as Java's
     /// <c>close(Duration)</c> fails them; their futures complete with that error, so a thread
     /// blocked in a future's <c>Get()</c> wakes and throws it.
-    /// </para>
-    /// <para>
-    /// The wait parks the calling thread inside the native client and needs no thread-pool
-    /// thread. Called from <c>async</c> code it therefore ties up a pool thread for up to
-    /// <paramref name="timeout"/>; async callers should use <see cref="IAsyncAdmin"/>, whose
-    /// <see cref="IAsyncAdmin.Close(TimeSpan)"/> is awaitable. The same holds for
-    /// <see cref="IDisposable.Dispose"/>, which waits without a bound.
-    /// </para>
     /// </remarks>
     /// <param name="timeout">
-    /// How long to wait. <see cref="TimeSpan.Zero"/> is valid (do not wait); for Java's
-    /// no-argument <c>close()</c> — wait indefinitely — use <see cref="IDisposable.Dispose"/>.
+    /// How long to wait. <see cref="TimeSpan.Zero"/> is valid (do not wait); <see cref="Close()"/> waits without a
+    /// bound.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    /// <seealso cref="IAsyncAdmin.Close(TimeSpan)"/>
+    /// <seealso cref="IAsyncAdmin.Close(TimeSpan, System.Threading.CancellationToken)"/>
     void Close(TimeSpan timeout);
+
+    /// <summary>
+    /// Closes the client, <b>blocking the calling thread</b> without a bound until the operations in flight have
+    /// completed — Java's <c>close()</c>. Idempotent. On <see cref="MockAdminClient"/> it does nothing, as Java's mock;
+    /// <see cref="IDisposable.Dispose"/> frees the mock.
+    /// </summary>
+    /// <remarks>
+    /// Called from a future's continuation on the client's thread it does not wait: the client is torn down once that
+    /// continuation has returned and the close has completed.
+    /// </remarks>
+    void Close();
 }

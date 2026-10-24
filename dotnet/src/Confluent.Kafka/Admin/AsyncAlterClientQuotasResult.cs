@@ -14,96 +14,71 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.AlterClientQuotas"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.AlterClientQuotasResult</c>: one future <b>per quota
-/// entity</b>, handed back the moment the request is submitted.
+/// The result of <see cref="IAsyncAdmin.AlterClientQuotas"/> — Java's
+/// <c>org.apache.kafka.clients.admin.AlterClientQuotasResult</c>: one future per quota entity.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Java stores <c>Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt; futures</c>
-/// (<c>AlterClientQuotasResult.java:31</c>), so awaiting one of these tells you whether that
-/// entity's quotas were altered and hands back nothing; an entity that fails faults only
-/// <em>its own</em> <see cref="AsyncKafkaFuture"/>.
-/// </para>
-/// <para>
-/// ⚠ The dictionary is keyed by <see cref="ClientQuotaEntity"/> itself, so a lookup works
-/// with any value-equal entity.
-/// </para>
+/// An entity that fails faults only its own future. The dictionary is keyed by
+/// <see cref="ClientQuotaEntity"/> value equality.
 /// </remarks>
 /// <seealso cref="AlterClientQuotasResult"/>
 public sealed class AsyncAlterClientQuotasResult
 {
     private readonly IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps one future per entity — Java's <b>public</b>
-    /// <c>AlterClientQuotasResult(Map&lt;ClientQuotaEntity, KafkaFuture&lt;Void&gt;&gt;)</c>
-    /// (<c>AlterClientQuotasResult.java:38</c>), which a caller can use to fabricate a result,
-    /// for a test double say.
-    /// </summary>
-    /// <remarks>
-    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
-    /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map, so
-    /// <see cref="Values"/> and <see cref="All"/> read whatever it holds when they are called.
-    /// </remarks>
-    /// <param name="futures">One future per entity, keyed by the entity.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="futures"/> is null — where Java stores the null and throws
-    /// <c>NullPointerException</c> on first use.
-    /// </exception>
+    // Internal, unlike Java's public constructor: a recorded deviation. The dictionary is held
+    // by reference, as Java holds its map.
     internal AsyncAlterClientQuotasResult(IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> futures)
     {
         _values = futures ?? throw new ArgumentNullException(nameof(futures));
     }
 
-    /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal success
-    /// token (result shape 2 — the ABI has no <c>get_value</c> here, so a null per-key error
-    /// <em>is</em> the success value) and must not reach the public surface.
-    /// </summary>
-    /// <remarks>
-    /// Each entry wraps the <b>same</b> task as the bridge's — no second task whose fault could
-    /// go unobserved. It reuses the bridge's own comparer so the view and the sources cannot
-    /// disagree about key identity.
-    /// </remarks>
-    internal AsyncAlterClientQuotasResult(
-        IReadOnlyDictionary<ClientQuotaEntity, Task<bool>> values,
-        IEqualityComparer<ClientQuotaEntity> comparer)
+    private AsyncAlterClientQuotasResult(
+        IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        Dictionary<ClientQuotaEntity, AsyncKafkaFuture> erased =
-            new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<ClientQuotaEntity, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncAlterClientQuotasResult From(VoidKeyedAdminOperation<ClientQuotaEntity> operation) =>
-        new AsyncAlterClientQuotasResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
-    /// One future per requested entity, keyed by the entity — Java's <c>values()</c>
-    /// (<c>:45</c>).
+    /// One future per requested entity, keyed by the entity — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> entity's quotas have been altered, and faults with the
-    /// first failure if any entity failed — Java's <c>all()</c> (<c>:52</c>).
+    /// Completes when every entity's quotas have been altered, and faults with the first
+    /// failure to complete if any entity failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() =>
+        _nativeFutures is not null
+            ? new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            : AsyncAdminFutures.AllOf(_values.Values);
+
+    internal static AsyncAlterClientQuotasResult OfClient(
+        (IReadOnlyDictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<ClientQuotaEntity, AsyncKafkaFuture> values = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>(native.Values.Count);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<ClientQuotaEntity, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncAlterClientQuotasResult(values, nativeFutures, native.Result);
+    }
 }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -19,19 +21,22 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.DescribeAclsOptions</c>.
 /// </summary>
 /// <remarks>
-/// A plain settable POCO rather than Java's fluent builder, mirroring
-/// <see cref="DeleteAclsOptions"/>. Java's type adds nothing to <c>AbstractOptions</c>
-/// (<c>DescribeAclsOptions.java:25</c>), so the timeout is the whole surface.
+/// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
 /// </remarks>
 public sealed class DescribeAclsOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset
-    /// so the client's <c>default.api.timeout.ms</c> applies — Java's
-    /// <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

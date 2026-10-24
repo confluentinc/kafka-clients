@@ -18,22 +18,12 @@ using System.Globalization;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A listing of one topic in the cluster — the .NET realization of Java's
+/// A listing of one topic in the cluster — Java's
 /// <c>org.apache.kafka.clients.admin.TopicListing</c>.
 /// </summary>
-/// <remarks>
-/// The three accessors are properties rather than methods, matching
-/// <see cref="TopicDescription"/>: each is a pure managed field read that does no
-/// P/Invoke and cannot throw, which is the case CLAUDE.md §3's "non-blocking getter →
-/// sync property" row is written for. (The consumer's <c>Assignment()</c> family are
-/// methods for the opposite reason — each marshals a fresh snapshot across the ABI.)
-/// </remarks>
 public sealed class TopicListing
 {
-    /// <summary>
-    /// Initializes a listing — Java's
-    /// <c>TopicListing(String name, Uuid topicId, boolean internal)</c>.
-    /// </summary>
+    /// <summary>Initializes a listing — Java's constructor.</summary>
     /// <param name="name">The topic name.</param>
     /// <param name="topicId">The topic id.</param>
     /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
@@ -58,7 +48,7 @@ public sealed class TopicListing
     /// </summary>
     public bool IsInternal { get; }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
@@ -66,6 +56,5 @@ public sealed class TopicListing
             "(name={0}, topicId={1}, internal={2})",
             Name,
             TopicId,
-            // Java renders a boolean lowercase; bool.ToString() would give True/False.
             IsInternal ? "true" : "false");
 }

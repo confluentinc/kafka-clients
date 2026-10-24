@@ -23,87 +23,67 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M15/P13.3 §4.8 (decision D10, tests only) — a <c>BROKER</c> / <c>BROKER_LOGGER</c> config
-/// resource whose name is not a decimal <c>int</c>. Java's <c>nodeFor</c> is
-/// <c>Integer.valueOf(name)</c>, so it throws <c>NumberFormatException("For input string:
-/// \"x\"")</c>. The binding adds no parse of its own (that would be logic in the binding); it
-/// forwards what the core answers, and these tests pin that answer.
+/// A <c>BROKER</c> or <c>BROKER_LOGGER</c> config resource whose name is not a decimal
+/// <c>int</c>: the binding makes no parse of its own and forwards what the core answers. The
+/// real client sends the call like any other, and the mock fails only that resource.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>The real client and the mock answer differently, and both are the core's own
-/// choice.</b> The real client cannot throw from the call, so it fails <b>every</b> requested
-/// resource of that call with the parse error and sends nothing (<c>kafka_admin_client.rs</c>,
-/// <c>describe_configs_with_options</c> / <c>incremental_alter_configs_with_options</c> →
-/// <c>failed_config_futures</c>) — which is why no broker is needed to observe it. The mock
-/// mirrors Java's <c>MockAdminClient</c>, which parses per resource: only the <c>BROKER</c>
-/// resource carries the parse error, the <c>TOPIC</c> beside it gets its own answer, and a
-/// <c>BROKER_LOGGER</c> resource is one Java's mock does not implement at all
-/// (<c>mock_admin_client.rs</c>, <c>get_resource_description</c> /
-/// <c>handle_incremental_resource_alteration</c>).
-/// </para>
+/// Java's <c>KafkaAdminClient.nodeFor</c> and <c>MockAdminClient</c> parse the name with
+/// <c>Integer.parseInt</c> and fail with <c>NumberFormatException</c>; the core does not, and
+/// these tests pin the core's answer.
 /// </remarks>
 public sealed class PublicAdminNonNumericBrokerNameTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary><c>kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT</c> — Java's <c>NumberFormatException</c> family.</summary>
-    private const int LocalIllegalArgumentCode = -3;
+    private const int InvalidRequestCode = 42;
 
-    /// <summary>The code the mock reports for an RPC arm Java's mock does not implement.</summary>
+    private const int RequestTimedOutCode = 7;
+
     private const int UnsupportedVersionCode = 35;
-
-    /// <summary>The core's message, copied from <c>parse_java_int</c> (Java's own text).</summary>
-    private const string ParseMessage = "For input string: \"x\"";
 
     private const string NotImplemented = "Not implemented yet";
 
     private const string Topic = "d10-topic";
 
-    /// <summary>
-    /// The real client fails every resource of a <c>describeConfigs</c> call — the valid
-    /// <c>TOPIC</c> included — with the parse error, for a <c>BROKER</c> or a
-    /// <c>BROKER_LOGGER</c> name.
-    /// </summary>
+    private const int CallTimeoutMs = 200;
+
     [Theory]
     [InlineData(ConfigResourceType.Broker)]
     [InlineData(ConfigResourceType.BrokerLogger)]
-    public async Task RealClient_DescribeConfigs_FailsEveryResource(ConfigResourceType brokerType)
+    public async Task RealClient_DescribeConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
         AsyncKafkaAdminClient admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
+        AsyncDescribeConfigsResult result = admin.DescribeConfigs(
+            new[] { broker, topic }, new DescribeConfigsOptions { TimeoutMs = CallTimeoutMs });
 
         Assert.Equal(2, result.Values.Count);
-        await AssertParseFailure(result.Values[broker].Get());
-        await AssertParseFailure(result.Values[topic].Get());
+        await AssertTimedOut(result.Values[broker].Get(), "describeConfigs");
+        await AssertTimedOut(result.Values[topic].Get(), "describeConfigs");
     }
 
-    /// <summary>The <c>incrementalAlterConfigs</c> twin of the test above.</summary>
     [Theory]
     [InlineData(ConfigResourceType.Broker)]
     [InlineData(ConfigResourceType.BrokerLogger)]
-    public async Task RealClient_IncrementalAlterConfigs_FailsEveryResource(ConfigResourceType brokerType)
+    public async Task RealClient_IncrementalAlterConfigs_SendsTheCall(ConfigResourceType brokerType)
     {
         AsyncKafkaAdminClient admin = NewUnconnectedClient();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
         ConfigResource broker = new ConfigResource(brokerType, "x");
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, Topic);
 
-        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
+        AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(
+            Alterations(broker, topic), new AlterConfigsOptions { TimeoutMs = CallTimeoutMs });
 
         Assert.Equal(2, result.Values.Count);
-        await AssertParseFailure(result.Values[broker].Get());
-        await AssertParseFailure(result.Values[topic].Get());
+        await AssertTimedOut(result.Values[broker].Get(), "incrementalAlterConfigs");
+        await AssertTimedOut(result.Values[topic].Get(), "incrementalAlterConfigs");
     }
 
-    /// <summary>
-    /// The mock's <c>describeConfigs</c>: the <c>BROKER</c> resource carries the parse error,
-    /// the <c>TOPIC</c> beside it is described.
-    /// </summary>
     [Fact]
     public async Task Mock_DescribeConfigs_Broker_FailsOnlyThatResource()
     {
@@ -114,15 +94,10 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { broker, topic });
 
-        await AssertParseFailure(result.Values[broker].Get());
+        await AssertInvalidRequest(result.Values[broker].Get(), "Broker x not found.");
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The mock's <c>describeConfigs</c> for <c>BROKER_LOGGER</c>: Java's mock does not
-    /// implement the type, so that resource is refused — no parse happens — and the
-    /// <c>TOPIC</c> beside it is described.
-    /// </summary>
     [Fact]
     public async Task Mock_DescribeConfigs_BrokerLogger_IsRefused_AndTheTopicIsDescribed()
     {
@@ -137,7 +112,6 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
-    /// <summary>The mock's <c>incrementalAlterConfigs</c> for <c>BROKER</c>.</summary>
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_Broker_FailsOnlyThatResource()
     {
@@ -148,11 +122,10 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(broker, topic));
 
-        await AssertParseFailure(result.Values[broker].Get());
+        await AssertInvalidRequest(result.Values[broker].Get(), "no such broker as x");
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
-    /// <summary>The mock's <c>incrementalAlterConfigs</c> for <c>BROKER_LOGGER</c>.</summary>
     [Fact]
     public async Task Mock_IncrementalAlterConfigs_BrokerLogger_IsRefused_AndTheTopicIsAltered()
     {
@@ -167,12 +140,21 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
-    private static async Task AssertParseFailure(Task outcome)
+    private static async Task AssertTimedOut(Task outcome, string call)
     {
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
-        Assert.Equal(LocalIllegalArgumentCode, failure.Code);
-        Assert.Equal(ParseMessage, failure.Message);
+        Assert.Equal(RequestTimedOutCode, failure.Code);
+        Assert.True(failure.IsRetriable);
+        Assert.Equal("Timed out waiting for a node assignment. Call: " + call, failure.Message);
+    }
+
+    private static async Task AssertInvalidRequest(Task outcome, string message)
+    {
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => outcome, s_deadline));
+        Assert.Equal(InvalidRequestCode, failure.Code);
+        Assert.Equal(message, failure.Message);
     }
 
     private static async Task AssertNotImplemented(Task outcome)
@@ -199,7 +181,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private static async Task<AsyncMockAdminClient> NewMockWithTopic()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
         await TestTimeout.Run(() => created.All().Get(), s_deadline);
         return admin;

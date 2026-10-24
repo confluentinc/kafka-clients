@@ -24,32 +24,23 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M15/P13.3 (c) decision D9, widened by M15/P13.4 decision D2 — every string the admin client
-/// hands the C ABI is rejected, synchronously and with <see cref="ArgumentException"/>, when it
-/// contains a NUL or an unpaired surrogate: the ABI would receive it truncated
-/// (<c>"a\0b"</c> → <c>"a"</c>) or altered (a lone surrogate → U+FFFD). The request would then
-/// name a different target than the caller did, and for a per-key key two caller keys could
-/// reach the core as one — since round 70 the core answers one callback per <em>distinct</em>
-/// key.
+/// Every string the admin client hands the C ABI is rejected, synchronously and with <see cref="ArgumentException"/>,
+/// when it contains a NUL or an unpaired surrogate: the C side would receive it truncated (<c>"a\0b"</c> →
+/// <c>"a"</c>) or altered (a lone surrogate → U+FFFD), so the request would name a different target than the caller
+/// did, and two per-key keys could reach the core as one.
 /// </summary>
 /// <remarks>
-/// One row per guarded string, over the public surface, each asserting the one shared message
-/// and the parameter it blames. The rows are the guarded-string list; a string pinned for the
-/// ABI without a row here is the gap this table is meant to make visible.
+/// One row per guarded string, over the public surface, each asserting the shared message and the parameter it
+/// blames. A string guarded for the C ABI without a row here is the gap this table makes visible.
 /// </remarks>
 public sealed class PublicAdminStringTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The message every rejection carries (asserted verbatim, DoD §3).</summary>
     private const string InvalidStringMessage =
         "An admin request string must not contain a NUL character or an unpaired UTF-16 " +
         "surrogate: such a string cannot be passed to the native client unchanged.";
 
-    /// <summary>
-    /// The two kinds of string the ABI cannot carry unchanged: an embedded NUL, which ends the
-    /// C string, and a lone high surrogate, which UTF-8 encodes as U+FFFD.
-    /// </summary>
     private static readonly IReadOnlyDictionary<string, string> s_badStrings =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -57,10 +48,6 @@ public sealed class PublicAdminStringTests
             ["lone-surrogate"] = "key\uD800tail",
         };
 
-    /// <summary>
-    /// Strings every guarded role must accept: non-ASCII text, a <b>well-formed</b> surrogate
-    /// pair, and CJK. Looked up by label, like <see cref="s_badStrings"/>.
-    /// </summary>
     private static readonly IReadOnlyDictionary<string, string> s_goodStrings =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -69,10 +56,6 @@ public sealed class PublicAdminStringTests
             ["cjk"] = "日本語",
         };
 
-    /// <summary>
-    /// Every guarded string: the RPC, the string's role in the key, the parameter the
-    /// rejection must blame, and the call that puts <c>bad</c> in that role.
-    /// </summary>
     private static readonly IReadOnlyDictionary<string, (string Parameter, Action<MockAdminClient, string> Call)> s_sites =
         new Dictionary<string, (string, Action<MockAdminClient, string>)>(StringComparer.Ordinal)
         {
@@ -172,36 +155,27 @@ public sealed class PublicAdminStringTests
             ["describeProducers:topic"] = ("partitions", (admin, bad) =>
                 admin.DescribeProducers(new[] { new TopicPartition(bad, 0) })),
 
-            // ---- M15/P13.4 S1: the request strings that are not per-key keys (A1–A7,
-            // A9–A20), and the mock seeding methods (A21, A22). A8 is a result method, not an
-            // RPC, so it has its own test below. ----
-
-            // A16 — a topic's config entry, pinned beside the topic name.
             ["createTopics:configName"] = ("newTopics", (admin, bad) =>
                 admin.CreateTopics(new[] { WithConfig("t", bad, "v") })),
             ["createTopics:configValue"] = ("newTopics", (admin, bad) =>
                 admin.CreateTopics(new[] { WithConfig("t", "k", bad) })),
 
-            // A1 — the op's config entry.
             ["incrementalAlterConfigs:configName"] = ("configs", (admin, bad) =>
                 admin.IncrementalAlterConfigs(ConfigOps("t", bad, "v"))),
             ["incrementalAlterConfigs:configValue"] = ("configs", (admin, bad) =>
                 admin.IncrementalAlterConfigs(ConfigOps("t", "k", bad))),
 
-            // A2 — the target log directory.
             ["alterReplicaLogDirs:logDir"] = ("replicaAssignment", (admin, bad) =>
                 admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>
                 {
                     [new TopicPartitionReplica("t", 0, 0)] = bad,
                 })),
 
-            // A3, A4 — the partition's topic (the DistinctPartitions check).
             ["electLeaders:topic"] = ("partitions", (admin, bad) =>
                 admin.ElectLeaders(ElectionType.Preferred, new[] { new TopicPartition(bad, 0) })),
             ["listPartitionReassignments:topic"] = ("partitions", (admin, bad) =>
                 admin.ListPartitionReassignments(new[] { new TopicPartition(bad, 0) })),
 
-            // A5 — the ACL filter's three strings.
             ["describeAcls:resourceName"] = ("filter", (admin, bad) =>
                 admin.DescribeAcls(new AclBindingFilter(
                     new ResourcePatternFilter(ResourceType.Topic, bad, PatternType.Literal),
@@ -215,7 +189,6 @@ public sealed class PublicAdminStringTests
                     ResourcePatternFilter.Any,
                     new AccessControlEntryFilter(null, bad, AclOperation.Any, AclPermissionType.Any)))),
 
-            // A6 — a quota filter component (marshaller-fed: guarded over the caller's filter).
             ["describeClientQuotas:entityType"] = ("filter", (admin, bad) =>
                 admin.DescribeClientQuotas(
                     ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(bad, "alice") }))),
@@ -223,7 +196,6 @@ public sealed class PublicAdminStringTests
                 admin.DescribeClientQuotas(
                     ClientQuotaFilter.Contains(new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, bad) }))),
 
-            // A17 — the quota op's key.
             ["alterClientQuotas:opKey"] = ("entries", (admin, bad) =>
                 admin.AlterClientQuotas(new[]
                 {
@@ -232,11 +204,9 @@ public sealed class PublicAdminStringTests
                         new[] { new ClientQuotaAlteration.Op(bad, 1024) }),
                 })),
 
-            // A7 — a described user.
             ["describeUserScramCredentials:user"] = ("users", (admin, bad) =>
                 admin.DescribeUserScramCredentials(new[] { bad })),
 
-            // A9, A10, A11 — the transaction RPCs.
             ["forceTerminateTransaction:transactionalId"] = ("transactionalId", (admin, bad) =>
                 admin.ForceTerminateTransaction(bad)),
             ["abortTransaction:topic"] = ("spec", (admin, bad) =>
@@ -244,7 +214,6 @@ public sealed class PublicAdminStringTests
             ["listTransactions:transactionalIdPattern"] = ("options", (admin, bad) =>
                 admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = bad })),
 
-            // A12 — the group, a partition's topic, and the offset's metadata.
             ["alterConsumerGroupOffsets:groupId"] = ("groupId", (admin, bad) =>
                 admin.AlterConsumerGroupOffsets(bad, Offsets("t", "meta"))),
             ["alterConsumerGroupOffsets:topic"] = ("offsets", (admin, bad) =>
@@ -252,13 +221,11 @@ public sealed class PublicAdminStringTests
             ["alterConsumerGroupOffsets:metadata"] = ("offsets", (admin, bad) =>
                 admin.AlterConsumerGroupOffsets("group", Offsets("t", bad))),
 
-            // A13 — the group and a partition's topic.
             ["deleteConsumerGroupOffsets:groupId"] = ("groupId", (admin, bad) =>
                 admin.DeleteConsumerGroupOffsets(bad, new[] { new TopicPartition("t", 0) })),
             ["deleteConsumerGroupOffsets:topic"] = ("partitions", (admin, bad) =>
                 admin.DeleteConsumerGroupOffsets("group", new[] { new TopicPartition(bad, 0) })),
 
-            // A14 — the group, and the two strings its options carry.
             ["removeMembersFromConsumerGroup:groupId"] = ("groupId", (admin, bad) =>
                 admin.RemoveMembersFromConsumerGroup(bad, new RemoveMembersFromConsumerGroupOptions())),
             ["removeMembersFromConsumerGroup:reason"] = ("options", (admin, bad) =>
@@ -268,7 +235,6 @@ public sealed class PublicAdminStringTests
                 admin.RemoveMembersFromConsumerGroup(
                     "group", new RemoveMembersFromConsumerGroupOptions(new[] { new MemberToRemove(bad) }))),
 
-            // A15 — the owner's and a renewer's principal (the PinPrincipals rows).
             ["createDelegationToken:ownerType"] = ("options", (admin, bad) =>
                 admin.CreateDelegationToken(new CreateDelegationTokenOptions { Owner = new KafkaPrincipal(bad, "alice") })),
             ["createDelegationToken:ownerName"] = ("options", (admin, bad) =>
@@ -278,47 +244,35 @@ public sealed class PublicAdminStringTests
             ["createDelegationToken:renewerName"] = ("options", (admin, bad) =>
                 admin.CreateDelegationToken(new CreateDelegationTokenOptions { Renewers = new[] { new KafkaPrincipal("User", bad) } })),
 
-            // A18 — an owner filter's principal.
             ["describeDelegationToken:ownerType"] = ("options", (admin, bad) =>
                 admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal(bad, "alice") } })),
             ["describeDelegationToken:ownerName"] = ("options", (admin, bad) =>
                 admin.DescribeDelegationToken(new DescribeDelegationTokenOptions { Owners = new[] { new KafkaPrincipal("User", bad) } })),
 
-            // A19 — a protocol-type filter.
             ["listGroups:protocolType"] = ("options", (admin, bad) =>
                 admin.ListGroups(new ListGroupsOptions { ProtocolTypes = new[] { bad } })),
 
-            // A20 — a spec's partition topic (the groupId row above is the key).
             ["listConsumerGroupOffsets(map):topic"] = ("groupSpecs", (admin, bad) =>
                 admin.ListConsumerGroupOffsets(new Dictionary<string, ListConsumerGroupOffsetsSpec>
                 {
                     ["group"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { new TopicPartition(bad, 0) } },
                 })),
 
-            // A21, A22 — the mock seeding methods (synchronous; no result to await).
-            ["setFeatureLevels:featureName"] = ("featureLevels", (admin, bad) =>
-                admin.SetFeatureLevels(new Dictionary<string, (short, short, short)> { [bad] = (1, 0, 1) })),
-            ["updateBeginningOffsets:topic"] = ("offsets", (admin, bad) =>
+            ["featureLevels:featureName"] = ("featureLevels", (_, bad) =>
+                MockAdminClient.Create().FeatureLevels(new Dictionary<string, short> { [bad] = 1 })),
+            ["updateBeginningOffsets:topic"] = ("newOffsets", (admin, bad) =>
                 admin.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(bad, 0)] = 1 })),
-            ["updateEndOffsets:topic"] = ("offsets", (admin, bad) =>
+            ["updateEndOffsets:topic"] = ("newOffsets", (admin, bad) =>
                 admin.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(bad, 0)] = 1 })),
-            ["updateConsumerGroupOffsets:topic"] = ("offsets", (admin, bad) =>
+            ["updateConsumerGroupOffsets:topic"] = ("newOffsets", (admin, bad) =>
                 admin.UpdateConsumerGroupOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(bad, 0)] = 1 })),
         };
 
-    /// <summary>Every (site, bad string) pair — the cross product of the two tables above.</summary>
     public static IEnumerable<object[]> Cases() =>
         from site in s_sites.Keys
         from kind in s_badStrings.Keys
         select new object[] { site, kind };
 
-    /// <summary>
-    /// The row count, pinned: 66 guarded strings over 41 surfaces. 29 rows are the per-key
-    /// key strings of M15/P13.3, over the 23 per-key RPCs that carry a string key
-    /// (<c>describeLogDirs</c>, keyed by broker id, has none); M15/P13.4 adds 37, over 14 more
-    /// RPCs and the 4 mock seeding methods. A row deleted from the table would otherwise
-    /// shrink the proof silently.
-    /// </summary>
     [Fact]
     public void EveryGuardedStringHasARow()
     {
@@ -333,15 +287,11 @@ public sealed class PublicAdminStringTests
                 .Count());
     }
 
-    /// <summary>
-    /// Each guarded string, holding each bad kind, is rejected synchronously with the shared
-    /// message and the caller's parameter name — before any result exists to await.
-    /// </summary>
     [Theory]
     [MemberData(nameof(Cases))]
     public void AStringTheAbiWouldChange_IsRejectedSynchronously(string site, string kind)
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         (string parameter, Action<MockAdminClient, string> call) = s_sites[site];
 
@@ -351,18 +301,12 @@ public sealed class PublicAdminStringTests
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// A8 — a guarded string outside an RPC: the user name
-    /// <see cref="DescribeUserScramCredentialsResult.Description"/> looks up. The mock faults
-    /// the RPC itself, but the guard runs before the result's task is awaited, so it throws
-    /// synchronously all the same.
-    /// </summary>
     [Theory]
     [InlineData("nul")]
     [InlineData("lone-surrogate")]
     public void DescribeUserScramCredentials_ADescriptionLookupName_IsRejectedSynchronously(string kind)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice" });
 
@@ -373,12 +317,6 @@ public sealed class PublicAdminStringTests
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// A guard outside the shared native path: the real client's single-group
-    /// <c>listConsumerGroupOffsets</c> overload blames its own <c>groupId</c> parameter, not
-    /// the batched form's <c>groupSpecs</c> it delegates to. Nothing is sent, so no broker is
-    /// needed.
-    /// </summary>
     [Theory]
     [InlineData("nul")]
     [InlineData("lone-surrogate")]
@@ -395,16 +333,10 @@ public sealed class PublicAdminStringTests
         Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The scenario the guard exists for: two different caller keys that the ABI would deliver
-    /// as one (<c>"a\0b"</c> and <c>"a\0c"</c> both reach it as <c>"a"</c>). Rejected, rather
-    /// than answered once for two awaitables. The client stays usable afterwards: nothing was
-    /// left half-submitted.
-    /// </summary>
     [Fact]
     public async Task TwoKeysThatWouldCollapseAtTheAbi_AreRejected_AndTheClientStaysUsable()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException rejected = Assert.Throws<ArgumentException>(
@@ -422,10 +354,6 @@ public sealed class PublicAdminStringTests
         await TestTimeout.Run(() => created.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The guard is not over-broad: non-ASCII text and a <b>well-formed</b> surrogate pair
-    /// cross the ABI unchanged, so they are accepted and round-trip as the same key.
-    /// </summary>
     [Theory]
     [InlineData("délété")]
     [InlineData("topic-🎈")]
@@ -433,7 +361,7 @@ public sealed class PublicAdminStringTests
     [InlineData("日本語")]
     public async Task AKeyStringThatCrossesUnchanged_IsAccepted(string name)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[] { new NewTopic(name, 1, 1) });
@@ -446,38 +374,26 @@ public sealed class PublicAdminStringTests
         Assert.Contains(name, names);
     }
 
-    /// <summary>Every (site, good string) pair.</summary>
     public static IEnumerable<object[]> AcceptedCases() =>
         from site in s_sites.Keys
         from kind in s_goodStrings.Keys
         select new object[] { site, kind };
 
-    /// <summary>
-    /// The guard is not over-broad in <b>any</b> role: the same call that rejects a bad string
-    /// raises nothing synchronously for one that crosses the ABI unchanged. What the mock then
-    /// does with it — succeed, or fault the returned task with its own message — is each
-    /// RPC's own behaviour and not asserted here.
-    /// </summary>
     [Theory]
     [MemberData(nameof(AcceptedCases))]
     public void AStringThatCrossesUnchanged_RaisesNoSynchronousException(string site, string kind)
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         (_, Action<MockAdminClient, string> call) = s_sites[site];
 
         call(admin, s_goodStrings[kind]);
     }
 
-    /// <summary>
-    /// A null ACL filter component means "any" and is not a key string the ABI would change,
-    /// so the guard lets it through — and a quota entity's null name (the default entity)
-    /// likewise.
-    /// </summary>
     [Fact]
     public void NullWildcards_AreNotRejected()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         _ = admin.DeleteAcls(new[] { new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any) });

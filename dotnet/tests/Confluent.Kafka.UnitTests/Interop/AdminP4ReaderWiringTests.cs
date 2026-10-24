@@ -13,1023 +13,378 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Pins <b>which ABI accessor</b> each composite-key and optional-error reader is built
-/// on — the one axis of <c>electLeaders</c>' walk that no behavioural test can reach.
+/// Pins which ABI symbol each admin static is bound to, the one axis no behavioural test can reach.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>Why this file exists (M15/P4 round 1, finding 70.2).</b> <c>electLeaders</c>'
-/// readers are only executed on the success branch of a real
-/// <c>kafka_admin_ElectLeadersResult_t</c>, and none is obtainable without a broker:
-/// Java's <c>MockAdminClient.electLeaders</c> throws
-/// <c>UnsupportedOperationException("Not implemented yet")</c>
-/// (<c>MockAdminClient.java:797</c>) and the core mirrors that faithfully. Measured on the
-/// shipped commit: replacing <c>AdminCallbacks.ElectLeadersKey</c> with a constant, and
-/// swapping its value reader's <c>FromBorrowedHandle</c> for <c>FromHandle</c>, each left
-/// the suite at <b>1231/1231 green</b>.
-/// </para>
-/// <para>
-/// The reader <em>bodies</em> are now shared factories
-/// (<see cref="AdminCallbacks.TopicPartitionKey"/>,
-/// <see cref="AdminCallbacks.BorrowedOptionalError"/>) that <c>deleteRecords</c> and
-/// <c>alterPartitionReassignments</c> drive over real result roots, so a defect in a body
-/// is caught there. What remains unreachable is the <b>wiring</b>: that
-/// <c>electLeaders</c>' instances capture <em>its</em> accessors and not another RPC's.
-/// This file reads that off the delegate itself.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>EVERY reader built on a shared factory must appear here, and the obligation is
-/// now a pre-write checklist item (PLAN §6.1 item 9) rather than a review finding.</b>
-/// M15/P4 Stage 2 added two <see cref="AdminCallbacks.TopicPartitionKey"/> readers —
-/// <c>ListPartitionReassignmentsKey</c> and <c>ListOffsetsKey</c> (the latter retired by
-/// M15/P9) — and did not extend this file, which reopened the exact gap it was written to
-/// close (finding 70.12).
-/// Measured before the fix: cross-wiring <c>ListOffsetsKey</c> to <c>deleteRecords</c>'
-/// accessors left the suite at <b>1297/1297 green</b>, because the sibling accessors are
-/// layout-compatible — the wrong call returns a plausible answer. A shared factory makes
-/// that mistake <em>easier</em> to write, not harder, which is why the guard is
-/// per-reader and not per-factory.
-/// </para>
-/// <para>
-/// ⚠ <b>The accessors are identified by their ABI <c>EntryPoint</c>, not by their C#
-/// name</b> — the entry point is the contract with the core, and a C# rename that kept the
-/// wrong symbol would still be a defect. Two properties are asserted per reader: the exact
-/// set of symbols it captures, and — across readers — that no two RPCs capture the same
-/// set, which is what a copy-paste wiring error produces.
-/// </para>
-/// <para>
-/// ⚠ <b>Reading captured state is deliberate, and it is guarded against becoming vacuous
-/// by TWO different mechanisms — which one fires depends on the refactor, and the
-/// difference was measured, not reasoned about.</b> A factory-built reader closes over its
-/// accessors, so its <see cref="Delegate.Target"/> is a display class whose fields hold
-/// them. Probed on net10.0:
-/// </para>
-/// <list type="table">
-/// <item>
-/// <term>factory-built closure (the shipped shape)</term>
-/// <description><c>&lt;&gt;c__DisplayClass…</c> — the fields hold the accessors.</description>
-/// </item>
-/// <item>
-/// <term>the factory inlined back into a <c>static</c> lambda</term>
-/// <description>
-/// <c>&lt;&gt;c</c> — <b>NOT <see langword="null"/></b>. A non-capturing lambda is cached
-/// on the compiler's singleton, so <see cref="CapturedEntryPoints"/> reaches the field
-/// scan and finds no <see cref="Delegate"/>; <b><see cref="Assert.NotEmpty{T}"/> is what
-/// fails</b>. Measured by mutation: constant-folding <c>ElectLeadersKey</c> to a
-/// <c>static</c> lambda gives <b>2 RED</b>, both "Collection was empty" — and the throw
-/// below fired <b>0</b> times.
-/// </description>
-/// </item>
-/// <item>
-/// <term>a plain <c>static</c> method group</term>
-/// <description>
-/// <see langword="null"/> — and <em>this</em> is the shape the <c>?? throw</c> in
-/// <see cref="CapturedEntryPoints"/> catches, so that clause is reachable rather than
-/// dead. Measured the same way, as the exact complement: rebinding
-/// <c>ElectLeadersKey</c> to a static method group gives <b>2 RED</b>, both the throw's
-/// own message — and "Collection was empty" fired <b>0</b> times.
-/// </description>
-/// </item>
-/// </list>
-/// <para>
-/// ⚠ An earlier version of this remark credited the <c>?? throw</c> with catching the
-/// static-lambda refactor. That was an unmeasured danger model in a code comment — PLAN
-/// §6.1 item 7 — and it was false: the guard held, but by the other mechanism. Both are
-/// kept, and they are exhaustive <em>structurally</em> rather than by enumeration: a
-/// reader that captures no P/Invoke delegate has either a null
-/// <see cref="Delegate.Target"/>, and throws, or a non-null one whose fields yield an
-/// empty set, and fails the assertion. The table above is which branch the three known
-/// shapes take, not the argument that there are only three.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>A shared accessor <em>bundle</em> is the same hazard one level up, and the
-/// closure scan above cannot see it (M15/P6, finding 76.1).</b> A bundle —
-/// <see cref="AclRowMarshal.NativeFilterAccessors"/>,
-/// <see cref="ClientQuotaMarshal.NativeEntityAccessors"/> — is a plain static object on a
-/// marshaller, not a <see cref="Delegate"/> on <see cref="AdminCallbacks"/>, so neither
-/// <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/> nor
-/// <see cref="CapturedEntryPoints"/> reaches it. Its constructor takes N accessors
-/// <b>positionally</b>, so transposing two of the same delegate type compiles. Measured on
-/// the reviewed commit: transposing <c>NativeFilterAccessors</c>' <c>Operation</c> and
-/// <c>PermissionType</c> left the suite at <b>1966/1966 green</b> — the only one of seven
-/// injections that survived, because the two tests able to observe a mis-decode both used
-/// <c>AclOperation.Read</c> (3) / <c>AclPermissionType.Allow</c> (3), identical codes.
-/// </para>
-/// <para>
-/// The bundle assertions below therefore pin each member to its own ABI symbol
-/// <b>positionally</b>, one row per member — a sorted set, as used for the readers above,
-/// is invariant under exactly the transposition being guarded against and would prove
-/// nothing. <see cref="TheTrackedBundleSet_CoversEveryAccessorBundle"/> discovers the
-/// bundles the same way the reader set is discovered, so a new one added without rows here
-/// turns red on its first run. Its criterion is the hazard itself — <b>two or more
-/// <em>same-typed</em></b> P/Invoke delegates held by one object — which is why
-/// <see cref="KeyedResultMarshal.Accessors"/> is correctly out of scope: its two members
-/// have distinct delegate types, so a transposition does not compile.
-/// </para>
+/// The accessors are identified by their ABI <c>EntryPoint</c>, not by their C# name: the entry point is the contract
+/// with the core.
 /// </remarks>
 public sealed class AdminP4ReaderWiringTests
 {
-    /// <summary>The one namespace an accessor bundle may live in (CLAUDE.md §2).</summary>
-    private const string InteropNamespace = "Confluent.Kafka.Internal.Interop";
-
-    /// <summary>
-    /// Each composite-key reader captures <b>its own</b> result type's
-    /// <c>get_topic</c> / <c>get_partition</c> pair.
-    /// </summary>
-    /// <remarks>
-    /// They share one body, so this is the assertion that keeps them distinguishable:
-    /// pointing <c>electLeaders</c>' reader at <c>deleteRecords</c>' accessors would be
-    /// invisible to every behavioural test and is caught here. The two group-offsets rows
-    /// (M15/P13.1) are twins with layout-identical accessors, so a cross-wire hands one RPC's
-    /// root to the other's accessor — a call that can return a plausible answer rather than
-    /// fail.
-    /// </remarks>
-    [Theory]
-    [InlineData(
-        nameof(AdminCallbacks.ElectLeadersKey),
-        "kafka_admin_ElectLeadersResult_get_topic",
-        "kafka_admin_ElectLeadersResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.DeleteRecordsKey),
-        "kafka_admin_DeleteRecordsResult_get_topic",
-        "kafka_admin_DeleteRecordsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.ListPartitionReassignmentsKey),
-        "kafka_admin_ListPartitionReassignmentsResult_get_topic",
-        "kafka_admin_ListPartitionReassignmentsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
-        "kafka_admin_AlterConsumerGroupOffsetsResult_get_topic",
-        "kafka_admin_AlterConsumerGroupOffsetsResult_get_partition")]
-    [InlineData(
-        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
-        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic",
-        "kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition")]
-    public void EachCompositeKeyReader_CapturesItsOwnAccessors(
-        string readerName, string getTopic, string getPartition) =>
-        Assert.Equal(
-            new[] { getPartition, getTopic }.OrderBy(name => name, StringComparer.Ordinal),
-            CapturedEntryPoints(Reader(readerName)));
-
-    /// <summary>
-    /// <c>electLeaders</c>' optional-error <b>value</b> reader captures
-    /// <c>kafka_admin_ElectLeadersResult_get_error</c> — its own, not the byte-identical
-    /// twin's.
-    /// </summary>
     [Fact]
-    public void ElectLeadersOptionalError_CapturesElectLeadersOwnErrorAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_ElectLeadersResult_get_error" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.ElectLeadersOptionalError))));
-
-    /// <summary>
-    /// <c>alterConsumerGroupOffsets</c>' optional-error <b>value</b> reader captures
-    /// <c>kafka_admin_AlterConsumerGroupOffsetsResult_get_error</c> — its own, not the
-    /// byte-identical twin's.
-    /// </summary>
-    [Fact]
-    public void AlterConsumerGroupOffsetsOptionalError_CapturesItsOwnErrorAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_AlterConsumerGroupOffsetsResult_get_error" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError))));
-
-    /// <summary>
-    /// <c>deleteConsumerGroupOffsets</c>' optional-error <b>value</b> reader captures
-    /// <c>kafka_admin_DeleteConsumerGroupOffsetsResult_get_error</c> — its own, not the
-    /// byte-identical twin's.
-    /// </summary>
-    [Fact]
-    public void DeleteConsumerGroupOffsetsOptionalError_CapturesItsOwnErrorAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DeleteConsumerGroupOffsetsResult_get_error" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))));
-
-    /// <summary>
-    /// ⚠ <c>alterConsumerGroupOffsets</c>' <b>outcome</b> reader captures its own
-    /// <c>count</c> and — the M15/P13.1 addition — its own <c>all</c>, the accessor that now
-    /// carries Java's <c>all()</c> outcome instead of a C# derivation over the map.
-    /// </summary>
-    /// <remarks>
-    /// The two twins' <c>_all</c> are layout-identical (<c>const Result_t*</c> → owned
-    /// <c>Error_t*</c>), so a cross-wire compiles and hands one RPC's root to the other's
-    /// accessor. What such a type-confused call returns is not something to reason from;
-    /// the symbol is what this row pins.
-    /// </remarks>
-    [Fact]
-    public void AlterConsumerGroupOffsetsOutcome_CapturesItsOwnCountAndAllAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_AlterConsumerGroupOffsetsResult_all",
-                "kafka_admin_AlterConsumerGroupOffsetsResult_count",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome))));
-
-    /// <summary>
-    /// <c>deleteConsumerGroupOffsets</c>' <b>outcome</b> reader captures its own
-    /// <c>count</c> and <c>all</c> — not <c>alterConsumerGroupOffsets</c>' layout-identical
-    /// twins.
-    /// </summary>
-    [Fact]
-    public void DeleteConsumerGroupOffsetsOutcome_CapturesItsOwnCountAndAllAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_DeleteConsumerGroupOffsetsResult_all",
-                "kafka_admin_DeleteConsumerGroupOffsetsResult_count",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome))));
-
-    /// <summary>
-    /// ⚠⚠ Each outcome reader composes <b>its own RPC's</b> key and optional-error readers —
-    /// the axis <see cref="CapturedEntryPoints"/> cannot see, because those two are closures,
-    /// not P/Invokes.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Handing <c>alterConsumerGroupOffsets</c>' outcome <c>deleteConsumerGroupOffsets</c>'
-    /// key reader compiles (the two are the same delegate type) and passes every per-reader
-    /// row above, since each reader is still wired to its own accessors in isolation — the
-    /// mistake is in which reader was passed. So the composition is pinned by reference
-    /// identity against the tracked fields.
-    /// </para>
-    /// <para>
-    /// It also pins textual order: the outcome fields are initialised from the key and
-    /// error fields, so declaring an outcome above them would capture <see langword="null"/>
-    /// — and a <see langword="null"/> capture fails the identity check here, at the wiring
-    /// level, not only as a faulted operation on the first root the reader walks.
-    /// </para>
-    /// </remarks>
-    [Theory]
-    [InlineData(
-        nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
-        nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
-        nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError))]
-    [InlineData(
-        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
-        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
-        nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError))]
-    [InlineData(
-        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
-        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
-        nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))]
-    public void EachGroupOffsetsOutcome_ComposesItsOwnKeyAndErrorReaders(
-        string outcomeName, string keyName, string errorName)
+    public void EveryAdminStaticBoundToAnAbiSymbol_HasExactlyOneRow()
     {
-        object target = Reader(outcomeName).Target
-            ?? throw new Xunit.Sdk.XunitException(
-                "the outcome reader no longer closes over its readers, so its composition is "
-                + "not readable here — this assertion needs a different mechanism, not deleting");
-
-        // Every captured field, P/Invoke or not, so a null capture is counted rather than
-        // silently filtered out by a type test.
-        object?[] captured = target.GetType()
-            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .Where(field => typeof(Delegate).IsAssignableFrom(field.FieldType))
-            .Select(field => field.GetValue(target))
-            .ToArray();
-
-        object?[] composed = captured
-            .Where(value => value is not Delegate accessor
-                || accessor.Method.GetCustomAttribute<DllImportAttribute>() is null)
-            .ToArray();
-
-        Assert.Equal(2, composed.Length);
-        Assert.Contains(composed, value => ReferenceEquals(value, Reader(keyName)));
-        Assert.Contains(composed, value => ReferenceEquals(value, Reader(errorName)));
-    }
-
-    /// <summary>
-    /// <c>removeMembersFromConsumerGroup</c>' optional-error <b>value</b> reader captures
-    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_error</c> — its own, not the
-    /// byte-identical twin's.
-    /// </summary>
-    [Fact]
-    public void RemoveMembersFromConsumerGroupOptionalError_CapturesItsOwnErrorAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_RemoveMembersFromConsumerGroupResult_get_error" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError))));
-
-    /// <summary>
-    /// <c>removeMembersFromConsumerGroup</c>' <b>key</b> reader (M15/P13.1 CP2) captures
-    /// <c>kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id</c> — its
-    /// own, not a byte-identical string-key twin's (the group RPCs' <c>get_group_id</c>
-    /// accessors share its <c>(const Result_t*, int32_t) → const char*</c> layout).
-    /// </summary>
-    [Fact]
-    public void RemoveMembersFromConsumerGroupKey_CapturesItsOwnGroupInstanceIdAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey))));
-
-    /// <summary>
-    /// ⚠ <c>removeMembersFromConsumerGroup</c>' <b>outcome</b> reader (M15/P13.1 CP2) captures
-    /// its own <c>count</c> and its own <c>all</c> — the accessor that carries Java's
-    /// <c>all()</c>, including the removeAll-mode partial failure no in-process root can
-    /// reach, so for that mode the symbol is pinned here rather than on native memory.
-    /// </summary>
-    /// <remarks>
-    /// The group-offsets twins' <c>_all</c> / <c>_count</c> are layout-identical
-    /// (<c>const Result_t*</c> → owned <c>Error_t*</c> / <c>int32_t</c>), so a cross-wire
-    /// compiles and hands this RPC's root to another RPC's accessor.
-    /// </remarks>
-    [Fact]
-    public void RemoveMembersFromConsumerGroupOutcome_CapturesItsOwnCountAndAllAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_RemoveMembersFromConsumerGroupResult_all",
-                "kafka_admin_RemoveMembersFromConsumerGroupResult_count",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome))));
-
-    /// <summary>
-    /// <c>deleteAcls</c>' <b>per-key</b> value reader captures the three accessors of the
-    /// OWNED <c>FilterResults_t</c> it is handed — not the retired root's
-    /// two-index twins above, which take a filter index it no longer has (M15/P9 CP5).
-    /// </summary>
-    [Fact]
-    public void DeleteAclsFilterResultsPerKeyValue_CapturesTheOwnedValuesAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_FilterResults_count",
-                "kafka_admin_FilterResults_get_binding",
-                "kafka_admin_FilterResults_get_error",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue))));
-
-    /// <summary>
-    /// <c>describeAcls</c>' <b>element</b> reader captures
-    /// <c>kafka_admin_DescribeAclsResult_get_binding</c> — its own, not
-    /// <c>createAcls</c>' or <c>deleteAcls</c>' byte-identical twin (M15/P6).
-    /// </summary>
-    [Fact]
-    public void DescribeAclsValue_CapturesDescribeAclsOwnBindingAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DescribeAclsResult_get_binding" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeAclsValue))));
-
-    /// <summary>
-    /// ⚠⚠ <c>fenceProducers</c>' <b>value</b> reader captures <b>both</b> of its own inline
-    /// scalars. The pair is the hazard: the producer id and the epoch are read at the same
-    /// index from two accessors, and both report <c>-1</c> for a failed id, so a transposition
-    /// returns a plausible answer (M15/P8).
-    /// </summary>
-    /// <remarks>
-    /// The capture set is order-independent, so it catches a cross-wire to another RPC's
-    /// accessors but says nothing about which slot each lands in. That axis needs no guard
-    /// <em>here</em>: the two factory parameters have distinct delegate types
-    /// (<c>…, long&gt;</c> and <c>…, short&gt;</c>), so transposing them does not compile —
-    /// unlike the same-typed bundles below. The reader's <em>body</em> — which field each
-    /// scalar reaches, and at which index — is asserted in <c>AdminP8ResultMarshalTests</c>
-    /// over injected accessors.
-    /// </remarks>
-    [Fact]
-    public void FenceProducersValue_CapturesBothOfItsOwnScalarAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_FenceProducersResult_get_epoch_id",
-                "kafka_admin_FenceProducersResult_get_producer_id",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.FenceProducersValue))));
-
-    /// <summary>
-    /// <c>describeDelegationToken</c>' <b>element</b> reader captures
-    /// <c>kafka_admin_DescribeDelegationTokenResult_get_token</c> (M15/P7).
-    /// </summary>
-    /// <remarks>
-    /// The <c>createDelegationToken</c> / <c>renew</c> / <c>expire</c> results declare a
-    /// byte-identical <c>get_token</c>, so a cross-wired reader returns a plausible token
-    /// rather than failing.
-    /// </remarks>
-    [Fact]
-    public void DescribeDelegationTokenValue_CapturesItsOwnTokenAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DescribeDelegationTokenResult_get_token" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeDelegationTokenValue))));
-
-    /// <summary>
-    /// <c>describeClientQuotas</c>' <b>key</b> reader captures
-    /// <c>kafka_admin_DescribeClientQuotasResult_get_entity</c> — its own, not
-    /// <c>alterClientQuotas</c>' byte-identical twin (M15/P6).
-    /// </summary>
-    [Fact]
-    public void DescribeClientQuotasKey_CapturesItsOwnEntityAccessor() =>
-        Assert.Equal(
-            new[] { "kafka_admin_DescribeClientQuotasResult_get_entity" },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeClientQuotasKey))));
-
-    /// <summary>
-    /// <c>describeClientQuotas</c>' <b>value</b> reader captures all three of its own
-    /// inner-axis accessors — the <c>(i, j)</c> quota walk lives inside the reader (M15/P6).
-    /// </summary>
-    [Fact]
-    public void DescribeClientQuotasValue_CapturesItsOwnInnerAccessors() =>
-        Assert.Equal(
-            new[]
-            {
-                "kafka_admin_DescribeClientQuotasResult_get_quota_count",
-                "kafka_admin_DescribeClientQuotasResult_get_quota_key",
-                "kafka_admin_DescribeClientQuotasResult_get_quota_value",
-            },
-            CapturedEntryPoints(Reader(nameof(AdminCallbacks.DescribeClientQuotasValue))));
-
-    /// <summary>
-    /// No two of the factory-built readers capture the same accessors — the control that
-    /// makes the per-reader assertions above more than three restatements of one source
-    /// line.
-    /// </summary>
-    /// <remarks>
-    /// A copy-paste wiring error produces exactly this collision, and it is the failure the
-    /// shared factory makes <em>easier</em> to write than the three separate lambdas did.
-    /// </remarks>
-    [Fact]
-    public void NoTwoFactoryBuiltReaders_CaptureTheSameAccessors()
-    {
-        string[] readers =
-        {
-            nameof(AdminCallbacks.ElectLeadersKey),
-            nameof(AdminCallbacks.DeleteRecordsKey),
-            nameof(AdminCallbacks.ListPartitionReassignmentsKey),
-            nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
-            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
-            nameof(AdminCallbacks.ElectLeadersOptionalError),
-            nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
-            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
-            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
-            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
-            nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
-            nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
-            nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
-            nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
-            nameof(AdminCallbacks.DescribeAclsValue),
-            nameof(AdminCallbacks.DescribeClientQuotasKey),
-            nameof(AdminCallbacks.DescribeClientQuotasValue),
-            nameof(AdminCallbacks.DescribeDelegationTokenValue),
-            nameof(AdminCallbacks.FenceProducersValue),
-        };
-
-        List<string> signatures = readers
-            .Select(name => string.Join("|", CapturedEntryPoints(Reader(name))))
-            .ToList();
-
-        // Control-positive: every reader really did yield a non-empty signature, so a
-        // decoder that silently returned nothing could not make this pass.
-        Assert.All(signatures, signature => Assert.NotEqual(string.Empty, signature));
-        Assert.Equal(readers.Length, signatures.Distinct(StringComparer.Ordinal).Count());
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>The tracked set is COMPLETE: every factory-built reader on
-    /// <see cref="AdminCallbacks"/> is covered by the assertions above.</b> This is
-    /// PLAN §6.1 item 9 enforced mechanically rather than by checklist.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// M15/P4 Stage 2 added two readers and did not extend this file; the gap was found in
-    /// review (70.12), not by the suite. A checklist prevents that only if it is read. This
-    /// discovers the readers instead: any <see cref="AdminCallbacks"/> field holding a
-    /// delegate that <em>closes over</em> at least one <c>DllImport</c> is factory-built by
-    /// construction, because that capture is exactly what the factories do — so a new
-    /// reader added without a row here turns this red on its first run.
-    /// </para>
-    /// <para>
-    /// ⚠ Hand-written <c>static</c> lambdas — <c>TopicListingValue</c>,
-    /// <c>PartitionReassignmentValue</c> and their kin — capture nothing and are correctly
-    /// out of scope: their wiring is visible in one line at the field, which is the
-    /// property the factories removed and this file restores.
-    /// </para>
-    /// </remarks>
-    [Fact]
-    public void TheTrackedSet_CoversEveryFactoryBuiltReader()
-    {
-        string[] discovered = typeof(AdminCallbacks)
+        string[] bound = typeof(NativeAdminClient)
             .GetFields(BindingFlags.NonPublic | BindingFlags.Static)
-            .Where(field => typeof(Delegate).IsAssignableFrom(field.FieldType))
-            .Where(field => CapturesAnyImport((Delegate?)field.GetValue(null)))
+            .Where(field => field.GetValue(null) is Delegate value
+                && value.Method.GetCustomAttribute<DllImportAttribute>() is not null)
             .Select(field => field.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
-
-        // Control-positive: the discovery really finds delegates, so an empty result
-        // could not make this pass vacuously.
-        Assert.NotEmpty(discovered);
-
-        Assert.Equal(
-            new[]
-            {
-                nameof(AdminCallbacks.AlterConsumerGroupOffsetsKey),
-                nameof(AdminCallbacks.AlterConsumerGroupOffsetsOptionalError),
-                nameof(AdminCallbacks.AlterConsumerGroupOffsetsOutcome),
-                nameof(AdminCallbacks.DeleteAclsFilterResultsPerKeyValue),
-                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsKey),
-                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOptionalError),
-                nameof(AdminCallbacks.DeleteConsumerGroupOffsetsOutcome),
-                nameof(AdminCallbacks.DeleteRecordsKey),
-                nameof(AdminCallbacks.DescribeAclsValue),
-                nameof(AdminCallbacks.DescribeClientQuotasKey),
-                nameof(AdminCallbacks.DescribeClientQuotasValue),
-                nameof(AdminCallbacks.DescribeDelegationTokenValue),
-                nameof(AdminCallbacks.ElectLeadersKey),
-                nameof(AdminCallbacks.ElectLeadersOptionalError),
-                nameof(AdminCallbacks.FenceProducersValue),
-                nameof(AdminCallbacks.ListPartitionReassignmentsKey),
-                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupKey),
-                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOptionalError),
-                nameof(AdminCallbacks.RemoveMembersFromConsumerGroupOutcome),
-            },
-            discovered);
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of the shared <c>kafka_common_acl_AclBindingFilter_*</c> bundle is bound
-    /// to <b>its own</b> ABI symbol — the positional guard the closure scan cannot give
-    /// (M15/P6, finding 76.1).
-    /// </summary>
-    /// <remarks>
-    /// The rows are compared in declaration order, member name included, so a transposition
-    /// of any same-typed pair — <c>Operation</c>/<c>PermissionType</c>,
-    /// <c>ResourceType</c>/<c>PatternType</c>, or any two of
-    /// <c>ResourceName</c>/<c>Principal</c>/<c>Host</c> — moves a symbol to the wrong row
-    /// and fails here. The expected symbols are the header's own accessor order
-    /// (header, <c>kafka_common_acl_AclBindingFilter_resource_type</c> through
-    /// <c>kafka_common_acl_AclBindingFilter_permission_type</c>).
-    /// </remarks>
-    [Fact]
-    public void NativeFilterAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        AclRowMarshal.FilterAccessors accessors = AclRowMarshal.NativeFilterAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "ResourceType=kafka_common_acl_AclBindingFilter_resource_type",
-                "ResourceName=kafka_common_acl_AclBindingFilter_resource_name",
-                "PatternType=kafka_common_acl_AclBindingFilter_pattern_type",
-                "Principal=kafka_common_acl_AclBindingFilter_principal",
-                "Host=kafka_common_acl_AclBindingFilter_host",
-                "Operation=kafka_common_acl_AclBindingFilter_operation",
-                "PermissionType=kafka_common_acl_AclBindingFilter_permission_type",
-            },
-            new[]
-            {
-                "ResourceType=" + EntryPointOf(accessors.ResourceType),
-                "ResourceName=" + EntryPointOf(accessors.ResourceName),
-                "PatternType=" + EntryPointOf(accessors.PatternType),
-                "Principal=" + EntryPointOf(accessors.Principal),
-                "Host=" + EntryPointOf(accessors.Host),
-                "Operation=" + EntryPointOf(accessors.Operation),
-                "PermissionType=" + EntryPointOf(accessors.PermissionType),
-            });
-    }
-
-    /// <summary>
-    /// Every member of the shared <c>kafka_common_quota_ClientQuotaEntity_*</c> bundle is bound to
-    /// <b>its own</b> ABI symbol (M15/P6).
-    /// </summary>
-    /// <remarks>
-    /// <c>GetEntryType</c>/<c>GetEntryName</c> are the one same-typed pair here;
-    /// <c>EntryCount</c> has its own delegate shape and cannot be transposed with either.
-    /// </remarks>
-    [Fact]
-    public void NativeEntityAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        ClientQuotaMarshal.EntityAccessors accessors = ClientQuotaMarshal.NativeEntityAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "EntryCount=kafka_common_quota_ClientQuotaEntity_entry_count",
-                "GetEntryType=kafka_common_quota_ClientQuotaEntity_get_entry_type",
-                "GetEntryName=kafka_common_quota_ClientQuotaEntity_get_entry_name",
-            },
-            new[]
-            {
-                "EntryCount=" + EntryPointOf(accessors.EntryCount),
-                "GetEntryType=" + EntryPointOf(accessors.GetEntryType),
-                "GetEntryName=" + EntryPointOf(accessors.GetEntryName),
-            });
-    }
-
-    /// <summary>
-    /// Every member of the <c>kafka_admin_OffsetAndMetadataMap_*</c> bundle is bound to
-    /// <b>its own</b> ABI symbol.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Found by <see cref="TheTrackedBundleSet_CoversEveryAccessorBundle"/> rather than by
-    /// hand — it predates M15/P6 and was unpinned, which is the whole argument for a
-    /// mechanical discovery over a checklist. Its same-typed pair is
-    /// <c>GetTopic</c>/<c>GetMetadata</c>, and transposing those swaps a key for a value.
-    /// </remarks>
-    [Fact]
-    public void OffsetAndMetadataMapAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        AdminCallbacks.OffsetAndMetadataMapAccessors accessors =
-            (AdminCallbacks.OffsetAndMetadataMapAccessors)typeof(AdminCallbacks)
-                .GetField("s_offsetAndMetadataMapAccessors", BindingFlags.NonPublic | BindingFlags.Static)!
-                .GetValue(null)!;
-
-        Assert.Equal(
-            new[]
-            {
-                "Count=kafka_admin_OffsetAndMetadataMap_count",
-                "GetTopic=kafka_admin_OffsetAndMetadataMap_get_topic",
-                "GetPartition=kafka_admin_OffsetAndMetadataMap_get_partition",
-                "HasOffset=kafka_admin_OffsetAndMetadataMap_has_offset",
-                "GetOffset=kafka_admin_OffsetAndMetadataMap_get_offset",
-                "GetMetadata=kafka_admin_OffsetAndMetadataMap_get_metadata",
-                "GetLeaderEpoch=kafka_admin_OffsetAndMetadataMap_get_leader_epoch",
-            },
-            new[]
-            {
-                "Count=" + EntryPointOf(accessors.Count),
-                "GetTopic=" + EntryPointOf(accessors.GetTopic),
-                "GetPartition=" + EntryPointOf(accessors.GetPartition),
-                "HasOffset=" + EntryPointOf(accessors.HasOffset),
-                "GetOffset=" + EntryPointOf(accessors.GetOffset),
-                "GetMetadata=" + EntryPointOf(accessors.GetMetadata),
-                "GetLeaderEpoch=" + EntryPointOf(accessors.GetLeaderEpoch),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of <c>UserScramCredentialsDescription</c>' bundle is bound to <b>its
-    /// own</b> ABI symbol, positionally (M15/P10).
-    /// </summary>
-    /// <remarks>
-    /// <c>CredentialMechanism</c>/<c>CredentialIterations</c> are the same delegate type in
-    /// adjacent positions, so transposing them compiles and both still return plausible
-    /// <c>int</c>s — <c>4096</c> decoding to <see cref="ScramMechanism.Unknown"/> rather than
-    /// to an error. ⚠ <c>Destroy</c> is asserted here too: it is the member that decides
-    /// whether an owned description is released, and mis-binding it is either a leak or a
-    /// double free, neither with a managed symptom.
-    /// </remarks>
-    [Fact]
-    public void UserScramCredentialAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        UserScramCredentialMarshal.Accessors accessors = UserScramCredentialMarshal.NativeAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "Name=kafka_admin_UserScramCredentialsDescription_name",
-                "CredentialCount=kafka_admin_UserScramCredentialsDescription_credential_count",
-                "CredentialMechanism=kafka_admin_UserScramCredentialsDescription_credential_mechanism",
-                "CredentialIterations=kafka_admin_UserScramCredentialsDescription_credential_iterations",
-                "Destroy=kafka_admin_UserScramCredentialsDescription_destroy",
-            },
-            new[]
-            {
-                "Name=" + EntryPointOf(accessors.Name),
-                "CredentialCount=" + EntryPointOf(accessors.CredentialCount),
-                "CredentialMechanism=" + EntryPointOf(accessors.CredentialMechanism),
-                "CredentialIterations=" + EntryPointOf(accessors.CredentialIterations),
-                "Destroy=" + EntryPointOf(accessors.Destroy),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of <c>describeFeatures</c>' bundle is bound to <b>its own</b> ABI
-    /// symbol, positionally (M15/P7).
-    /// </summary>
-    /// <remarks>
-    /// This is the bundle with the most transposable members in the binding: the two counts,
-    /// the two name accessors and the <b>four</b> version accessors are each same-typed, so a
-    /// finalized/supported mix-up compiles and returns plausible version numbers. It is also
-    /// the one bundle whose mis-wiring the mock cannot surface — it derives both tables from
-    /// one seeded key set, so finalized and supported always agree there.
-    /// </remarks>
-    [Fact]
-    public void FeatureMetadataAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        FeatureMetadataMarshal.Accessors accessors = FeatureMetadataMarshal.NativeAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "FinalizedCount=kafka_admin_DescribeFeaturesResult_finalized_count",
-                "GetFinalizedFeature=kafka_admin_DescribeFeaturesResult_get_finalized_feature",
-                "GetFinalizedMinVersionLevel=kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level",
-                "GetFinalizedMaxVersionLevel=kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level",
-                "SupportedCount=kafka_admin_DescribeFeaturesResult_supported_count",
-                "GetSupportedFeature=kafka_admin_DescribeFeaturesResult_get_supported_feature",
-                "GetSupportedMinVersion=kafka_admin_DescribeFeaturesResult_get_supported_min_version",
-                "GetSupportedMaxVersion=kafka_admin_DescribeFeaturesResult_get_supported_max_version",
-                "FinalizedFeaturesEpoch=kafka_admin_DescribeFeaturesResult_finalized_features_epoch",
-            },
-            new[]
-            {
-                "FinalizedCount=" + EntryPointOf(accessors.FinalizedCount),
-                "GetFinalizedFeature=" + EntryPointOf(accessors.GetFinalizedFeature),
-                "GetFinalizedMinVersionLevel=" + EntryPointOf(accessors.GetFinalizedMinVersionLevel),
-                "GetFinalizedMaxVersionLevel=" + EntryPointOf(accessors.GetFinalizedMaxVersionLevel),
-                "SupportedCount=" + EntryPointOf(accessors.SupportedCount),
-                "GetSupportedFeature=" + EntryPointOf(accessors.GetSupportedFeature),
-                "GetSupportedMinVersion=" + EntryPointOf(accessors.GetSupportedMinVersion),
-                "GetSupportedMaxVersion=" + EntryPointOf(accessors.GetSupportedMaxVersion),
-                "FinalizedFeaturesEpoch=" + EntryPointOf(accessors.FinalizedFeaturesEpoch),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of <c>describeTransactions</c>' bundle is bound to <b>its own</b> ABI
-    /// symbol, positionally (M15/P8).
-    /// </summary>
-    /// <remarks>
-    /// Three same-typed groups are transposable here and every transposition is silent:
-    /// <c>GetCoordinatorId</c>/<c>GetProducerEpoch</c>/<c>GetTopicPartitionCount</c> are all
-    /// <c>…, int&gt;</c> — and a count read from the coordinator id would drive the inner walk
-    /// off the end of the row — while <c>GetProducerId</c>/<c>GetTransactionTimeoutMs</c> are
-    /// both <c>…, long&gt;</c>, and both report <c>-1</c> for a failed row, so a swap returns a
-    /// plausible number. The remaining four each have a unique delegate type.
-    /// </remarks>
-    [Fact]
-    public void TransactionDescriptionAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        TransactionDescriptionMarshal.Accessors accessors =
-            TransactionDescriptionMarshal.NativeAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "GetCoordinatorId=kafka_admin_DescribeTransactionsResult_get_coordinator_id",
-                "GetState=kafka_admin_DescribeTransactionsResult_get_state",
-                "GetProducerId=kafka_admin_DescribeTransactionsResult_get_producer_id",
-                "GetProducerEpoch=kafka_admin_DescribeTransactionsResult_get_producer_epoch",
-                "GetTransactionTimeoutMs=kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms",
-                "TryGetTransactionStartTimeMs=kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms",
-                "GetTopicPartitionCount=kafka_admin_DescribeTransactionsResult_get_topic_partition_count",
-                "GetTopicPartitionTopic=kafka_admin_DescribeTransactionsResult_get_topic_partition_topic",
-                "GetTopicPartitionPartition=kafka_admin_DescribeTransactionsResult_get_topic_partition_partition",
-            },
-            new[]
-            {
-                "GetCoordinatorId=" + EntryPointOf(accessors.GetCoordinatorId),
-                "GetState=" + EntryPointOf(accessors.GetState),
-                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
-                "GetProducerEpoch=" + EntryPointOf(accessors.GetProducerEpoch),
-                "GetTransactionTimeoutMs=" + EntryPointOf(accessors.GetTransactionTimeoutMs),
-                "TryGetTransactionStartTimeMs=" + EntryPointOf(accessors.TryGetTransactionStartTimeMs),
-                "GetTopicPartitionCount=" + EntryPointOf(accessors.GetTopicPartitionCount),
-                "GetTopicPartitionTopic=" + EntryPointOf(accessors.GetTopicPartitionTopic),
-                "GetTopicPartitionPartition=" + EntryPointOf(accessors.GetTopicPartitionPartition),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of <c>describeProducers</c>' bundle is bound to <b>its own</b> ABI
-    /// symbol, positionally (M15/P8).
-    /// </summary>
-    /// <remarks>
-    /// Two same-typed pairs are transposable and both are silent:
-    /// <c>GetProducerId</c>/<c>GetLastTimestamp</c> are both <c>(i, j) -&gt; long</c> and
-    /// <c>GetProducerEpoch</c>/<c>GetLastSequence</c> are both <c>(i, j) -&gt; int</c>, and
-    /// every one of the four reports <c>-1</c> for an out-of-range index, so a swap returns a
-    /// plausible number. The two optionals and the count each have a unique delegate type.
-    /// </remarks>
-    [Fact]
-    public void PartitionProducerStateAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        PartitionProducerStateMarshal.Accessors accessors =
-            PartitionProducerStateMarshal.NativeAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "GetProducerCount=kafka_admin_DescribeProducersResult_get_producer_count",
-                "GetProducerId=kafka_admin_DescribeProducersResult_get_producer_id",
-                "GetProducerEpoch=kafka_admin_DescribeProducersResult_get_producer_epoch",
-                "GetLastSequence=kafka_admin_DescribeProducersResult_get_last_sequence",
-                "GetLastTimestamp=kafka_admin_DescribeProducersResult_get_last_timestamp",
-                "TryGetCurrentTransactionStartOffset=kafka_admin_DescribeProducersResult_get_current_transaction_start_offset",
-                "TryGetCoordinatorEpoch=kafka_admin_DescribeProducersResult_get_coordinator_epoch",
-            },
-            new[]
-            {
-                "GetProducerCount=" + EntryPointOf(accessors.GetProducerCount),
-                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
-                "GetProducerEpoch=" + EntryPointOf(accessors.GetProducerEpoch),
-                "GetLastSequence=" + EntryPointOf(accessors.GetLastSequence),
-                "GetLastTimestamp=" + EntryPointOf(accessors.GetLastTimestamp),
-                "TryGetCurrentTransactionStartOffset="
-                    + EntryPointOf(accessors.TryGetCurrentTransactionStartOffset),
-                "TryGetCoordinatorEpoch=" + EntryPointOf(accessors.TryGetCoordinatorEpoch),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ Every member of <c>listTransactions</c>' bundle is bound to <b>its own</b> ABI
-    /// symbol, positionally (M15/P8).
-    /// </summary>
-    /// <remarks>
-    /// <c>GetTransactionalId</c>/<c>GetState</c> are the same-typed pair, and transposing them
-    /// is the worst of the three P8 bundles: a transactional id decodes through
-    /// <see cref="TransactionMarshal"/> to <c>Unknown</c> rather than throwing, so every
-    /// listing would report a plausible state and an id that is a state name.
-    /// </remarks>
-    [Fact]
-    public void TransactionListingAccessors_BindEveryMemberToItsOwnAbiSymbol()
-    {
-        TransactionListingMarshal.Accessors accessors = TransactionListingMarshal.NativeAccessors;
-
-        Assert.Equal(
-            new[]
-            {
-                "GetListingCount=kafka_admin_ListTransactionsResult_get_listing_count",
-                "GetTransactionalId=kafka_admin_ListTransactionsResult_get_transactional_id",
-                "GetProducerId=kafka_admin_ListTransactionsResult_get_producer_id",
-                "GetState=kafka_admin_ListTransactionsResult_get_state",
-            },
-            new[]
-            {
-                "GetListingCount=" + EntryPointOf(accessors.GetListingCount),
-                "GetTransactionalId=" + EntryPointOf(accessors.GetTransactionalId),
-                "GetProducerId=" + EntryPointOf(accessors.GetProducerId),
-                "GetState=" + EntryPointOf(accessors.GetState),
-            });
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>Each single-root trampoline listed here destroys ITS OWN result root.</b> The
-    /// types declare byte-identical destroys, so a cross-wired one frees the right pointer
-    /// through the wrong destructor — undetectable by any behavioural assertion. The rows are
-    /// the count-less P7 trampolines (M15/P7) and the three single-callback group-RPC
-    /// trampolines (M15/P13.1), whose destroy is a separate argument to the shared
-    /// single-awaiter shell beside the outcome reader the other wiring tests pin.
-    /// </summary>
-    [Theory]
-    [InlineData(
-        "s_destroyCreateDelegationTokenResult",
-        "kafka_admin_CreateDelegationTokenResult_destroy")]
-    [InlineData(
-        "s_destroyRenewDelegationTokenResult",
-        "kafka_admin_RenewDelegationTokenResult_destroy")]
-    [InlineData(
-        "s_destroyExpireDelegationTokenResult",
-        "kafka_admin_ExpireDelegationTokenResult_destroy")]
-    [InlineData(
-        "s_destroyDescribeDelegationTokenResult",
-        "kafka_admin_DescribeDelegationTokenResult_destroy")]
-    [InlineData(
-        "s_destroyDescribeFeaturesResult",
-        "kafka_admin_DescribeFeaturesResult_destroy")]
-    [InlineData(
-        "s_destroyDescribeUserScramCredentialsResult",
-        "kafka_admin_DescribeUserScramCredentialsResult_destroy")]
-    [InlineData(
-        "s_destroyAlterConsumerGroupOffsetsResult",
-        "kafka_admin_AlterConsumerGroupOffsetsResult_destroy")]
-    [InlineData(
-        "s_destroyDeleteConsumerGroupOffsetsResult",
-        "kafka_admin_DeleteConsumerGroupOffsetsResult_destroy")]
-    [InlineData(
-        "s_destroyRemoveMembersFromConsumerGroupResult",
-        "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy")]
-    public void EachRootDestroy_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
-        Assert.Equal(entryPoint, EntryPointOf(Reader(fieldName)));
-
-    /// <summary>
-    /// ⚠⚠ <b>The tracked bundle set is COMPLETE: every shared accessor bundle in the binding
-    /// is pinned by one of the three assertions above.</b> The bundle-level twin of
-    /// <see cref="TheTrackedSet_CoversEveryFactoryBuiltReader"/>.
-    /// </summary>
-    /// <remarks>
-    /// Discovery is the hazard's own definition — an object held in an interop static field
-    /// that carries <b>two or more same-typed</b> P/Invoke delegates, which is exactly what a
-    /// positional constructor lets you transpose without a compile error. A bundle whose
-    /// delegate types are all distinct (<see cref="KeyedResultMarshal.Accessors"/>) is not
-    /// discovered because it is not transposable, so this does not widen into a checklist
-    /// over every accessor set in the binding.
-    /// </remarks>
-    [Fact]
-    public void TheTrackedBundleSet_CoversEveryAccessorBundle()
-    {
-        string[] discovered = typeof(AdminCallbacks).Assembly
-            .GetTypes()
-            .Where(type => type.Namespace == InteropNamespace && !type.ContainsGenericParameters)
-            .SelectMany(type =>
-                type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            .Where(field => !typeof(Delegate).IsAssignableFrom(field.FieldType)
-                && !field.FieldType.IsPrimitive
-                && field.FieldType != typeof(string))
-            .Where(field => HasTransposableAccessorPair(field.GetValue(null)))
-            .Select(field => field.DeclaringType!.Name + "." + field.Name)
+        string[] rows = typeof(AdminP4ReaderWiringTests)
+            .GetMethods()
+            .SelectMany(method => method.GetCustomAttributes<InlineDataAttribute>()
+                .SelectMany(data => data.GetData(method)))
+            .Select(row => (string)row[0])
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
-        // Control-positive: the discovery really reaches bundles, so a criterion that
-        // silently matched nothing could not make this pass vacuously.
-        Assert.NotEmpty(discovered);
-
-        Assert.Equal(
-            new[]
-            {
-                "AclRowMarshal.NativeFilterAccessors",
-                "AdminCallbacks.s_offsetAndMetadataMapAccessors",
-                "ClientQuotaMarshal.NativeEntityAccessors",
-                "FeatureMetadataMarshal.NativeAccessors",
-                "PartitionProducerStateMarshal.NativeAccessors",
-                "TransactionDescriptionMarshal.NativeAccessors",
-                "TransactionListingMarshal.NativeAccessors",
-                "UserScramCredentialMarshal.NativeAccessors",
-            },
-            discovered);
+        Assert.NotEmpty(bound);
+        Assert.Equal(bound, rows);
     }
 
-    /// <summary>
-    /// Whether an object holds two or more P/Invoke delegates of the <b>same</b> delegate
-    /// type — the shape a positional constructor lets a caller transpose silently.
-    /// </summary>
-    private static bool HasTransposableAccessorPair(object? bundle) =>
-        bundle is not null
-        && bundle.GetType()
-            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .Where(field => field.GetValue(bundle) is Delegate accessor
-                && accessor.Method.GetCustomAttribute<DllImportAttribute>() is not null)
-            .GroupBy(field => field.FieldType)
-            .Any(sameTyped => sameTyped.Count() >= 2);
+    [Theory]
+    [InlineData("s_createAclsValues", "kafka_admin_CreateAclsResult_values_err")]
+    [InlineData("s_deleteAclsValues", "kafka_admin_DeleteAclsResult_values_err")]
+    [InlineData("s_describeAclsValues", "kafka_admin_DescribeAclsResult_values_err")]
+    [InlineData("s_newCreateAclsOptions", "kafka_admin_CreateAclsOptions_new_err")]
+    [InlineData("s_destroyCreateAclsOptions", "kafka_admin_CreateAclsOptions_destroy_err")]
+    [InlineData("s_destroyCreateAclsResult", "kafka_admin_CreateAclsResult_destroy_err")]
+    [InlineData("s_newDescribeAclsOptions", "kafka_admin_DescribeAclsOptions_new_err")]
+    [InlineData("s_destroyDescribeAclsOptions", "kafka_admin_DescribeAclsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeAclsResult", "kafka_admin_DescribeAclsResult_destroy_err")]
+    [InlineData("s_newDeleteAclsOptions", "kafka_admin_DeleteAclsOptions_new_err")]
+    [InlineData("s_destroyDeleteAclsOptions", "kafka_admin_DeleteAclsOptions_destroy_err")]
+    [InlineData("s_destroyDeleteAclsResult", "kafka_admin_DeleteAclsResult_destroy_err")]
+    public void EachAclRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
 
-    /// <summary>
-    /// The ABI <c>EntryPoint</c> one bundle member is bound to.
-    /// </summary>
-    /// <exception cref="Xunit.Sdk.XunitException">
-    /// The member is not a direct P/Invoke, so the row below it would assert nothing.
-    /// </exception>
+    [Theory]
+    [InlineData("s_alterConfigsValues", "kafka_admin_AlterConfigsResult_values_err")]
+    [InlineData("s_describeConfigsValues", "kafka_admin_DescribeConfigsResult_values_err")]
+    [InlineData("s_listConfigResourcesAll", "kafka_admin_ListConfigResourcesResult_all_err")]
+    [InlineData("s_newDescribeConfigsOptions", "kafka_admin_DescribeConfigsOptions_new_err")]
+    [InlineData("s_destroyDescribeConfigsOptions", "kafka_admin_DescribeConfigsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeConfigsResult", "kafka_admin_DescribeConfigsResult_destroy_err")]
+    [InlineData("s_newAlterConfigsOptions", "kafka_admin_AlterConfigsOptions_new_err")]
+    [InlineData("s_destroyAlterConfigsOptions", "kafka_admin_AlterConfigsOptions_destroy_err")]
+    [InlineData("s_destroyAlterConfigsResult", "kafka_admin_AlterConfigsResult_destroy_err")]
+    [InlineData("s_newListConfigResourcesOptions", "kafka_admin_ListConfigResourcesOptions_new_err")]
+    [InlineData("s_destroyListConfigResourcesOptions", "kafka_admin_ListConfigResourcesOptions_destroy_err")]
+    [InlineData("s_destroyListConfigResourcesResult", "kafka_admin_ListConfigResourcesResult_destroy_err")]
+    public void EachConfigRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_newUnregisterControllerOptions", "kafka_admin_UnregisterControllerOptions_new_err")]
+    [InlineData("s_destroyUnregisterControllerOptions", "kafka_admin_UnregisterControllerOptions_destroy_err")]
+    [InlineData("s_destroyUnregisterControllerResult", "kafka_admin_UnregisterControllerResult_destroy_err")]
+    [InlineData("s_unregisterControllerAll", "kafka_admin_UnregisterControllerResult_all_err")]
+    public void EachControllerRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_describeFeaturesFeatureMetadata", "kafka_admin_DescribeFeaturesResult_feature_metadata_err")]
+    [InlineData("s_updateFeaturesValues", "kafka_admin_UpdateFeaturesResult_values_err")]
+    [InlineData("s_destroyDescribeFeaturesResult", "kafka_admin_DescribeFeaturesResult_destroy_err")]
+    [InlineData("s_destroyUpdateFeaturesResult", "kafka_admin_UpdateFeaturesResult_destroy_err")]
+    [InlineData("s_newDescribeFeaturesOptions", "kafka_admin_DescribeFeaturesOptions_new_err")]
+    [InlineData("s_newUpdateFeaturesOptions", "kafka_admin_UpdateFeaturesOptions_new_err")]
+    [InlineData("s_destroyDescribeFeaturesOptions", "kafka_admin_DescribeFeaturesOptions_destroy_err")]
+    [InlineData("s_destroyUpdateFeaturesOptions", "kafka_admin_UpdateFeaturesOptions_destroy_err")]
+    public void EachFeatureRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_adminDeleteConsumerGroupsWithOptions", "kafka_admin_Admin_delete_consumer_groups_with_options_err")]
+    [InlineData("s_alterConsumerGroupOffsetsAll", "kafka_admin_AlterConsumerGroupOffsetsResult_all_err")]
+    [InlineData(
+        "s_alterConsumerGroupOffsetsPartitionResult",
+        "kafka_admin_AlterConsumerGroupOffsetsResult_partition_result_err")]
+    [InlineData("s_deleteConsumerGroupOffsetsAll", "kafka_admin_DeleteConsumerGroupOffsetsResult_all_err")]
+    [InlineData(
+        "s_deleteConsumerGroupOffsetsPartitionResult",
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result")]
+    [InlineData("s_deleteConsumerGroupsDeletedGroups", "kafka_admin_DeleteConsumerGroupsResult_deleted_groups_err")]
+    [InlineData(
+        "s_listConsumerGroupOffsetsPartitionsToOffsetAndMetadataWithGroupId",
+        "kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id")]
+    [InlineData("s_removeMembersFromConsumerGroupAll", "kafka_admin_RemoveMembersFromConsumerGroupResult_all_err")]
+    [InlineData(
+        "s_removeMembersFromConsumerGroupMemberResult",
+        "kafka_admin_RemoveMembersFromConsumerGroupResult_member_result")]
+    [InlineData("s_newListConsumerGroupOffsetsOptions", "kafka_admin_ListConsumerGroupOffsetsOptions_new_err")]
+    [InlineData("s_destroyListConsumerGroupOffsetsOptions", "kafka_admin_ListConsumerGroupOffsetsOptions_destroy_err")]
+    [InlineData("s_destroyListConsumerGroupOffsetsResult", "kafka_admin_ListConsumerGroupOffsetsResult_destroy_err")]
+    [InlineData("s_newAlterConsumerGroupOffsetsOptions", "kafka_admin_AlterConsumerGroupOffsetsOptions_new_err")]
+    [InlineData(
+        "s_destroyAlterConsumerGroupOffsetsOptions",
+        "kafka_admin_AlterConsumerGroupOffsetsOptions_destroy_err")]
+    [InlineData("s_destroyAlterConsumerGroupOffsetsResult", "kafka_admin_AlterConsumerGroupOffsetsResult_destroy_err")]
+    [InlineData("s_newDeleteConsumerGroupOffsetsOptions", "kafka_admin_DeleteConsumerGroupOffsetsOptions_new_err")]
+    [InlineData(
+        "s_destroyDeleteConsumerGroupOffsetsOptions",
+        "kafka_admin_DeleteConsumerGroupOffsetsOptions_destroy_err")]
+    [InlineData(
+        "s_destroyDeleteConsumerGroupOffsetsResult",
+        "kafka_admin_DeleteConsumerGroupOffsetsResult_destroy_err")]
+    [InlineData("s_newDeleteConsumerGroupsOptions", "kafka_admin_DeleteConsumerGroupsOptions_new_err")]
+    [InlineData("s_destroyDeleteConsumerGroupsOptions", "kafka_admin_DeleteConsumerGroupsOptions_destroy_err")]
+    [InlineData("s_destroyDeleteConsumerGroupsResult", "kafka_admin_DeleteConsumerGroupsResult_destroy_err")]
+    [InlineData(
+        "s_destroyRemoveMembersFromConsumerGroupOptions",
+        "kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy_err")]
+    [InlineData(
+        "s_destroyRemoveMembersFromConsumerGroupResult",
+        "kafka_admin_RemoveMembersFromConsumerGroupResult_destroy_err")]
+    public void EachGroupOffsetsRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData(
+        "s_adminDescribeClassicGroupsWithOptions",
+        "kafka_admin_Admin_describe_classic_groups_with_options_err")]
+    [InlineData(
+        "s_adminDescribeConsumerGroupsWithOptions",
+        "kafka_admin_Admin_describe_consumer_groups_with_options_err")]
+    [InlineData(
+        "s_describeClassicGroupsDescribedGroups",
+        "kafka_admin_DescribeClassicGroupsResult_described_groups_err")]
+    [InlineData(
+        "s_describeConsumerGroupsDescribedGroups",
+        "kafka_admin_DescribeConsumerGroupsResult_described_groups_err")]
+    [InlineData("s_listGroupsOptionsInGroupStates", "kafka_admin_ListGroupsOptions_in_group_states_err")]
+    [InlineData("s_listGroupsOptionsWithTypes", "kafka_admin_ListGroupsOptions_with_types_err")]
+    [InlineData("s_listGroupsAll", "kafka_admin_ListGroupsResult_all_err")]
+    [InlineData("s_listGroupsErrors", "kafka_admin_ListGroupsResult_errors_err")]
+    [InlineData("s_listGroupsValid", "kafka_admin_ListGroupsResult_valid_err")]
+    [InlineData("s_newListGroupsOptions", "kafka_admin_ListGroupsOptions_new_err")]
+    [InlineData("s_destroyListGroupsOptions", "kafka_admin_ListGroupsOptions_destroy_err")]
+    [InlineData("s_destroyListGroupsResult", "kafka_admin_ListGroupsResult_destroy_err")]
+    [InlineData("s_newDescribeConsumerGroupsOptions", "kafka_admin_DescribeConsumerGroupsOptions_new_err")]
+    [InlineData("s_destroyDescribeConsumerGroupsOptions", "kafka_admin_DescribeConsumerGroupsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeConsumerGroupsResult", "kafka_admin_DescribeConsumerGroupsResult_destroy_err")]
+    [InlineData("s_newDescribeClassicGroupsOptions", "kafka_admin_DescribeClassicGroupsOptions_new_err")]
+    [InlineData("s_destroyDescribeClassicGroupsOptions", "kafka_admin_DescribeClassicGroupsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeClassicGroupsResult", "kafka_admin_DescribeClassicGroupsResult_destroy_err")]
+    public void EachGroupRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_alterReplicaLogDirsValues", "kafka_admin_AlterReplicaLogDirsResult_values_err")]
+    [InlineData("s_describeLogDirsDescriptions", "kafka_admin_DescribeLogDirsResult_descriptions_err")]
+    [InlineData("s_describeReplicaLogDirsValues", "kafka_admin_DescribeReplicaLogDirsResult_values_err")]
+    [InlineData("s_newDescribeLogDirsOptions", "kafka_admin_DescribeLogDirsOptions_new_err")]
+    [InlineData("s_destroyDescribeLogDirsOptions", "kafka_admin_DescribeLogDirsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeLogDirsResult", "kafka_admin_DescribeLogDirsResult_destroy_err")]
+    [InlineData("s_newAlterReplicaLogDirsOptions", "kafka_admin_AlterReplicaLogDirsOptions_new_err")]
+    [InlineData("s_destroyAlterReplicaLogDirsOptions", "kafka_admin_AlterReplicaLogDirsOptions_destroy_err")]
+    [InlineData("s_destroyAlterReplicaLogDirsResult", "kafka_admin_AlterReplicaLogDirsResult_destroy_err")]
+    [InlineData("s_newDescribeReplicaLogDirsOptions", "kafka_admin_DescribeReplicaLogDirsOptions_new_err")]
+    [InlineData("s_destroyDescribeReplicaLogDirsOptions", "kafka_admin_DescribeReplicaLogDirsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeReplicaLogDirsResult", "kafka_admin_DescribeReplicaLogDirsResult_destroy_err")]
+    public void EachLogDirRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_createPartitionsValues", "kafka_admin_CreatePartitionsResult_values_err")]
+    [InlineData("s_deleteRecordsLowWatermarks", "kafka_admin_DeleteRecordsResult_low_watermarks_err")]
+    [InlineData("s_listOffsetsPartitionResult", "kafka_admin_ListOffsetsResult_partition_result")]
+    [InlineData("s_newCreatePartitionsOptions", "kafka_admin_CreatePartitionsOptions_new_err")]
+    [InlineData("s_destroyCreatePartitionsOptions", "kafka_admin_CreatePartitionsOptions_destroy_err")]
+    [InlineData("s_destroyCreatePartitionsResult", "kafka_admin_CreatePartitionsResult_destroy_err")]
+    [InlineData("s_newDeleteRecordsOptions", "kafka_admin_DeleteRecordsOptions_new_err")]
+    [InlineData("s_destroyDeleteRecordsOptions", "kafka_admin_DeleteRecordsOptions_destroy_err")]
+    [InlineData("s_destroyDeleteRecordsResult", "kafka_admin_DeleteRecordsResult_destroy_err")]
+    [InlineData("s_newListOffsetsOptions", "kafka_admin_ListOffsetsOptions_new_err")]
+    [InlineData("s_destroyListOffsetsOptions", "kafka_admin_ListOffsetsOptions_destroy_err")]
+    [InlineData("s_destroyListOffsetsResult", "kafka_admin_ListOffsetsResult_destroy_err")]
+    public void EachPartitionRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_alterClientQuotasValues", "kafka_admin_AlterClientQuotasResult_values_err")]
+    [InlineData("s_describeClientQuotasEntities", "kafka_admin_DescribeClientQuotasResult_entities_err")]
+    [InlineData("s_newDescribeClientQuotasOptions", "kafka_admin_DescribeClientQuotasOptions_new_err")]
+    [InlineData("s_destroyDescribeClientQuotasOptions", "kafka_admin_DescribeClientQuotasOptions_destroy_err")]
+    [InlineData("s_destroyDescribeClientQuotasResult", "kafka_admin_DescribeClientQuotasResult_destroy_err")]
+    [InlineData("s_newAlterClientQuotasOptions", "kafka_admin_AlterClientQuotasOptions_new_err")]
+    [InlineData("s_destroyAlterClientQuotasOptions", "kafka_admin_AlterClientQuotasOptions_destroy_err")]
+    [InlineData("s_destroyAlterClientQuotasResult", "kafka_admin_AlterClientQuotasResult_destroy_err")]
+    public void EachQuotaRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_alterPartitionReassignmentsValues", "kafka_admin_AlterPartitionReassignmentsResult_values_err")]
+    [InlineData("s_electLeadersPartitions", "kafka_admin_ElectLeadersResult_partitions_err")]
+    [InlineData(
+        "s_listPartitionReassignmentsReassignments",
+        "kafka_admin_ListPartitionReassignmentsResult_reassignments_err")]
+    [InlineData("s_newElectLeadersOptions", "kafka_admin_ElectLeadersOptions_new_err")]
+    [InlineData("s_destroyElectLeadersOptions", "kafka_admin_ElectLeadersOptions_destroy_err")]
+    [InlineData("s_destroyElectLeadersResult", "kafka_admin_ElectLeadersResult_destroy_err")]
+    [InlineData("s_newAlterPartitionReassignmentsOptions", "kafka_admin_AlterPartitionReassignmentsOptions_new_err")]
+    [InlineData(
+        "s_destroyAlterPartitionReassignmentsOptions",
+        "kafka_admin_AlterPartitionReassignmentsOptions_destroy_err")]
+    [InlineData(
+        "s_destroyAlterPartitionReassignmentsResult",
+        "kafka_admin_AlterPartitionReassignmentsResult_destroy_err")]
+    [InlineData("s_newListPartitionReassignmentsOptions", "kafka_admin_ListPartitionReassignmentsOptions_new_err")]
+    [InlineData(
+        "s_destroyListPartitionReassignmentsOptions",
+        "kafka_admin_ListPartitionReassignmentsOptions_destroy_err")]
+    [InlineData(
+        "s_destroyListPartitionReassignmentsResult",
+        "kafka_admin_ListPartitionReassignmentsResult_destroy_err")]
+    public void EachReassignmentRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_alterUserScramCredentialsValues", "kafka_admin_AlterUserScramCredentialsResult_values_err")]
+    [InlineData("s_describeUserScramCredentialsAll", "kafka_admin_DescribeUserScramCredentialsResult_all_err")]
+    [InlineData(
+        "s_describeUserScramCredentialsDescription",
+        "kafka_admin_DescribeUserScramCredentialsResult_description_err")]
+    [InlineData("s_describeUserScramCredentialsUsers", "kafka_admin_DescribeUserScramCredentialsResult_users_err")]
+    [InlineData("s_newDescribeUserScramCredentialsOptions", "kafka_admin_DescribeUserScramCredentialsOptions_new_err")]
+    [InlineData(
+        "s_destroyDescribeUserScramCredentialsOptions",
+        "kafka_admin_DescribeUserScramCredentialsOptions_destroy_err")]
+    [InlineData(
+        "s_destroyDescribeUserScramCredentialsResult",
+        "kafka_admin_DescribeUserScramCredentialsResult_destroy_err")]
+    [InlineData("s_newAlterUserScramCredentialsOptions", "kafka_admin_AlterUserScramCredentialsOptions_new_err")]
+    [InlineData(
+        "s_destroyAlterUserScramCredentialsOptions",
+        "kafka_admin_AlterUserScramCredentialsOptions_destroy_err")]
+    [InlineData("s_destroyAlterUserScramCredentialsResult", "kafka_admin_AlterUserScramCredentialsResult_destroy_err")]
+    public void EachScramRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_createDelegationTokenToken", "kafka_admin_CreateDelegationTokenResult_delegation_token_err")]
+    [InlineData("s_renewDelegationTokenExpiryTimestamp", "kafka_admin_RenewDelegationTokenResult_expiry_timestamp_err")]
+    [InlineData(
+        "s_expireDelegationTokenExpiryTimestamp",
+        "kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_err")]
+    [InlineData("s_describeDelegationTokenTokens", "kafka_admin_DescribeDelegationTokenResult_delegation_tokens_err")]
+    [InlineData("s_destroyCreateDelegationTokenResult", "kafka_admin_CreateDelegationTokenResult_destroy_err")]
+    [InlineData("s_destroyRenewDelegationTokenResult", "kafka_admin_RenewDelegationTokenResult_destroy_err")]
+    [InlineData("s_destroyExpireDelegationTokenResult", "kafka_admin_ExpireDelegationTokenResult_destroy_err")]
+    [InlineData("s_destroyDescribeDelegationTokenResult", "kafka_admin_DescribeDelegationTokenResult_destroy_err")]
+    [InlineData(
+        "s_createDelegationTokenOptionsSetRenewers",
+        "kafka_admin_CreateDelegationTokenOptions_set_renewers_err")]
+    [InlineData(
+        "s_describeDelegationTokenOptionsSetOwners",
+        "kafka_admin_DescribeDelegationTokenOptions_set_owners_err")]
+    [InlineData("s_newCreateDelegationTokenOptions", "kafka_admin_CreateDelegationTokenOptions_new_err")]
+    [InlineData("s_destroyCreateDelegationTokenOptions", "kafka_admin_CreateDelegationTokenOptions_destroy_err")]
+    [InlineData("s_newRenewDelegationTokenOptions", "kafka_admin_RenewDelegationTokenOptions_new_err")]
+    [InlineData("s_destroyRenewDelegationTokenOptions", "kafka_admin_RenewDelegationTokenOptions_destroy_err")]
+    [InlineData("s_newExpireDelegationTokenOptions", "kafka_admin_ExpireDelegationTokenOptions_new_err")]
+    [InlineData("s_destroyExpireDelegationTokenOptions", "kafka_admin_ExpireDelegationTokenOptions_destroy_err")]
+    [InlineData("s_newDescribeDelegationTokenOptions", "kafka_admin_DescribeDelegationTokenOptions_new_err")]
+    [InlineData("s_destroyDescribeDelegationTokenOptions", "kafka_admin_DescribeDelegationTokenOptions_destroy_err")]
+    public void EachDelegationTokenRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_adminDescribeClusterWithOptions", "kafka_admin_Admin_describe_cluster_with_options_err")]
+    [InlineData("s_adminListTopicsWithOptions", "kafka_admin_Admin_list_topics_with_options_err")]
+    [InlineData("s_createTopicsValues", "kafka_admin_CreateTopicsResult_values_err")]
+    [InlineData("s_deleteTopicsTopicIdValues", "kafka_admin_DeleteTopicsResult_topic_id_values_err")]
+    [InlineData("s_deleteTopicsTopicNameValues", "kafka_admin_DeleteTopicsResult_topic_name_values_err")]
+    [InlineData("s_describeClusterAuthorizedOperations", "kafka_admin_DescribeClusterResult_authorized_operations_err")]
+    [InlineData("s_describeClusterClusterId", "kafka_admin_DescribeClusterResult_cluster_id_err")]
+    [InlineData("s_describeClusterController", "kafka_admin_DescribeClusterResult_controller_err")]
+    [InlineData("s_describeClusterNodes", "kafka_admin_DescribeClusterResult_nodes_err")]
+    [InlineData("s_describeTopicsTopicIdValues", "kafka_admin_DescribeTopicsResult_topic_id_values_err")]
+    [InlineData("s_describeTopicsTopicNameValues", "kafka_admin_DescribeTopicsResult_topic_name_values_err")]
+    [InlineData("s_listTopicsNamesToListings", "kafka_admin_ListTopicsResult_names_to_listings_err")]
+    [InlineData("s_newListTopicsOptions", "kafka_admin_ListTopicsOptions_new_err")]
+    [InlineData("s_destroyListTopicsOptions", "kafka_admin_ListTopicsOptions_destroy_err")]
+    [InlineData("s_destroyListTopicsResult", "kafka_admin_ListTopicsResult_destroy_err")]
+    [InlineData("s_newCreateTopicsOptions", "kafka_admin_CreateTopicsOptions_new_err")]
+    [InlineData("s_destroyCreateTopicsOptions", "kafka_admin_CreateTopicsOptions_destroy_err")]
+    [InlineData("s_destroyCreateTopicsResult", "kafka_admin_CreateTopicsResult_destroy_err")]
+    [InlineData("s_newDeleteTopicsOptions", "kafka_admin_DeleteTopicsOptions_new_err")]
+    [InlineData("s_destroyDeleteTopicsOptions", "kafka_admin_DeleteTopicsOptions_destroy_err")]
+    [InlineData("s_destroyDeleteTopicsResult", "kafka_admin_DeleteTopicsResult_destroy_err")]
+    [InlineData("s_newDescribeTopicsOptions", "kafka_admin_DescribeTopicsOptions_new_err")]
+    [InlineData("s_destroyDescribeTopicsOptions", "kafka_admin_DescribeTopicsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeTopicsResult", "kafka_admin_DescribeTopicsResult_destroy_err")]
+    [InlineData("s_newDescribeClusterOptions", "kafka_admin_DescribeClusterOptions_new_err")]
+    [InlineData("s_destroyDescribeClusterOptions", "kafka_admin_DescribeClusterOptions_destroy_err")]
+    [InlineData("s_destroyDescribeClusterResult", "kafka_admin_DescribeClusterResult_destroy_err")]
+    public void EachTopicRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_adminDescribeTransactionsWithOptions", "kafka_admin_Admin_describe_transactions_with_options_err")]
+    [InlineData("s_adminFenceProducersWithOptions", "kafka_admin_Admin_fence_producers_with_options_err")]
+    [InlineData("s_adminListTransactionsWithOptions", "kafka_admin_Admin_list_transactions_with_options_err")]
+    [InlineData("s_describeProducersPartitionResult", "kafka_admin_DescribeProducersResult_partition_result")]
+    [InlineData("s_describeTransactionsDescription", "kafka_admin_DescribeTransactionsResult_description")]
+    [InlineData("s_fenceProducersEpochId", "kafka_admin_FenceProducersResult_epoch_id")]
+    [InlineData("s_fenceProducersProducerId", "kafka_admin_FenceProducersResult_producer_id")]
+    [InlineData("s_listTransactionsOptionsFilterStates", "kafka_admin_ListTransactionsOptions_filter_states_err")]
+    [InlineData("s_newDescribeProducersOptions", "kafka_admin_DescribeProducersOptions_new_err")]
+    [InlineData("s_destroyDescribeProducersOptions", "kafka_admin_DescribeProducersOptions_destroy_err")]
+    [InlineData("s_destroyDescribeProducersResult", "kafka_admin_DescribeProducersResult_destroy_err")]
+    [InlineData("s_newDescribeTransactionsOptions", "kafka_admin_DescribeTransactionsOptions_new_err")]
+    [InlineData("s_destroyDescribeTransactionsOptions", "kafka_admin_DescribeTransactionsOptions_destroy_err")]
+    [InlineData("s_destroyDescribeTransactionsResult", "kafka_admin_DescribeTransactionsResult_destroy_err")]
+    [InlineData("s_newAbortTransactionOptions", "kafka_admin_AbortTransactionOptions_new_err")]
+    [InlineData("s_destroyAbortTransactionOptions", "kafka_admin_AbortTransactionOptions_destroy_err")]
+    [InlineData("s_destroyAbortTransactionResult", "kafka_admin_AbortTransactionResult_destroy_err")]
+    [InlineData("s_abortTransactionAll", "kafka_admin_AbortTransactionResult_all_err")]
+    [InlineData("s_newFenceProducersOptions", "kafka_admin_FenceProducersOptions_new_err")]
+    [InlineData("s_destroyFenceProducersOptions", "kafka_admin_FenceProducersOptions_destroy_err")]
+    [InlineData("s_destroyFenceProducersResult", "kafka_admin_FenceProducersResult_destroy_err")]
+    [InlineData("s_newTerminateTransactionOptions", "kafka_admin_TerminateTransactionOptions_new_err")]
+    [InlineData("s_destroyTerminateTransactionOptions", "kafka_admin_TerminateTransactionOptions_destroy_err")]
+    [InlineData("s_destroyTerminateTransactionResult", "kafka_admin_TerminateTransactionResult_destroy_err")]
+    [InlineData("s_terminateTransactionResult", "kafka_admin_TerminateTransactionResult_result_err")]
+    [InlineData("s_newListTransactionsOptions", "kafka_admin_ListTransactionsOptions_new_err")]
+    [InlineData("s_destroyListTransactionsOptions", "kafka_admin_ListTransactionsOptions_destroy_err")]
+    [InlineData("s_destroyListTransactionsResult", "kafka_admin_ListTransactionsResult_destroy_err")]
+    [InlineData("s_listTransactionsByBrokerId", "kafka_admin_ListTransactionsResult_by_broker_id_err")]
+    public void EachTransactionRpc_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    [Theory]
+    [InlineData("s_mockAdminClientUpdateBeginningOffsets", "kafka_admin_MockAdminClient_update_beginning_offsets_err")]
+    [InlineData(
+        "s_mockAdminClientUpdateConsumerGroupOffsets",
+        "kafka_admin_MockAdminClient_update_consumer_group_offsets_err")]
+    [InlineData("s_mockAdminClientUpdateEndOffsets", "kafka_admin_MockAdminClient_update_end_offsets_err")]
+    public void EachMockSeeder_BindsItsOwnAbiSymbol(string fieldName, string entryPoint) =>
+        AssertBinding(fieldName, entryPoint);
+
+    private static void AssertBinding(string fieldName, string entryPoint) =>
+        Assert.Equal(
+            entryPoint,
+            EntryPointOf(
+                (Delegate)typeof(NativeAdminClient)
+                    .GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)!
+                    .GetValue(null)!));
+
     private static string EntryPointOf(Delegate accessor) =>
         accessor.Method.GetCustomAttribute<DllImportAttribute>()?.EntryPoint
         ?? throw new Xunit.Sdk.XunitException(
             "the bundle member is not a direct P/Invoke, so its ABI symbol is no longer "
             + "readable here — this assertion needs a different mechanism, not deleting");
-
-    /// <summary>
-    /// Whether a delegate closes over at least one <c>DllImport</c> — the signature of a
-    /// factory-built reader.
-    /// </summary>
-    private static bool CapturesAnyImport(Delegate? candidate)
-    {
-        object? target = candidate?.Target;
-        if (target is null)
-        {
-            return false;
-        }
-
-        return target.GetType()
-            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .Select(field => field.GetValue(target))
-            .OfType<Delegate>()
-            .Any(captured => captured.Method.GetCustomAttribute<DllImportAttribute>() is not null);
-    }
-
-    /// <summary>
-    /// The ABI <c>EntryPoint</c>s of every P/Invoke a reader closes over, sorted.
-    /// </summary>
-    /// <exception cref="Xunit.Sdk.XunitException">
-    /// The reader captures nothing. Thrown explicitly for a <c>static</c> <b>method
-    /// group</b> (<see cref="Delegate.Target"/> is <see langword="null"/>); a
-    /// non-capturing <b>lambda</b> instead reaches <see cref="Assert.NotEmpty{T}"/> below,
-    /// because its target is the compiler's <c>&lt;&gt;c</c> singleton rather than
-    /// <see langword="null"/>. See the measured table in the type remarks.
-    /// </exception>
-    private static string[] CapturedEntryPoints(Delegate reader)
-    {
-        // Null target == a static method group. A non-capturing LAMBDA does not land here —
-        // its target is <>c — and is caught by the Assert.NotEmpty below instead.
-        object target = reader.Target
-            ?? throw new Xunit.Sdk.XunitException(
-                "the reader is a static method group, so it captures nothing and its wiring is "
-                + "no longer readable here — this file needs a different mechanism, not deleting");
-
-        string[] entryPoints = target.GetType()
-            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .Select(field => field.GetValue(target))
-            .OfType<Delegate>()
-            .Select(captured => captured.Method.GetCustomAttribute<DllImportAttribute>()?.EntryPoint)
-            .Where(entryPoint => entryPoint is not null)
-            .Select(entryPoint => entryPoint!)
-            .OrderBy(entryPoint => entryPoint, StringComparer.Ordinal)
-            .ToArray();
-
-        // ⚠ THE mechanism for a non-capturing lambda — see the type remarks' measured table.
-        Assert.NotEmpty(entryPoints);
-        return entryPoints;
-    }
-
-    private static Delegate Reader(string fieldName) =>
-        (Delegate)typeof(AdminCallbacks)
-            .GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static)!
-            .GetValue(null)!;
 }

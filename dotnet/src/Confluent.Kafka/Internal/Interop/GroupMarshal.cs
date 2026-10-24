@@ -17,96 +17,118 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Converts between the group enums and the <b>names</b> the ABI speaks. None of
-/// <see cref="GroupType"/>, <see cref="GroupState"/> or <see cref="ClassicGroupState"/>
-/// has a numeric id in Java — the header states this at every accessor — so Java's
-/// <c>toString()</c> spelling is the wire value in both directions.
+/// Converts between the group enums and the C ABI's singletons: a singleton the core hands out is
+/// decoded through its <c>__enum</c> id, a filter value is encoded as its singleton, and the
+/// <c>NameFrom*</c> functions give Java's <c>toString()</c> names.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>The tables below are spelled out rather than derived from
-/// <see cref="Enum.ToString()"/>, although the two agree today.</b> Every C# member name
-/// here happens to equal Java's <c>toString()</c> value, so <c>ToString()</c> would
-/// "work" — until a member is renamed for C# style, or a trimmer strips enum metadata and
-/// <c>ToString()</c> starts yielding the number. An explicit switch makes the mapping a
-/// reviewable fact and makes a rename a compile error rather than a wire change.
-/// </para>
-/// <para>
-/// ⚠ <b>A name this client does not recognise decodes to <c>Unknown</c>, never to a
-/// failure.</b> That is Java's <c>parse</c> in each of these classes
-/// (<c>GroupType.java:44-50</c>, <c>GroupState.java:71-74</c>,
-/// <c>ClassicGroupState.java:49-52</c>) and it is load-bearing: a newer broker naming a
-/// state this client has never heard of must still produce a listing — Java's
-/// <c>ClassicGroupDescription.state()</c> javadoc says so in as many words ("or UNKNOWN if
-/// the state is too new for us to parse"). Matching is case-insensitive, as Java's lookup
-/// maps are (<c>GroupType.java:32-33</c> lower-cases, <c>GroupState.java:59-60</c> and
-/// <c>ClassicGroupState.java:37-38</c> upper-case — the same relation) and as the header
-/// promises.
-/// </para>
-/// <para>
-/// ⚠ <b>A recognised name and an absent one are different answers.</b> Every
-/// <c>*FromName</c> below returns <see langword="null"/> — Java's <c>Optional.empty()</c> —
-/// only for a <b>null pointer</b>. A non-null pointer always yields a value, falling back
-/// to <c>Unknown</c>. Collapsing the two would make "the broker did not report a state"
-/// indistinguishable from "it reported one I cannot name".
-/// </para>
-/// <para>
-/// <b>The encode direction is total in Java and partial here.</b> Java cannot hold an
-/// enum value outside its constants; a C# cast can. So
-/// <see cref="NameFromType(GroupType)"/> / <see cref="NameFromState(GroupState)"/> /
-/// <see cref="NameFromClassicState(ClassicGroupState)"/> return <see langword="null"/> for
-/// an undefined value and leave the throw to the caller, which knows the parameter name to
-/// blame. Validation happens before any native call (ffi-marshalling.md §B5).
-/// </para>
-/// <para>
-/// <b>Member naming drops the shared <c>Group</c>, which the class already carries:</b>
-/// <c>GroupType</c> → <c>…Type…</c>, <c>GroupState</c> → <c>…State…</c>,
-/// <c>ClassicGroupState</c> → <c>…ClassicState…</c>.
-/// </para>
+/// Each mapping is an explicit switch, never a cast, so the C and C# orders cannot drift apart. An unknown C id
+/// decodes to <c>Unknown</c>, as Java's <c>parse</c> does, and a null singleton, Java's <c>Optional.empty()</c>,
+/// to <see langword="null"/>.
 /// </remarks>
 internal static class GroupMarshal
 {
-    /// <summary>
-    /// Decodes a borrowed, NUL-terminated <c>GroupType</c> name into
-    /// <see cref="GroupType"/>, or <see langword="null"/> when the ABI reports Java's
-    /// <c>Optional.empty()</c> as a null pointer.
-    /// </summary>
-    /// <param name="name">The borrowed name pointer, read before its root is destroyed.</param>
-    internal static GroupType? TypeFromName(IntPtr name)
+    internal static GroupType? TypeFrom(IntPtr type)
     {
-        string? text = Utf8Marshal.PtrToString(name);
-        return text is null ? null : ParseType(text);
+        if (type == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int id = NativeMethods.GroupTypeEnum(type, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return id switch
+        {
+            1 => GroupType.Consumer,
+            2 => GroupType.Classic,
+            3 => GroupType.Share,
+            4 => GroupType.Streams,
+            _ => GroupType.Unknown,
+        };
     }
 
-    /// <summary>
-    /// Decodes a borrowed, NUL-terminated <c>GroupState</c> name into
-    /// <see cref="GroupState"/>, or <see langword="null"/> when the ABI reports Java's
-    /// <c>Optional.empty()</c> as a null pointer.
-    /// </summary>
-    /// <param name="name">The borrowed name pointer, read before its root is destroyed.</param>
-    internal static GroupState? StateFromName(IntPtr name)
+    internal static GroupState? StateFrom(IntPtr state)
     {
-        string? text = Utf8Marshal.PtrToString(name);
-        return text is null ? null : ParseState(text);
+        if (state == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int id = NativeMethods.GroupStateEnum(state, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return id switch
+        {
+            1 => GroupState.PreparingRebalance,
+            2 => GroupState.CompletingRebalance,
+            3 => GroupState.Stable,
+            4 => GroupState.Dead,
+            5 => GroupState.Empty,
+            6 => GroupState.Assigning,
+            7 => GroupState.Reconciling,
+            8 => GroupState.NotReady,
+            _ => GroupState.Unknown,
+        };
     }
 
-    /// <summary>
-    /// Decodes a borrowed, NUL-terminated <c>ClassicGroupState</c> name into
-    /// <see cref="ClassicGroupState"/>, or <see langword="null"/> when the ABI reports
-    /// Java's <c>Optional.empty()</c> as a null pointer.
-    /// </summary>
-    /// <param name="name">The borrowed name pointer, read before its root is destroyed.</param>
-    internal static ClassicGroupState? ClassicStateFromName(IntPtr name)
+    internal static ClassicGroupState? ClassicStateFrom(IntPtr state)
     {
-        string? text = Utf8Marshal.PtrToString(name);
-        return text is null ? null : ParseClassicState(text);
+        if (state == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int id = NativeMethods.ClassicGroupStateEnum(state, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return id switch
+        {
+            1 => ClassicGroupState.PreparingRebalance,
+            2 => ClassicGroupState.CompletingRebalance,
+            3 => ClassicGroupState.Stable,
+            4 => ClassicGroupState.Dead,
+            5 => ClassicGroupState.Empty,
+            _ => ClassicGroupState.Unknown,
+        };
     }
 
-    /// <summary>
-    /// Java's <c>GroupType.toString()</c> for a defined member, or <see langword="null"/>
-    /// for a value no member defines.
-    /// </summary>
-    /// <param name="type">The type to encode.</param>
+    internal static IntPtr TypeSingleton(GroupType type)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr singleton = type switch
+        {
+            GroupType.Unknown => NativeMethods.GroupTypeUnknown(ref outErr),
+            GroupType.Consumer => NativeMethods.GroupTypeConsumer(ref outErr),
+            GroupType.Classic => NativeMethods.GroupTypeClassic(ref outErr),
+            GroupType.Share => NativeMethods.GroupTypeShare(ref outErr),
+            GroupType.Streams => NativeMethods.GroupTypeStreams(ref outErr),
+            _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Not a defined GroupType member."),
+        };
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return singleton;
+    }
+
+    internal static IntPtr StateSingleton(GroupState state)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr singleton = state switch
+        {
+            GroupState.Unknown => NativeMethods.GroupStateUnknown(ref outErr),
+            GroupState.PreparingRebalance => NativeMethods.GroupStatePreparingRebalance(ref outErr),
+            GroupState.CompletingRebalance => NativeMethods.GroupStateCompletingRebalance(ref outErr),
+            GroupState.Stable => NativeMethods.GroupStateStable(ref outErr),
+            GroupState.Dead => NativeMethods.GroupStateDead(ref outErr),
+            GroupState.Empty => NativeMethods.GroupStateEmpty(ref outErr),
+            GroupState.Assigning => NativeMethods.GroupStateAssigning(ref outErr),
+            GroupState.Reconciling => NativeMethods.GroupStateReconciling(ref outErr),
+            GroupState.NotReady => NativeMethods.GroupStateNotReady(ref outErr),
+            _ => throw new ArgumentOutOfRangeException(nameof(state), state, "Not a defined GroupState member."),
+        };
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return singleton;
+    }
+
     internal static string? NameFromType(GroupType type) =>
         type switch
         {
@@ -118,11 +140,6 @@ internal static class GroupMarshal
             _ => null,
         };
 
-    /// <summary>
-    /// Java's <c>GroupState.toString()</c> for a defined member, or <see langword="null"/>
-    /// for a value no member defines.
-    /// </summary>
-    /// <param name="state">The state to encode.</param>
     internal static string? NameFromState(GroupState state) =>
         state switch
         {
@@ -138,17 +155,6 @@ internal static class GroupMarshal
             _ => null,
         };
 
-    /// <summary>
-    /// Java's <c>ClassicGroupState.toString()</c> (<c>ClassicGroupState.java:54-57</c>) for
-    /// a defined member, or <see langword="null"/> for a value no member defines.
-    /// </summary>
-    /// <param name="state">The state to encode.</param>
-    /// <remarks>
-    /// ⚠ <b>There are deliberately no <c>Assigning</c>, <c>Reconciling</c> or
-    /// <c>NotReady</c> arms.</b> Java's <c>ClassicGroupState</c> has none of those
-    /// constants — they belong to <see cref="GroupState"/> (<c>GroupState.java:55-57</c>).
-    /// The enums are separate axes, not intercastable.
-    /// </remarks>
     internal static string? NameFromClassicState(ClassicGroupState state) =>
         state switch
         {
@@ -159,58 +165,5 @@ internal static class GroupMarshal
             ClassicGroupState.Dead => "Dead",
             ClassicGroupState.Empty => "Empty",
             _ => null,
-        };
-
-    /// <summary>Java's <c>GroupType.parse</c> (<c>GroupType.java:44-50</c>).</summary>
-    /// <param name="name">A non-null type name in any casing.</param>
-    private static GroupType ParseType(string name) =>
-        name.ToUpperInvariant() switch
-        {
-            "CONSUMER" => GroupType.Consumer,
-            "CLASSIC" => GroupType.Classic,
-            "SHARE" => GroupType.Share,
-            "STREAMS" => GroupType.Streams,
-            _ => GroupType.Unknown,
-        };
-
-    /// <summary>Java's <c>GroupState.parse</c> (<c>GroupState.java:71-74</c>).</summary>
-    /// <param name="name">A non-null state name in any casing.</param>
-    /// <remarks>
-    /// <c>"UNKNOWN"</c> has no arm of its own: it is what the default yields, which is also
-    /// what Java's map lookup yields for it. An explicit arm would be a second spelling of
-    /// the same answer.
-    /// </remarks>
-    private static GroupState ParseState(string name) =>
-        name.ToUpperInvariant() switch
-        {
-            "PREPARINGREBALANCE" => GroupState.PreparingRebalance,
-            "COMPLETINGREBALANCE" => GroupState.CompletingRebalance,
-            "STABLE" => GroupState.Stable,
-            "DEAD" => GroupState.Dead,
-            "EMPTY" => GroupState.Empty,
-            "ASSIGNING" => GroupState.Assigning,
-            "RECONCILING" => GroupState.Reconciling,
-            "NOTREADY" => GroupState.NotReady,
-            _ => GroupState.Unknown,
-        };
-
-    /// <summary>
-    /// Java's <c>ClassicGroupState.parse</c> (<c>ClassicGroupState.java:49-52</c>).
-    /// </summary>
-    /// <param name="name">A non-null state name in any casing.</param>
-    /// <remarks>
-    /// <c>"UNKNOWN"</c> has no arm of its own, as in <see cref="ParseState(string)"/>: it is
-    /// what the default yields, which is also what Java's map lookup yields for it. An
-    /// explicit arm would be a second spelling of the same answer.
-    /// </remarks>
-    private static ClassicGroupState ParseClassicState(string name) =>
-        name.ToUpperInvariant() switch
-        {
-            "PREPARINGREBALANCE" => ClassicGroupState.PreparingRebalance,
-            "COMPLETINGREBALANCE" => ClassicGroupState.CompletingRebalance,
-            "STABLE" => ClassicGroupState.Stable,
-            "DEAD" => ClassicGroupState.Dead,
-            "EMPTY" => ClassicGroupState.Empty,
-            _ => ClassicGroupState.Unknown,
         };
 }

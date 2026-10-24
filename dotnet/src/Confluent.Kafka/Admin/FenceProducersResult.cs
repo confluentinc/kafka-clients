@@ -17,126 +17,109 @@ using System.Collections.Generic;
 using System.Globalization;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.FenceProducers"/> — Java's
-/// <c>org.apache.kafka.clients.admin.FenceProducersResult</c> (<c>:31</c>).
+/// <c>org.apache.kafka.clients.admin.FenceProducersResult</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> (<c>:33</c>) but never
-/// publishes that pair as itself: <see cref="FencedProducers"/> erases it
-/// (<c>thenApply(p -&gt; null)</c>, <c>:46</c>) and <see cref="ProducerId"/> /
-/// <see cref="EpochId"/> project one field each. Hence there is no public
-/// <c>ProducerIdAndEpoch</c> type here (M15/P8 D50).
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its id (or, for
-/// <see cref="All"/>, every id) has completed, and needs no thread-pool thread: the futures here are composed on the
-/// waiting thread, never over a <c>Task</c>.
-/// </para>
+/// Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> but never publishes that
+/// pair: <see cref="FencedProducers"/> erases it and <see cref="ProducerId"/> /
+/// <see cref="EpochId"/> project one field each, so there is no public <c>ProducerIdAndEpoch</c>
+/// type here.
 /// </remarks>
 /// <seealso cref="AsyncFenceProducersResult"/>
 public sealed class FenceProducersResult
 {
-    private readonly IReadOnlyDictionary<string, KafkaFuture<ProducerIdAndEpoch>> _values;
-    private readonly IReadOnlyDictionary<string, KafkaFuture> _erasedValues;
+    private readonly IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> _futures;
+    private readonly SafeAdminResultHandle _native;
 
-    internal FenceProducersResult(
-        IReadOnlyDictionary<string, KafkaFuture<ProducerIdAndEpoch>> values,
-        IEqualityComparer<string> comparer)
+    private FenceProducersResult(
+        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
     {
-        _values = values;
-
-        // Java's fencedProducers() erases the payload (:46). Each entry wraps the SAME latch as
-        // the id's typed future, so it completes exactly when that one does, with the same
-        // failure. Java mints a fresh map per call; this one is built once, which is
-        // observationally identical for an immutable view.
-        Dictionary<string, KafkaFuture> erased = new Dictionary<string, KafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, KafkaFuture<ProducerIdAndEpoch>> entry in values)
-        {
-            erased.Add(entry.Key, entry.Value.Erase());
-        }
-
-        _erasedValues = erased;
+        _futures = futures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static FenceProducersResult From(KeyedAdminOperation<string, ProducerIdAndEpoch> operation) =>
-        new FenceProducersResult(SyncAdminFutures.Wrap(operation.SyncSources), operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// One payload-free future per requested transactional id — Java's
-    /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <see cref="KafkaFuture"/>s, as here.
+    /// <c>fencedProducers()</c>, whose values are <see cref="KafkaFuture"/>s, as here.
     /// </summary>
-    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers => _erasedValues;
+    /// <remarks>Each access builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
+    public IReadOnlyDictionary<string, KafkaFuture> FencedProducers
+    {
+        get
+        {
+            Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
+            {
+                fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
+            }
+
+            return fenced;
+        }
+    }
 
     /// <summary>
     /// The producer id generated while initializing that transaction — Java's
-    /// <c>producerId(String)</c> (<c>:53</c>).
+    /// <c>producerId(String)</c>.
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>A future over that id's producer id.</returns>
+    /// <returns>A new future over that id's producer id.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request — Java's
-    /// <c>IllegalArgumentException</c> (<c>:74-77</c>), thrown synchronously as Java's is.
+    /// <c>IllegalArgumentException</c>, thrown synchronously as Java's is.
     /// </exception>
     public KafkaFuture<long> ProducerId(string transactionalId) =>
-        FindAndApply(transactionalId, static value => value.ProducerId);
+        new KafkaFuture<long>(Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
 
     /// <summary>
     /// The epoch generated while initializing that transaction — Java's
-    /// <c>epochId(String)</c> (<c>:60</c>), a <see langword="short"/> as Java's is.
+    /// <c>epochId(String)</c>, a <see langword="short"/> as Java's is.
     /// </summary>
     /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>A future over that id's epoch.</returns>
+    /// <returns>A new future over that id's epoch.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="transactionalId"/> was not included in the request — see
     /// <see cref="ProducerId"/>.
     /// </exception>
     public KafkaFuture<short> EpochId(string transactionalId) =>
-        FindAndApply(transactionalId, static value => value.Epoch);
+        new KafkaFuture<short>(Find(_futures, transactionalId).ThenApply(static value => value.Epoch));
 
     /// <summary>
-    /// Completes when <b>every</b> producer has been fenced, and fails with the first failure
-    /// otherwise — Java's <c>all()</c> (<c>:67</c>).
+    /// Completes when every producer has been fenced, and fails with the first failure to complete
+    /// otherwise — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    /// <remarks>
-    /// Every id is waited for first, so a failure fails the batch with the first failure in key order, as Java's
-    /// <c>allOf</c> does. Each call builds a new future.
-    /// </remarks>
-    public KafkaFuture All() => SyncAdminFutures.AllOf(_values.Values);
+    /// <remarks>Each call builds a new future.</remarks>
+    public KafkaFuture All() => new KafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_futures.Values)));
 
-    /// <summary>Java's <c>findAndApply</c> (<c>:71-78</c>).</summary>
-    private KafkaFuture<TResult> FindAndApply<TResult>(
-        string transactionalId, Func<ProducerIdAndEpoch, TResult> followup)
+    internal static FenceProducersResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
+        new FenceProducersResult(native.Producers, native.Result);
+
+    internal static KafkaFutureImpl<ProducerIdAndEpoch> Find(
+        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, string transactionalId)
     {
-        // Synchronous, as Java's is: the lookup happens before the thenApply, so an
-        // unrequested id is a usage error at the call site rather than a future's outcome.
         if (transactionalId is null)
         {
             throw new ArgumentNullException(nameof(transactionalId));
         }
 
-        if (!_values.TryGetValue(transactionalId, out KafkaFuture<ProducerIdAndEpoch> source))
-        {
-            throw new ArgumentException(
+        return futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
+            ? future
+            : throw new ArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "TransactionalId `{0}` was not included in the request",
                     transactionalId),
                 nameof(transactionalId));
-        }
-
-        // A new projection per call, as Java's thenApply allocates one; each is memoized.
-        return SyncAdminFutures.Project(source, followup);
     }
 }

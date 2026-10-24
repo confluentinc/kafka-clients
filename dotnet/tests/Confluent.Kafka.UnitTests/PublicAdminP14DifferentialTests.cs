@@ -24,11 +24,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The differential rows of M15/P14 S4, S5a, S5b, S5c, S5d and S5e: each converted RPC, called with the same arguments on a
-/// <see cref="MockAdminClient"/> and an <see cref="AsyncMockAdminClient"/> seeded with the same mock state, gives the
-/// same outcome through every member of its Result — equal values, or an exception of the same type with the same
-/// message (and, for a <see cref="KafkaException"/>, the same code). Each row also pins the outcome itself, so two
-/// flavours that agreed on a wrong answer would still fail.
+/// Each converted RPC, called with the same arguments on a <see cref="MockAdminClient"/> and an
+/// <see cref="AsyncMockAdminClient"/> seeded with the same state, gives the same outcome through every member of its
+/// Result: equal values, or an exception of the same type and message (and, for a <see cref="KafkaException"/>, the
+/// same code). Each row also pins the outcome itself, so two flavours agreeing on a wrong answer still fail.
 /// </summary>
 /// <remarks>
 /// Every wait is bounded (<see cref="FutureProbe"/>): a sync <c>Get()</c> runs on a dedicated thread, an async one
@@ -36,63 +35,44 @@ namespace Confluent.Kafka.UnitTests;
 /// </remarks>
 public sealed class PublicAdminP14DifferentialTests
 {
-    // Errors.INVALID_REPLICATION_FACTOR and Errors.TOPIC_ALREADY_EXISTS.
     private const int InvalidReplicationFactorCode = 38;
     private const int TopicAlreadyExistsCode = 36;
 
-    // Errors.UNKNOWN_TOPIC_OR_PARTITION, Errors.UNKNOWN_TOPIC_ID and Errors.UNSUPPORTED_VERSION (the mock's
-    // "Not implemented yet", Java's UnsupportedOperationException).
     private const int UnknownTopicOrPartitionCode = 3;
     private const int UnknownTopicIdCode = 100;
     private const int UnsupportedVersionCode = 35;
 
-    // Errors.REPLICA_NOT_AVAILABLE, Errors.INVALID_REQUEST and Errors.KAFKA_STORAGE_ERROR (M15/P14 S5a).
     private const int ReplicaNotAvailableCode = 9;
     private const int InvalidRequestCode = 42;
     private const int KafkaStorageErrorCode = 56;
 
-    // The core's LOCAL_ILLEGAL_STATE, which carries its absent-key error.
-    private const int LocalIllegalStateCode = -4;
-
     private const string NotImplementedYet = "Not implemented yet";
 
-    // Java's mock alterConsumerGroupOffsets refusal, with Java's own typo (MockAdminClient.java:1213), which the core
-    // mock carries verbatim (M15/P14 S5c).
+    // Java's mock refusal, typo included, which the core mock carries verbatim.
     private const string NotImplementYet = "Not implement yet";
 
-    // ListConsumerGroupOffsetsResult's no-argument accessor over anything but one group (Java's
-    // IllegalStateException, ListConsumerGroupOffsetsResult.java:51) (M15/P14 S5c).
     private const string MultipleGroupsRequested =
         "Offsets from multiple consumer groups were requested. " +
         "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.";
 
-    // The core's default message for UNKNOWN_TOPIC_OR_PARTITION, which the core mock's reassignment of an unknown
-    // partition carries (Java's mock throws a message-less UnknownTopicOrPartitionException).
+    // The core's default message, where Java's mock throws a message-less UnknownTopicOrPartitionException.
     private const string UnknownTopicOrPartitionMessage = "This server does not host this topic-partition.";
 
-    // The core's LOCAL_ILLEGAL_ARGUMENT, and the core mock's refusal of a token request without a renewer (Java's mock
-    // throws IndexOutOfBoundsException from options.renewers().get(0), MockAdminClient.java:652) (M15/P14 S5e).
-    private const int LocalIllegalArgumentCode = -3;
+    // The core mock's refusal, an ArgumentException, where Java's mock throws IndexOutOfBoundsException.
     private const string NoRenewer =
         "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner";
 
-    // Errors.DELEGATION_TOKEN_NOT_FOUND, which the core mock raises with an empty message (M15/P14 S5e).
     private const int DelegationTokenNotFoundCode = 62;
     private const string DelegationTokenNotFoundMessage = "";
 
     private static readonly Uuid s_missingId = new Uuid(0x7A7A7A7A7A7A7A7AL, 0x5B5B5B5B5B5B5B5BL);
 
-    /// <summary>
-    /// <c>CreateTopics</c>: a creatable topic and one whose replication factor exceeds the broker count, then the
-    /// creatable one again (now existing). Values, <c>All()</c> and the four typed accessors agree on both mocks. The
-    /// topic id is minted by each mock independently, so only its presence is compared.
-    /// </summary>
     [Fact]
     public async Task CreateTopics_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         NewTopic[] request = { new NewTopic("diff-ok", 3, 1), new NewTopic("diff-bad", 1, 5) };
 
@@ -139,17 +119,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncAgain.All()), FutureProbe.Of(asyncAgain.All())));
     }
 
-    /// <summary>
-    /// <c>DeleteTopics</c> by names: an existing topic and a missing one, through the name-collection overload, then
-    /// the deleted topic again through the <see cref="TopicCollection"/> overload (now missing). The per-key futures and
-    /// <c>All()</c> agree on both mocks, the by-id side is null on both, and the topic left behind is the same.
-    /// </summary>
     [Fact]
     public async Task DeleteTopics_ByNames_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-a", 1, 1), new NewTopic("diff-b", 1, 1));
 
@@ -187,16 +162,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(new[] { "diff-b" }, await TopicNames(sync, async));
     }
 
-    /// <summary>
-    /// <c>DeleteTopics</c> by ids: each mock's own id for an existing topic, and an id neither mock minted. Each mock
-    /// mints its own ids, so the existing topic's key is compared by role, not across mocks; the outcomes agree.
-    /// </summary>
     [Fact]
     public async Task DeleteTopics_ByIds_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         (Uuid syncId, Uuid asyncId) = await Seed(sync, async, new NewTopic("diff-c", 1, 1));
 
@@ -225,17 +196,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Empty(await TopicNames(sync, async));
     }
 
-    /// <summary>
-    /// <c>DescribeTopics</c> by names: an existing two-partition topic and a missing one through the name-collection
-    /// overload, then the existing one alone through the <see cref="TopicCollection"/> overload. The descriptions agree
-    /// on everything but the topic id each mock mints, which is compared for presence only.
-    /// </summary>
     [Fact]
     public async Task DescribeTopics_ByNames_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-d", 2, 1));
 
@@ -288,16 +254,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(described.ToString(), gathered["diff-d"].ToString());
     }
 
-    /// <summary>
-    /// <c>DescribeTopics</c> by ids: each mock's own id and an id neither minted. The missing id fails with
-    /// <c>UNKNOWN_TOPIC_ID</c> on both, and the gathered <c>AllTopicIds()</c> of the found one agrees.
-    /// </summary>
     [Fact]
     public async Task DescribeTopics_ByIds_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         (Uuid syncId, Uuid asyncId) = await Seed(sync, async, new NewTopic("diff-e", 1, 1));
 
@@ -345,17 +307,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(described.ToString(), gathered[syncId].ToString());
     }
 
-    /// <summary>
-    /// <c>ListTopics</c>: <c>NamesToListings()</c> and its two projections agree on both mocks over the same seeded
-    /// topics. The mock's map is unordered, so names are compared sorted, and topic ids, which each mock mints, are
-    /// left out.
-    /// </summary>
     [Fact]
     public async Task ListTopics_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-f", 1, 1), new NewTopic("diff-g", 2, 1));
 
@@ -387,17 +344,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.All(listings, static listing => Assert.False(listing.IsInternal));
     }
 
-    /// <summary>
-    /// <c>CreatePartitions</c>: Java's <c>MockAdminClient.createPartitions</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>, which the core mock delivers per key. Both mocks
-    /// fail the key and <c>All()</c> with the same error.
-    /// </summary>
     [Fact]
     public async Task CreatePartitions_OnBothMocks_FailsAlike_NotImplementedYet()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-h", 1, 1));
         Dictionary<string, NewPartitions> request = new Dictionary<string, NewPartitions>(StringComparer.Ordinal)
@@ -420,16 +372,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>DeleteRecords</c>: Java's mock throws <c>"Not implemented yet"</c> for a non-empty request, delivered per
-    /// partition on both mocks; an empty request succeeds on both with no partitions.
-    /// </summary>
     [Fact]
     public async Task DeleteRecords_OnBothMocks_FailsAlike_NotImplementedYet_AndAnEmptyRequestSucceeds()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-i", 1, 1));
         TopicPartition partition = new TopicPartition("diff-i", 0);
@@ -460,16 +408,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
-    /// <summary>
-    /// <c>DescribeCluster</c> (M15/P14 S5a): the four projections agree on both three-broker mocks — the nodes, the
-    /// controller, the mock's cluster id and, when asked for, the empty-but-present authorized-operation set.
-    /// </summary>
     [Fact]
     public async Task DescribeCluster_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(3);
+        MockAdminClient sync = MockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         DescribeClusterOptions options = new DescribeClusterOptions { IncludeAuthorizedOperations = true };
 
@@ -502,16 +446,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Empty(operations);
     }
 
-    /// <summary>
-    /// <c>ListConfigResources</c> (M15/P14 S5a): with the same topic seeded, the topic filter yields exactly that
-    /// topic's resource on both mocks, and the unfiltered call lists the same resources on both.
-    /// </summary>
     [Fact]
     public async Task ListConfigResources_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-j", 1, 1));
 
@@ -531,17 +471,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Contains(every, static resource => resource.Type == ConfigResourceType.Broker);
     }
 
-    /// <summary>
-    /// <c>DescribeConfigs</c> (M15/P14 S5a): a seeded topic, a missing topic, an existing broker and a missing one.
-    /// The per-resource futures and the gathered <c>All()</c> agree on both mocks; <c>All()</c> fails with the first
-    /// failure in key order.
-    /// </summary>
     [Fact]
     public async Task DescribeConfigs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         NewTopic topic = new NewTopic("diff-k", 1, 1)
         {
@@ -557,8 +492,9 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeConfigsResult syncResult = sync.DescribeConfigs(request);
         AsyncDescribeConfigsResult asyncResult = async.DescribeConfigs(request);
-        Assert.Equal(request, syncResult.Values.Keys);
-        Assert.Equal(request, asyncResult.Values.Keys);
+        ConfigResource[] coreOrder = { broker, absentBroker, present, missing };
+        Assert.Equal(coreOrder, syncResult.Values.Keys);
+        Assert.Equal(coreOrder, asyncResult.Values.Keys);
 
         Config config = Assert.IsType<Config>(
             await Agree(
@@ -583,22 +519,17 @@ public sealed class PublicAdminP14DifferentialTests
             "Broker 7 not found.",
             await Agree(FutureProbe.Of(syncResult.Values[absentBroker]), FutureProbe.Of(asyncResult.Values[absentBroker])));
         AssertKafka(
-            UnknownTopicOrPartitionCode,
-            MissingTopic,
+            InvalidRequestCode,
+            "Broker 7 not found.",
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>IncrementalAlterConfigs</c> (M15/P14 S5a): a <see cref="AlterConfigOpType.Set"/> against a seeded topic and
-    /// one against a missing topic. The per-resource void futures and <c>All()</c> agree on both mocks, and the change
-    /// is visible to a later describe on both.
-    /// </summary>
     [Fact]
     public async Task IncrementalAlterConfigs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-l", 1, 1));
 
@@ -634,17 +565,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal("1000", described.Get("retention.ms")!.Value);
     }
 
-    /// <summary>
-    /// <c>DescribeLogDirs</c> (M15/P14 S5a): a broker hosting a seeded two-partition topic and a broker the mock does
-    /// not have. The per-broker futures and the gathered <c>AllDescriptions()</c> agree on both mocks; the unknown
-    /// broker succeeds with an empty map on both.
-    /// </summary>
     [Fact]
     public async Task DescribeLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-m", 2, 1));
         int[] request = { 0, 5 };
@@ -683,17 +609,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(request, all.Keys.OrderBy(static broker => broker));
     }
 
-    /// <summary>
-    /// <c>AlterReplicaLogDirs</c> (M15/P14 S5a): a move to the broker's own directory, one to a directory it does not
-    /// have, and one naming a broker that does not exist. The per-replica void futures and <c>All()</c> agree on both
-    /// mocks, and the accepted move is then described as in progress on both.
-    /// </summary>
     [Fact]
     public async Task AlterReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-n", 2, 1));
 
@@ -709,8 +630,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterReplicaLogDirsResult syncResult = sync.AlterReplicaLogDirs(request);
         AsyncAlterReplicaLogDirsResult asyncResult = async.AlterReplicaLogDirs(request);
-        Assert.Equal(new[] { moved, offline, nowhere }, syncResult.Values.Keys);
-        Assert.Equal(new[] { moved, offline, nowhere }, asyncResult.Values.Keys);
+        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(syncResult.Values.Keys));
+        Assert.Equal(Replicas(new[] { moved, offline, nowhere }), Replicas(asyncResult.Values.Keys));
 
         Assert.Same(
             BlockingCall.Returned,
@@ -724,10 +645,11 @@ public sealed class PublicAdminP14DifferentialTests
             ReplicaNotAvailableCode,
             "Can't find diff-n-0-7",
             await Agree(FutureProbe.Of(syncResult.Values[nowhere]), FutureProbe.Of(asyncResult.Values[nowhere])));
-        AssertKafka(
-            KafkaStorageErrorCode,
-            Offline,
-            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        KafkaException allFailure =
+            Assert.IsType<KafkaException>(await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        Assert.Contains(
+            (allFailure.Code, allFailure.Message),
+            new[] { (KafkaStorageErrorCode, Offline), (ReplicaNotAvailableCode, "Can't find diff-n-0-7") });
 
         object? info = await Agree(
             FutureProbe.Of(sync.DescribeReplicaLogDirs(new[] { moved }).Values[moved]),
@@ -738,17 +660,12 @@ public sealed class PublicAdminP14DifferentialTests
             Assert.IsType<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(info).ToString());
     }
 
-    /// <summary>
-    /// <c>DescribeReplicaLogDirs</c> (M15/P14 S5a): a replica at rest and a replica of a topic the mock does not have,
-    /// which the mock omits from its answer. The per-replica futures and the gathered <c>All()</c> agree on both mocks;
-    /// the omitted replica fails on both with the core's absent-key error, and so does <c>All()</c>.
-    /// </summary>
     [Fact]
     public async Task DescribeReplicaLogDirs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-o", 1, 1));
 
@@ -758,8 +675,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeReplicaLogDirsResult syncResult = sync.DescribeReplicaLogDirs(request);
         AsyncDescribeReplicaLogDirsResult asyncResult = async.DescribeReplicaLogDirs(request);
-        Assert.Equal(request, syncResult.Values.Keys);
-        Assert.Equal(request, asyncResult.Values.Keys);
+        Assert.Equal(new[] { atRest }, syncResult.Values.Keys);
+        Assert.Equal(new[] { atRest }, asyncResult.Values.Keys);
 
         object? info = await Agree(
             FutureProbe.Of(syncResult.Values[atRest]),
@@ -769,29 +686,21 @@ public sealed class PublicAdminP14DifferentialTests
             "ReplicaLogDirInfo(currentReplicaLogDir=/tmp/kafka-logs)",
             Assert.IsType<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(info).ToString());
 
-        // The core's absent-key error (LOCAL_ILLEGAL_STATE, -4), delivered per key on both flavours.
-        const string Absent = "the requested key was not present in the admin RPC's response";
-        AssertKafka(
-            LocalIllegalStateCode,
-            Absent,
-            await Agree(FutureProbe.Of(syncResult.Values[omitted]), FutureProbe.Of(asyncResult.Values[omitted])));
-        AssertKafka(
-            LocalIllegalStateCode,
-            Absent,
-            await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
+        object? all = await Agree(
+            FutureProbe.Of(syncResult.All()),
+            FutureProbe.Of(asyncResult.All()),
+            static outcome => string.Join(",", ((IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>)outcome).Keys));
+        Assert.Equal(
+            new[] { atRest },
+            Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>(all).Keys);
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the cluster, configs and log-dir members (M15/P14 S5a) throw alike on both
-    /// mocks — the same type, parameter name and message — before any future exists: a null argument, and a null
-    /// element where the member takes a collection of references.
-    /// </summary>
     [Fact]
     public void ClusterConfigsLogDirsGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, "diff-p");
         TopicPartitionReplica replica = new TopicPartitionReplica("diff-p", 0, 0);
@@ -818,23 +727,23 @@ public sealed class PublicAdminP14DifferentialTests
             () => async.DescribeReplicaLogDirs(new TopicPartitionReplica[] { null! }));
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the topic-family members throw alike on both mocks — the same type,
-    /// parameter name and message — before any future exists.
-    /// </summary>
     [Fact]
     public void TopicFamilyGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertThrowAlike(() => sync.DeleteTopics((TopicCollection)null!), () => async.DeleteTopics((TopicCollection)null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DeleteTopics((TopicCollection)null!),
+            () => async.DeleteTopics((TopicCollection)null!));
         AssertThrowAlike(
             () => sync.DeleteTopics((IReadOnlyCollection<string>)null!),
             () => async.DeleteTopics((IReadOnlyCollection<string>)null!));
-        AssertThrowAlike(() => sync.DescribeTopics((TopicCollection)null!), () => async.DescribeTopics((TopicCollection)null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeTopics((TopicCollection)null!),
+            () => async.DescribeTopics((TopicCollection)null!));
         AssertThrowAlike(
             () => sync.DescribeTopics((IReadOnlyCollection<string>)null!),
             () => async.DescribeTopics((IReadOnlyCollection<string>)null!));
@@ -842,18 +751,12 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(() => sync.DeleteRecords(null!), () => async.DeleteRecords(null!));
     }
 
-    /// <summary>
-    /// <c>ElectLeaders</c> (M15/P14 S5b): Java's <c>MockAdminClient.electLeaders</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c> (<c>MockAdminClient.java:793-797</c>), which the
-    /// core mock delivers as the call's own failure. For an explicit selection, an empty one and the null "every
-    /// partition" one, <c>Partitions()</c> and <c>All()</c> fail alike on both mocks.
-    /// </summary>
     [Fact]
     public async Task ElectLeaders_OnBothMocks_FailsAlike_NotImplementedYet()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         IReadOnlyCollection<TopicPartition>?[] selections =
         {
@@ -878,18 +781,12 @@ public sealed class PublicAdminP14DifferentialTests
         }
     }
 
-    /// <summary>
-    /// <c>AlterPartitionReassignments</c> (M15/P14 S5b): a reassignment, a cancellation (a null entry, Java's
-    /// <c>Optional.empty()</c>) and a reassignment of a partition the mock does not have. The per-partition void
-    /// futures and <c>All()</c> agree on both mocks, and a later list shows the same reassignment on both — the
-    /// cancelled partition absent.
-    /// </summary>
     [Fact]
     public async Task AlterPartitionReassignments_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(3);
+        MockAdminClient sync = MockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await Seed(sync, async, new NewTopic("diff-r", 2, 1));
 
@@ -933,17 +830,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(new[] { 0, 2 }, Target(listed[reassigned]));
     }
 
-    /// <summary>
-    /// <c>ListPartitionReassignments(partitions, options)</c> (M15/P14 S5b): with the same reassignment made on both
-    /// mocks, an explicit selection lists it and omits the quiet partition, an empty selection lists nothing, and the
-    /// zero-argument form (a null selection) lists every reassignment — alike on both mocks.
-    /// </summary>
     [Fact]
     public async Task ListPartitionReassignments_WithASelection_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(3);
+        MockAdminClient sync = MockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition reassigned = new TopicPartition("diff-s", 0);
         TopicPartition quiet = new TopicPartition("diff-s", 1);
@@ -975,17 +867,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(new[] { reassigned }, every.Keys);
     }
 
-    /// <summary>
-    /// <c>ListPartitionReassignments(options)</c> (M15/P14 S5b), the options-only overload, which routes on its own
-    /// (a null selection, not an empty one): it lists every reassignment on both mocks, the same as
-    /// <c>(null, options)</c> does.
-    /// </summary>
     [Fact]
     public async Task ListPartitionReassignments_OptionsOnly_OnBothMocks_ListsEveryReassignment()
     {
-        MockAdminClient sync = new MockAdminClient(3);
+        MockAdminClient sync = MockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition reassigned = new TopicPartition("diff-t", 0);
         await Reassign(sync, async, new NewTopic("diff-t", 1, 2), reassigned, 1, 2);
@@ -1009,19 +896,12 @@ public sealed class PublicAdminP14DifferentialTests
             ReassignmentsOf(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(explicitNull)));
     }
 
-    /// <summary>
-    /// <c>ListOffsets</c> (M15/P14 S5b): with the same offsets seeded on both mocks, an earliest query, a latest query
-    /// and a timestamp query — which Java's mock does not implement (<c>MockAdminClient.java:1230-1231</c> throws from
-    /// the call; the core mock fails that partition instead). The per-partition futures and the gathered <c>All()</c>
-    /// agree on both mocks, and
-    /// <c>PartitionResult</c> rejects an unrequested partition alike, at the call.
-    /// </summary>
     [Fact]
     public async Task ListOffsets_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition earliest = new TopicPartition("diff-u", 0);
         TopicPartition latest = new TopicPartition("diff-u", 1);
@@ -1057,11 +937,11 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal("42/-1/none", Offsets(fromLatest));
         AssertKafka(
             UnsupportedVersionCode,
-            NotImplementedYet,
+            NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.PartitionResult(byTime)), FutureProbe.Of(asyncResult.PartitionResult(byTime))));
         AssertKafka(
             UnsupportedVersionCode,
-            NotImplementedYet,
+            NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-u", 7);
@@ -1075,22 +955,14 @@ public sealed class PublicAdminP14DifferentialTests
             rejected.Message);
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the election, reassignment and offset members (M15/P14 S5b) throw alike on
-    /// both mocks — the same type, parameter name and message — before any future exists: a null argument where the
-    /// member takes a required reference, and a null element (a null topic, a null offset spec) where it takes a
-    /// collection. <c>ElectLeaders</c> and <c>ListPartitionReassignments</c> take a null selection as "every
-    /// partition", so only their null-element guard applies.
-    /// </summary>
     [Fact]
     public void ElectionsReassignmentsOffsetsGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition nullTopic = default;
-        TopicPartition partition = new TopicPartition("diff-v", 0);
 
         AssertThrowAlike(() => sync.AlterPartitionReassignments(null!), () => async.AlterPartitionReassignments(null!));
         AssertThrowAlike(() => sync.ListOffsets(null!), () => async.ListOffsets(null!));
@@ -1109,23 +981,14 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike<ArgumentException>(
             () => sync.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }),
             () => async.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }));
-        AssertThrowAlike<ArgumentException>(
-            () => sync.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = null! }),
-            () => async.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = null! }));
     }
 
-    /// <summary>
-    /// <c>ListGroups</c> (M15/P14 S5c): with the same groups seeded on both mocks — a group config each, which is what
-    /// makes either mock list a group (Java's mock lists its <c>groupConfigs</c> keys,
-    /// <c>MockAdminClient.java:727-731</c>) — <c>Valid()</c> and <c>All()</c> agree on both mocks and list exactly the
-    /// seeded groups, and <c>Errors()</c> is empty on both.
-    /// </summary>
     [Fact]
     public async Task ListGroups_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         await SeedGroups(sync, async, "diff-w-b", "diff-w-a");
 
@@ -1153,25 +1016,19 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Empty(errors);
     }
 
-    /// <summary>
-    /// <c>DescribeConsumerGroups</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:735</c> throws from the call; the core mock fails every group instead): both mocks key
-    /// the result by the requested ids, in request order, and each group's future and the gathered <c>All()</c> fail
-    /// alike.
-    /// </summary>
     [Fact]
     public async Task DescribeConsumerGroups_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-x-b", "diff-x-a" };
 
         DescribeConsumerGroupsResult syncResult = sync.DescribeConsumerGroups(groups);
         AsyncDescribeConsumerGroupsResult asyncResult = async.DescribeConsumerGroups(groups);
-        Assert.Equal(groups, syncResult.DescribedGroups.Keys);
-        Assert.Equal(groups, asyncResult.DescribedGroups.Keys);
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups.Keys));
 
         foreach (string group in groups)
         {
@@ -1187,25 +1044,19 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>DescribeClassicGroups</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1480</c> throws from the call; the core mock fails every group instead): both mocks key
-    /// the result by the requested ids, in request order, and each group's future and the gathered <c>All()</c> fail
-    /// alike.
-    /// </summary>
     [Fact]
     public async Task DescribeClassicGroups_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-xc-b", "diff-xc-a" };
 
         DescribeClassicGroupsResult syncResult = sync.DescribeClassicGroups(groups);
         AsyncDescribeClassicGroupsResult asyncResult = async.DescribeClassicGroups(groups);
-        Assert.Equal(groups, syncResult.DescribedGroups.Keys);
-        Assert.Equal(groups, asyncResult.DescribedGroups.Keys);
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DescribedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DescribedGroups.Keys));
 
         foreach (string group in groups)
         {
@@ -1221,18 +1072,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>ListConsumerGroupOffsets(groupId)</c> (M15/P14 S5c): with the same offsets committed on both mocks, the
-    /// single-group path Java's mock implements (<c>MockAdminClient.java:753-759</c>). The no-argument accessor, the
-    /// by-id accessor and <c>All()</c> agree on both mocks and carry every committed partition, and an unrequested
-    /// group is rejected alike, at the call.
-    /// </summary>
     [Fact]
     public async Task ListConsumerGroupOffsets_ByGroupId_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
         {
@@ -1281,19 +1126,12 @@ public sealed class PublicAdminP14DifferentialTests
             unknown.Message);
     }
 
-    /// <summary>
-    /// <c>ListConsumerGroupOffsets(groupSpecs)</c> (M15/P14 S5c), with the same offsets committed on both mocks. One
-    /// spec selecting one partition takes the single-group path (<c>MockAdminClient.java:753-759</c>, filtered by the
-    /// selection) and agrees on both mocks; several specs are what Java's mock refuses
-    /// (<c>MockAdminClient.java:750-751</c> throws from the call; the core mock fails every group instead), so each
-    /// group's future and <c>All()</c> fail alike, and the no-argument accessor is rejected alike, at the call.
-    /// </summary>
     [Fact]
     public async Task ListConsumerGroupOffsets_BySpecs_OnBothMocks_GivesEqualOutcomes()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition selected = new TopicPartition("diff-z", 0);
         Dictionary<TopicPartition, long> committed = new Dictionary<TopicPartition, long>
@@ -1349,24 +1187,19 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(syncNoArgument.Message, asyncNoArgument.Message);
     }
 
-    /// <summary>
-    /// <c>DeleteConsumerGroups</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:774</c> throws from the call; the core mock fails every group instead): both mocks key
-    /// the result by the requested ids, in request order, and each group's future and <c>All()</c> fail alike.
-    /// </summary>
     [Fact]
     public async Task DeleteConsumerGroups_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] groups = { "diff-aa-b", "diff-aa-a" };
 
         DeleteConsumerGroupsResult syncResult = sync.DeleteConsumerGroups(groups);
         AsyncDeleteConsumerGroupsResult asyncResult = async.DeleteConsumerGroups(groups);
-        Assert.Equal(groups, syncResult.DeletedGroups.Keys);
-        Assert.Equal(groups, asyncResult.DeletedGroups.Keys);
+        Assert.True(new HashSet<string>(groups).SetEquals(syncResult.DeletedGroups.Keys));
+        Assert.True(new HashSet<string>(groups).SetEquals(asyncResult.DeletedGroups.Keys));
 
         foreach (string group in groups)
         {
@@ -1382,19 +1215,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>RemoveMembersFromConsumerGroup</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:802</c> throws from the call; the core mock fails the request instead), in both modes.
-    /// Naming members, each member's future and <c>All()</c> fail alike, and an unrequested or null member is rejected
-    /// alike, at the call. In <c>removeAll</c> mode <c>All()</c> fails alike and <c>MemberResult</c> is rejected alike,
-    /// at the call.
-    /// </summary>
     [Fact]
     public async Task RemoveMembersFromConsumerGroup_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         MemberToRemove[] members = { new MemberToRemove("diff-ab-2"), new MemberToRemove("diff-ab-1") };
 
@@ -1439,19 +1265,12 @@ public sealed class PublicAdminP14DifferentialTests
             Assert.Throws<ArgumentException>(() => { _ = syncAll.MemberResult(members[0]); }).Message);
     }
 
-    /// <summary>
-    /// <c>AlterConsumerGroupOffsets</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1213</c> throws from the call, with its own "Not implement yet" typo; the core mock
-    /// fails the request instead): the partition's future and <c>All()</c> fail alike. An unrequested partition is
-    /// accepted at the call on both, and its future fails alike at <c>Get()</c> with the request's failure, which wins
-    /// over the not-attempted guard.
-    /// </summary>
     [Fact]
     public async Task AlterConsumerGroupOffsets_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition partition = new TopicPartition("diff-ac", 0);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
@@ -1477,17 +1296,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.PartitionResult(unrequested)), FutureProbe.Of(asyncResult.PartitionResult(unrequested))));
     }
 
-    /// <summary>
-    /// <c>DeleteConsumerGroupOffsets</c> (M15/P14 S5c), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:784</c> throws from the call; the core mock fails the request instead): the
-    /// partition's future and <c>All()</c> fail alike, and an unrequested partition is rejected alike, at the call.
-    /// </summary>
     [Fact]
     public async Task DeleteConsumerGroupOffsets_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition partition = new TopicPartition("diff-ad", 0);
 
@@ -1511,18 +1325,12 @@ public sealed class PublicAdminP14DifferentialTests
             Assert.Throws<ArgumentException>(() => { _ = syncResult.PartitionResult(unrequested); }).Message);
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the group and group-offset members (M15/P14 S5c) throw alike on both
-    /// mocks — the same type, parameter name and message — before any future exists: an undefined enum value in the
-    /// <c>ListGroups</c> options, a null argument where a member takes a required reference, and a null element (a null
-    /// group id, a null spec, a null topic, a null offset) where it takes a collection.
-    /// </summary>
     [Fact]
     public void GroupsGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition nullTopic = default;
         TopicPartition partition = new TopicPartition("diff-ae", 0);
@@ -1603,25 +1411,20 @@ public sealed class PublicAdminP14DifferentialTests
             () => async.DeleteConsumerGroupOffsets("diff-ae-group", new[] { nullTopic }));
     }
 
-    /// <summary>
-    /// <c>CreateAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:806-808</c> throws
-    /// from the call; the core mock fails every binding instead): both mocks key the result by the requested bindings,
-    /// in request order and once per distinct binding, and each binding's future and <c>All()</c> fail alike.
-    /// </summary>
     [Fact]
     public async Task CreateAcls_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBinding[] bindings = { Acl("diff-af-b", "User:bob"), Acl("diff-af-a", "User:alice") };
         AclBinding[] requested = { bindings[0], bindings[1], Acl("diff-af-b", "User:bob") };
 
         CreateAclsResult syncResult = sync.CreateAcls(requested);
         AsyncCreateAclsResult asyncResult = async.CreateAcls(requested);
-        Assert.Equal(bindings, syncResult.Values.Keys);
-        Assert.Equal(bindings, asyncResult.Values.Keys);
+        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(syncResult.Values.Keys));
+        Assert.True(new HashSet<AclBinding>(bindings).SetEquals(asyncResult.Values.Keys));
 
         foreach (AclBinding binding in bindings)
         {
@@ -1637,25 +1440,20 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>DeleteAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:816-818</c> throws
-    /// from the call; the core mock fails every filter instead): both mocks key the result by the requested filters, in
-    /// request order and once per distinct filter, and each filter's future and <c>All()</c> fail alike.
-    /// </summary>
     [Fact]
     public async Task DeleteAcls_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBindingFilter[] filters = { AclFilter("diff-ag-b"), AclFilter("diff-ag-a") };
         AclBindingFilter[] requested = { filters[0], filters[1], AclFilter("diff-ag-b") };
 
         DeleteAclsResult syncResult = sync.DeleteAcls(requested);
         AsyncDeleteAclsResult asyncResult = async.DeleteAcls(requested);
-        Assert.Equal(filters, syncResult.Values.Keys);
-        Assert.Equal(filters, asyncResult.Values.Keys);
+        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(syncResult.Values.Keys));
+        Assert.True(new HashSet<AclBindingFilter>(filters).SetEquals(asyncResult.Values.Keys));
 
         foreach (AclBindingFilter filter in filters)
         {
@@ -1671,16 +1469,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>DescribeAcls</c> (M15/P14 S5d), which Java's mock does not implement (<c>MockAdminClient.java:811-813</c>
-    /// throws from the call; the core mock fails the request instead): <c>Values()</c> fails alike.
-    /// </summary>
     [Fact]
     public async Task DescribeAcls_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBindingFilter filter = AclFilter("diff-ah");
 
@@ -1692,17 +1486,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.Values()), FutureProbe.Of(asyncResult.Values())));
     }
 
-    /// <summary>
-    /// <c>DescribeClientQuotas</c> (M15/P14 S5d), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1244-1246</c> throws from the call, with its own "Not implement yet" typo; the core mock
-    /// fails the request instead): <c>Entities()</c> fails alike.
-    /// </summary>
     [Fact]
     public async Task DescribeClientQuotas_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ClientQuotaFilter filter = ClientQuotaFilter.ContainsOnly(
             new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "diff-ai") });
@@ -1715,19 +1504,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.Entities()), FutureProbe.Of(asyncResult.Entities())));
     }
 
-    /// <summary>
-    /// <c>AlterClientQuotas</c> (M15/P14 S5d), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1249-1251</c> throws from the call, with its own "Not implement yet" typo; the core mock
-    /// fails every entity instead): both mocks key the result by the altered entities, in request order and once per
-    /// distinct entity (a second alteration of one entity is sent, not keyed again), and each entity's future and
-    /// <c>All()</c> fail alike.
-    /// </summary>
     [Fact]
     public async Task AlterClientQuotas_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ClientQuotaEntity[] entities = { QuotaEntity("diff-aj"), QuotaEntity(null) };
         ClientQuotaAlteration[] alterations =
@@ -1739,8 +1521,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterClientQuotasResult syncResult = sync.AlterClientQuotas(alterations);
         AsyncAlterClientQuotasResult asyncResult = async.AlterClientQuotas(alterations);
-        Assert.Equal(entities, syncResult.Values.Keys);
-        Assert.Equal(entities, asyncResult.Values.Keys);
+        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(syncResult.Values.Keys));
+        Assert.True(new HashSet<ClientQuotaEntity>(entities).SetEquals(asyncResult.Values.Keys));
 
         foreach (ClientQuotaEntity entity in entities)
         {
@@ -1756,18 +1538,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the ACL and quota members (M15/P14 S5d) throw alike on both mocks — the same
-    /// type, parameter name and message — before any future exists: a null argument where a member takes a required
-    /// reference, a null element where it takes a collection, and a request string the native client cannot take
-    /// unchanged (an embedded NUL).
-    /// </summary>
     [Fact]
     public void AclsAndQuotasGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AclBinding?[] nullBinding = { Acl("diff-ak", "User:alice"), null };
         AclBinding[] nulBinding = { Acl("diff\0ak", "User:alice") };
@@ -1799,7 +1575,7 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike<ArgumentException>(
             () => sync.AlterClientQuotas(nulAlteration), () => async.AlterClientQuotas(nulAlteration));
 
-        // The rows' own pins: the null-element and request-string guards are the core's, with its messages.
+        // The null-element and request-string guards are the core's, with its messages.
         AssertArgument("The ACL bindings must not contain a null element.", "acls", () => sync.CreateAcls(nullBinding!));
         AssertArgument("The ACL filters must not contain a null element.", "filters", () => sync.DeleteAcls(nullFilter!));
         AssertArgument(
@@ -1813,18 +1589,12 @@ public sealed class PublicAdminP14DifferentialTests
         AssertArgument(Internal.AdminStrings.InvalidStringMessage, "entries", () => sync.AlterClientQuotas(nulAlteration));
     }
 
-    /// <summary>
-    /// <c>DescribeUserScramCredentials</c> (M15/P14 S5e), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1254-1255</c> throws from the call; the core mock fails the one completion instead):
-    /// <c>All()</c>, <c>Users()</c> and a <c>Description</c> fail alike, as Java derives all three from the one
-    /// future.
-    /// </summary>
     [Fact]
     public async Task DescribeUserScramCredentials_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] users = { "diff-al-alice", "diff-al-bob" };
 
@@ -1845,18 +1615,12 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(syncResult.Description(users[0])), FutureProbe.Of(asyncResult.Description(users[0]))));
     }
 
-    /// <summary>
-    /// <c>AlterUserScramCredentials</c> (M15/P14 S5e), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1259-1260</c> throws from the call; the core mock fails every user instead): both mocks key
-    /// the result by the altered users, in request order and once per distinct user, and each user's future and
-    /// <c>All()</c> fail alike.
-    /// </summary>
     [Fact]
     public async Task AlterUserScramCredentials_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] users = { "diff-am-bob", "diff-am-alice" };
         UserScramCredentialAlteration[] alterations =
@@ -1868,8 +1632,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterUserScramCredentialsResult syncResult = sync.AlterUserScramCredentials(alterations);
         AsyncAlterUserScramCredentialsResult asyncResult = async.AlterUserScramCredentials(alterations);
-        Assert.Equal(users, syncResult.Values.Keys);
-        Assert.Equal(users, asyncResult.Values.Keys);
+        Assert.True(new HashSet<string>(users).SetEquals(syncResult.Values.Keys));
+        Assert.True(new HashSet<string>(users).SetEquals(asyncResult.Values.Keys));
 
         foreach (string user in users)
         {
@@ -1885,18 +1649,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
-    /// <summary>
-    /// <c>CreateDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:641</c>):
-    /// both mocks mint a token owned by the first renewer, with the requested maximum lifetime and the ABI's <c>-1</c>
-    /// expiry (token ids, MACs and issue times are each mock's own, so the token is compared through
-    /// <see cref="TokenOf"/>); and both fail a request without a renewer alike, with the core mock's message.
-    /// </summary>
     [Fact]
     public async Task CreateDelegationToken_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         object? created = await Agree(
@@ -1907,25 +1665,19 @@ public sealed class PublicAdminP14DifferentialTests
             "owner=User:diff-an-alice;renewers=User:diff-an-alice,User:diff-an-bob;max=86400000;expiry=-1",
             TokenOf(Assert.IsType<DelegationToken>(created)));
 
-        AssertKafka(
-            LocalIllegalArgumentCode,
-            NoRenewer,
+        ArgumentException noRenewer = Assert.IsType<ArgumentException>(
             await Agree(
                 FutureProbe.Of(sync.CreateDelegationToken().DelegationToken()),
                 FutureProbe.Of(async.CreateDelegationToken().DelegationToken())));
+        Assert.Equal(NoRenewer, noRenewer.Message);
     }
 
-    /// <summary>
-    /// <c>RenewDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:661</c>):
-    /// renewing each mock's own token by its MAC gives the renew period as the new expiry on both, and an unknown MAC
-    /// fails alike with <c>DELEGATION_TOKEN_NOT_FOUND</c>.
-    /// </summary>
     [Fact]
     public async Task RenewDelegationToken_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ao")).DelegationToken()))).Hmac;
         byte[] asyncMac =
@@ -1944,19 +1696,20 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(
                 FutureProbe.Of(sync.RenewDelegationToken(unknown).ExpiryTimestamp()),
                 FutureProbe.Of(async.RenewDelegationToken(unknown).ExpiryTimestamp())));
+        AssertKafka(
+            DelegationTokenNotFoundCode,
+            DelegationTokenNotFoundMessage,
+            await Agree(
+                FutureProbe.Of(sync.RenewDelegationToken(null!).ExpiryTimestamp()),
+                FutureProbe.Of(async.RenewDelegationToken(null!).ExpiryTimestamp())));
     }
 
-    /// <summary>
-    /// <c>ExpireDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:683</c>):
-    /// expiring each mock's own token now gives the expiry period on both and removes the token from both; an unknown
-    /// MAC fails alike with <c>DELEGATION_TOKEN_NOT_FOUND</c>.
-    /// </summary>
     [Fact]
     public async Task ExpireDelegationToken_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         byte[] syncMac = (await Minted(FutureProbe.Of(sync.CreateDelegationToken(Renewers("diff-ap")).DelegationToken()))).Hmac;
         byte[] asyncMac =
@@ -1980,18 +1733,20 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(
                 FutureProbe.Of(sync.ExpireDelegationToken(unknown).ExpiryTimestamp()),
                 FutureProbe.Of(async.ExpireDelegationToken(unknown).ExpiryTimestamp())));
+        AssertKafka(
+            DelegationTokenNotFoundCode,
+            DelegationTokenNotFoundMessage,
+            await Agree(
+                FutureProbe.Of(sync.ExpireDelegationToken(null!).ExpiryTimestamp()),
+                FutureProbe.Of(async.ExpireDelegationToken(null!).ExpiryTimestamp())));
     }
 
-    /// <summary>
-    /// <c>DescribeDelegationToken</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:709</c>):
-    /// with no owners filter both mocks describe every token they minted, compared through <see cref="TokensOf"/>.
-    /// </summary>
     [Fact]
     public async Task DescribeDelegationToken_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         foreach (string renewer in new[] { "diff-aq-alice", "diff-aq-bob" })
         {
@@ -2009,25 +1764,21 @@ public sealed class PublicAdminP14DifferentialTests
             TokensOf(Assert.IsAssignableFrom<IReadOnlyList<DelegationToken>>(described)));
     }
 
-    /// <summary>
-    /// <c>DescribeFeatures</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:1269</c>):
-    /// both mocks describe the same seeded feature levels, compared through <see cref="FeaturesOf"/>.
-    /// </summary>
     [Fact]
     public async Task DescribeFeatures_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        Dictionary<string, short> levels =
+            new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 7, ["group.version"] = 1 };
+        Dictionary<string, short> minSupported =
+            new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 1, ["group.version"] = 0 };
+        Dictionary<string, short> maxSupported =
+            new Dictionary<string, short>(StringComparer.Ordinal) { ["metadata.version"] = 20, ["group.version"] = 1 };
+        MockAdminClient sync = MockAdminClient.Create()
+            .FeatureLevels(levels).MinSupportedFeatureLevels(minSupported).MaxSupportedFeatureLevels(maxSupported).Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create()
+            .FeatureLevels(levels).MinSupportedFeatureLevels(minSupported).MaxSupportedFeatureLevels(maxSupported).Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        Dictionary<string, (short Level, short MinSupported, short MaxSupported)> levels =
-            new Dictionary<string, (short Level, short MinSupported, short MaxSupported)>(StringComparer.Ordinal)
-            {
-                ["metadata.version"] = (7, 1, 20),
-                ["group.version"] = (1, 0, 1),
-            };
-        sync.SetFeatureLevels(levels);
-        async.SetFeatureLevels(levels);
 
         object? described = await Agree(
             FutureProbe.Of(sync.DescribeFeatures().FeatureMetadata()),
@@ -2039,17 +1790,12 @@ public sealed class PublicAdminP14DifferentialTests
             FeaturesOf(Assert.IsType<FeatureMetadata>(described)));
     }
 
-    /// <summary>
-    /// <c>UpdateFeatures</c> (M15/P14 S5e), which Java's mock implements (<c>MockAdminClient.java:1286</c>): an
-    /// update past the seeded bounds fails alike on both mocks, with the core mock's message; an update to level 0
-    /// succeeds alike on every key; and an empty map gives an empty result whose <c>All()</c> succeeds, on both.
-    /// </summary>
     [Fact]
     public async Task UpdateFeatures_OnBothMocks_Agree()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         // One key, so the core mock's first-failure-aborts-the-batch is not ordered by its map.
@@ -2075,8 +1821,12 @@ public sealed class PublicAdminP14DifferentialTests
             feature => feature, _ => new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade), StringComparer.Ordinal);
         UpdateFeaturesResult syncAccepted = sync.UpdateFeatures(accepted);
         AsyncUpdateFeaturesResult asyncAccepted = async.UpdateFeatures(accepted);
-        Assert.Equal(features, syncAccepted.Values.Keys);
-        Assert.Equal(features, asyncAccepted.Values.Keys);
+        Assert.Equal(
+            features.OrderBy(key => key, StringComparer.Ordinal),
+            syncAccepted.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        Assert.Equal(
+            features.OrderBy(key => key, StringComparer.Ordinal),
+            asyncAccepted.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
         foreach (string feature in features)
         {
             Assert.Same(
@@ -2094,19 +1844,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the SCRAM, delegation-token and feature members (M15/P14 S5e) throw alike on
-    /// both mocks — the same type, parameter name and message — before any future exists: a null argument where a
-    /// member takes a required reference, a null element where it takes a collection, and a request string the native
-    /// client cannot take unchanged (an embedded NUL). <c>Description</c>'s guards are the Result's own, at the call
-    /// on both flavours.
-    /// </summary>
     [Fact]
     public void ScramTokensAndFeaturesGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nulUser = { "diff\0ar" };
         UserScramCredentialAlteration?[] nullAlteration =
@@ -2119,6 +1862,9 @@ public sealed class PublicAdminP14DifferentialTests
         {
             ["metadata\0version"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade),
         };
+        CreateDelegationTokenOptions noRenewers = new CreateDelegationTokenOptions { Renewers = null! };
+        CreateDelegationTokenOptions nullRenewer = new CreateDelegationTokenOptions { Renewers = new KafkaPrincipal[] { null! } };
+        DescribeDelegationTokenOptions nullOwner = new DescribeDelegationTokenOptions { Owners = new KafkaPrincipal[] { null! } };
 
         AssertThrowAlike<ArgumentException>(
             () => sync.DescribeUserScramCredentials(nulUser), () => async.DescribeUserScramCredentials(nulUser));
@@ -2129,8 +1875,12 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike<ArgumentException>(
             () => sync.AlterUserScramCredentials(nulAlteration), () => async.AlterUserScramCredentials(nulAlteration));
 
-        AssertThrowAlike(() => sync.RenewDelegationToken(null!), () => async.RenewDelegationToken(null!));
-        AssertThrowAlike(() => sync.ExpireDelegationToken(null!), () => async.ExpireDelegationToken(null!));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.CreateDelegationToken(noRenewers), () => async.CreateDelegationToken(noRenewers));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.CreateDelegationToken(nullRenewer), () => async.CreateDelegationToken(nullRenewer));
+        AssertThrowAlike<ArgumentException>(
+            () => sync.DescribeDelegationToken(nullOwner), () => async.DescribeDelegationToken(nullOwner));
 
         AssertThrowAlike(() => sync.UpdateFeatures(null!), () => async.UpdateFeatures(null!));
         AssertThrowAlike<ArgumentException>(
@@ -2142,10 +1892,8 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(() => syncResult.Description(null!), () => asyncResult.Description(null!));
         AssertThrowAlike<ArgumentException>(() => syncResult.Description("diff\0ar"), () => asyncResult.Description("diff\0ar"));
 
-        // The rows' own pins: the null-element guards are the binding's, with its messages, and the request-string
-        // guard names the member's own parameter.
-        Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.RenewDelegationToken(null!)).ParamName);
-        Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.ExpireDelegationToken(null!)).ParamName);
+        // The null-element guards are the binding's, with its messages; the request-string guard names the member's own
+        // parameter.
         Assert.Equal("alterations", Assert.Throws<ArgumentNullException>(() => sync.AlterUserScramCredentials(null!)).ParamName);
         Assert.Equal("featureUpdates", Assert.Throws<ArgumentNullException>(() => sync.UpdateFeatures(null!)).ParamName);
         Assert.Equal("userName", Assert.Throws<ArgumentNullException>(() => syncResult.Description(null!)).ParamName);
@@ -2160,20 +1908,26 @@ public sealed class PublicAdminP14DifferentialTests
             Internal.AdminStrings.InvalidStringMessage, "alterations", () => sync.AlterUserScramCredentials(nulAlteration));
         AssertArgument(Internal.AdminStrings.InvalidStringMessage, "featureUpdates", () => sync.UpdateFeatures(nulFeature));
         AssertArgument(Internal.AdminStrings.InvalidStringMessage, "userName", () => syncResult.Description("diff\0ar"));
+        AssertArgument(
+            "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.",
+            "options",
+            () => sync.CreateDelegationToken(noRenewers));
+        AssertArgument(
+            "CreateDelegationTokenOptions.Renewers must not contain a null element.",
+            "options",
+            () => sync.CreateDelegationToken(nullRenewer));
+        AssertArgument(
+            "DescribeDelegationTokenOptions.Owners must not contain a null element.",
+            "options",
+            () => sync.DescribeDelegationToken(nullOwner));
     }
 
-    /// <summary>
-    /// <c>FenceProducers</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1396</c>
-    /// throws from the call; the core mock fails every id instead): both mocks key the result by the requested ids, in
-    /// request order and once per distinct id, and each id's erased future, its <c>ProducerId</c> / <c>EpochId</c>
-    /// projections and <c>All()</c> fail alike; an empty request is an empty success on both.
-    /// </summary>
     [Fact]
     public async Task FenceProducers_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] ids = { "diff-fp-b", "diff-fp-a" };
         string[] requested = { ids[0], ids[1], ids[0] };
@@ -2211,17 +1965,12 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Same(BlockingCall.Returned, await Agree(FutureProbe.Of(syncEmpty.All()), FutureProbe.Of(asyncEmpty.All())));
     }
 
-    /// <summary>
-    /// <c>DescribeTransactions</c> (M15/P14 S5f), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1376</c> throws from the call; the core mock fails every id instead): each requested id's
-    /// <c>Description</c> and <c>All()</c> fail alike; an empty request gathers an equal, empty map on both.
-    /// </summary>
     [Fact]
     public async Task DescribeTransactions_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] ids = { "diff-dt-b", "diff-dt-a", "diff-dt-b" };
 
@@ -2246,18 +1995,12 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.DescribeTransactions(Array.Empty<string>()).All()))));
     }
 
-    /// <summary>
-    /// <c>DescribeProducers</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1371</c>
-    /// throws from the call; the core mock fails every partition instead): each requested partition's
-    /// <c>PartitionResult</c> and <c>All()</c> fail alike, a repeated partition included; an empty request gathers an
-    /// equal, empty map on both.
-    /// </summary>
     [Fact]
     public async Task DescribeProducers_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         TopicPartition[] partitions =
         {
@@ -2286,17 +2029,12 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.DescribeProducers(Array.Empty<TopicPartition>()).All()))));
     }
 
-    /// <summary>
-    /// <c>ListTransactions</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1391</c>
-    /// throws from the call; the core mock fails the broker discovery instead): <c>ByBrokerId()</c>,
-    /// <c>AllByBrokerId()</c> and <c>All()</c> fail alike, with every filter set as with none.
-    /// </summary>
     [Fact]
     public async Task ListTransactions_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         ListTransactionsOptions filtered = new ListTransactionsOptions
         {
@@ -2325,16 +2063,12 @@ public sealed class PublicAdminP14DifferentialTests
         }
     }
 
-    /// <summary>
-    /// <c>AbortTransaction</c> (M15/P14 S5f), which Java's mock does not implement (<c>MockAdminClient.java:1381</c>
-    /// throws from the call; the core mock fails the one completion instead): <c>All()</c> fails alike.
-    /// </summary>
     [Fact]
     public async Task AbortTransaction_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AbortTransactionSpec spec = new AbortTransactionSpec(new TopicPartition("diff-at", 3), 91_234L, 7, 42);
 
@@ -2344,17 +2078,12 @@ public sealed class PublicAdminP14DifferentialTests
             await Agree(FutureProbe.Of(sync.AbortTransaction(spec).All()), FutureProbe.Of(async.AbortTransaction(spec).All())));
     }
 
-    /// <summary>
-    /// <c>ForceTerminateTransaction</c> (M15/P14 S5f), which Java's mock does not implement
-    /// (<c>MockAdminClient.java:1386</c> throws from the call; the core mock fails the one completion instead):
-    /// <c>Result()</c> fails alike.
-    /// </summary>
     [Fact]
     public async Task ForceTerminateTransaction_OnBothMocks_FailsAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
         AssertKafka(
@@ -2365,19 +2094,12 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.ForceTerminateTransaction("diff-ft").Result())));
     }
 
-    /// <summary>
-    /// The synchronous argument guards of the producer and transaction members (M15/P14 S5f) throw alike on both mocks —
-    /// the same type, parameter name and message — before any future exists: a null argument where a member takes a
-    /// required reference, a null element (or a partition with a null topic) where it takes a collection, and a request
-    /// string the native client cannot take unchanged (an embedded NUL). The Results' own lookup guards
-    /// (<c>ProducerId</c>, <c>EpochId</c>, <c>Description</c>, <c>PartitionResult</c>) are at the call on both flavours.
-    /// </summary>
     [Fact]
     public void ProducersAndTransactionsGuards_OnBothMocks_ThrowAlike()
     {
-        MockAdminClient sync = new MockAdminClient(1);
+        MockAdminClient sync = MockAdminClient.Create().Build();
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
-        AsyncMockAdminClient async = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nullId = { "diff-pg", null! };
         string[] nulId = { "diff\0pg" };
@@ -2430,7 +2152,7 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike<ArgumentException>(
             () => syncProducers.PartitionResult(missing), () => asyncProducers.PartitionResult(missing));
 
-        // The rows' own pins: each guard names the member's own parameter, with the binding's (or Java's) message.
+        // Each guard names the member's own parameter, with the binding's (or Java's) message.
         Assert.Equal("transactionalIds", Assert.Throws<ArgumentNullException>(() => sync.FenceProducers(null!)).ParamName);
         Assert.Equal("transactionalIds", Assert.Throws<ArgumentNullException>(() => sync.DescribeTransactions(null!)).ParamName);
         Assert.Equal("partitions", Assert.Throws<ArgumentNullException>(() => sync.DescribeProducers(null!)).ParamName);
@@ -2472,10 +2194,6 @@ public sealed class PublicAdminP14DifferentialTests
             () => syncProducers.PartitionResult(missing));
     }
 
-    /// <summary>
-    /// <paramref name="call"/> throws exactly <see cref="ArgumentException"/>, naming <paramref name="parameterName"/>
-    /// with <paramref name="message"/>.
-    /// </summary>
     private static void AssertArgument(string message, string parameterName, Action call)
     {
         ArgumentException failure = Assert.Throws<ArgumentException>(call);
@@ -2483,10 +2201,6 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(new ArgumentException(message, parameterName).Message, failure.Message);
     }
 
-    /// <summary>
-    /// Runs both probes to their outcomes and asserts they agree: equal values, or exceptions of the same type with
-    /// the same message (and code). Returns the sync outcome for the row's own pin.
-    /// </summary>
     private static async Task<object?> Agree(FutureProbe sync, FutureProbe async)
     {
         object? syncOutcome = await sync.Outcome();
@@ -2495,11 +2209,6 @@ public sealed class PublicAdminP14DifferentialTests
         return syncOutcome;
     }
 
-    /// <summary>
-    /// <see cref="Agree(FutureProbe, FutureProbe)"/> for a value comparable only through a projection — one carrying an
-    /// id each mock mints, or an unordered collection. A failure must agree as there; a value must agree on
-    /// <paramref name="project"/>. Returns the sync outcome for the row's own pin.
-    /// </summary>
     private static async Task<object?> Agree(FutureProbe sync, FutureProbe async, Func<object, string> project)
     {
         object? syncOutcome = await sync.Outcome();
@@ -2547,6 +2256,9 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(message, failure.Message);
     }
 
+    private static List<string> Replicas(IEnumerable<TopicPartitionReplica> replicas) =>
+        replicas.Select(static replica => replica.ToString()).OrderBy(static r => r, StringComparer.Ordinal).ToList();
+
     private static List<string> Entries(Config config) =>
         config.Entries.Select(static entry => entry.Name + "=" + entry.Value).OrderBy(static e => e, StringComparer.Ordinal).ToList();
 
@@ -2559,14 +2271,9 @@ public sealed class PublicAdminP14DifferentialTests
     private static string Resources(IEnumerable<ConfigResource> resources) =>
         string.Join(",", Sorted(resources.Select(static resource => resource.ToString())));
 
-    /// <summary>A reassignment map, comparable across mocks: each partition, sorted, with its reassignment.</summary>
     private static string ReassignmentsOf(IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments) =>
         string.Join("|", Sorted(reassignments.Select(static entry => entry.Key + "=" + entry.Value)));
 
-    /// <summary>
-    /// The target replicas a reassignment moves to: its current replicas plus those being added, less those being
-    /// removed, sorted.
-    /// </summary>
     private static List<int> Target(PartitionReassignment reassignment) =>
         reassignment.Replicas
             .Concat(reassignment.AddingReplicas)
@@ -2578,17 +2285,12 @@ public sealed class PublicAdminP14DifferentialTests
     private static string Offsets(ListOffsetsResult.ListOffsetsResultInfo info) =>
         info.Offset + "/" + info.Timestamp + "/" + (info.LeaderEpoch?.ToString() ?? "none");
 
-    /// <summary>Group listings, comparable across mocks: each group id, sorted, with its type, state and protocol.</summary>
     private static string Listings(IEnumerable<GroupListing> listings) =>
         string.Join(
             ",",
             Sorted(listings.Select(static listing =>
                 listing.GroupId + "/" + listing.Type + "/" + listing.GroupState + "/" + listing.Protocol)));
 
-    /// <summary>
-    /// One group's committed offsets, comparable across mocks: each partition, sorted, with its offset, leader epoch
-    /// and quoted metadata, or <c>null</c> for a partition with no committed offset.
-    /// </summary>
     private static string GroupOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> offsets) =>
         string.Join(
             ",",
@@ -2598,7 +2300,6 @@ public sealed class PublicAdminP14DifferentialTests
                     ? "null"
                     : entry.Value.Offset + "/" + (entry.Value.LeaderEpoch?.ToString() ?? "none") + "/'" + entry.Value.Metadata + "'"))));
 
-    /// <summary>Every group's committed offsets, comparable across mocks: each group id, sorted, with its offsets.</summary>
     private static string AllGroupOffsets(
         IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> groups) =>
         string.Join(
@@ -2606,10 +2307,6 @@ public sealed class PublicAdminP14DifferentialTests
             groups.OrderBy(static entry => entry.Key, StringComparer.Ordinal)
                 .Select(static entry => entry.Key + ":" + GroupOffsets(entry.Value)));
 
-    /// <summary>
-    /// Gives each of <paramref name="groupIds"/> a group config on both mocks, asserting both agree — a group config is
-    /// what makes either mock list a group.
-    /// </summary>
     private static async Task SeedGroups(MockAdminClient sync, AsyncMockAdminClient async, params string[] groupIds)
     {
         Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> request = groupIds.ToDictionary(
@@ -2625,10 +2322,6 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.IncrementalAlterConfigs(request).All())));
     }
 
-    /// <summary>
-    /// Creates <paramref name="topic"/> on both mocks and reassigns <paramref name="partition"/> to
-    /// <paramref name="targetReplicas"/> on both, asserting both agree.
-    /// </summary>
     private static async Task Reassign(
         MockAdminClient sync,
         AsyncMockAdminClient async,
@@ -2648,10 +2341,6 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(async.AlterPartitionReassignments(request).All())));
     }
 
-    /// <summary>
-    /// One broker's log directories, comparable across mocks: each path, sorted, with its error (if any) and its
-    /// replicas' partitions, sorted.
-    /// </summary>
     private static string LogDirs(IReadOnlyDictionary<string, LogDirDescription> directories) =>
         string.Join(
             "|",
@@ -2661,10 +2350,6 @@ public sealed class PublicAdminP14DifferentialTests
                 + ":"
                 + string.Join(";", Sorted(entry.Value.ReplicaInfos.Keys.Select(static partition => partition.ToString())))));
 
-    /// <summary>
-    /// Creates <paramref name="topics"/> on both mocks, asserting they agree, and returns each mock's own id for the
-    /// first topic.
-    /// </summary>
     private static async Task<(Uuid Sync, Uuid Async)> Seed(
         MockAdminClient sync, AsyncMockAdminClient async, params NewTopic[] topics)
     {
@@ -2679,7 +2364,6 @@ public sealed class PublicAdminP14DifferentialTests
         return (syncId, asyncId);
     }
 
-    /// <summary>The topic names both mocks list, which must agree, sorted.</summary>
     private static async Task<List<string>> TopicNames(MockAdminClient sync, AsyncMockAdminClient async)
     {
         IReadOnlyCollection<string> names = Assert.IsAssignableFrom<IReadOnlyCollection<string>>(
@@ -2700,11 +2384,9 @@ public sealed class PublicAdminP14DifferentialTests
             new ResourcePatternFilter(ResourceType.Topic, topic, PatternType.Literal),
             new AccessControlEntryFilter("User:alice", "*", AclOperation.Any, AclPermissionType.Any));
 
-    /// <summary>A user entity; a <see langword="null"/> name is the default user.</summary>
     private static ClientQuotaEntity QuotaEntity(string? user) =>
         new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal) { [ClientQuotaEntity.User] = user });
 
-    /// <summary>A token request whose renewers are the users <paramref name="names"/>, for a day.</summary>
     private static CreateDelegationTokenOptions Renewers(params string[] names) =>
         new CreateDelegationTokenOptions
         {
@@ -2712,23 +2394,16 @@ public sealed class PublicAdminP14DifferentialTests
             MaxLifetimeMs = 86_400_000L,
         };
 
-    /// <summary>
-    /// The token a mock minted, read through <paramref name="minted"/> within its deadline; a mint that failed fails the
-    /// test here rather than in a later step.
-    /// </summary>
     private static async Task<DelegationToken> Minted(FutureProbe minted) =>
         Assert.IsType<DelegationToken>(await minted.Outcome());
 
-    /// <summary>A token's mock-independent fields: its owner, renewers, maximum lifetime and expiry.</summary>
     private static string TokenOf(DelegationToken token) =>
         $"owner={token.TokenInfo.OwnerAsString};renewers={string.Join(",", token.TokenInfo.RenewersAsString)};" +
         $"max={token.TokenInfo.MaxTimestamp};expiry={token.TokenInfo.ExpiryTimestamp}";
 
-    /// <summary>Every token's <see cref="TokenOf"/>, in ordinal order.</summary>
     private static string TokensOf(IReadOnlyList<DelegationToken> tokens) =>
         string.Join("|", tokens.Select(TokenOf).OrderBy(token => token, StringComparer.Ordinal));
 
-    /// <summary>A feature description's two tables, each in ordinal key order, and its epoch.</summary>
     private static string FeaturesOf(FeatureMetadata metadata) =>
         "finalized=" + string.Join(
             ",",
@@ -2741,20 +2416,11 @@ public sealed class PublicAdminP14DifferentialTests
                 .OrderBy(entry => entry.Key, StringComparer.Ordinal)
                 .Select(entry => $"{entry.Key}:{entry.Value.MinVersion}-{entry.Value.MaxVersion}"));
 
-    /// <summary>One quota of <paramref name="entity"/> set to <paramref name="value"/>, or removed when it is null.</summary>
     private static ClientQuotaAlteration QuotaAlteration(ClientQuotaEntity entity, string quota, double? value) =>
         new ClientQuotaAlteration(entity, new[] { new ClientQuotaAlteration.Op(quota, value) });
 
-    /// <summary>
-    /// Both calls throw synchronously, alike: an <see cref="ArgumentNullException"/> with the same message and
-    /// parameter name.
-    /// </summary>
     private static void AssertThrowAlike(Action sync, Action async) => AssertThrowAlike<ArgumentNullException>(sync, async);
 
-    /// <summary>
-    /// Both calls throw synchronously, alike: exactly <typeparamref name="TException"/>, with the same message and
-    /// parameter name.
-    /// </summary>
     private static void AssertThrowAlike<TException>(Action sync, Action async)
         where TException : ArgumentException
     {

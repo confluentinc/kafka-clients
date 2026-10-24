@@ -13,51 +13,51 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a borrowed <c>kafka_admin_TopicListing_t</c> into a fully owned managed
-/// <see cref="TopicListing"/>, so nothing survives the
-/// <c>ListTopicsResult_destroy</c> that follows the walk (ffi §B2 Category 4 / §B4).
+/// Copies the borrowed <c>kafka_Map_t</c> of topic names to <c>kafka_admin_TopicListing_t</c> that a
+/// <c>namesToListings</c> future delivers into an owned managed map, in the core's (name) order.
 /// </summary>
 internal static class TopicListingMarshal
 {
-    /// <summary>Copies one borrowed listing out.</summary>
-    /// <param name="listing">
-    /// The borrowed <c>get_value(i)</c> pointer. Valid only until the result root is
-    /// destroyed.
-    /// </param>
-    /// <returns>The owned listing.</returns>
-    /// <exception cref="KafkaException">
-    /// The result reported a listing the ABI could not produce — impossible within the
-    /// result's own <c>count</c>, but surfaced rather than dereferenced.
-    /// </exception>
-    internal static TopicListing CopyOut(IntPtr listing)
+    internal static IReadOnlyDictionary<string, TopicListing> CopyOutMap(IntPtr map)
     {
-        if (listing == IntPtr.Zero)
+        Dictionary<string, TopicListing> listings = new Dictionary<string, TopicListing>(StringComparer.Ordinal);
+        if (map == IntPtr.Zero)
         {
-            // Guarded by `count` at the call site, so unreachable; the aggregate shape has
-            // no per-key channel, so this faults the whole listTopics task rather than
-            // silently dropping a topic from the map.
-            throw new KafkaException("The listTopics result produced no listing for an index within its own count.");
+            return listings;
         }
 
-        // NUL-terminated, borrowed (ffi §B3 row 2) — copied out here.
-        string name = Utf8Marshal.PtrToString(NativeMethods.TopicListingName(listing)) ?? string.Empty;
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.MapSize(map, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr key = NativeMethods.MapKey(map, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr value = NativeMethods.MapValue(map, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            listings[Utf8Marshal.PtrToString(key) ?? string.Empty] = CopyOut(value);
+        }
 
-        string topicIdText =
-            Utf8Marshal.PtrToString(NativeMethods.TopicListingTopicId(listing)) ?? string.Empty;
+        return listings;
+    }
 
-        // Same reading as TopicDescriptionMarshal: an empty id is the metadata-unavailable
-        // spelling and becomes Uuid.Zero (Java's ZERO_UUID default), while a genuinely
-        // malformed one throws out of Parse.
-        Uuid topicId = topicIdText.Length == 0 ? Uuid.Zero : Uuid.Parse(topicIdText);
-
-        bool isInternal = NativeMethods.TopicListingIsInternal(listing);
-
-        return new TopicListing(name, topicId, isInternal);
+    internal static TopicListing CopyOut(IntPtr listing)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        string name = Utf8Marshal.PtrToString(NativeMethods.TopicListingName(listing, ref outErr)) ?? string.Empty;
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr topicId = NativeMethods.TopicListingTopicId(listing, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        Uuid id = UuidMarshal.CopyOutAndDestroy(topicId);
+        sbyte isInternal = NativeMethods.TopicListingIsInternal(listing, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new TopicListing(name, id, isInternal != 0);
     }
 }

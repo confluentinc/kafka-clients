@@ -24,20 +24,13 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the shape and the behaviour of <see cref="ConsumerGroupDescription"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>.
+/// <see cref="ConsumerGroupDescription"/> against Java's <c>org.apache.kafka.clients.admin.ConsumerGroupDescription</c>:
+/// the one constructor Java does not deprecate, the coalesced arguments, absent versus empty members, equality and
+/// <c>ToString</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>This is a pure value type</b> — everything here is managed and broker-free, as it is
-/// for its two siblings <see cref="MemberAssignment"/> and <see cref="MemberDescription"/>.
-/// </para>
-/// <para>
-/// ⚠ <b>C# upcasts and widens silently, so the shape half has to be reflection
-/// assertions.</b> A behavioural test passes equally against <c>GroupType</c> and
-/// <c>GroupType?</c>, which is precisely the distinction this class draws against
-/// <see cref="GroupListing"/>.
-/// </para>
+/// The shape half is reflection assertions: a behavioural test passes equally against <c>GroupType</c> and
+/// <c>GroupType?</c>, the distinction drawn against <see cref="GroupListing"/>.
 /// </remarks>
 public sealed class PublicAdminConsumerGroupDescriptionTests
 {
@@ -49,11 +42,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
 
     private static readonly Node s_coordinatorNode = new Node(7, "broker-1", 9092, "r-1");
 
-    /// <summary>
-    /// Java's one <b>current</b> constructor ships, with Java's parameter shape. The three it
-    /// deprecates deliberately do not — a ruling for this phase, and the reason the count is
-    /// exactly one rather than four.
-    /// </summary>
     [Fact]
     public void Constructor_IsJavasCurrentOne_TheThreeDeprecatedOnesAreNotTranslated()
     {
@@ -82,13 +70,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             only);
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="ConsumerGroupDescription.Type"/> is non-optional here, unlike on
-    /// <see cref="GroupListing"/>.</b> Java's description carries a plain
-    /// <c>GroupType</c> while its listing carries an <c>Optional&lt;GroupType&gt;</c>, and the
-    /// contrast is asserted against the sibling rather than stated, because a behavioural test
-    /// cannot see it — a <c>GroupType</c> widens into a <c>GroupType?</c> silently.
-    /// </summary>
     [Fact]
     public void TypeAndGroupState_AreNonOptionalHere_UnlikeOnTheListing()
     {
@@ -99,11 +80,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(typeof(GroupState?), typeof(GroupListing).GetProperty("GroupState")!.PropertyType);
     }
 
-    /// <summary>
-    /// The three <c>Optional</c>-shaped members are nullable and the two collections keep
-    /// Java's element types — the absent-versus-present distinction the behaviour tests below
-    /// rely on has to exist in the metadata first.
-    /// </summary>
     [Fact]
     public void Properties_AreJavasShapes()
     {
@@ -135,10 +111,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(9, description.TargetAssignmentEpoch);
     }
 
-    /// <summary>
-    /// Java coalesces exactly three arguments (the id, the members and the assignor); the
-    /// other six are stored as given, which is what keeps absence observable.
-    /// </summary>
     [Fact]
     public void Constructor_CoalescesTheThreeJavaCoalescesAndNoOthers()
     {
@@ -155,7 +127,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Null(description.TargetAssignmentEpoch);
     }
 
-    /// <summary>The members are copied, so a later mutation of the argument is not observed.</summary>
     [Fact]
     public void Constructor_CopiesTheMembers()
     {
@@ -168,11 +139,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(new[] { s_memberOne }, description.Members);
     }
 
-    /// <summary>
-    /// Java deprecates <c>state()</c> in favour of <c>groupState()</c> but not the class
-    /// itself. The deprecated accessor is not translated, and neither the class nor
-    /// <see cref="ConsumerGroupDescription.GroupState"/> carries the attribute.
-    /// </summary>
     [Fact]
     public void State_IsNotTranslated_AndGroupStateAndTheClassAreNotObsolete()
     {
@@ -184,13 +150,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Null(typeof(ConsumerGroupDescription).GetCustomAttribute<ObsoleteAttribute>());
     }
 
-    /// <summary>
-    /// ⚠ <b>Absent is not empty.</b> The ABI reports whether the broker sent an
-    /// authorized-operations set at all, so Java's <c>null</c> (not reported) and its empty
-    /// set (reported, nothing authorized) are two distinct values. A test that only checked
-    /// emptiness could not tell them apart — <c>Assert.Empty</c> passes on neither, and
-    /// counting passes on both.
-    /// </summary>
     [Fact]
     public void AuthorizedOperations_DistinguishesAbsentFromEmpty()
     {
@@ -209,10 +168,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Contains("authorizedOperations=[],", empty.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Java's parameter is a <c>Set</c>: duplicates collapse. First-seen order is kept so the
-    /// rendering is stable.
-    /// </summary>
     [Fact]
     public void AuthorizedOperations_CollapseDuplicatesAndKeepFirstSeenOrder()
     {
@@ -223,10 +178,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
     }
 
-    /// <summary>
-    /// The two epochs are <c>Optional&lt;Integer&gt;</c> in Java — absent for a classic group.
-    /// Absence must not collapse into a sentinel: neither <c>0</c> nor <c>-1</c> is it.
-    /// </summary>
     [Fact]
     public void AnAbsentEpochIsNotASentinel()
     {
@@ -247,12 +198,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(9, present.TargetAssignmentEpoch);
     }
 
-    /// <summary>
-    /// The coordinator is nullable, and a present one is compared field-by-field — this
-    /// binding's <see cref="Node"/> carries no value equality of its own, so each of the five
-    /// members Java's <c>Node.equals</c> compares (<c>Node.java:143-154</c>) has to
-    /// discriminate here, <see cref="Node.IsFenced"/> included (M15/P13.3, D12).
-    /// </summary>
     [Fact]
     public void Coordinator_CoversAbsentAndPresent()
     {
@@ -273,9 +218,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-1", 9092, "r-1", isFenced: true))));
     }
 
-    /// <summary>
-    /// Equality covers the ten constructor members, as Java's <c>equals</c> does.
-    /// </summary>
     [Fact]
     public void Equality_CoversAllTenMembers()
     {
@@ -285,7 +227,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.True(description.Equals(description));
         Assert.Equal(Canonical().GetHashCode(), description.GetHashCode());
 
-        // Each member discriminates on its own.
         Assert.False(description.Equals(Describe(
             "other", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.Consumer,
             GroupState.Stable, s_coordinatorNode, Operations(), 7, 9)));
@@ -321,11 +262,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.False(description.Equals("g-1"));
     }
 
-    /// <summary>
-    /// The two collections hash and compare the way Java's own do: the members are a
-    /// <c>List</c> (positional), the authorized operations a <c>Set</c> (order-insensitive).
-    /// Treating either like the other would be wrong in one direction or the other.
-    /// </summary>
     [Fact]
     public void Equality_ComparesMembersPositionallyAndOperationsAsASet()
     {
@@ -345,13 +281,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
         Assert.Equal(description.GetHashCode(), operationsReversed.GetHashCode());
     }
 
-    /// <summary>
-    /// ⚠ <b>Java renders absence three ways in this one method.</b> An empty members list
-    /// renders as a bare <c>members=</c> (the elements join with <c>","</c> and no space); an
-    /// absent coordinator or operations set concatenates the bare text <c>null</c>; and the
-    /// two epochs reach that same text through <c>orElse(null)</c> — <b>not</b> the
-    /// <c>Optional.empty</c> that <see cref="MemberDescription"/> emits.
-    /// </summary>
     [Fact]
     public void ToString_MirrorsJavasRendering()
     {
@@ -378,7 +307,6 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
                 .ToString());
     }
 
-    /// <summary>Java's <c>Boolean.toString()</c> is lowercase; .NET's would render "True".</summary>
     [Fact]
     public void ToString_SpellsASimpleGroupTheJavaWay()
     {

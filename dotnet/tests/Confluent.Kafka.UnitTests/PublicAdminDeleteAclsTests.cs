@@ -24,41 +24,20 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>deleteAcls</c> end to end against <see cref="MockAdminClient"/>, no broker (M15/P6).
+/// <c>DeleteAcls</c> end to end against the mocks, which fail every filter with the mock's own answer, as Java's mock
+/// does: per-filter results keyed by filter value (a null and an empty name stay distinct keys), the preconditions
+/// and the options.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>Every filter fails here, and that is Java's behaviour rather than a gap.</b> Java's
-/// <c>MockAdminClient.deleteAcls</c> throws
-/// <c>UnsupportedOperationException("Not implemented yet")</c>
-/// (<c>MockAdminClient.java:816-818</c>) and the Rust mock mirrors it as one exceptional
-/// future <em>per filter</em> (<c>admin-client.md</c> §9). The ABI still materialises a real
-/// result table, so the <b>key</b> reader runs over real borrowed
-/// <c>kafka_common_acl_AclBindingFilter_t</c> handles and each filter-level error is read through
-/// <see cref="KafkaException.FromBorrowedHandle"/> — real native memory, not a stand-in. What
-/// the mock cannot reach is a filter-level <em>success</em>, and with it the whole inner
-/// axis; <c>AdminP6ResultMarshalTests</c> covers that by injection.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>The round trip carries the null-versus-empty rule all the way through native.</b> A
-/// filter with a <see langword="null"/> name and one with <c>""</c> are submitted, decoded by
-/// the core, handed back, and must still be two distinct keys.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminDeleteAclsTests
 {
     private const string NotImplemented = "Not implemented yet";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// A filter built fresh, equal by value to the one submitted, finds its own awaitable
-    /// (PLAN D39).
-    /// </summary>
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("keyed-by-value") });
@@ -72,15 +51,10 @@ public sealed class PublicAdminDeleteAclsTests
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// ⚠⚠ A <see langword="null"/> name and an <c>""</c> name survive the full round trip as
-    /// <b>two</b> distinct keys. Collapsing either direction — on the way out or on the way
-    /// back — loses one entry here.
-    /// </summary>
     [Fact]
     public async Task NullAndEmpty_RoundTripAsDistinctKeys()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter wildcard = new AclBindingFilter(
@@ -97,7 +71,6 @@ public sealed class PublicAdminDeleteAclsTests
         Assert.True(result.Values.ContainsKey(wildcard));
         Assert.True(result.Values.ContainsKey(literalEmpty));
 
-        // The decoded keys really are null-vs-empty, not two copies of one of them.
         foreach (AclBindingFilter key in result.Values.Keys)
         {
             Assert.Equal(key.PatternFilter.Name, key.EntryFilter.Principal);
@@ -107,14 +80,10 @@ public sealed class PublicAdminDeleteAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// Each filter gets <b>its own</b> awaitable, and its key round trips through the ABI
-    /// unchanged — the seven flat accessors reassembled into the nested Java shape (PLAN D36).
-    /// </summary>
     [Fact]
     public async Task EachFilter_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter alpha = new AclBindingFilter(
@@ -139,14 +108,10 @@ public sealed class PublicAdminDeleteAclsTests
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
-    /// <summary>
-    /// One filter can be awaited without awaiting the others — the per-key granularity Java
-    /// publishes.
-    /// </summary>
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter first = Filter("solo-first");
@@ -160,13 +125,10 @@ public sealed class PublicAdminDeleteAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// <c>All()</c> over an empty request completes with an empty collection.
-    /// </summary>
     [Fact]
     public async Task All_OverAnEmptyRequest_IsAnEmptyCollection()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(Array.Empty<AclBindingFilter>());
@@ -175,14 +137,10 @@ public sealed class PublicAdminDeleteAclsTests
         Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// A repeated filter collapses to one entry — Java keys its result on a map, so two
-    /// value-equal filters are one key.
-    /// </summary>
     [Fact]
     public async Task DuplicateFilters_CollapseToOneEntry()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = admin.DeleteAcls(new[] { Filter("dup"), Filter("dup") });
@@ -191,14 +149,10 @@ public sealed class PublicAdminDeleteAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// A non-ASCII resource name survives the hand-rolled UTF-8 round trip in both directions
-    /// (ffi §A3/§B3).
-    /// </summary>
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBindingFilter filter = Filter("tópico-café-日本");
@@ -208,13 +162,10 @@ public sealed class PublicAdminDeleteAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// Preconditions are .NET exceptions raised before any native call (ffi §B5).
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
@@ -227,31 +178,24 @@ public sealed class PublicAdminDeleteAclsTests
             "The ACL filters must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
         Assert.Equal("filters", nullElement.ParamName);
 
-        // A negative timeout is not a precondition (M15/P13.5 X2): it is sent as 0.
+        // A negative timeout is not a precondition: it is sent as 0.
         Assert.Null(Record.Exception(
             () => admin.DeleteAcls(
                 new[] { Filter("t") }, new DeleteAclsOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>A call after <c>Dispose</c> throws <see cref="ObjectDisposedException"/>.</summary>
     [Fact]
     public void AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteAcls(new[] { Filter("gone") }));
     }
 
-    /// <summary>The options default to Java's defaults — an unset timeout.</summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() => Assert.Null(new DeleteAclsOptions().TimeoutMs);
 
-    /// <summary>
-    /// M15/P13.5 G4-5: <see cref="DeleteAclsResult.FilterResult"/>'s failure accessor is named
-    /// after Java's <c>exception()</c> (<c>DeleteAclsResult.java:58</c>) — a public, nullable
-    /// <see cref="KafkaException"/> <c>Exception</c> — and the old <c>Error</c> name is gone.
-    /// </summary>
     [Fact]
     public void G4_5_FilterResult_ExposesException_NotError()
     {

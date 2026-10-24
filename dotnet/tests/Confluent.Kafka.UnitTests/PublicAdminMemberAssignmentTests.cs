@@ -52,15 +52,12 @@ public sealed class PublicAdminMemberAssignmentTests
     [Fact]
     public void TheTypeIsNotDeprecated_BecauseJavasIsNot()
     {
-        // Java's MemberAssignment carries no @Deprecated; neither does this type. The
-        // attribute is mirrored only where Java's own member carries it.
         Assert.Null(typeof(MemberAssignment).GetCustomAttribute<ObsoleteAttribute>());
     }
 
     [Fact]
     public void NullPartitions_BecomeAnEmptyAssignment()
     {
-        // Java :38 — topicPartitions == null ? Collections.emptySet() : ...
         var assignment = new MemberAssignment(null);
 
         Assert.Empty(assignment.TopicPartitions);
@@ -70,7 +67,6 @@ public sealed class PublicAdminMemberAssignmentTests
     [Fact]
     public void ThePartitionsAreCopiedDefensively()
     {
-        // Java :38 — Set.copyOf(...).
         var source = new List<TopicPartition> { new TopicPartition("orders", 0) };
         var assignment = new MemberAssignment(source);
 
@@ -120,7 +116,6 @@ public sealed class PublicAdminMemberAssignmentTests
         Assert.True(assignment.Equals(new MemberAssignment(new[] { new TopicPartition("orders", 0) })));
         Assert.True(assignment.Equals(assignment));
 
-        // A different partition, a different topic, a superset and the empty set all differ.
         Assert.False(assignment.Equals(new MemberAssignment(new[] { new TopicPartition("orders", 1) })));
         Assert.False(assignment.Equals(new MemberAssignment(new[] { new TopicPartition("payments", 0) })));
         Assert.False(assignment.Equals(new MemberAssignment(new[]
@@ -137,8 +132,6 @@ public sealed class PublicAdminMemberAssignmentTests
     [Fact]
     public void GetHashCode_IsTheSumOfTheElementHashes_AsJavasSetHashCodeIs()
     {
-        // Java :52 returns topicPartitions.hashCode(), and Set.hashCode() is specified as
-        // the sum of the element hashes.
         var partitions = new[] { new TopicPartition("orders", 0), new TopicPartition("payments", 7) };
         var expected = unchecked(partitions[0].GetHashCode() + partitions[1].GetHashCode());
 
@@ -149,7 +142,6 @@ public sealed class PublicAdminMemberAssignmentTests
     [Fact]
     public void ToString_MirrorsJavasRendering()
     {
-        // Java :64-66 — "(topicPartitions=" + joined-with-"," + ")".
         var assignment = new MemberAssignment(new[]
         {
             new TopicPartition("orders", 0),

@@ -20,39 +20,11 @@ using Confluent.Kafka.Admin;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The bidirectional <see cref="TransactionState"/> ⇄ wire-name table.
+/// Marshals the listTransactions values: a <see cref="TransactionState"/> filter as the C singleton its Java
+/// <c>toString()</c> name parses to, and the listings a broker's future delivers as <see cref="TransactionListing"/>s.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The wire name is Java's <c>toString()</c>, not <c>name()</c></b>
-/// (<c>TransactionState.java:25-32, :43-45</c>) — <c>"PrepareAbort"</c>, not
-/// <c>"PREPARE_ABORT"</c>. The C# identifiers coincide with those spellings today, so
-/// <see cref="Enum.ToString()"/> would <em>happen</em> to be right; the coincidence is not the
-/// contract, and a later rename would silently change the wire format rather than fail to
-/// compile.
-/// </para>
-/// <para>
-/// ⚠ The read direction is wrong outright with <see cref="Enum.Parse(Type, string)"/>, in two
-/// ways this table avoids: it <b>throws</b> on a name it does not recognise where Java's
-/// <c>parse</c> returns <c>UNKNOWN</c> (<c>:47-49</c>) — the broker-side <c>DEAD</c> is a live
-/// example — and it accepts a <b>numeric</b> string, so a <c>"3"</c> on the wire would decode
-/// to <see cref="TransactionState.CompleteAbort"/> although Java's constants carry no numeric
-/// id at all.
-/// </para>
-/// <para>
-/// Both directions are needed — <c>describeTransactions</c> reads a state,
-/// <see cref="ListTransactionsOptions.FilteredStates"/> writes one — and the parse table is
-/// <em>derived</em> from the writer, exactly as Java derives <c>NAME_TO_ENUM</c> from
-/// <c>values()</c> (<c>:34-35</c>), so the two cannot disagree.
-/// </para>
-/// </remarks>
 internal static class TransactionMarshal
 {
-    private static readonly Dictionary<string, TransactionState> s_byWireName = BuildParseTable();
-
-    /// <summary>Java's <c>toString()</c> for one state.</summary>
-    /// <param name="state">The state, including a value outside the declared set.</param>
-    /// <returns>The wire spelling; <c>"Unknown"</c> for an undeclared value.</returns>
     internal static string WireName(TransactionState state) =>
         state switch
         {
@@ -66,29 +38,43 @@ internal static class TransactionMarshal
             _ => "Unknown",
         };
 
-    /// <summary>Java's <c>parse</c> (<c>:47-49</c>): case-sensitive, unrecognised → Unknown.</summary>
-    /// <param name="name">A wire spelling, or <see langword="null"/>.</param>
-    /// <returns>The state, or <see cref="TransactionState.Unknown"/>.</returns>
-    internal static TransactionState Parse(string? name) =>
-        name is not null && s_byWireName.TryGetValue(name, out TransactionState state)
-            ? state
-            : TransactionState.Unknown;
-
-    /// <summary>Decodes a borrowed, NUL-terminated state name from a result root.</summary>
-    /// <param name="borrowedName">The borrowed <c>const char*</c>; never freed.</param>
-    /// <returns>The state, or <see cref="TransactionState.Unknown"/> when null or unrecognised.</returns>
-    internal static TransactionState ReadState(IntPtr borrowedName) =>
-        Parse(Utf8Marshal.PtrToString(borrowedName));
-
-    private static Dictionary<string, TransactionState> BuildParseTable()
+    internal static IntPtr Singleton(TransactionState state)
     {
-        Dictionary<string, TransactionState> table =
-            new Dictionary<string, TransactionState>(StringComparer.Ordinal);
-        foreach (TransactionState state in (TransactionState[])Enum.GetValues(typeof(TransactionState)))
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(WireName(state));
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr singleton = NativeMethods.TransactionStateParse(name.Pointer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return singleton;
+    }
+
+    internal static IReadOnlyCollection<TransactionListing> CopyOutListings(IntPtr list)
+    {
+        if (list == IntPtr.Zero)
         {
-            table[WireName(state)] = state;
+            throw new KafkaException("The admin result produced no transaction listings.");
         }
 
-        return table;
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(list, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        TransactionListing[] listings = new TransactionListing[count];
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr listing = NativeMethods.ListGet(list, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr transactionalId = NativeMethods.TransactionListingTransactionalId(listing, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            long producerId = NativeMethods.TransactionListingProducerId(listing, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr state = NativeMethods.TransactionListingState(listing, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            listings[i] = new TransactionListing(
+                Utf8Marshal.PtrToString(transactionalId)
+                    ?? throw new KafkaException("The admin result produced no transactional id for a listing."),
+                producerId,
+                TransactionDescriptionMarshal.StateFrom(state));
+        }
+
+        return listings;
     }
 }

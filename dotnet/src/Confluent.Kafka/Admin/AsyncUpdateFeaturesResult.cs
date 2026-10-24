@@ -12,54 +12,60 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.UpdateFeatures"/> — Java's
-/// <c>org.apache.kafka.clients.admin.UpdateFeaturesResult</c>: one future <b>per feature</b>
-/// (<c>:29</c>).
+/// <c>org.apache.kafka.clients.admin.UpdateFeaturesResult</c>: one future per feature.
 /// </summary>
-/// <remarks>
-/// ⚠ See <see cref="AsyncAlterUserScramCredentialsResult"/> on the byte-identical accessor sets and
-/// the wiring guard that keeps the two readers apart.
-/// </remarks>
 /// <seealso cref="UpdateFeaturesResult"/>
 public sealed class AsyncUpdateFeaturesResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncUpdateFeaturesResult(
-        IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer)
+    private AsyncUpdateFeaturesResult(
+        IReadOnlyDictionary<string, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        Dictionary<string, AsyncKafkaFuture> erased = new Dictionary<string, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncUpdateFeaturesResult From(VoidKeyedAdminOperation<string> operation) =>
-        new AsyncUpdateFeaturesResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// One future per requested feature — Java's <c>values()</c> (<c>:39</c>).
+    /// One future per requested feature — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when every feature's update has been applied — Java's <c>all()</c>
-    /// (<c>:46</c>).
+    /// Completes when every feature's update has been applied, and faults with the first failure to complete if any
+    /// feature failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() => new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+
+    internal static AsyncUpdateFeaturesResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, AsyncKafkaFuture> values =
+            new Dictionary<string, AsyncKafkaFuture>(native.Values.Count, StringComparer.Ordinal);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncUpdateFeaturesResult(values, nativeFutures, native.Result);
+    }
 }

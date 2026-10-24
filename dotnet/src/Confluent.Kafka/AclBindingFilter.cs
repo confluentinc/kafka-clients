@@ -18,39 +18,30 @@ using System.Globalization;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A filter selecting ACL bindings — the .NET realization of Java's
-/// <c>org.apache.kafka.common.acl.AclBindingFilter</c> (<c>:42</c>).
+/// A filter selecting ACL bindings — Java's <c>org.apache.kafka.common.acl.AclBindingFilter</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Nested over the flat C ABI, like <see cref="AclBinding"/> (PLAN D36). Value equality is
-/// load-bearing: this type is a dictionary <b>key</b> on the ACL RPC results, so a wrong
-/// <see cref="Equals(object?)"/> / <see cref="GetHashCode"/> makes every caller lookup miss
-/// <em>silently</em> (PLAN D39).
+/// Filters are dictionary keys on the ACL RPC results, so their value equality decides every
+/// lookup.
 /// </para>
 /// <para>
-/// Java's matching family (<c>matches</c>, <c>matchesAtMostOne</c>, <c>findIndefiniteField</c>)
-/// is deliberately <b>not</b> ported — see <see cref="ResourcePatternFilter"/> for the recorded
-/// deviation.
+/// Java's matching members (<c>matches</c>, <c>matchesAtMostOne</c>,
+/// <c>findIndefiniteField</c>) are not ported, a recorded deviation: ACL matching is Kafka
+/// behaviour and lives in the core.
 /// </para>
 /// </remarks>
 public sealed class AclBindingFilter
 {
-    /// <summary>
-    /// A filter matching every ACL binding — Java's <c>ANY</c> (<c>:34</c>).
-    /// </summary>
+    /// <summary>A filter matching every ACL binding — Java's <c>ANY</c>.</summary>
     public static AclBindingFilter Any { get; } =
         new AclBindingFilter(ResourcePatternFilter.Any, AccessControlEntryFilter.Any);
 
-    /// <summary>
-    /// Creates a binding filter — Java's
-    /// <c>AclBindingFilter(ResourcePatternFilter, AccessControlEntryFilter)</c> (<c>:42</c>).
-    /// </summary>
+    /// <summary>Creates a binding filter — Java's constructor.</summary>
     /// <param name="patternFilter">The resource pattern filter.</param>
     /// <param name="entryFilter">The access control entry filter.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="patternFilter"/> or <paramref name="entryFilter"/> is null
-    /// (Java's <c>:43-44</c>).
+    /// <paramref name="patternFilter"/> or <paramref name="entryFilter"/> is null.
     /// </exception>
     public AclBindingFilter(ResourcePatternFilter patternFilter, AccessControlEntryFilter entryFilter)
     {
@@ -58,23 +49,18 @@ public sealed class AclBindingFilter
         EntryFilter = entryFilter ?? throw new ArgumentNullException(nameof(entryFilter));
     }
 
-    /// <summary>The resource pattern filter — Java's <c>patternFilter()</c> (<c>:57</c>).</summary>
+    /// <summary>The resource pattern filter — Java's <c>patternFilter()</c>.</summary>
     public ResourcePatternFilter PatternFilter { get; }
 
-    /// <summary>
-    /// The access control entry filter — Java's <c>entryFilter()</c> (<c>:64</c>).
-    /// </summary>
+    /// <summary>The access control entry filter — Java's <c>entryFilter()</c>.</summary>
     public AccessControlEntryFilter EntryFilter { get; }
 
     /// <summary>
-    /// Whether either half has an <c>Unknown</c> component — Java's <c>isUnknown()</c>
-    /// (<c>:50</c>).
+    /// Whether either half has an <c>Unknown</c> component — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown => PatternFilter.IsUnknown || EntryFilter.IsUnknown;
 
-    /// <summary>
-    /// Value equality over both halves — Java's <c>equals</c> (<c>:74</c>).
-    /// </summary>
+    /// <summary>Value equality over both halves — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two are the same filter.</returns>
     public override bool Equals(object? obj) =>
@@ -82,10 +68,7 @@ public sealed class AclBindingFilter
         && PatternFilter.Equals(other.PatternFilter)
         && EntryFilter.Equals(other.EntryFilter);
 
-    /// <summary>
-    /// The hash of both halves — Java's <c>hashCode</c> (<c>:108</c>), same fields and same
-    /// <c>31 *</c> fold as <c>Objects.hash</c>.
-    /// </summary>
+    /// <summary>The hash of both halves — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -99,10 +82,9 @@ public sealed class AclBindingFilter
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:69</c>). It
-    /// embeds <see cref="ResourcePatternFilter.ToString"/> and
-    /// <see cref="AccessControlEntryFilter.ToString"/>, so it prints their enums with .NET
-    /// names, as they do.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>, with the enums' .NET names,
+    /// as in <see cref="ResourcePatternFilter.ToString"/> and
+    /// <see cref="AccessControlEntryFilter.ToString"/>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

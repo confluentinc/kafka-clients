@@ -12,61 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System;
 using System.Collections.Generic;
-using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.ListTopics"/> — the .NET realization of Java's
-/// <c>ListTopicsResult</c>: <b>one</b> future over the whole cluster listing, handed
-/// back the moment the request is submitted.
+/// The result of <see cref="IAdmin.ListTopics"/> — Java's
+/// <c>org.apache.kafka.clients.admin.ListTopicsResult</c>: one future over the whole cluster
+/// listing.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>One future, not one per topic — and that is the ABI's shape as much as Java's.</b>
-/// Every other admin RPC bound so far pre-registers the caller's keys and resolves one
-/// future per key. <c>listTopics</c> cannot: the request carries no key array (the
-/// topics are discovered from the response), and
-/// <c>kafka_admin_ListTopicsResult_t</c> declares <b>no <c>get_error</c> at all</b>.
-/// That absence is the ABI stating the semantics — there is no per-topic failure to
-/// attribute, so either the call fails and <em>this one</em> future fails, or the whole
-/// map succeeds.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="Listings"/> and <see cref="Names"/> are projections of the same
-/// future, not independent calls.</b> Java derives both from <c>namesToListings()</c>
-/// with <c>thenApply(Map::values)</c> / <c>thenApply(Map::keySet)</c>
-/// (<c>ListTopicsResult.java:46-55</c>), so the three can never disagree. Three
-/// independent requests would be a different shape — and could report three different
-/// cluster states.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
-/// no thread-pool thread: the futures here are composed on the waiting thread, never over a <c>Task</c>.
-/// </para>
+/// <see cref="Listings"/> and <see cref="Names"/> are projections of <see cref="NamesToListings"/>,
+/// as in Java, so the three never disagree.
 /// </remarks>
 /// <seealso cref="AsyncListTopicsResult"/>
 public sealed class ListTopicsResult
 {
     private readonly KafkaFuture<IReadOnlyDictionary<string, TopicListing>> _future;
 
-    /// <summary>
-    /// Wraps the single future — Java's package-private
-    /// <c>ListTopicsResult(KafkaFuture&lt;Map&lt;String, TopicListing&gt;&gt;)</c>.
-    /// </summary>
-    internal ListTopicsResult(KafkaFuture<IReadOnlyDictionary<string, TopicListing>> future)
+    internal ListTopicsResult(
+        KafkaFuture<IReadOnlyDictionary<string, TopicListing>> future, SafeAdminResultHandle? native = null)
     {
         _future = future;
+        Native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static ListTopicsResult From(SingleAdminOperation<IReadOnlyDictionary<string, TopicListing>> operation) =>
-        new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(operation.SyncSource));
+    internal SafeAdminResultHandle? Native { get; }
 
     /// <summary>
     /// The topic names mapped to their listings — Java's <c>namesToListings()</c>.
@@ -75,47 +47,20 @@ public sealed class ListTopicsResult
     /// A future yielding the map, or failing with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
-    /// <remarks>
-    /// This is the underlying future itself, so every call returns an <b>equal</b>
-    /// <see cref="KafkaFuture{T}"/> — the same latch.
-    /// </remarks>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public KafkaFuture<IReadOnlyDictionary<string, TopicListing>> NamesToListings() => _future;
 
     /// <summary>
-    /// The listings alone — Java's <c>listings()</c>
-    /// (<c>namesToListings().thenApply(Map::values)</c>).
+    /// The listings alone — Java's <c>listings()</c>.
     /// </summary>
     /// <returns>A future yielding the listings.</returns>
     public KafkaFuture<IReadOnlyCollection<TopicListing>> Listings() =>
-        Project(static map => (IReadOnlyCollection<TopicListing>)new List<TopicListing>(map.Values));
+        _future.ThenApply(static map => (IReadOnlyCollection<TopicListing>)new List<TopicListing>(map.Values));
 
     /// <summary>
-    /// The topic names alone — Java's <c>names()</c>
-    /// (<c>namesToListings().thenApply(Map::keySet)</c>).
+    /// The topic names alone — Java's <c>names()</c>.
     /// </summary>
     /// <returns>A future yielding the names.</returns>
-    /// <remarks>
-    /// Java returns a <c>Set&lt;String&gt;</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates
-    /// the netstandard2.0 floor, so this is an <c>IReadOnlyCollection&lt;string&gt;</c> —
-    /// the same substitution the consumer surface already makes for
-    /// <c>Subscription()</c> and friends (CLAUDE.md §3's idiom map). The names are
-    /// distinct regardless, because they are the keys of a dictionary.
-    /// </remarks>
     public KafkaFuture<IReadOnlyCollection<string>> Names() =>
-        Project(static map => (IReadOnlyCollection<string>)new List<string>(map.Keys));
-
-    /// <summary>
-    /// Java's <c>thenApply</c>, in C#: derive a new future from the one future, so a
-    /// projection cannot observe a different cluster state than
-    /// <see cref="NamesToListings"/> did.
-    /// </summary>
-    /// <remarks>
-    /// A <see cref="ProjectedSyncFuture{TIn, TOut}"/>: the projection runs once, on the first <c>Get()</c>'s thread,
-    /// and a failure of the source propagates as the same <see cref="KafkaException"/> instance. Each call builds one
-    /// future, exactly as each Java <c>thenApply</c> allocates one <see cref="KafkaFuture{T}"/> — and admin is
-    /// batch/administrative, with no per-record path to budget (<c>admin-client.md</c> §10).
-    /// </remarks>
-    private KafkaFuture<TResult> Project<TResult>(
-        Func<IReadOnlyDictionary<string, TopicListing>, TResult> select) =>
-        SyncAdminFutures.Project(_future, select);
+        _future.ThenApply(static map => (IReadOnlyCollection<string>)new List<string>(map.Keys));
 }

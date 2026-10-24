@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -23,17 +25,34 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class ListOffsetsOptions
 {
+    private int? _timeoutMs;
+
+    private IsolationLevel _isolationLevel = IsolationLevel.ReadUncommitted;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// The read isolation the query observes — Java's <c>isolationLevel()</c>. Defaults to
     /// <see cref="Confluent.Kafka.IsolationLevel.ReadUncommitted"/>, as Java's does.
     /// </summary>
-    /// <remarks>
-    /// That default is also the C# default for the underlying value (<c>0</c>), so
-    /// <c>options: null</c> and a freshly constructed instance agree — but it is Java's
-    /// default that decides it, not the language's.
-    /// </remarks>
-    public IsolationLevel IsolationLevel { get; set; } = IsolationLevel.ReadUncommitted;
+    public IsolationLevel IsolationLevel
+    {
+        get => _isolationLevel;
+        set
+        {
+            _isolationLevel = value;
+            Setters.Ran(nameof(IsolationLevel));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

@@ -81,8 +81,6 @@ public sealed class PublicAdminMemberDescriptionTests
     [Fact]
     public void NothingIsDeprecated_BecauseNothingInJavasClassIs()
     {
-        // Java's class carries no @Deprecated, and none of its nine accessors does either;
-        // only its four forwarding constructors do, and those are not translated.
         Assert.Null(typeof(MemberDescription).GetCustomAttribute<ObsoleteAttribute>());
 
         var deprecated = typeof(MemberDescription)
@@ -112,8 +110,6 @@ public sealed class PublicAdminMemberDescriptionTests
     [Fact]
     public void NullArguments_CoalesceLikeJavas()
     {
-        // Java :50-56 — the three plain strings become "" and the assignment becomes an
-        // empty MemberAssignment; the five Optionals stay absent.
         var description = new MemberDescription(null, null, null, null, null, null, null, null, null);
 
         Assert.Equal(string.Empty, description.ConsumerId);
@@ -137,7 +133,6 @@ public sealed class PublicAdminMemberDescriptionTests
         Assert.True(description.Equals(description));
         Assert.Equal(Canonical().GetHashCode(), description.GetHashCode());
 
-        // Each member discriminates on its own.
         Assert.False(description.Equals(
             new MemberDescription("other", "gi-1", "rack-1", "c-1", "h-1", s_current, s_target, 5, true)));
         Assert.False(description.Equals(
@@ -164,8 +159,6 @@ public sealed class PublicAdminMemberDescriptionTests
     [Fact]
     public void AnAbsentValueDoesNotEqualItsFalsyPresentOne()
     {
-        // The ABI reports memberEpoch and upgraded as presence flags; absent must not
-        // collapse into 0 or false.
         var absent = new MemberDescription("m-1", null, null, "c-1", "h-1", s_current, null, null, null);
         var zero = new MemberDescription("m-1", null, null, "c-1", "h-1", s_current, null, 0, false);
 
@@ -175,9 +168,8 @@ public sealed class PublicAdminMemberDescriptionTests
     [Fact]
     public void ToString_MirrorsJavasRendering()
     {
-        // Java :239-250. groupInstanceId/rackId render through orElse("null"),
-        // targetAssignment inherits Optional.toString(), and memberEpoch/upgraded render
-        // through orElse(null) — three spellings for five Optionals, all mirrored.
+        // Java renders five Optionals three ways: groupInstanceId and rackId through orElse("null"), targetAssignment as an
+        // Optional, and memberEpoch and upgraded through orElse(null).
         Assert.Equal(
             "(memberId=m-1, groupInstanceId=gi-1, rackId=rack-1, clientId=c-1, host=h-1, "
             + "assignment=(topicPartitions=orders-0), "

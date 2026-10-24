@@ -12,41 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.ForceTerminateTransaction"/> — Java's
-/// <c>org.apache.kafka.clients.admin.TerminateTransactionResult</c> (<c>:25</c>).
+/// <c>org.apache.kafka.clients.admin.TerminateTransactionResult</c>: one future over the termination.
 /// </summary>
-/// <remarks>
-/// ⚠ The sole member is <see cref="Result"/>, <b>not</b> <c>All()</c>: Java names it
-/// <c>result()</c> (<c>:36</c>), and it wraps a scalar <see cref="AsyncKafkaFuture"/> (Java's
-/// <c>KafkaFuture&lt;Void&gt;</c>) rather than a per-key map. The five sibling P8 results do
-/// answer <c>All()</c>; that asymmetry is Java's and is deliberately kept.
-/// </remarks>
 /// <seealso cref="TerminateTransactionResult"/>
 public sealed class AsyncTerminateTransactionResult
 {
-    private readonly Task _result;
+    private readonly KafkaFutureImpl<object?> _future;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncTerminateTransactionResult(Task result)
+    private AsyncTerminateTransactionResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
-        _result = result;
+        _future = future;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncTerminateTransactionResult From(SingleAdminOperation<bool> operation) =>
-        new AsyncTerminateTransactionResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>
-    /// Whether the transaction was terminated — Java's <c>result()</c> (<c>:36</c>).
-    /// </summary>
-    /// <returns>A future that completes when the termination has.</returns>
-    public AsyncKafkaFuture Result() => new AsyncKafkaFuture(_result);
+    /// <inheritdoc cref="TerminateTransactionResult.Result"/>
+    public AsyncKafkaFuture Result() => new AsyncKafkaFuture(_future);
+
+    internal static AsyncTerminateTransactionResult OfClient(
+        (KafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) native) =>
+        new AsyncTerminateTransactionResult(native.Future, native.Result);
 }

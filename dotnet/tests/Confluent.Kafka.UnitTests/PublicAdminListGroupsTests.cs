@@ -24,44 +24,20 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public behaviour of M15/P5's <c>listGroups</c>, driven end to end through
-/// <see cref="MockAdminClient"/> — the real submit, the real marshalling, the real bridge
-/// and teardown, with no broker.
+/// <c>ListGroups</c> end to end against the mocks. Groups are seeded through <c>IncrementalAlterConfigs</c> on group
+/// resources, as Java's mock lists one listing per group config; the mock ignores the filters, so these tests check
+/// that every filter spelling completes.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Groups are seeded through <c>incrementalAlterConfigs</c>.</b> The mock has no
-/// "create group" call; it lists one <c>CONSUMER</c>/<c>STABLE</c> listing per group
-/// <em>config</em> it holds, exactly as Java's <c>MockAdminClient.listGroups</c> does, and
-/// a config is put there by altering a <see cref="ConfigResourceType.Group"/> resource. So
-/// the alter below is the fixture, not the subject.
-/// </para>
-/// <para>
-/// ⚠ <b>The filters are not exercised here, and cannot be.</b> Filtering is broker-side
-/// and the mock ignores the options entirely, so a filtered call and an unfiltered one
-/// return the same thing — which makes this file structurally unable to tell a forwarded
-/// filter from a dropped one. That claim is owned by
-/// <c>Interop/AdminP5SubmitArgumentTests</c>, at the P/Invoke seam where the three axes
-/// are observable; and the two-different-lengths result walk by
-/// <c>Interop/AdminP5ResultMarshalTests</c>, since the mock never emits an error. What
-/// this file owns is everything those two cannot reach: that the whole path fits together.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminListGroupsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The protocol type the mock reports, Java's <c>ConsumerProtocol.PROTOCOL_TYPE</c>.</summary>
     private const string ConsumerProtocol = "consumer";
 
-    /// <summary>
-    /// The happy path: every seeded group comes back, fully populated, with no error
-    /// alongside it.
-    /// </summary>
     [Fact]
     public async Task ListGroups_ReportsEverySeededGroup()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-a", "public-lg-b", "public-lg-c");
@@ -78,8 +54,6 @@ public sealed class PublicAdminListGroupsTests
             valid.Select(listing => listing.GroupId).OrderBy(id => id, StringComparer.Ordinal));
         Assert.Empty(errors);
 
-        // Every field crossed the ABI, not just the id: an unset enum would surface as null
-        // and an unread string as empty, so asserting all four pins the whole reader.
         foreach (GroupListing listing in valid)
         {
             Assert.Equal(GroupType.Consumer, listing.Type);
@@ -89,14 +63,10 @@ public sealed class PublicAdminListGroupsTests
         }
     }
 
-    /// <summary>
-    /// With no error reported, <c>All()</c> yields exactly what <c>Valid()</c> does rather
-    /// than throwing — the two agree only because the error list came back empty.
-    /// </summary>
     [Fact]
     public async Task ListGroups_AllAgreesWithValid_WhenNothingFailed()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-all-1", "public-lg-all-2");
@@ -112,14 +82,10 @@ public sealed class PublicAdminListGroupsTests
         Assert.Equal(2, all.Count);
     }
 
-    /// <summary>
-    /// A client with nothing to list yields two <b>empty</b> collections and no failure —
-    /// "no groups" is a successful answer, not an error.
-    /// </summary>
     [Fact]
     public async Task ListGroups_WithNoGroups_YieldsTwoEmptyCollections()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncListGroupsResult result = admin.ListGroups();
@@ -129,14 +95,10 @@ public sealed class PublicAdminListGroupsTests
         Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// The call is reachable through the <see cref="IAsyncAdmin"/> surface, which is what a user
-    /// holding the interface — and every test double written against it — actually calls.
-    /// </summary>
     [Fact]
     public async Task ListGroups_IsReachableThroughTheInterface()
     {
-        AsyncMockAdminClient mock = new AsyncMockAdminClient();
+        AsyncMockAdminClient mock = AsyncMockAdminClient.Create().Build();
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncAdmin admin = mock;
 
@@ -148,15 +110,10 @@ public sealed class PublicAdminListGroupsTests
         Assert.Equal("public-lg-iface", Assert.Single(valid).GroupId);
     }
 
-    /// <summary>
-    /// Every way of asking for "no filter" — omitting the options, passing
-    /// <see langword="null"/>, and passing a fresh <see cref="ListGroupsOptions"/> — is the
-    /// same call, and none of them means "match nothing".
-    /// </summary>
     [Fact]
     public async Task ListGroups_NoFilter_IsTheSameCallHoweverItIsSpelled()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-nofilter");
@@ -172,20 +129,10 @@ public sealed class PublicAdminListGroupsTests
         }
     }
 
-    /// <summary>
-    /// A filtered call completes normally and yields the mock's answer unchanged — the
-    /// filters are evaluated by the broker, so the binding's job here is only to carry them
-    /// without disturbing the call.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ This does <b>not</b> assert the filter was applied: the mock ignores the options,
-    /// so an implementation that dropped the filters outright would pass this too. See the
-    /// remarks on the class for where that claim is actually tested.
-    /// </remarks>
     [Fact]
     public async Task ListGroups_AFullyFilteredCall_CompletesNormally()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-filtered");
@@ -201,14 +148,10 @@ public sealed class PublicAdminListGroupsTests
         Assert.Equal("public-lg-filtered", Assert.Single(await TestTimeout.Run(() => result.Valid().Get(), s_deadline)).GroupId);
     }
 
-    /// <summary>
-    /// Java's three convenience filters are callable end to end and each yields a result
-    /// rather than tripping the enum validation on its own factory output.
-    /// </summary>
     [Fact]
     public async Task ListGroups_JavasFilterFactories_AreCallableEndToEnd()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await SeedGroups(admin, "public-lg-factory");
@@ -224,29 +167,19 @@ public sealed class PublicAdminListGroupsTests
         }
     }
 
-    /// <summary>
-    /// A negative timeout is not refused (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
-    /// result. The value actually sent is pinned by the submit-seam tests.
-    /// </summary>
     [Fact]
     public void ListGroups_ANegativeTimeout_IsNotRejectedSynchronously()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(() => admin.ListGroups(new ListGroupsOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>
-    /// An enum value no member defines cannot be named for the wire — the filters cross as
-    /// Java's <c>toString()</c> names — so it is rejected before the call is submitted,
-    /// naming the property that carried it.
-    /// </summary>
     [Fact]
     public void ListGroups_AnUndefinedEnumValue_ThrowsRightAway()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentOutOfRangeException state = Assert.Throws<ArgumentOutOfRangeException>(
@@ -260,22 +193,15 @@ public sealed class PublicAdminListGroupsTests
         Assert.Contains("ListGroupsOptions.Types", type.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// After disposal the call is refused with an <see cref="ObjectDisposedException"/>
-    /// rather than reaching a freed handle.
-    /// </summary>
     [Fact]
     public void ListGroups_AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.ListGroups());
     }
 
-    /// <summary>
-    /// Puts one group config per id into the mock, which is what makes the mock list them.
-    /// </summary>
     private static Task SeedGroups(AsyncMockAdminClient admin, params string[] groupIds) =>
         TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(

@@ -14,31 +14,39 @@
 
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for force-terminating a transaction — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.TerminateTransactionOptions</c>
-/// (<c>TerminateTransactionOptions.java:23</c>).
+/// <c>org.apache.kafka.clients.admin.TerminateTransactionOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java declares no option of its own; the timeout is all there is. ⚠ Java has no
-/// <c>ForceTerminateTransactionOptions</c> — this class is named for the result, not for the
-/// <c>forceTerminateTransaction</c> RPC that takes it.
-/// </para>
 /// </remarks>
 public sealed class TerminateTransactionOptions
 {
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:26</c>).</summary>
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "TerminateTransactionOptions{{timeoutMs={0}}}",
             TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

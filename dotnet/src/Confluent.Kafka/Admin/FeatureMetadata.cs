@@ -24,9 +24,8 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.FeatureMetadata</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ The two maps are <b>independent</b>: they can differ in both size and key set
-/// (header, <c>kafka_admin_DescribeFeaturesResult_supported_count</c>). Java's constructor is
-/// package-private (<c>:38</c>), so this one is <c>internal</c>.
+/// The two maps are independent: they can differ in both size and key set. Java's constructor is
+/// package-private, so this one is <c>internal</c>.
 /// </remarks>
 public sealed class FeatureMetadata
 {
@@ -44,29 +43,26 @@ public sealed class FeatureMetadata
     }
 
     /// <summary>
-    /// The finalized version level of each feature — Java's <c>finalizedFeatures()</c>
-    /// (<c>:51</c>).
+    /// The finalized version level of each feature — Java's <c>finalizedFeatures()</c>.
     /// </summary>
     public IReadOnlyDictionary<string, FinalizedVersionRange> FinalizedFeatures => _finalizedFeatures;
 
     /// <summary>
     /// The finalized-features epoch, or <see langword="null"/> when the finalized features are
-    /// unavailable — Java's <c>finalizedFeaturesEpoch()</c> (<c>:59</c>), an
+    /// unavailable — Java's <c>finalizedFeaturesEpoch()</c>, an
     /// <c>Optional&lt;Long&gt;</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ Absence is carried by the ABI's <c>bool</c> return, never by a sentinel: every
-    /// <c>long</c>, <c>0</c> and <c>-1</c> included, is a legal epoch.
+    /// A negative epoch is absent, as Java reads it; <c>0</c> is a legal epoch.
     /// </remarks>
     public long? FinalizedFeaturesEpoch { get; }
 
     /// <summary>
-    /// The versions of each feature the brokers support — Java's <c>supportedFeatures()</c>
-    /// (<c>:68</c>).
+    /// The versions of each feature the brokers support — Java's <c>supportedFeatures()</c>.
     /// </summary>
     public IReadOnlyDictionary<string, SupportedVersionRange> SupportedFeatures => _supportedFeatures;
 
-    /// <summary>Value equality over all three members — Java's <c>equals</c> (<c>:73</c>).</summary>
+    /// <summary>Value equality over all three members — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same feature metadata.</returns>
     public override bool Equals(object? obj) =>
@@ -75,13 +71,12 @@ public sealed class FeatureMetadata
         && MapEquals(_finalizedFeatures, other._finalizedFeatures)
         && MapEquals(_supportedFeatures, other._supportedFeatures);
 
-    /// <summary>The hash of all three members — Java's <c>hashCode</c> (<c>:88</c>).</summary>
+    /// <summary>The hash of all three members — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
         unchecked
         {
-            // Order-independent, because the underlying maps are unordered.
             int hash = FinalizedFeaturesEpoch.GetHashCode();
             foreach (KeyValuePair<string, FinalizedVersionRange> entry in _finalizedFeatures)
             {
@@ -97,7 +92,7 @@ public sealed class FeatureMetadata
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:104</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(

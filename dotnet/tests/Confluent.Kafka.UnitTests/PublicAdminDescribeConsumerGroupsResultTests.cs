@@ -19,239 +19,188 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins <see cref="DescribeConsumerGroupsResult"/> against Java's
-/// <c>org.apache.kafka.clients.admin.DescribeConsumerGroupsResult</c>.
+/// Pins <see cref="DescribeConsumerGroupsResult"/> and <see cref="AsyncDescribeConsumerGroupsResult"/> against Java's
+/// <c>org.apache.kafka.clients.admin.DescribeConsumerGroupsResult</c>: the public constructor over one future per group, the per-group
+/// map, and <c>All()</c>, which waits for every future before it fails.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>A per-group failure is not a call failure.</b> One group's task can fault while
-/// another's yields a description, which is the whole reason Java publishes the per-key map
-/// alongside <see cref="DescribeConsumerGroupsResult.All"/>. Both directions are asserted:
-/// the healthy group still resolves, and the aggregate still faults.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="DescribeConsumerGroupsResult.All"/> waits for <em>every</em> task before
-/// it faults</b>, matching Java's <c>allOf(...).thenApply(...)</c> (<c>:49-62</c>). A gather
-/// written without the <c>WhenAll</c> would fault the instant it touched the broken key, so
-/// the still-pending case is asserted explicitly — it is the only case that tells the two
-/// implementations apart.
-/// </para>
-/// <para>
-/// <b>This is a pure value type</b> — the ABI wiring and the client method arrive in later
-/// slices — so everything here is managed and broker-free.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminDescribeConsumerGroupsResultTests
 {
-    private static ConsumerGroupDescription Description(string groupId) =>
-        new ConsumerGroupDescription(
-            groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private static AsyncKafkaFuture<ConsumerGroupDescription> Completed(string groupId) =>
-        new AsyncKafkaFuture<ConsumerGroupDescription>(Task.FromResult(Description(groupId)));
-
-    private static TaskCompletionSource<ConsumerGroupDescription> Pending() =>
-        new TaskCompletionSource<ConsumerGroupDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    /// <summary>
-    /// Java's constructor is <b>public</b> (<c>:34</c>); here it is <b>internal</b> — a recorded Java-parity
-    /// deviation, follow-up FU-5 (M15/P14 Q3) — over one <see cref="KafkaFuture{T}"/> per group, and it still
-    /// rejects a null map before anything can dereference it (reached through <c>InternalsVisibleTo</c>).
-    /// </summary>
     [Fact]
-    public void Constructor_IsInternalAndRejectsNull()
+    public void Constructors_ArePublic_OverOneFuturePerGroup_AndRejectNull()
     {
-        Assert.Empty(typeof(DescribeConsumerGroupsResult).GetConstructors());
-        ConstructorInfo constructor = Assert.Single(
-            typeof(DescribeConsumerGroupsResult).GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
-            candidate => candidate.IsAssembly);
+        ConstructorInfo sync = Assert.Single(typeof(DescribeConsumerGroupsResult).GetConstructors());
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>>),
-            Assert.Single(constructor.GetParameters()).ParameterType);
+            Assert.Single(sync.GetParameters()).ParameterType);
+        ConstructorInfo async = Assert.Single(typeof(AsyncDescribeConsumerGroupsResult).GetConstructors());
+        Assert.Equal(
+            typeof(IReadOnlyDictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>),
+            Assert.Single(async.GetParameters()).ParameterType);
 
-        ArgumentNullException error =
-            Assert.Throws<ArgumentNullException>(() => new DescribeConsumerGroupsResult(null!));
-        Assert.Equal("futures", error.ParamName);
+        Assert.Equal("futures", Assert.Throws<ArgumentNullException>(() => new DescribeConsumerGroupsResult(null!)).ParamName);
+        Assert.Equal("futures", Assert.Throws<ArgumentNullException>(() => new AsyncDescribeConsumerGroupsResult(null!)).ParamName);
     }
 
-    /// <summary>
-    /// The public surface is exactly Java's two accessors — the per-key map and the
-    /// aggregate — with the aggregate a <b>method</b>, because it starts work and hands back
-    /// a fresh <see cref="Task"/>, which is not what a property promises.
-    /// </summary>
-    [Fact]
-    public void PublicShape_IsJavasTwoAccessors()
+    [Theory]
+    [InlineData(typeof(DescribeConsumerGroupsResult))]
+    [InlineData(typeof(AsyncDescribeConsumerGroupsResult))]
+    public void PublicShape_IsJavasTwoAccessors(Type result)
     {
-        Assert.Equal(
-            new[] { "DescribedGroups" },
-            typeof(DescribeConsumerGroupsResult)
-                .GetProperties()
-                .Select(property => property.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
-
+        Assert.Equal(new[] { "DescribedGroups" }, result.GetProperties().Select(property => property.Name));
         Assert.Equal(
             new[] { "All" },
-            typeof(DescribeConsumerGroupsResult)
+            result
                 .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
                 .Where(method => !method.IsSpecialName)
-                .Select(method => method.Name)
-                .OrderBy(name => name, StringComparer.Ordinal));
+                .Select(method => method.Name));
+        Assert.Empty(result.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Null(result.GetCustomAttribute<ObsoleteAttribute>());
+    }
+    [Fact]
+    public void DescribedGroups_IsACopy_ThatALaterChangeToTheGivenMapDoesNotReach_Sync()
+    {
+        KafkaFuture<ConsumerGroupDescription> first = KafkaFuture.CompletedFuture(Description("g-1"));
+        Dictionary<string, KafkaFuture<ConsumerGroupDescription>> futures =
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal) { ["g-1"] = first };
+        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(futures);
 
-        // Java declares no statics on this class.
-        Assert.Empty(
-            typeof(DescribeConsumerGroupsResult)
-                .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        futures["g-2"] = KafkaFuture.CompletedFuture(Description("g-2"));
+        futures.Remove("g-1");
 
-        // Java carries no @Deprecated here, so neither does this.
-        Assert.Null(typeof(DescribeConsumerGroupsResult).GetCustomAttribute<ObsoleteAttribute>());
+        Assert.NotSame(futures, result.DescribedGroups);
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
+        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.Equal(new[] { "g-1" }, result.All().Get(s_deadline).Keys);
     }
 
-    /// <summary>
-    /// <see cref="DescribeConsumerGroupsResult.DescribedGroups"/> hands back the stored map
-    /// — the recorded deviation from Java's <c>new HashMap&lt;&gt;(futures)</c> copy
-    /// (<c>:42</c>), which exists only to deny a mutation the declared read-only type
-    /// already denies.
-    /// </summary>
     [Fact]
-    public void DescribedGroups_IsTheStoredMapRatherThanJavasDefensiveCopy()
+    public async Task DescribedGroups_IsACopy_ThatALaterChangeToTheGivenMapDoesNotReach_Async()
     {
+        AsyncKafkaFuture<ConsumerGroupDescription> first = AsyncKafkaFuture.CompletedFuture(Description("g-1"));
         Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>> futures =
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
-            {
-                ["g-1"] = Completed("g-1"),
-            };
-
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal) { ["g-1"] = first };
         AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(futures);
 
-        Assert.Same(futures, result.DescribedGroups);
-        Assert.Same(result.DescribedGroups, result.DescribedGroups);
+        futures["g-2"] = AsyncKafkaFuture.CompletedFuture(Description("g-2"));
+        futures.Remove("g-1");
+
+        Assert.NotSame(futures, result.DescribedGroups);
+        Assert.Equal(new[] { "g-1" }, result.DescribedGroups.Keys);
+        Assert.Equal(first, result.DescribedGroups["g-1"]);
+        Assert.Equal(new[] { "g-1" }, (await result.All().Get()).Keys);
     }
 
-    /// <summary>
-    /// The aggregate carries every group, keyed the way it was requested.
-    /// </summary>
     [Fact]
-    public async Task All_YieldsEveryDescriptionKeyedByGroupId()
+    public async Task All_YieldsEveryDescription_KeyedOrdinally()
     {
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
+        ConsumerGroupDescription lower = Description("group");
+        ConsumerGroupDescription upper = Description("GROUP");
+        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
+            {
+                ["group"] = KafkaFuture.CompletedFuture(lower),
+                ["GROUP"] = KafkaFuture.CompletedFuture(upper),
+            });
+        AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
             new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
             {
-                ["g-1"] = Completed("g-1"),
-                ["g-2"] = Completed("g-2"),
+                ["group"] = AsyncKafkaFuture.CompletedFuture(lower),
+                ["GROUP"] = AsyncKafkaFuture.CompletedFuture(upper),
             });
 
-        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All().Get();
-
-        Assert.Equal(2, all.Count);
-        Assert.Equal("g-1", all["g-1"].GroupId);
-        Assert.Equal("g-2", all["g-2"].GroupId);
+        foreach (IReadOnlyDictionary<string, ConsumerGroupDescription> all in new[] { result.All().Get(s_deadline), await asyncResult.All().Get() })
+        {
+            Assert.Equal(2, all.Count);
+            Assert.Same(lower, all["group"]);
+            Assert.Same(upper, all["GROUP"]);
+        }
     }
 
-    /// <summary>
-    /// An empty request yields an empty map rather than a task that never completes.
-    /// </summary>
     [Fact]
     public async Task All_OverAnEmptyMap_YieldsAnEmptyMap()
     {
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal));
-
-        Assert.Empty(await result.All().Get());
+        Assert.Empty(new DescribeConsumerGroupsResult(new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>()).All().Get(s_deadline));
+        Assert.Empty(await new AsyncDescribeConsumerGroupsResult(new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>()).All().Get());
     }
 
-    /// <summary>
-    /// Each call starts a fresh aggregate, as Java's <c>all()</c> builds a new
-    /// <c>KafkaFuture</c> per call — the behaviour that makes this a method rather than a
-    /// property.
-    /// </summary>
     [Fact]
-    public void All_HandsBackAFreshTaskEachCall()
+    public void All_HandsBackANewFutureEachCall()
     {
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
-            {
-                ["g-1"] = Completed("g-1"),
-            });
+        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>> { ["g-1"] = KafkaFuture.CompletedFuture(Description("g-1")) });
+        AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>> { ["g-1"] = AsyncKafkaFuture.CompletedFuture(Description("g-1")) });
 
-        Assert.NotSame(result.All().Get(), result.All().Get());
+        Assert.NotEqual(result.All(), result.All());
+        Assert.NotEqual(asyncResult.All(), asyncResult.All());
     }
 
-    /// <summary>
-    /// A group that fails faults only its own task; the healthy group still resolves, while
-    /// the aggregate fails.
-    /// </summary>
     [Fact]
-    public async Task AGroupFailure_FaultsOnlyItsOwnTask_AndTheAggregate()
+    public async Task AGroupFailure_FailsOnlyItsOwnFuture_AndTheAggregate()
     {
-        TaskCompletionSource<ConsumerGroupDescription> broken = Pending();
-        broken.SetException(new InvalidOperationException("group is broken"));
+        KafkaFutureImpl<ConsumerGroupDescription> broken = new KafkaFutureImpl<ConsumerGroupDescription>();
+        InvalidOperationException failure = new InvalidOperationException("group is broken");
+        broken.CompleteWithError(failure);
+        ConsumerGroupDescription healthy = Description("healthy");
 
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>
             {
-                ["healthy"] = Completed("healthy"),
-                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken.Task),
+                ["healthy"] = KafkaFuture.CompletedFuture(healthy),
+                ["broken"] = new KafkaFuture<ConsumerGroupDescription>(broken),
             });
+        Assert.Same(healthy, result.DescribedGroups["healthy"].Get(s_deadline));
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
 
-        ConsumerGroupDescription healthy = await result.DescribedGroups["healthy"].Get();
-        Assert.Equal("healthy", healthy.GroupId);
-
-        InvalidOperationException error =
-            await Assert.ThrowsAsync<InvalidOperationException>(() => result.All().Get());
-        Assert.Equal("group is broken", error.Message);
+        AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>
+            {
+                ["healthy"] = AsyncKafkaFuture.CompletedFuture(healthy),
+                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken),
+            });
+        Assert.Same(healthy, await asyncResult.DescribedGroups["healthy"].Get());
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
     }
 
-    /// <summary>
-    /// ⚠ The aggregate waits for <b>every</b> task before faulting — Java's
-    /// <c>allOf(...)</c> semantics. A gather that read each result as it walked the map
-    /// would fault the moment it reached the broken key, while a group was still in flight.
-    /// </summary>
     [Fact]
-    public async Task All_WaitsForEveryTaskBeforeItFaults()
+    public async Task All_WaitsForEveryFutureBeforeItFails()
     {
-        TaskCompletionSource<ConsumerGroupDescription> broken = Pending();
-        broken.SetException(new InvalidOperationException("group is broken"));
-        TaskCompletionSource<ConsumerGroupDescription> stillRunning = Pending();
+        InvalidOperationException failure = new InvalidOperationException("group is broken");
+        KafkaFutureImpl<ConsumerGroupDescription> broken = new KafkaFutureImpl<ConsumerGroupDescription>();
+        broken.CompleteWithError(failure);
+        KafkaFutureImpl<ConsumerGroupDescription> stillRunning = new KafkaFutureImpl<ConsumerGroupDescription>();
 
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
+        DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>
             {
-                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken.Task),
-                ["still-running"] = new AsyncKafkaFuture<ConsumerGroupDescription>(stillRunning.Task),
+                ["broken"] = new KafkaFuture<ConsumerGroupDescription>(broken),
+                ["still-running"] = new KafkaFuture<ConsumerGroupDescription>(stillRunning),
             });
+        AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
+            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>
+            {
+                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken),
+                ["still-running"] = new AsyncKafkaFuture<ConsumerGroupDescription>(stillRunning),
+            });
+        KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All();
+        AsyncKafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> asyncAll = asyncResult.All();
+        Assert.False(all.IsDone);
+        Assert.False(asyncAll.IsDone);
 
-        Task<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All().Get();
-        Assert.False(all.IsCompleted);
+        stillRunning.Complete(Description("still-running"));
 
-        stillRunning.SetResult(Description("still-running"));
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => all);
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => all.Get(s_deadline)));
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
     }
 
-    /// <summary>
-    /// The aggregate is keyed ordinally — what the bridge keys group ids by, and how Kafka
-    /// compares them — so two ids differing only in case stay two entries.
-    /// </summary>
-    [Fact]
-    public async Task All_KeysOrdinally()
-    {
-        AsyncDescribeConsumerGroupsResult result = new AsyncDescribeConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(StringComparer.Ordinal)
-            {
-                ["group"] = Completed("group"),
-                ["GROUP"] = Completed("GROUP"),
-            });
-
-        IReadOnlyDictionary<string, ConsumerGroupDescription> all = await result.All().Get();
-
-        Assert.Equal(2, all.Count);
-        Assert.Equal("group", all["group"].GroupId);
-        Assert.Equal("GROUP", all["GROUP"].GroupId);
-    }
+    private static ConsumerGroupDescription Description(string groupId) => new ConsumerGroupDescription(groupId, false, null, "range", GroupType.Consumer, GroupState.Stable, null, null, null, null);
 }

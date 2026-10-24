@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 using Xunit;
@@ -70,7 +71,7 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
     }
 
     [Fact]
-    public void Node_IsFenced_IsAGetOnlyPublicBool_AndNoConstructorIsPublic()
+    public void Node_IsFenced_IsAGetOnlyPublicBool_AndJavasThreeConstructorsArePublic()
     {
         PropertyInfo? property = typeof(Node).GetProperty(nameof(Node.IsFenced), BindingFlags.Public | BindingFlags.Instance);
 
@@ -79,7 +80,19 @@ public sealed class PublicConsumerPartitionMetadataValueTypeTests
         Assert.NotNull(property.GetGetMethod(nonPublic: false));
         Assert.Null(property.GetSetMethod(nonPublic: true));
 
-        Assert.Empty(typeof(Node).GetConstructors());
+        Assert.Equal(
+            new[] { "Int32,String,Int32", "Int32,String,Int32,String", "Int32,String,Int32,String,Boolean" },
+            typeof(Node).GetConstructors()
+                .Select(static c => string.Join(",", c.GetParameters().Select(static p => p.ParameterType.Name)))
+                .OrderBy(static s => s.Length));
+    }
+
+    [Fact]
+    public void Node_NullHost_ThrowsArgumentNullException_FromEveryConstructor()
+    {
+        Assert.Equal("host", Assert.Throws<ArgumentNullException>(() => new Node(1, null!, 9092)).ParamName);
+        Assert.Equal("host", Assert.Throws<ArgumentNullException>(() => new Node(1, null!, 9092, "r")).ParamName);
+        Assert.Equal("host", Assert.Throws<ArgumentNullException>(() => new Node(1, null!, 9092, null, true)).ParamName);
     }
 
     [Fact]

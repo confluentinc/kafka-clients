@@ -21,38 +21,24 @@ using System.Text;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A description of one log directory on one broker — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.LogDirDescription</c>
-/// (<c>LogDirDescription.java:31</c>).
+/// A description of one log directory on one broker — Java's
+/// <c>org.apache.kafka.clients.admin.LogDirDescription</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b><see cref="Error"/> is a FIELD on a successfully-returned description, not a
-/// failure of the query.</b> It means <em>this log directory</em> is offline or unreadable
-/// while the broker's query itself succeeded — Java documents
-/// <c>KafkaStorageException</c> ("the log directory is offline") and
-/// <c>UnknownServerException</c> as its two values (<c>:54-59</c>). The per-broker
-/// future in <see cref="DescribeLogDirsResult.Descriptions"/> /
-/// <see cref="AsyncDescribeLogDirsResult.Descriptions"/> therefore
-/// <b>succeeds</b>, carrying a description whose <see cref="Error"/> is non-null. Failing
-/// that future here would be a behavioural divergence — the broker answered.
-/// </para>
-/// <para>
-/// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read.
-/// </para>
+/// <see cref="Error"/> is a field of a description the broker returned, not a failure of the
+/// query: it means this log directory is offline or unreadable (Java's
+/// <c>KafkaStorageException</c> or <c>UnknownServerException</c>). The per-broker future in
+/// <see cref="DescribeLogDirsResult.Descriptions"/> and
+/// <see cref="AsyncDescribeLogDirsResult.Descriptions"/> succeeds, as in Java.
 /// </remarks>
 public sealed class LogDirDescription
 {
-    /// <summary>
-    /// Java's <c>UNKNOWN_VOLUME_BYTES</c> (<c>DescribeLogDirsResponse.java</c>, imported at
-    /// <c>LogDirDescription.java:26</c>), the "did not report" volume size.
-    /// </summary>
     private const long UnknownVolumeBytes = -1L;
 
     /// <summary>
     /// Initializes a description with unreported volume sizes and an uncordoned directory —
-    /// Java's 2-arg constructor (<c>:38</c>), which passes <c>UNKNOWN_VOLUME_BYTES</c> for both
-    /// sizes and <c>false</c> for <c>isCordoned</c>.
+    /// Java's 2-argument constructor, which passes <c>UNKNOWN_VOLUME_BYTES</c> for both sizes and
+    /// <c>false</c> for <c>isCordoned</c>.
     /// </summary>
     /// <param name="error">
     /// The directory-level error, or <see langword="null"/> if the directory is healthy.
@@ -66,8 +52,8 @@ public sealed class LogDirDescription
     }
 
     /// <summary>
-    /// Initializes an uncordoned description — Java's 4-arg constructor (<c>:42</c>), which
-    /// passes <c>false</c> for <c>isCordoned</c>.
+    /// Initializes an uncordoned description — Java's 4-argument constructor, which passes
+    /// <c>false</c> for <c>isCordoned</c>.
     /// </summary>
     /// <param name="error">
     /// The directory-level error, or <see langword="null"/> if the directory is healthy.
@@ -92,7 +78,7 @@ public sealed class LogDirDescription
     }
 
     /// <summary>
-    /// Initializes a description — Java's 5-arg constructor (<c>:46</c>).
+    /// Initializes a description — Java's 5-argument constructor.
     /// </summary>
     /// <param name="error">
     /// The directory-level error, or <see langword="null"/> if the directory is healthy.
@@ -109,24 +95,13 @@ public sealed class LogDirDescription
     /// <param name="isCordoned">Whether this log directory is cordoned.</param>
     /// <remarks>
     /// <para>
-    /// <b>Public, with Java's three arities</b> (2, 4 and 5 — <c>:38</c>, <c>:42</c>,
-    /// <c>:46</c>), so a caller can build one for a fake or a test, as Java's public
-    /// constructors allow; its siblings <see cref="ReplicaInfo"/> and
-    /// <see cref="PartitionReassignment"/> are likewise publicly constructible.
+    /// A size of <c>-1</c>, Java's <c>UNKNOWN_VOLUME_BYTES</c>, is stored as
+    /// <see langword="null"/>, as Java's constructor turns it into <c>OptionalLong.empty()</c>;
+    /// every other value, <c>0</c> and other negatives included, is kept as given.
     /// </para>
     /// <para>
-    /// The sizes are <c>long?</c> because <see cref="TotalBytes"/> / <see cref="UsableBytes"/>
-    /// are (see <see cref="TotalBytes"/>). Java's sentinel <c>-1</c>
-    /// (<c>UNKNOWN_VOLUME_BYTES</c>) is accepted too and stored as <see langword="null"/>, as
-    /// Java's constructor turns it into <c>OptionalLong.empty()</c> (<c>:49-50</c>), so a
-    /// Java-ported <c>(…, -1, -1)</c> means the same here. Every other value, <c>0</c> and
-    /// other negatives included, is kept as given, as Java keeps it.
-    /// </para>
-    /// <para>
-    /// ⚠ A null <paramref name="replicaInfos"/> is rejected with
-    /// <see cref="ArgumentNullException"/>, stricter than Java, which stores it and fails
-    /// later, in <c>replicaInfos()</c>'s <c>unmodifiableMap(null)</c> (<c>:70</c>) — the
-    /// <see cref="PartitionReassignment"/> precedent for a null collection argument.
+    /// A null <paramref name="replicaInfos"/> throws, stricter than Java, which fails later in
+    /// <c>replicaInfos()</c>: a recorded deviation.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="replicaInfos"/> is null.</exception>
@@ -144,9 +119,6 @@ public sealed class LogDirDescription
 
         Error = error;
 
-        // Java returns Collections.unmodifiableMap over the stored map (:69-70): a read-only
-        // view, so the map cannot be changed through this property, while changes the caller
-        // makes to its own map stay visible, as they do in Java.
         ReplicaInfos = replicaInfos is IDictionary<TopicPartition, ReplicaInfo> mutable
             ? new ReadOnlyDictionary<TopicPartition, ReplicaInfo>(mutable)
             : replicaInfos;
@@ -157,47 +129,40 @@ public sealed class LogDirDescription
 
     /// <summary>
     /// The directory-level error, or <see langword="null"/> when the directory is healthy —
-    /// Java's <c>error()</c> (<c>:61</c>), whose type is <c>ApiException</c>.
+    /// Java's <c>error()</c>, whose <c>ApiException</c> maps to <see cref="KafkaException"/>.
     /// </summary>
     /// <remarks>
-    /// <see cref="KafkaException"/> is this binding's established mapping for Java's
-    /// <c>ApiException</c> (the M15/P1 <c>TopicMetadataAndConfig</c> precedent); no second
-    /// exception type is introduced for it. ⚠ Non-null here does <b>not</b> mean the query
-    /// failed — see the type remarks.
+    /// Non-null does not mean the query failed: see the type remarks.
     /// </remarks>
     public KafkaException? Error { get; }
 
     /// <summary>
     /// The replicas hosted in this directory, keyed by topic partition — Java's
-    /// <c>replicaInfos()</c> (<c>:69</c>).
+    /// <c>replicaInfos()</c>.
     /// </summary>
     /// <remarks>
-    /// A read-only view, as Java's <c>Collections.unmodifiableMap</c> is: casting it back to a
-    /// mutable dictionary and changing it throws <see cref="NotSupportedException"/>, the .NET
-    /// counterpart of Java's <c>UnsupportedOperationException</c>.
+    /// A read-only view over the caller's map, as Java's <c>Collections.unmodifiableMap</c> is:
+    /// the caller's own changes stay visible, and a change through a cast back to a mutable
+    /// dictionary throws <see cref="NotSupportedException"/>.
     /// </remarks>
     public IReadOnlyDictionary<TopicPartition, ReplicaInfo> ReplicaInfos { get; }
 
     /// <summary>
     /// The total size in bytes of the volume this directory is on, or
     /// <see langword="null"/> when the broker did not report it — Java's
-    /// <c>totalBytes()</c> (<c>:78</c>), an <c>OptionalLong</c>.
+    /// <c>totalBytes()</c>, an <c>OptionalLong</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ <c>OptionalLong</c> has no netstandard2.0 equivalent, so the mapping is
-    /// <c>long?</c>, and the ABI's <c>-1</c> — Java's <c>UNKNOWN_VOLUME_BYTES</c>, which its
-    /// constructor turns into <c>OptionalLong.empty()</c> (<c>:49</c>) — becomes
-    /// <see langword="null"/>. ⚠ <b>Contrast <see cref="DeletedRecords.LowWatermark"/>,
-    /// where <c>-1</c> is a legitimate value and not a sentinel at all.</b> Here a volume
-    /// size cannot legitimately be negative, and the header names <c>-1</c> as the "did not
-    /// report" marker. <c>0</c> is a real size and stays <c>0</c>.
+    /// Java's <c>UNKNOWN_VOLUME_BYTES</c> (<c>-1</c>), which Java's constructor turns into
+    /// <c>OptionalLong.empty()</c>, becomes <see langword="null"/>; <c>0</c> is a real size.
+    /// Unlike <see cref="DeletedRecords.LowWatermark"/>, where <c>-1</c> is a value.
     /// </remarks>
     public long? TotalBytes { get; }
 
     /// <summary>
     /// The usable size in bytes of the volume this directory is on, or
     /// <see langword="null"/> when the broker did not report it — Java's
-    /// <c>usableBytes()</c> (<c>:87</c>).
+    /// <c>usableBytes()</c>.
     /// </summary>
     /// <remarks>
     /// <inheritdoc cref="TotalBytes" path="/remarks"/>
@@ -205,13 +170,12 @@ public sealed class LogDirDescription
     public long? UsableBytes { get; }
 
     /// <summary>
-    /// Whether this log directory is cordoned — Java's <c>isCordoned()</c> (<c>:94</c>),
-    /// a plain <c>boolean</c>.
+    /// Whether this log directory is cordoned — Java's <c>isCordoned()</c>.
     /// </summary>
     public bool IsCordoned { get; }
 
     /// <summary>
-    /// A diagnostic rendering following Java's <c>toString()</c> (<c>:98</c>).
+    /// A diagnostic rendering following Java's <c>toString()</c>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
@@ -238,7 +202,6 @@ public sealed class LogDirDescription
             Error is null ? "null" : Error.Message,
             TotalBytes is null ? "empty" : TotalBytes.Value.ToString(CultureInfo.InvariantCulture),
             UsableBytes is null ? "empty" : UsableBytes.Value.ToString(CultureInfo.InvariantCulture),
-            // Java renders the Boolean lowercase; C#'s bool.ToString() would give "True"/"False".
             IsCordoned ? "true" : "false");
     }
 }

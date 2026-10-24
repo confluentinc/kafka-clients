@@ -258,6 +258,7 @@ internal static class Translate
             Id = node.Id,
             Host = node.Host,
             Port = node.Port,
+            IsFenced = node.IsFenced,
         };
         if (node.Rack is not null)
         {

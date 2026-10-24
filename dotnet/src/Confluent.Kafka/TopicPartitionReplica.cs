@@ -18,45 +18,18 @@ using System.Globalization;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A topic name, partition number and the broker id of the replica — the .NET realization
-/// of Java's <c>org.apache.kafka.common.TopicPartitionReplica</c>
-/// (<c>TopicPartitionReplica.java:26</c>).
+/// A topic name, partition number and the broker id of the replica — Java's
+/// <c>org.apache.kafka.common.TopicPartitionReplica</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>Value equality is load-bearing.</b> This type keys <b>both</b>
+/// Value equality over all three fields, as Java's: the type keys
 /// <see cref="Admin.AlterReplicaLogDirsResult"/> and
-/// <see cref="Admin.DescribeReplicaLogDirsResult"/>, so a wrong
-/// <see cref="Equals(object?)"/> / <see cref="GetHashCode"/> produces a result map whose
-/// keys the caller cannot look up. Both mirror Java exactly — <c>:74</c> compares
-/// partition, broker id and topic; <c>:52-63</c> combines the same three with the same
-/// <c>31 *</c> chain.
-/// </para>
-/// <para>
-/// <b>Namespace.</b> Java's package is <c>org.apache.kafka.common</c> — not
-/// <c>clients.admin</c> — so it sits at the root <c>Confluent.Kafka</c> namespace
-/// (decision D13), beside <see cref="TopicPartition"/>, <see cref="Node"/> and
-/// <see cref="Uuid"/>.
-/// </para>
-/// <para>
-/// <b>Accessors are properties</b> (decision D18): each is a pure managed field read that
-/// does no P/Invoke and cannot throw, which is CLAUDE.md §3's "non-blocking getter → sync
-/// property" row. Java's are methods only because Java has no properties.
-/// </para>
-/// <para>
-/// ⚠ <b>No constructor-time validation beyond the null check, deliberately.</b> Java
-/// rejects a null topic (<c>:34</c> <c>Objects.requireNonNull</c>) and nothing else — a
-/// negative partition is constructible there, so it is here
-/// (<c>definition-of-done.md</c> §7 forbids adding validation Java does not have). The
-/// submit path guards what the ABI actually requires.
-/// </para>
+/// <see cref="Admin.DescribeReplicaLogDirsResult"/>. As in Java, only a null topic is rejected; a
+/// negative partition is constructible.
 /// </remarks>
 public sealed class TopicPartitionReplica
 {
-    /// <summary>
-    /// Initializes a replica reference — Java's
-    /// <c>TopicPartitionReplica(String topic, int partition, int brokerId)</c> (<c>:33</c>).
-    /// </summary>
+    /// <summary>Initializes a replica reference — Java's constructor.</summary>
     /// <param name="topic">The topic name.</param>
     /// <param name="partition">The partition number.</param>
     /// <param name="brokerId">The id of the broker hosting the replica.</param>
@@ -68,16 +41,16 @@ public sealed class TopicPartitionReplica
         BrokerId = brokerId;
     }
 
-    /// <summary>The topic name — Java's <c>topic()</c> (<c>:39</c>).</summary>
+    /// <summary>The topic name — Java's <c>topic()</c>.</summary>
     public string Topic { get; }
 
-    /// <summary>The partition number — Java's <c>partition()</c> (<c>:43</c>).</summary>
+    /// <summary>The partition number — Java's <c>partition()</c>.</summary>
     public int Partition { get; }
 
-    /// <summary>The broker hosting the replica — Java's <c>brokerId()</c> (<c>:47</c>).</summary>
+    /// <summary>The broker hosting the replica — Java's <c>brokerId()</c>.</summary>
     public int BrokerId { get; }
 
-    /// <summary>Value equality over all three fields — Java's <c>equals</c> (<c>:66</c>).</summary>
+    /// <summary>Value equality over all three fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same replica.</returns>
     public override bool Equals(object? obj) =>
@@ -87,9 +60,7 @@ public sealed class TopicPartitionReplica
         && string.Equals(Topic, other.Topic, StringComparison.Ordinal);
 
     /// <summary>
-    /// The hash of all three fields — Java's <c>hashCode</c> (<c>:52</c>), same fields and
-    /// same <c>31 *</c> chain. (Java memoizes it in a field; that is an allocation-free
-    /// micro-optimisation with no observable effect, and admin is not a hot path.)
+    /// The hash of all three fields — Java's <c>hashCode</c>, the same <c>31 *</c> chain.
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
@@ -104,7 +75,7 @@ public sealed class TopicPartitionReplica
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:78</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering, <c>topic-partition-brokerId</c>.</returns>
     public override string ToString() =>
         string.Format(CultureInfo.InvariantCulture, "{0}-{1}-{2}", Topic, Partition, BrokerId);

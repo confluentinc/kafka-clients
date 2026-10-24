@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -32,10 +33,13 @@ public sealed class PublicAdminTeardownTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
+    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+
     [Fact]
     public void Dispose_IsIdempotent()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
 
         TestTimeout.Run(admin.Dispose, s_deadline);
         TestTimeout.Run(admin.Dispose, s_deadline);
@@ -44,7 +48,7 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task DisposeAsync_IsIdempotent_AndMixesWithDispose()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
 
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
         await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
@@ -56,53 +60,126 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task Close_WithATimeout_ThenDispose_IsSafe()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), s_deadline);
 
-        // Close already won the teardown latch; Dispose must be a no-op, not a
-        // second close-and-destroy.
+        // Close already won the teardown; Dispose must be a no-op, not a second close and destroy.
         TestTimeout.Run(admin.Dispose, s_deadline);
     }
 
     [Fact]
     public async Task Close_WithZeroTimeout_IsValid()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
 
         await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
     }
 
     [Fact]
-    public async Task Close_WithANegativeTimeout_ThrowsBeforeAnyNativeCall()
+    public async Task Close_WithANegativeTimeout_ThrowsJavasMessage_BeforeTheClosedCheck()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        string expected = new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative.").Message;
 
-        ArgumentOutOfRangeException failure = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => admin.Close(TimeSpan.FromMilliseconds(-1)));
+        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+            () => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); });
         Assert.Equal("timeout", failure.ParamName);
-        Assert.StartsWith("Timeout must not be negative.", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(expected, failure.Message);
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
+        Assert.Equal(
+            expected,
+            Assert.Throws<ArgumentOutOfRangeException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
+    }
+
+    [Fact]
+    public async Task AMockClose_ReadsNoTimeout_AndLeavesTheMockOpenUntilItIsDisposed()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.FromMilliseconds(-1)), s_deadline);
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        using (CancellationTokenSource cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            await TestTimeout.Run(() => admin.Close(cancelled.Token), s_deadline);
+        }
+
+        await TestTimeout.DisposeAsync(admin);
+        Assert.Equal(
+            nameof(MockAdminClient),
+            Assert.Throws<ObjectDisposedException>(() => admin.ListTopics()).ObjectName);
+    }
+
+    [Fact]
+    public void TheSyncCloseWithoutATimeout_ClosesTheClient()
+    {
+        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+
+        TestTimeout.Run(admin.Close, s_deadline);
+        TestTimeout.Run(admin.Close, s_deadline);
+        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        TestTimeout.Run(admin.Dispose, s_deadline);
+    }
+
+    [Fact]
+    public async Task TheAsyncCloseWithoutATimeout_ClosesTheClient()
+    {
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        await TestTimeout.Run(() => admin.Close(CancellationToken.None), s_deadline);
+        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+        await TestTimeout.DisposeAsync(admin);
+    }
+
+    [Fact]
+    public async Task AnAlreadyCancelledToken_ThrowsBeforeTheCloseBegins()
+    {
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        using CancellationTokenSource cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(cancelled.Token); });
+        Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(TimeSpan.Zero, cancelled.Token); });
+
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        Assert.Throws<ObjectDisposedException>(() => admin.ListTopics());
+    }
+
+    [Fact]
+    public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
+    {
+        KafkaException failure = Assert.Throws<KafkaException>(() => new KafkaAdminClient(
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["bootstrap.servers"] = "127.0.0.1:1",
+                ["security.protocol"] = "SASL_PLAINTEXT",
+            }));
+
+        Assert.Equal(-10, failure.Code);
+        Assert.Equal(
+            "Invalid value GSSAPI for configuration sasl.mechanism: SASL mechanism 'GSSAPI' is not supported by this "
+            + "client: only PLAIN is implemented",
+            failure.Message);
     }
 
     [Fact]
     public void CallAfterDispose_ThrowsObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.CreateTopics(new[] { new NewTopic("after-dispose", 1, 1) }));
     }
 
-    /// <summary>
-    /// The post-dispose exception names the <b>public</b> type the caller holds, on both
-    /// flavors (M15/P13.5 X9) — not the internal class they share, which a caller cannot see.
-    /// </summary>
     [Fact]
     public void X9_CallAfterDispose_NamesThePublicType()
     {
-        MockAdminClient mock = new MockAdminClient(1);
+        MockAdminClient mock = MockAdminClient.Create().Build();
         TestTimeout.Run(mock.Dispose, s_deadline);
         Assert.Equal(
             nameof(MockAdminClient),
@@ -119,11 +196,16 @@ public sealed class PublicAdminTeardownTests
     [Fact]
     public async Task CloseAfterDispose_IsANoOp()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         // Java's close() is idempotent; a second close must not throw.
         await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(1)), s_deadline);
+
+        AsyncKafkaAdminClient real = new AsyncKafkaAdminClient(s_unreachable);
+        await TestTimeout.DisposeAsync(real);
+        await TestTimeout.Run(() => real.Close(TimeSpan.FromSeconds(1)), s_deadline);
+        await TestTimeout.Run(() => real.Close(), s_deadline);
     }
 
     [Fact]
@@ -134,19 +216,19 @@ public sealed class PublicAdminTeardownTests
             {
                 for (int i = 0; i < 25; i++)
                 {
-                    AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
-                    using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-                    AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic($"churn-{i}", 1, 1) });
-                    result.All().Get().GetAwaiter().GetResult();
+                    AsyncMockAdminClient.Create().Build().Dispose();
+                    MockAdminClient.Create().NumBrokers(1 + (i % 3)).Build().Dispose();
+                }
+
+                for (int i = 0; i < 5; i++)
+                {
+                    new KafkaAdminClient(s_unreachable).Dispose();
+                    new AsyncKafkaAdminClient(s_unreachable).DisposeAsync().AsTask().GetAwaiter().GetResult();
                 }
             },
             s_deadline);
     }
 
-    /// <summary>
-    /// The real client constructs against an unreachable broker without blocking — Java's
-    /// <c>Admin.create</c> does not connect eagerly — and tears down cleanly.
-    /// </summary>
     [Fact]
     public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
     {

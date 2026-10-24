@@ -20,7 +20,7 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class UserScramCredentialDeletion : UserScramCredentialAlteration
 {
-    /// <summary>Creates a deletion — Java's <c>:34</c>.</summary>
+    /// <summary>Creates a deletion — Java's constructor.</summary>
     /// <param name="user">The user.</param>
     /// <param name="mechanism">The mechanism whose credential is deleted.</param>
     /// <exception cref="System.ArgumentNullException"><paramref name="user"/> is null.</exception>
@@ -30,6 +30,6 @@ public sealed class UserScramCredentialDeletion : UserScramCredentialAlteration
         Mechanism = mechanism;
     }
 
-    /// <summary>The mechanism — Java's <c>mechanism()</c> (<c>:43</c>).</summary>
+    /// <summary>The mechanism — Java's <c>mechanism()</c>.</summary>
     public ScramMechanism Mechanism { get; }
 }

@@ -37,8 +37,9 @@ namespace Confluent.Kafka;
 /// another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
-/// Rebalance listeners and commit callbacks run on the calling thread, inside the blocking call that delivers
-/// them. What a callback may call on its own consumer is in <see cref="IConsumerRebalanceListener"/>.
+/// Rebalance listeners run on the calling thread, only inside <c>Poll</c>, <c>Unsubscribe</c> and <c>Close</c>;
+/// commit callbacks run on it inside the blocking call that delivers them. What a callback may call on its own
+/// consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>

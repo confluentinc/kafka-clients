@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -21,29 +23,41 @@ namespace Confluent.Kafka.Admin;
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks"/>
 public sealed class ListTopicsOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it
-    /// unset so the client's <c>default.api.timeout.ms</c> applies — Java's
-    /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+
+    private bool _listInternal;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Include internal topics such as <c>__consumer_offsets</c> — Java's
     /// <c>listInternal(boolean)</c> / <c>shouldListInternal()</c>. Defaults to
     /// <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ListInternal { get; set; }
+    public bool ListInternal
+    {
+        get => _listInternal;
+        set
+        {
+            _listInternal = value;
+            Setters.Ran(nameof(ListInternal));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 
     /// <summary>
-    /// Value equality over <see cref="ListInternal"/> only, deliberately <em>excluding</em>
-    /// <see cref="TimeoutMs"/> — Java's <c>equals</c> (<c>ListTopicsOptions.java:67-72</c>)
-    /// compares <c>listInternal</c> alone, as <see cref="ListTransactionsOptions.Equals(object?)"/>
-    /// leaves out its timeout (unlike <see cref="DescribeProducersOptions.Equals(object?)"/>).
-    /// Two options that differ only in their timeout are therefore equal.
+    /// Value equality over <see cref="ListInternal"/> only, as Java's <c>equals</c>: two
+    /// options that differ only in their timeout are equal.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two options ask for the same listing.</returns>
@@ -51,16 +65,13 @@ public sealed class ListTopicsOptions
         obj is ListTopicsOptions other && ListInternal == other.ListInternal;
 
     /// <summary>
-    /// The hash of <see cref="ListInternal"/> alone, excluding <see cref="TimeoutMs"/> as
-    /// <see cref="Equals(object?)"/> does — Java's <c>hashCode</c> (<c>:75-77</c>).
+    /// The hash of <see cref="ListInternal"/> alone — Java's <c>hashCode</c>.
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode() => ListInternal.GetHashCode();
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:60-64</c>), which, like
-    /// <see cref="Equals(object?)"/>, leaves out the timeout and prints the flag in Java's
-    /// lowercase form.
+    /// A diagnostic rendering matching Java's <c>toString()</c>, which leaves out the timeout.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

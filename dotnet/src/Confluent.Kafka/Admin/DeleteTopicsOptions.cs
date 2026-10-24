@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,28 +22,38 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.DeleteTopicsOptions</c>.
 /// </summary>
 /// <remarks>
-/// A plain settable POCO rather than Java's fluent builder, and every default matches
-/// Java's — the same shape and the same reasoning as
-/// <see cref="CreateTopicsOptions"/>, which this type deliberately mirrors. The ABI has
-/// no options handle, so this is destructured at the P/Invoke site.
+/// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
 /// </remarks>
 public sealed class DeleteTopicsOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it
-    /// unset so the client's <c>default.api.timeout.ms</c> applies — Java's
-    /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+
+    private bool _retryOnQuotaViolation = true;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <b><see langword="true"/></b>, as
-    /// Java's does; note this is the one option whose default is not the C# default for
-    /// its type.
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
-    public bool RetryOnQuotaViolation { get; set; } = true;
+    public bool RetryOnQuotaViolation
+    {
+        get => _retryOnQuotaViolation;
+        set
+        {
+            _retryOnQuotaViolation = value;
+            Setters.Ran(nameof(RetryOnQuotaViolation));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

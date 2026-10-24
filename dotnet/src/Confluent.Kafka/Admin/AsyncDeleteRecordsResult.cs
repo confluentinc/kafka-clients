@@ -15,58 +15,38 @@
 using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DeleteRecords"/> — the .NET realization of Java's
-/// <c>DeleteRecordsResult</c>: one future <b>per topic partition</b>, handed back the
-/// moment the request is submitted.
+/// The result of <see cref="IAsyncAdmin.DeleteRecords"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DeleteRecordsResult</c>: one future per topic partition.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The key is a composite the ABI never spells out.</b>
-/// <c>kafka_admin_DeleteRecordsResult_t</c> declares <b>no <c>get_key</c></b>: entry
-/// <c>i</c>'s key is <c>(get_topic(i), get_partition(i))</c>, reassembled here into the
-/// shipped <see cref="Confluent.Kafka.TopicPartition"/> that Java keys this map by.
-/// </para>
-/// <para>
-/// ⚠ <b>A low watermark of <c>-1</c> is a success, not a failure.</b> The ABI's
-/// <c>get_low_watermark</c> returns <c>-1</c> for a failed partition, for an
-/// out-of-range index, <em>and</em> for a partition whose watermark genuinely is
-/// <c>-1</c> — so it cannot be a verdict. The authoritative signal is the entry's own
-/// <c>get_error</c>: a partition with a non-null error faults its
-/// <see cref="AsyncKafkaFuture"/>; one with a null error completes with its
-/// <see cref="DeletedRecords"/>, whatever the number.
-/// </para>
-/// </remarks>
 /// <seealso cref="DeleteRecordsResult"/>
 public sealed class AsyncDeleteRecordsResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> _futures;
+    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps one future per topic partition — Java's <b>public</b>
-    /// <c>DeleteRecordsResult(Map&lt;TopicPartition, KafkaFuture&lt;DeletedRecords&gt;&gt;)</c>
-    /// (<c>DeleteRecordsResult.java:32</c>).
-    /// </summary>
-    /// <remarks>
-    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
-    /// <c>design/current/STATUS.md</c>.
-    /// </remarks>
-    /// <param name="lowWatermarks">One future per topic partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="lowWatermarks"/> is null.</exception>
+    // Internal, unlike Java's public constructor: a recorded deviation.
     internal AsyncDeleteRecordsResult(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> lowWatermarks)
     {
         _futures = lowWatermarks ?? throw new ArgumentNullException(nameof(lowWatermarks));
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDeleteRecordsResult From(KeyedAdminOperation<TopicPartition, DeletedRecords> operation) =>
-        new AsyncDeleteRecordsResult(AsyncAdminFutures.Wrap(operation.Tasks));
+    private AsyncDeleteRecordsResult(
+        IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> lowWatermarks,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
+    {
+        _futures = lowWatermarks;
+        _nativeFutures = nativeFutures;
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
     /// One future per requested topic partition, each carrying that partition's own
@@ -75,15 +55,28 @@ public sealed class AsyncDeleteRecordsResult
     public IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> LowWatermarks => _futures;
 
     /// <summary>
-    /// Completes when <b>every</b> partition's deletion has succeeded, and faults with
-    /// the first failure if any partition failed — Java's <c>all()</c>
-    /// (<c>KafkaFuture.allOf</c>).
+    /// Completes when every partition's deletion has succeeded, and faults with the first failure
+    /// to complete if any partition failed — Java's <c>all()</c>, which carries no watermarks: read
+    /// them from <see cref="LowWatermarks"/>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    /// <remarks>
-    /// Java's <c>all()</c> is a <c>KafkaFuture&lt;Void&gt;</c>: it reports only whether
-    /// everything succeeded, and the watermarks are read from
-    /// <see cref="LowWatermarks"/>. The non-generic <see cref="AsyncKafkaFuture"/> is that shape.
-    /// </remarks>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_futures.Values));
+    public AsyncKafkaFuture All() =>
+        _nativeFutures is not null
+            ? new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            : AsyncAdminFutures.AllOf(_futures.Values);
+
+    internal static AsyncDeleteRecordsResult OfClient(
+        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DeletedRecords>> LowWatermarks, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> lowWatermarks =
+            new Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>>(native.LowWatermarks.Count);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.LowWatermarks.Count);
+        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<DeletedRecords>> entry in native.LowWatermarks)
+        {
+            lowWatermarks.Add(entry.Key, new AsyncKafkaFuture<DeletedRecords>(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncDeleteRecordsResult(lowWatermarks, nativeFutures, native.Result);
+    }
 }

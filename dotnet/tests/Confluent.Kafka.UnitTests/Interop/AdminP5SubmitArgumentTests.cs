@@ -27,1059 +27,848 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// What <see cref="ListGroupsOptions"/> actually becomes at the <c>list_groups_async</c>
-/// P/Invoke — the M15/P5 twin of <see cref="AdminP3SubmitArgumentTests"/>.
+/// What the group options become in C, read back through the header's getters, and the checks the
+/// group RPCs make before they call the core.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The three filters are invisible to a behavioural test.</b> The Rust
-/// <c>MockAdminClient</c> ignores the options it is handed —
-/// <c>fn list_groups(&amp;self, _options: ListGroupsOptions)</c> — so it answers a
-/// filtered call and an unfiltered one identically. Their values are therefore read here,
-/// at the seam, where they are facts rather than inferences; the same reason the P3 file
-/// gives for <c>DescribeCluster</c>'s booleans.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>The defect this file exists to catch is a shared count.</b> The submit takes
-/// <em>three</em> name arrays that are <b>not parallel</b> — three independent filter
-/// axes whose lengths are unrelated — so every axis must travel with its own count and its
-/// own array. Sizing one axis from another's count silently narrows or widens the request,
-/// and because the mock ignores the filters entirely, nothing downstream would notice. So
-/// every case here drives axes of <b>different</b> lengths, and asserts each axis's count
-/// <em>and</em> its decoded contents, rather than sampling one.
-/// </para>
-/// <para>
-/// ⚠ <b>The names are decoded inside the submit, not after it.</b> Production pins every
-/// name for the call only and unpins in its <c>finally</c> (ffi §A4), so a pointer read
-/// after <c>ListGroups</c> returns is a use-after-unpin. Reading them in the stand-in is
-/// also the only way to observe that the pins are live for the whole call.
-/// </para>
-/// <para>
-/// ⚠ <b>No <c>MarshalAs(I1)</c> claim is made here</b>, and none is needed: this submit
-/// has no boolean. An injected submit never crosses the P/Invoke at all, so this file
-/// cannot observe marshalling — that is
-/// <c>AdminNativeMethodsMarshallingTests</c>' business.
-/// </para>
-/// <para>
-/// ⚠ <b>One argument list and one stand-in per RPC.</b> The file grew beyond the
-/// three-array original — <c>describe_consumer_groups_async</c>, for one, takes one array
-/// and one <c>bool</c>. Each section keeps its own capture harness and carrier type
-/// deliberately: the delegates differ in arity, so
-/// every argument after the first array — the callback pointer included — sits at a
-/// different position in each, and a shared harness would hide that.
-/// </para>
-/// </remarks>
 public sealed class AdminP5SubmitArgumentTests
 {
-    /// <summary>
-    /// A <see langword="null"/> timeout must become a <b>negative</b> <c>timeout_ms</c>,
-    /// which the ABI reads as "unset, use the client default" — <b>not</b> <c>0</c>, which
-    /// would mean "time out immediately". Both spellings of "no timeout" agree.
-    /// </summary>
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    public static TheoryData<GroupState> GroupStates => Values<GroupState>();
+
+    public static TheoryData<GroupType> GroupTypes => Values<GroupType>();
+
     [Fact]
-    public void NullTimeout_MapsToANegative_NotZero()
+    public void ListGroupsOptions_Defaults_SendNoFilterAndAnUnsetTimeout()
     {
-        Assert.True(
-            Capture(options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
+        Assert.Empty(new ListGroupsOptions().Setters.InOrder);
 
-        Assert.True(
-            Capture(new ListGroupsOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-    }
-
-    /// <summary>
-    /// An explicit timeout is forwarded verbatim, and <c>0</c> stays <c>0</c> — a real
-    /// request ("do not wait"), distinct from <see langword="null"/>.
-    /// </summary>
-    [Theory]
-    [InlineData(0)]
-    [InlineData(45_678)]
-    public void ExplicitTimeout_IsForwardedVerbatim(int timeoutMs) =>
-        Assert.Equal(timeoutMs, Capture(new ListGroupsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
-
-    /// <summary>
-    /// <see langword="null"/> options send Java's defaults: <b>three</b> empty axes, each
-    /// with its own count of <c>0</c>, which the ABI reads as "do not filter on this one".
-    /// </summary>
-    /// <remarks>
-    /// ⚠ Empty is <b>not</b> "match nothing" — it is Java's <c>Set.of()</c> field
-    /// initializer (<c>ListGroupsOptions.java:30-32</c>), so the no-options call must list
-    /// groups of every state, protocol type and type. An axis that arrived with a
-    /// <em>non-zero</em> count here would filter a request the caller never filtered.
-    /// </remarks>
-    [Fact]
-    public void NullOptions_SendThreeEmptyAxes()
-    {
-        Captured captured = Capture(options: null);
-
-        AssertAxis(captured.GroupStates, Array.Empty<string>());
-        AssertAxis(captured.ProtocolTypes, Array.Empty<string>());
-        AssertAxis(captured.Types, Array.Empty<string>());
-    }
-
-    /// <summary>
-    /// A default-constructed options object is indistinguishable at the seam from
-    /// <see langword="null"/> options — the claim <see cref="IAdmin.ListGroups"/> makes.
-    /// </summary>
-    [Fact]
-    public void EmptyOptions_SendTheSameThreeEmptyAxes()
-    {
-        Captured captured = Capture(new ListGroupsOptions());
-
-        AssertAxis(captured.GroupStates, Array.Empty<string>());
-        AssertAxis(captured.ProtocolTypes, Array.Empty<string>());
-        AssertAxis(captured.Types, Array.Empty<string>());
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this shape.</b> All three filters reach the submit at once, at
-    /// three <b>different</b> lengths, each in its own array beside its own count.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The lengths (1, 3, 2) are deliberately pairwise distinct: any axis sized from
-    /// another's count, or handed another axis's array, changes a value asserted below.
-    /// Equal lengths would let a crossed count pass.
-    /// </para>
-    /// <para>
-    /// The enums cross as Java's <c>toString()</c> names, never as ordinals — neither
-    /// <see cref="GroupState"/> nor <see cref="GroupType"/> has a numeric id in Java — so
-    /// the expected values are spelled out as the strings the ABI parses.
-    /// </para>
-    /// </remarks>
-    [Fact]
-    public void AllThreeFilters_ReachTheSubmit_EachWithItsOwnArrayAndCount()
-    {
-        Captured captured = Capture(new ListGroupsOptions
+        foreach (ListGroupsOptions? options in new[] { null, new ListGroupsOptions() })
         {
+            ListGroupsReadBack sent = ReadBack(options);
+            Assert.Equal(-1, sent.TimeoutMs);
+            Assert.Empty(sent.GroupStates);
+            Assert.Empty(sent.ProtocolTypes);
+            Assert.Empty(sent.Types);
+        }
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void ListGroupsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
+    {
+        ListGroupsOptions options = new ListGroupsOptions { TimeoutMs = timeoutMs };
+
+        Assert.Equal(new[] { nameof(ListGroupsOptions.TimeoutMs) }, options.Setters.InOrder);
+        Assert.Equal(expected, ReadBack(options).TimeoutMs);
+    }
+
+    [Fact]
+    public void ListGroupsOptions_EachSetterRunTwice_SendsItsLastValue()
+    {
+        ListGroupsOptions options = new ListGroupsOptions
+        {
+            TimeoutMs = 5,
             GroupStates = new[] { GroupState.Stable },
-            ProtocolTypes = new[] { "", "consumer", "connect" },
-            Types = new[] { GroupType.Classic, GroupType.Consumer },
-        });
+            ProtocolTypes = new[] { "consumer" },
+            Types = new[] { GroupType.Share },
+        };
+        options.TimeoutMs = 7;
+        options.GroupStates = new[] { GroupState.Dead, GroupState.Empty };
+        options.ProtocolTypes = Array.Empty<string>();
+        options.Types = null!;
 
-        AssertAxis(captured.GroupStates, new[] { "Stable" });
-        AssertAxis(captured.ProtocolTypes, new[] { "", "connect", "consumer" });
-        AssertAxis(captured.Types, new[] { "Classic", "Consumer" });
-    }
-
-    /// <summary>
-    /// Setting <b>one</b> axis leaves the other two empty — the asymmetric case a
-    /// shared count hides, since an axis sized from a sibling's count would arrive
-    /// populated (or truncated) without anyone asking.
-    /// </summary>
-    [Theory]
-    [InlineData(Axis.GroupStates)]
-    [InlineData(Axis.ProtocolTypes)]
-    [InlineData(Axis.Types)]
-    public void OneAxisSet_LeavesTheOtherTwoEmpty(Axis axis)
-    {
-        Captured captured = Capture(axis switch
-        {
-            Axis.GroupStates => new ListGroupsOptions
+        Assert.Equal(
+            new[]
             {
-                GroupStates = new[] { GroupState.Empty, GroupState.Dead },
+                nameof(ListGroupsOptions.TimeoutMs),
+                nameof(ListGroupsOptions.GroupStates),
+                nameof(ListGroupsOptions.ProtocolTypes),
+                nameof(ListGroupsOptions.Types),
             },
-            Axis.ProtocolTypes => new ListGroupsOptions { ProtocolTypes = new[] { "consumer" } },
-            _ => new ListGroupsOptions { Types = new[] { GroupType.Share } },
+            options.Setters.InOrder);
+
+        ListGroupsReadBack sent = ReadBack(options);
+        Assert.Equal(7, sent.TimeoutMs);
+        Assert.Equal(new[] { GroupState.Dead, GroupState.Empty }, sent.GroupStates.OrderBy(state => state));
+        Assert.Empty(sent.ProtocolTypes);
+        Assert.Empty(sent.Types);
+    }
+
+    [Theory]
+    [MemberData(nameof(GroupStates))]
+    public void ListGroupsOptions_EveryGroupState_CrossesAsItself(GroupState state) =>
+        Assert.Equal(new[] { state }, ReadBack(new ListGroupsOptions { GroupStates = new[] { state } }).GroupStates);
+
+    [Theory]
+    [MemberData(nameof(GroupTypes))]
+    public void ListGroupsOptions_EveryGroupType_CrossesAsItself(GroupType type) =>
+        Assert.Equal(new[] { type }, ReadBack(new ListGroupsOptions { Types = new[] { type } }).Types);
+
+    [Fact]
+    public void ListGroupsOptions_TheThreeFilters_EachCrossWithItsOwnValues()
+    {
+        ListGroupsReadBack sent = ReadBack(new ListGroupsOptions
+        {
+            GroupStates = new[] { GroupState.Stable, GroupState.Empty, GroupState.Stable, GroupState.Reconciling },
+            ProtocolTypes = new[] { "", "consumer", "prötocol-日本" },
+            Types = new[] { GroupType.Consumer },
         });
 
-        AssertAxis(
-            captured.GroupStates,
-            axis == Axis.GroupStates ? new[] { "Dead", "Empty" } : Array.Empty<string>());
-        AssertAxis(
-            captured.ProtocolTypes,
-            axis == Axis.ProtocolTypes ? new[] { "consumer" } : Array.Empty<string>());
-        AssertAxis(
-            captured.Types,
-            axis == Axis.Types ? new[] { "Share" } : Array.Empty<string>());
+        Assert.Equal(
+            new[] { GroupState.Stable, GroupState.Empty, GroupState.Reconciling },
+            sent.GroupStates.OrderBy(state => state));
+        Assert.Equal(
+            new[] { "", "consumer", "prötocol-日本" },
+            sent.ProtocolTypes.OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Equal(new[] { GroupType.Consumer }, sent.Types);
     }
 
-    /// <summary>
-    /// Java's three static factories reach the seam as the filters they document —
-    /// including <c>forConsumerGroups()</c>'s <b>two</b> axes, whose empty protocol type
-    /// is a member of the set and not a placeholder.
-    /// </summary>
     [Fact]
-    public void JavasFactories_ReachTheSubmitAsTheFiltersTheyDocument()
+    public void ListGroupsOptions_JavasFactories_SendTheFiltersTheyDocument()
     {
-        Captured consumer = Capture(ListGroupsOptions.ForConsumerGroups());
-        AssertAxis(consumer.ProtocolTypes, new[] { "", "consumer" });
-        AssertAxis(consumer.Types, new[] { "Classic", "Consumer" });
-        AssertAxis(consumer.GroupStates, Array.Empty<string>());
+        ListGroupsOptions consumer = ListGroupsOptions.ForConsumerGroups();
+        Assert.Equal(
+            new[] { nameof(ListGroupsOptions.Types), nameof(ListGroupsOptions.ProtocolTypes) },
+            consumer.Setters.InOrder);
+        ListGroupsReadBack forConsumer = ReadBack(consumer);
+        Assert.Equal(new[] { GroupType.Consumer, GroupType.Classic }, forConsumer.Types.OrderBy(type => type));
+        Assert.Equal(new[] { "", "consumer" }, forConsumer.ProtocolTypes.OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(forConsumer.GroupStates);
+        Assert.Equal(-1, forConsumer.TimeoutMs);
 
-        Captured share = Capture(ListGroupsOptions.ForShareGroups());
-        AssertAxis(share.Types, new[] { "Share" });
-        AssertAxis(share.ProtocolTypes, Array.Empty<string>());
+        ListGroupsReadBack forShare = ReadBack(ListGroupsOptions.ForShareGroups());
+        Assert.Equal(new[] { GroupType.Share }, forShare.Types);
+        Assert.Empty(forShare.ProtocolTypes);
 
-        Captured streams = Capture(ListGroupsOptions.ForStreamsGroups());
-        AssertAxis(streams.Types, new[] { "Streams" });
-        AssertAxis(streams.ProtocolTypes, Array.Empty<string>());
+        ListGroupsReadBack forStreams = ReadBack(ListGroupsOptions.ForStreamsGroups());
+        Assert.Equal(new[] { GroupType.Streams }, forStreams.Types);
+        Assert.Empty(forStreams.ProtocolTypes);
     }
 
-    /// <summary>
-    /// A <see cref="GroupState"/> or <see cref="GroupType"/> value no member defines —
-    /// reachable in C# only by a cast, which Java's enum-typed <c>Set</c> cannot express —
-    /// is rejected <b>before</b> anything is submitted, pinned or rooted (ffi §B5).
-    /// </summary>
-    /// <remarks>
-    /// The blame names the caller's parameter, not the marshaller: <c>GroupMarshal</c>'s
-    /// encode direction is deliberately partial and does not know which property to
-    /// mention. Nothing reaches the submit, so there is nothing to unwind — and no
-    /// <c>GCHandle</c> was rooted to leak.
-    /// </remarks>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void UndefinedEnumValue_IsRejectedBeforeAnythingIsSubmitted(bool onTheStateAxis)
+    public void ListGroups_AnUndefinedStateOrType_IsRejectedBeforeTheCall(bool onTheStateAxis)
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        bool submitted = false;
         ListGroupsOptions options = onTheStateAxis
             ? new ListGroupsOptions { GroupStates = new[] { (GroupState)(-1) } }
             : new ListGroupsOptions { Types = new[] { (GroupType)99 } };
 
-        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
-            () => AsyncListGroupsResult.From(admin.ListGroups(
-                options,
-                AdminFlavour.Async,
-                (handle, states, stateCount, protocols, protocolCount, types, typeCount, timeoutMs, callback, userData) =>
-                    submitted = true)));
+        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(() => admin.ListGroups(options));
 
-        Assert.False(submitted, "an undefined enum value must never reach the submit");
         Assert.Equal("options", failure.ParamName);
-        Assert.Contains(
-            onTheStateAxis ? "ListGroupsOptions.GroupStates" : "ListGroupsOptions.Types",
+        Assert.StartsWith(
+            onTheStateAxis
+                ? "ListGroupsOptions.GroupStates must contain only defined GroupState members."
+                : "ListGroupsOptions.Types must contain only defined GroupType members.",
             failure.Message,
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2), by the shared mapping — so
-    /// <c>listGroups</c> treats it exactly as every other admin RPC does: Java's
-    /// <c>calcDeadlineMs</c> clamp, not a throw. See <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </summary>
     [Fact]
-    public void X2_NegativeTimeout_IsSentAsZero() =>
-        Assert.Equal(0, Capture(new ListGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
-
-    /// <summary>Which of the three independent filter axes a parameterised case sets.</summary>
-    public enum Axis
-    {
-        /// <summary>Java's <c>inGroupStates</c>, encoded as <c>GroupState.toString()</c>.</summary>
-        GroupStates,
-
-        /// <summary>Java's <c>withProtocolTypes</c>, already strings.</summary>
-        ProtocolTypes,
-
-        /// <summary>Java's <c>withTypes</c>, encoded as <c>GroupType.toString()</c>.</summary>
-        Types,
-    }
-
-    /// <summary>
-    /// Asserts one axis arrived with <b>both</b> its own count and its own array contents.
-    /// </summary>
-    /// <remarks>
-    /// The count is asserted separately from the decoded contents on purpose: a count
-    /// borrowed from another axis is a different defect from an array borrowed from
-    /// another axis, and either one alone would pass the other's assertion.
-    /// </remarks>
-    /// <param name="actual">What the stand-in submit recorded for this axis.</param>
-    /// <param name="expected">The names, in ordinal order (the axes de-duplicate through a set).</param>
-    private static void AssertAxis(CapturedAxis actual, string[] expected)
-    {
-        Assert.Equal(expected.Length, actual.Count);
-        Assert.Equal(expected.Length, actual.Names.Count);
-        Assert.Equal(expected, actual.Names.OrderBy(name => name, StringComparer.Ordinal));
-    }
-
-    /// <summary>
-    /// Runs the production submit with a stand-in that records the three axes instead of
-    /// calling native, then completes the operation through the <b>production</b>
-    /// trampoline so the <c>GCHandle</c> and the span-the-op reference are released before
-    /// the client is disposed.
-    /// </summary>
-    /// <param name="options">The options under test, or <see langword="null"/>.</param>
-    private static Captured Capture(ListGroupsOptions? options)
+    public void ListGroups_AProtocolTypeThatCannotCross_IsRejectedBeforeTheCall()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        Captured captured = new Captured();
-        AsyncListGroupsResult result = AsyncListGroupsResult.From(admin.ListGroups(
-            options,
-            AdminFlavour.Async,
-            (handle, states, stateCount, protocols, protocolCount, types, typeCount, timeoutMs, callback, userData) =>
-            {
-                captured.TimeoutMs = timeoutMs;
+        ArgumentException failure = Assert.Throws<ArgumentException>(
+            () => admin.ListGroups(new ListGroupsOptions { ProtocolTypes = new[] { "con\0sumer" } }));
 
-                // ⚠ Decoded HERE: production unpins every name the moment this returns.
-                captured.GroupStates = new CapturedAxis(stateCount, Decode(states));
-                captured.ProtocolTypes = new CapturedAxis(protocolCount, Decode(protocols));
-                captured.Types = new CapturedAxis(typeCount, Decode(types));
-                captured.UserData = userData;
-            }));
-
-        AdminCallbacks.ListGroups(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the fault the trampoline just delivered. All() awaits an already-faulted
-        // source, so it completes synchronously and this read is race-free.
-        Assert.NotNull(result.All().Get().Exception);
-        return captured;
+        Assert.Equal("options", failure.ParamName);
+        Assert.StartsWith(AdminStrings.InvalidStringMessage, failure.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Decodes one axis's pointer array in full — <b>by the array's own length</b>, never
-    /// by a count, so a mismatch between the two is reported by the assertion rather than
-    /// by an index-out-of-range inside the stand-in.
-    /// </summary>
-    /// <param name="names">The pinned, NUL-terminated UTF-8 names for one axis.</param>
-    private static IReadOnlyList<string> Decode(IntPtr[] names) =>
-        names.Select(name => Utf8Marshal.PtrToString(name) ?? "<null>").ToArray();
-
-    /// <summary>
-    /// An <b>owned</b> error for the trampoline to consume, standing in for the one native
-    /// would hand the callback. The trampoline frees it via
-    /// <see cref="KafkaException.FromHandle"/>, so it must never be freed here.
-    /// </summary>
-    private static IntPtr CapturedError()
+    [Fact]
+    public void ListGroupsOptions_ANullProtocolType_IsRejectedBySetter()
     {
-        using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("captured");
-        IntPtr error = NativeMethods.KafkaErrorNew(1, message.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
+        ArgumentException failure = Assert.Throws<ArgumentException>(
+            () => new ListGroupsOptions { ProtocolTypes = new[] { "consumer", null! } });
+
+        Assert.Equal("value", failure.ParamName);
+        Assert.StartsWith("A protocol type must not be null", failure.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Settles a shape-4a operation by firing one per-key failure for every key the submit
-    /// carried. The <c>value</c> slot is NULL on a failing key; each error is <b>owned</b>
-    /// and the trampoline frees it.
-    /// </summary>
-    /// <param name="fire">The production trampoline for this RPC.</param>
-    /// <param name="keys">Every key the submit sent, in submit order.</param>
-    /// <param name="userData">The operation's <c>GCHandle</c> pointer.</param>
-    private static void FirePerKeyFailures(
-        Action<IntPtr, IntPtr, IntPtr, IntPtr> fire, IEnumerable<string> keys, IntPtr userData)
+    [Fact]
+    public void ListGroups_OnAnEmptyMock_CompletesEveryFutureEmpty()
     {
-        foreach (string key in keys)
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        var listed = admin.ListGroups(ListGroupsOptions.ForConsumerGroups());
+
+        Assert.Empty(listed.All.Get(s_deadline));
+        Assert.Empty(listed.Valid.Get(s_deadline));
+        Assert.Empty(listed.Errors.Get(s_deadline));
+        listed.Result.Dispose();
+    }
+
+    [Fact]
+    public void DescribeGroupsOptions_Defaults_SendNoFlagAndAnUnsetTimeout()
+    {
+        Assert.Empty(new DescribeConsumerGroupsOptions().Setters.InOrder);
+        Assert.Empty(new DescribeClassicGroupsOptions().Setters.InOrder);
+
+        foreach (DescribeConsumerGroupsOptions? options in new[] { null, new DescribeConsumerGroupsOptions() })
         {
-            using Utf8Marshal.PinnedUtf8String pinnedKey = Utf8Marshal.Pin(key);
-            fire(pinnedKey.Pointer, IntPtr.Zero, CapturedError(), userData);
+            Assert.Equal((-1, false), ReadBack(options));
+        }
+
+        foreach (DescribeClassicGroupsOptions? options in new[] { null, new DescribeClassicGroupsOptions() })
+        {
+            Assert.Equal((-1, false), ReadBack(options));
         }
     }
 
-    /// <summary>One filter axis as it crossed the seam: its own count, its own names.</summary>
-    private sealed class CapturedAxis
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void DescribeGroupsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
     {
-        internal CapturedAxis(int count, IReadOnlyList<string> names)
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions { TimeoutMs = timeoutMs };
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions { TimeoutMs = timeoutMs };
+
+        Assert.Equal(new[] { nameof(DescribeConsumerGroupsOptions.TimeoutMs) }, consumer.Setters.InOrder);
+        Assert.Equal(new[] { nameof(DescribeClassicGroupsOptions.TimeoutMs) }, classic.Setters.InOrder);
+        Assert.Equal((expected, false), ReadBack(consumer));
+        Assert.Equal((expected, false), ReadBack(classic));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DescribeGroupsOptions_IncludeAuthorizedOperations_CrossesInBothStates(bool include)
+    {
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions { IncludeAuthorizedOperations = include };
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include };
+
+        Assert.Equal(
+            new[] { nameof(DescribeConsumerGroupsOptions.IncludeAuthorizedOperations) }, consumer.Setters.InOrder);
+        Assert.Equal((-1, include), ReadBack(consumer));
+        Assert.Equal((-1, include), ReadBack(classic));
+    }
+
+    [Fact]
+    public void DescribeGroupsOptions_EachSetterRunTwice_SendsItsLastValue()
+    {
+        DescribeConsumerGroupsOptions consumer = new DescribeConsumerGroupsOptions
         {
-            Count = count;
-            Names = names;
-        }
+            IncludeAuthorizedOperations = true,
+            TimeoutMs = 5,
+        };
+        consumer.IncludeAuthorizedOperations = false;
+        consumer.TimeoutMs = 7;
+        DescribeClassicGroupsOptions classic = new DescribeClassicGroupsOptions
+        {
+            TimeoutMs = 5,
+            IncludeAuthorizedOperations = false,
+        };
+        classic.TimeoutMs = 9;
+        classic.IncludeAuthorizedOperations = true;
 
-        /// <summary>The <c>*_count</c> argument this axis travelled with.</summary>
-        internal int Count { get; }
-
-        /// <summary>Everything the axis's pointer array actually held.</summary>
-        internal IReadOnlyList<string> Names { get; }
-    }
-
-    private sealed class Captured
-    {
-        internal int TimeoutMs { get; set; }
-
-        internal CapturedAxis GroupStates { get; set; } =
-            new CapturedAxis(int.MinValue, Array.Empty<string>());
-
-        internal CapturedAxis ProtocolTypes { get; set; } =
-            new CapturedAxis(int.MinValue, Array.Empty<string>());
-
-        internal CapturedAxis Types { get; set; } =
-            new CapturedAxis(int.MinValue, Array.Empty<string>());
-
-        internal IntPtr UserData { get; set; }
-    }
-
-    // ------------------------------------------------------------------------------------
-    // describeConsumerGroups — a third argument list at the same seam.
-    //
-    // ⚠⚠ ONE array and ONE bool, not two arrays. The submit takes the group-id array, its
-    // count, the timeout, then `includeAuthorizedOperations` — so every argument after the
-    // single array sits at a different position from the RPC above, INCLUDING the
-    // callback pointer. A stand-in copied from that neighbour would bind the callback
-    // slot to the wrong parameter; these cases exist to catch exactly that.
-    //
-    // ⚠ And the group ids are NOT options — they are a required argument the caller
-    // supplies directly, so their rejection paths (null collection, null element,
-    // duplicates) name `groupIds`, not `options`, unlike every filter axis above.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// The group ids and their count reach the submit intact, and the count is the array's
-    /// own length rather than the caller's collection size.
-    /// </summary>
-    [Fact]
-    public void Describe_GroupIdsAndCount_ReachTheSubmit()
-    {
-        DescribeCaptured captured = CaptureDescribe(new[] { "alpha", "beta", "gamma" }, options: null);
-
-        Assert.Equal(3, captured.GroupIds.Count);
-        Assert.Equal(new[] { "alpha", "beta", "gamma" }, captured.GroupIds.Names);
-    }
-
-    /// <summary>
-    /// The id list is deduplicated <b>ordinally</b> before it is pinned, so the count the
-    /// submit sees shrinks — and two ids differing only in case are NOT duplicates.
-    /// </summary>
-    [Fact]
-    public void Describe_DuplicateGroupIds_AreCollapsedOrdinallyBeforeTheSubmit()
-    {
-        DescribeCaptured captured = CaptureDescribe(
-            new[] { "g", "g", "G", "g" },
-            options: null);
-
-        Assert.Equal(2, captured.GroupIds.Count);
-        Assert.Equal(new[] { "g", "G" }, captured.GroupIds.Names);
-    }
-
-    /// <summary>
-    /// <c>IncludeAuthorizedOperations</c> crosses in <b>both</b> states. A flag that is
-    /// hardcoded, dropped, or inverted is invisible downstream — the Rust mock fails every
-    /// key regardless — so it is read here, at the seam.
-    /// </summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void Describe_IncludeAuthorizedOperations_CrossesInBothStates(bool include)
-    {
-        DescribeCaptured captured = CaptureDescribe(
-            new[] { "g1" },
-            new DescribeConsumerGroupsOptions { IncludeAuthorizedOperations = include });
-
-        Assert.Equal(include, captured.IncludeAuthorizedOperations);
-    }
-
-    /// <summary>
-    /// No options at all: the flag defaults to <see langword="false"/> and the timeout
-    /// travels as the negative "unset" value, exactly as the two RPCs above do.
-    /// </summary>
-    [Fact]
-    public void Describe_NullOptions_SendNoFlagAndAnUnsetTimeout()
-    {
-        DescribeCaptured captured = CaptureDescribe(new[] { "g1" }, options: null);
-
-        Assert.False(captured.IncludeAuthorizedOperations);
-        Assert.True(
-            captured.TimeoutMs < 0,
-            $"an absent timeout must cross as the negative unset value, not {captured.TimeoutMs}");
-    }
-
-    /// <summary>An explicit timeout is forwarded verbatim, zero included.</summary>
-    [Theory]
-    [InlineData(0)]
-    [InlineData(45_678)]
-    public void Describe_ExplicitTimeout_IsForwardedVerbatim(int timeoutMs)
-    {
-        DescribeCaptured captured = CaptureDescribe(
-            new[] { "g1" },
-            new DescribeConsumerGroupsOptions { TimeoutMs = timeoutMs });
-
-        Assert.Equal(timeoutMs, captured.TimeoutMs);
-    }
-
-    /// <summary>
-    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
-    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </summary>
-    [Fact]
-    public void X2_Describe_NegativeTimeout_IsSentAsZero() =>
-        Assert.Equal(
-            0, CaptureDescribe(new[] { "g1" }, new DescribeConsumerGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
-
-    /// <summary>
-    /// A null id collection and a null element inside one are both refused, and both name
-    /// <c>groupIds</c> — the required argument — not <c>options</c>.
-    /// </summary>
-    [Fact]
-    public void Describe_BadGroupIds_AreRejectedBeforeAnythingIsSubmitted()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        bool submitted = false;
-        NativeAdminClient.NativeDescribeConsumerGroupsSubmit submit =
-            (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true;
-
-        ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(null!, null, AdminFlavour.Async, submit)); });
-        Assert.Equal("groupIds", missing.ParamName);
-
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => { AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(new string?[] { "g1", null }!, null, AdminFlavour.Async, submit)); });
-        Assert.Equal("groupIds", nullElement.ParamName);
-
-        Assert.False(submitted, "a malformed id list must never reach the submit");
-    }
-
-    /// <summary>
-    /// Drives one <c>describe_consumer_groups_async</c> submit and reports every argument
-    /// that crossed, then settles the operation through the production trampoline so the
-    /// per-operation <c>GCHandle</c> is released before the client is disposed.
-    /// </summary>
-    /// <param name="groupIds">The ids to request.</param>
-    /// <param name="options">The options under test, or <see langword="null"/>.</param>
-    private static DescribeCaptured CaptureDescribe(
-        IReadOnlyCollection<string> groupIds,
-        DescribeConsumerGroupsOptions? options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        DescribeCaptured captured = new DescribeCaptured();
-        AsyncDescribeConsumerGroupsResult result = AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(
-            groupIds,
-            options,
-            AdminFlavour.Async,
-            (handle, ids, count, timeoutMs, include, callback, userData) =>
-            {
-                captured.TimeoutMs = timeoutMs;
-                captured.IncludeAuthorizedOperations = include;
-
-                // ⚠ Decoded HERE: production unpins every id the moment this returns.
-                captured.GroupIds = new CapturedAxis(count, Decode(ids));
-                captured.UserData = userData;
-            }));
-
-        FirePerKeyFailures(
-            AdminCallbacks.DescribeConsumerGroups.Invoke, groupIds, captured.UserData);
-
-        Assert.NotEmpty(result.DescribedGroups);
-        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Get().Exception));
-        return captured;
-    }
-
-    /// <summary>
-    /// What crossed the <c>describe_consumer_groups_async</c> seam. Its own type, again:
-    /// this RPC's single array plus a boolean share no shape with either neighbour's
-    /// filter axes.
-    /// </summary>
-    private sealed class DescribeCaptured
-    {
-        internal int TimeoutMs { get; set; } = int.MinValue;
-
-        internal bool IncludeAuthorizedOperations { get; set; }
-
-        internal CapturedAxis GroupIds { get; set; } =
-            new CapturedAxis(int.MinValue, Array.Empty<string>());
-
-        internal IntPtr UserData { get; set; }
-    }
-
-    // ------------------------------------------------------------------------------------
-    // describeClassicGroups — the same seam, argument-for-argument.
-    //
-    // ⚠ Covered separately rather than parameterized over the neighbour above, because the
-    // two submits are DIFFERENT delegate types carrying DIFFERENT callbacks: a
-    // DescribeClassicGroupsCallback hands back a DescribeClassicGroupsResult_t root, and the
-    // whole point of the split is that it can never reach the consumer RPC's destroy. A
-    // shared harness would have to erase exactly the distinction being protected.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// The group ids and their count reach the submit intact, and ordinal deduplication
-    /// happens before the pin — so two ids differing only in case stay two ids.
-    /// </summary>
-    [Fact]
-    public void DescribeClassic_GroupIdsAndCount_ReachTheSubmitDeduplicatedOrdinally()
-    {
-        DescribeCaptured captured = CaptureDescribeClassic(
-            new[] { "alpha", "beta", "alpha", "Alpha" },
-            options: null);
-
-        Assert.Equal(3, captured.GroupIds.Count);
-        Assert.Equal(new[] { "alpha", "beta", "Alpha" }, captured.GroupIds.Names);
-    }
-
-    /// <summary>
-    /// <c>IncludeAuthorizedOperations</c> crosses in <b>both</b> states. A flag that is
-    /// hardcoded, dropped, or inverted is invisible downstream — the Rust mock fails every
-    /// key regardless — so it is read here, at the seam.
-    /// </summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void DescribeClassic_IncludeAuthorizedOperations_CrossesInBothStates(bool include)
-    {
-        DescribeCaptured captured = CaptureDescribeClassic(
-            new[] { "g1" },
-            new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
-
-        Assert.Equal(include, captured.IncludeAuthorizedOperations);
-    }
-
-    /// <summary>
-    /// No options at all: the flag defaults to <see langword="false"/> and the timeout
-    /// travels as the negative "unset" value. An explicit timeout is forwarded verbatim.
-    /// </summary>
-    [Fact]
-    public void DescribeClassic_TimeoutAndFlag_DefaultUnsetAndForwardVerbatim()
-    {
-        DescribeCaptured unset = CaptureDescribeClassic(new[] { "g1" }, options: null);
-
-        Assert.False(unset.IncludeAuthorizedOperations);
-        Assert.True(
-            unset.TimeoutMs < 0,
-            $"an absent timeout must cross as the negative unset value, not {unset.TimeoutMs}");
-
-        // Zero included: it is a legal timeout, not a stand-in for "unset".
-        Assert.Equal(
-            0,
-            CaptureDescribeClassic(
-                new[] { "g1" },
-                new DescribeClassicGroupsOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            45_678,
-            CaptureDescribeClassic(
-                new[] { "g1" },
-                new DescribeClassicGroupsOptions { TimeoutMs = 45_678 }).TimeoutMs);
-    }
-
-    /// <summary>
-    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
-    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </summary>
-    [Fact]
-    public void X2_DescribeClassic_NegativeTimeout_IsSentAsZero() =>
-        Assert.Equal(
-            0,
-            CaptureDescribeClassic(new[] { "g1" }, new DescribeClassicGroupsOptions { TimeoutMs = -1 }).TimeoutMs);
-
-    /// <summary>
-    /// Every precondition is refused before anything is pinned or submitted (ffi §B5), and
-    /// each names the argument it is about — <c>groupIds</c> for both the missing collection
-    /// and the null element inside one. (A negative timeout is not a precondition: it is sent
-    /// as <c>0</c>, see <see cref="X2_DescribeClassic_NegativeTimeout_IsSentAsZero"/>.)
-    /// </summary>
-    [Fact]
-    public void DescribeClassic_BadArguments_AreRejectedBeforeAnythingIsSubmitted()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        bool submitted = false;
-        NativeAdminClient.NativeDescribeClassicGroupsSubmit submit =
-            (handle, groupIds, count, timeoutMs, include, callback, userData) => submitted = true;
-
-        ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(null!, null, AdminFlavour.Async, submit)); });
-        Assert.Equal("groupIds", missing.ParamName);
-
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => { AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(new string?[] { "g1", null }!, null, AdminFlavour.Async, submit)); });
-        Assert.Equal("groupIds", nullElement.ParamName);
-
-        Assert.False(submitted, "a malformed request must never reach the submit");
-    }
-
-    /// <summary>
-    /// Drives one <c>describe_classic_groups_async</c> submit and reports every argument
-    /// that crossed, then settles the operation through the production trampoline so the
-    /// per-operation <c>GCHandle</c> is released before the client is disposed.
-    /// </summary>
-    /// <param name="groupIds">The ids to request.</param>
-    /// <param name="options">The options under test, or <see langword="null"/>.</param>
-    private static DescribeCaptured CaptureDescribeClassic(
-        IReadOnlyCollection<string> groupIds,
-        DescribeClassicGroupsOptions? options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        DescribeCaptured captured = new DescribeCaptured();
-        AsyncDescribeClassicGroupsResult result = AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(
-            groupIds,
-            options,
-            AdminFlavour.Async,
-            (handle, ids, count, timeoutMs, include, callback, userData) =>
-            {
-                captured.TimeoutMs = timeoutMs;
-                captured.IncludeAuthorizedOperations = include;
-
-                // ⚠ Decoded HERE: production unpins every id the moment this returns.
-                captured.GroupIds = new CapturedAxis(count, Decode(ids));
-                captured.UserData = userData;
-            }));
-
-        // ⚠ This RPC's own trampoline, not the consumer one: a submit-level error is OWNED,
-        // and routing it through the wrong trampoline is what the split delegate prevents.
-        FirePerKeyFailures(
-            AdminCallbacks.DescribeClassicGroups.Invoke, groupIds, captured.UserData);
-
-        Assert.NotEmpty(result.DescribedGroups);
-        Assert.All(result.DescribedGroups.Values, task => Assert.NotNull(task.Get().Exception));
-        return captured;
-    }
-
-    // ------------------------------------------------------------------------------------
-    // listConsumerGroupOffsets — the one JAGGED submit on this surface.
-    //
-    // ⚠⚠ Two levels of indirection, and a discriminant that cannot be derived. Per group id
-    // the request carries a topic-partition selection as two parallel INNER arrays behind
-    // `topics[i]` / `partitions[i]`, sized by `partition_counts[i]`; `all_partitions[i]`
-    // says whether the selection exists at all. "All partitions" and "an empty explicit
-    // selection" BOTH cross with a count of 0, so the flag is the only thing telling them
-    // apart — and they are opposite requests. Every case below therefore asserts the flag
-    // and the count together, per index.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this shape.</b> A null <c>TopicPartitions</c> ("all partitions")
-    /// and an <em>empty</em> one ("nothing") both travel with a count of <c>0</c> and a NULL
-    /// inner pointer, and are distinguished <b>only</b> by <c>all_partitions[i]</c> —
-    /// <see langword="true"/> for the first, <see langword="false"/> for the second.
-    /// </summary>
-    /// <remarks>
-    /// A flag derived from the count would make every empty selection read as "all", which
-    /// returns a group's entire committed state to a caller who asked for none of it. Both
-    /// groups are driven in one call so a per-index mix-up cannot pass either.
-    /// </remarks>
-    [Fact]
-    public void Offsets_AllVersusEmptySelection_DifferOnlyByTheFlag()
-    {
-        OffsetsCaptured captured = CaptureOffsets(
-            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-            {
-                ["all"] = new ListConsumerGroupOffsetsSpec(),
-                ["none"] = new ListConsumerGroupOffsetsSpec
-                {
-                    TopicPartitions = Array.Empty<TopicPartition>(),
-                },
-            },
-            options: null);
-
-        int all = captured.IndexOf("all");
-        int none = captured.IndexOf("none");
-
-        Assert.True(captured.AllPartitions[all], "a null selection means ALL partitions");
-        Assert.False(captured.AllPartitions[none], "an empty selection means NO partitions");
-
-        Assert.Equal(0, captured.PartitionCounts[all]);
-        Assert.Equal(0, captured.PartitionCounts[none]);
-        Assert.True(captured.InnerPointersNull[all]);
-        Assert.True(captured.InnerPointersNull[none]);
-    }
-
-    /// <summary>
-    /// An explicit selection reaches the submit through both levels of indirection, at
-    /// <b>different</b> lengths per group and beside an all-partitions group — so an inner
-    /// array sized from a neighbour's count, or read from the wrong index, changes a value
-    /// asserted here.
-    /// </summary>
-    /// <remarks>
-    /// The two parallel inner arrays are decoded together, pair by pair: a topic array read
-    /// against the other group's partition array would still decode, and only a paired
-    /// assertion catches it.
-    /// </remarks>
-    [Fact]
-    public void Offsets_JaggedSelections_ReachTheSubmitPairedAndPerGroup()
-    {
-        OffsetsCaptured captured = CaptureOffsets(
-            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-            {
-                ["one"] = new ListConsumerGroupOffsetsSpec
-                {
-                    TopicPartitions = new[] { new TopicPartition("t-one", 7) },
-                },
-                ["three"] = new ListConsumerGroupOffsetsSpec
-                {
-                    TopicPartitions = new[]
-                    {
-                        new TopicPartition("alpha", 0),
-                        new TopicPartition("beta", 11),
-                        new TopicPartition("alpha", 2),
-                    },
-                },
-                ["all"] = new ListConsumerGroupOffsetsSpec(),
-            },
-            options: null);
-
-        Assert.Equal(3, captured.GroupCount);
-        Assert.Equal(3, captured.GroupIds.Count);
-
-        int one = captured.IndexOf("one");
-        Assert.False(captured.AllPartitions[one]);
-        Assert.Equal(1, captured.PartitionCounts[one]);
-        Assert.Equal(new[] { new TopicPartition("t-one", 7) }, captured.Selections[one]);
-
-        int three = captured.IndexOf("three");
-        Assert.False(captured.AllPartitions[three]);
-        Assert.Equal(3, captured.PartitionCounts[three]);
         Assert.Equal(
             new[]
             {
-                new TopicPartition("alpha", 0),
-                new TopicPartition("beta", 11),
-                new TopicPartition("alpha", 2),
+                nameof(DescribeConsumerGroupsOptions.IncludeAuthorizedOperations),
+                nameof(DescribeConsumerGroupsOptions.TimeoutMs),
             },
-            captured.Selections[three]);
-
-        int all = captured.IndexOf("all");
-        Assert.True(captured.AllPartitions[all]);
-        Assert.Equal(0, captured.PartitionCounts[all]);
-        Assert.True(captured.InnerPointersNull[all]);
+            consumer.Setters.InOrder);
+        Assert.Equal((7, false), ReadBack(consumer));
+        Assert.Equal((9, true), ReadBack(classic));
     }
 
-    /// <summary>
-    /// <c>RequireStable</c> crosses in <b>both</b> states. The Rust mock ignores it, so a
-    /// flag that is hardcoded, dropped or inverted is invisible downstream — it is read
-    /// here, at the seam.
-    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DescribeGroups_BadGroupIds_AreRejectedBeforeTheCall(bool classic)
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        Action<IReadOnlyCollection<string>> describe = classic
+            ? groupIds => admin.DescribeClassicGroups(groupIds, null)
+            : groupIds => admin.DescribeConsumerGroups(groupIds, null);
+
+        Assert.Equal("groupIds", Assert.Throws<ArgumentNullException>(() => describe(null!)).ParamName);
+
+        ArgumentException nullElement = Assert.Throws<ArgumentException>(() => describe(new[] { "g", null! }));
+        Assert.Equal("groupIds", nullElement.ParamName);
+        Assert.StartsWith("The group ids must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
+
+        ArgumentException nul = Assert.Throws<ArgumentException>(() => describe(new[] { "g\0" }));
+        Assert.Equal("groupIds", nul.ParamName);
+        Assert.StartsWith(AdminStrings.InvalidStringMessage, nul.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DescribeConsumerGroups_DuplicateIds_CollapseOrdinally_AndEachKeyFailsAsTheMockDoes()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        var described = admin.DescribeConsumerGroups(
+            new[] { "group", "GROUP", "group", "grüppe" }, new DescribeConsumerGroupsOptions { TimeoutMs = 100 });
+
+        Assert.Equal(
+            new[] { "GROUP", "group", "grüppe" },
+            described.DescribedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        foreach (KafkaFutureImpl<ConsumerGroupDescription> future in described.DescribedGroups.Values)
+        {
+            AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
+        }
+
+        described.Result.Dispose();
+    }
+
+    [Fact]
+    public void DescribeClassicGroups_DuplicateIds_CollapseOrdinally_AndEachKeyFailsAsTheMockDoes()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        var described = admin.DescribeClassicGroups(
+            new[] { "group", "GROUP", "group" }, new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = true });
+
+        Assert.Equal(
+            new[] { "GROUP", "group" }, described.DescribedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        foreach (KafkaFutureImpl<ClassicGroupDescription> future in described.DescribedGroups.Values)
+        {
+            AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
+        }
+
+        described.Result.Dispose();
+    }
+
+    [Fact]
+    public void DescribeGroups_NoGroupIds_YieldAnEmptyResult()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        var consumer = admin.DescribeConsumerGroups(Array.Empty<string>(), null);
+        Assert.Empty(consumer.DescribedGroups);
+        consumer.Result.Dispose();
+
+        var classic = admin.DescribeClassicGroups(Array.Empty<string>(), null);
+        Assert.Empty(classic.DescribedGroups);
+        classic.Result.Dispose();
+    }
+
+    private static TheoryData<T> Values<T>()
+        where T : struct, Enum
+    {
+        TheoryData<T> data = new TheoryData<T>();
+        foreach (T value in Enum.GetValues(typeof(T)).Cast<T>())
+        {
+            data.Add(value);
+        }
+
+        return data;
+    }
+
+    private static void AssertNotImplemented(Exception? outcome)
+    {
+        KafkaException failure = Assert.IsType<KafkaException>(outcome);
+        Assert.Equal(35, failure.Code);
+        Assert.Equal("Not implemented yet", failure.Message);
+    }
+
+    private static ListGroupsReadBack ReadBack(ListGroupsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewListGroupsOptions(options);
+        try
+        {
+            return new ListGroupsReadBack(
+                ReadInt32(native, Native.ListGroupsOptionsTimeoutMs),
+                ReadList(native, Native.ListGroupsOptionsGroupStates, element => GroupMarshal.StateFrom(element)!.Value),
+                ReadList(native, Native.ListGroupsOptionsProtocolTypes, element => Utf8Marshal.PtrToString(element)!),
+                ReadList(native, Native.ListGroupsOptionsTypes, element => GroupMarshal.TypeFrom(element)!.Value));
+        }
+        finally
+        {
+            NativeAdminClient.FreeListGroupsOptions(native);
+        }
+    }
+
+    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeConsumerGroupsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeConsumerGroupsOptions(options);
+        try
+        {
+            return (
+                ReadInt32(native, Native.DescribeConsumerGroupsOptionsTimeoutMs),
+                ReadFlag(native, Native.DescribeConsumerGroupsOptionsIncludeAuthorizedOperations));
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeConsumerGroupsOptions(native);
+        }
+    }
+
+    private static (int TimeoutMs, bool IncludeAuthorizedOperations) ReadBack(DescribeClassicGroupsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeClassicGroupsOptions(options);
+        try
+        {
+            return (
+                ReadInt32(native, Native.DescribeClassicGroupsOptionsTimeoutMs),
+                ReadFlag(native, Native.DescribeClassicGroupsOptionsIncludeAuthorizedOperations));
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeClassicGroupsOptions(native);
+        }
+    }
+
+    private static int ReadInt32(IntPtr self, Native.Int32Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static bool ReadFlag(IntPtr self, Native.FlagGetter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        sbyte value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value != 0;
+    }
+
+    private static IReadOnlyList<T> ReadList<T>(IntPtr self, Native.PointerGetter getter, Func<IntPtr, T> element) =>
+        ReadOptionalList(self, getter, element) ?? throw new InvalidOperationException("The getter returned no list.");
+
+    private static IReadOnlyList<T>? ReadOptionalList<T>(IntPtr self, Native.PointerGetter getter, Func<IntPtr, T> element)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr list = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        if (list == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            int size = NativeMethods.ListSize(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            T[] values = new T[size];
+            for (int i = 0; i < size; i++)
+            {
+                IntPtr item = NativeMethods.ListGet(list, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                values[i] = element(item);
+            }
+
+            return values;
+        }
+        finally
+        {
+            NativeMethods.ListDestroy(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+    }
+
+    /// <summary>The four fields of a C <c>ListGroupsOptions_t</c>, read back through its getters.</summary>
+    private sealed class ListGroupsReadBack
+    {
+        internal ListGroupsReadBack(
+            int timeoutMs,
+            IReadOnlyList<GroupState> groupStates,
+            IReadOnlyList<string> protocolTypes,
+            IReadOnlyList<GroupType> types)
+        {
+            TimeoutMs = timeoutMs;
+            GroupStates = groupStates;
+            ProtocolTypes = protocolTypes;
+            Types = types;
+        }
+
+        internal int TimeoutMs { get; }
+
+        internal IReadOnlyList<GroupState> GroupStates { get; }
+
+        internal IReadOnlyList<string> ProtocolTypes { get; }
+
+        internal IReadOnlyList<GroupType> Types { get; }
+    }
+
+    /// <summary>The header's group Options and request getters, which the binding itself never calls.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
+
+        internal delegate IntPtr PointerGetter(IntPtr self, ref IntPtr outErr);
+
+        internal delegate int Int32Getter(IntPtr self, ref IntPtr outErr);
+
+        internal delegate sbyte FlagGetter(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int ListGroupsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsOptions_group_states_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ListGroupsOptionsGroupStates(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsOptions_protocol_types_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ListGroupsOptionsProtocolTypes(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListGroupsOptions_types_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ListGroupsOptionsTypes(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeConsumerGroupsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeConsumerGroupsOptions_include_authorized_operations_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte DescribeConsumerGroupsOptionsIncludeAuthorizedOperations(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeClassicGroupsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClassicGroupsOptions_include_authorized_operations_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte DescribeClassicGroupsOptionsIncludeAuthorizedOperations(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int ListConsumerGroupOffsetsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsOptions_require_stable_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte ListConsumerGroupOffsetsOptionsRequireStable(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ListConsumerGroupOffsetsSpecTopicPartitions(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_AlterConsumerGroupOffsetsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int AlterConsumerGroupOffsetsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupOffsetsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DeleteConsumerGroupOffsetsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteConsumerGroupsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DeleteConsumerGroupsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupOptions_members_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr RemoveMembersOptionsMembers(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupOptions_reason_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr RemoveMembersOptionsReason(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte RemoveMembersOptionsRemoveAll(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_RemoveMembersFromConsumerGroupOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int RemoveMembersOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_MemberToRemove_group_instance_id_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr MemberToRemoveGroupInstanceId(IntPtr self, ref IntPtr outErr);
+    }
+
+    [Fact]
+    public void GroupOffsetsOptions_Defaults_SendAnUnsetTimeout()
+    {
+        Assert.Empty(new ListConsumerGroupOffsetsOptions().Setters.InOrder);
+        Assert.Empty(new AlterConsumerGroupOffsetsOptions().Setters.InOrder);
+        Assert.Empty(new DeleteConsumerGroupOffsetsOptions().Setters.InOrder);
+        Assert.Empty(new DeleteConsumerGroupsOptions().Setters.InOrder);
+
+        foreach (ListConsumerGroupOffsetsOptions? options in new[] { null, new ListConsumerGroupOffsetsOptions() })
+        {
+            Assert.Equal((-1, false), ReadBack(options));
+        }
+
+        foreach (AlterConsumerGroupOffsetsOptions? options in new[] { null, new AlterConsumerGroupOffsetsOptions() })
+        {
+            Assert.Equal(-1, ReadBack(options));
+        }
+
+        foreach (DeleteConsumerGroupOffsetsOptions? options in new[] { null, new DeleteConsumerGroupOffsetsOptions() })
+        {
+            Assert.Equal(-1, ReadBack(options));
+        }
+
+        foreach (DeleteConsumerGroupsOptions? options in new[] { null, new DeleteConsumerGroupsOptions() })
+        {
+            Assert.Equal(-1, ReadBack(options));
+        }
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void GroupOffsetsOptions_Timeout_IsSentAsTheCoreReadsIt(int? timeoutMs, int expected)
+    {
+        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
+        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
+        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions { TimeoutMs = timeoutMs };
+        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions { TimeoutMs = timeoutMs };
+        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions { TimeoutMs = timeoutMs };
+
+        Assert.Equal(new[] { nameof(ListConsumerGroupOffsetsOptions.TimeoutMs) }, list.Setters.InOrder);
+        Assert.Equal(new[] { nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs) }, remove.Setters.InOrder);
+        Assert.Equal((expected, false), ReadBack(list));
+        Assert.Equal(expected, ReadBack(alter));
+        Assert.Equal(expected, ReadBack(deleteOffsets));
+        Assert.Equal(expected, ReadBack(deleteGroups));
+        Assert.Equal(expected, ReadBack(remove).TimeoutMs);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Offsets_RequireStable_CrossesInBothStates(bool requireStable)
+    public void ListConsumerGroupOffsetsOptions_RequireStable_CrossesInBothStates(bool requireStable)
     {
-        OffsetsCaptured captured = CaptureOffsets(
-            OneGroup(),
-            new ListConsumerGroupOffsetsOptions { RequireStable = requireStable });
+        ListConsumerGroupOffsetsOptions options = new ListConsumerGroupOffsetsOptions { RequireStable = requireStable };
 
-        Assert.Equal(requireStable, captured.RequireStable);
+        Assert.Equal(new[] { nameof(ListConsumerGroupOffsetsOptions.RequireStable) }, options.Setters.InOrder);
+        Assert.Equal((-1, requireStable), ReadBack(options));
     }
 
-    /// <summary>
-    /// No options at all: <c>RequireStable</c> defaults to <see langword="false"/> and the
-    /// timeout travels as the negative "unset" value. An explicit timeout is forwarded
-    /// verbatim, <c>0</c> included — it is a real request, not a stand-in for "unset".
-    /// </summary>
     [Fact]
-    public void Offsets_TimeoutAndFlag_DefaultUnsetAndForwardVerbatim()
+    public void GroupOffsetsOptions_EachSetterRunTwice_SendsItsLastValue()
     {
-        OffsetsCaptured unset = CaptureOffsets(OneGroup(), options: null);
-
-        Assert.False(unset.RequireStable);
-        Assert.True(
-            unset.TimeoutMs < 0,
-            $"an absent timeout must cross as the negative unset value, not {unset.TimeoutMs}");
-
-        Assert.True(
-            CaptureOffsets(OneGroup(), new ListConsumerGroupOffsetsOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-
+        ListConsumerGroupOffsetsOptions list = new ListConsumerGroupOffsetsOptions { TimeoutMs = 5, RequireStable = true };
+        list.TimeoutMs = 7;
+        list.RequireStable = false;
         Assert.Equal(
-            0,
-            CaptureOffsets(
-                OneGroup(),
-                new ListConsumerGroupOffsetsOptions { TimeoutMs = 0 }).TimeoutMs);
+            new[] { nameof(ListConsumerGroupOffsetsOptions.TimeoutMs), nameof(ListConsumerGroupOffsetsOptions.RequireStable) },
+            list.Setters.InOrder);
+        Assert.Equal((7, false), ReadBack(list));
+
+        AlterConsumerGroupOffsetsOptions alter = new AlterConsumerGroupOffsetsOptions { TimeoutMs = 5 };
+        alter.TimeoutMs = null;
+        Assert.Equal(-1, ReadBack(alter));
+
+        DeleteConsumerGroupOffsetsOptions deleteOffsets = new DeleteConsumerGroupOffsetsOptions { TimeoutMs = 5 };
+        deleteOffsets.TimeoutMs = 8;
+        Assert.Equal(8, ReadBack(deleteOffsets));
+
+        DeleteConsumerGroupsOptions deleteGroups = new DeleteConsumerGroupsOptions { TimeoutMs = 5 };
+        deleteGroups.TimeoutMs = 9;
+        Assert.Equal(9, ReadBack(deleteGroups));
+
+        RemoveMembersFromConsumerGroupOptions remove = new RemoveMembersFromConsumerGroupOptions { Reason = "first", TimeoutMs = 5 };
+        remove.Reason = null;
+        remove.TimeoutMs = 6;
         Assert.Equal(
-            45_678,
-            CaptureOffsets(
-                OneGroup(),
-                new ListConsumerGroupOffsetsOptions { TimeoutMs = 45_678 }).TimeoutMs);
+            new[] { nameof(RemoveMembersFromConsumerGroupOptions.Reason), nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs) },
+            remove.Setters.InOrder);
+        RemoveMembersReadBack sent = ReadBack(remove);
+        Assert.Equal(string.Empty, sent.Reason);
+        Assert.Equal(6, sent.TimeoutMs);
     }
 
-    /// <summary>
-    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — see
-    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </summary>
     [Fact]
-    public void X2_Offsets_NegativeTimeout_IsSentAsZero() =>
-        Assert.Equal(
-            0, CaptureOffsets(OneGroup(), new ListConsumerGroupOffsetsOptions { TimeoutMs = -1 }).TimeoutMs);
-
-    /// <summary>
-    /// Every precondition is refused before anything is pinned, rooted or submitted
-    /// (ffi §B5), and each names the argument it is about.
-    /// </summary>
-    /// <remarks>
-    /// The null group id and the repeated one are unreachable through a
-    /// <see cref="Dictionary{TKey, TValue}"/>, but the parameter is an <b>interface</b> a
-    /// caller may implement — so they are driven through a stand-in implementation that can
-    /// produce them. A repeat is rejected rather than collapsed: the per-key bridge would
-    /// otherwise carry whichever spec happened to win.
-    /// </remarks>
-    [Fact]
-    public void Offsets_BadArguments_AreRejectedBeforeAnythingIsSubmitted()
+    public void RemoveMembersOptions_TheNoArgumentConstructor_SendsRemoveAll()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions();
+        Assert.Empty(options.Setters.InOrder);
 
-        bool submitted = false;
-        NativeAdminClient.NativeListConsumerGroupOffsetsSubmit submit =
-            (handle, ids, all, topics, partitions, counts, count, timeoutMs, stable, callback, userData) =>
-                submitted = true;
-
-        ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
-            () => { AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(null!, null, AdminFlavour.Async, submit)); });
-        Assert.Equal("groupSpecs", missing.ParamName);
-
-        ArgumentException nullGroupId = Assert.Throws<ArgumentException>(
-            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
-                new GroupSpecEntries(
-                    new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
-                        null!, new ListConsumerGroupOffsetsSpec())),
-                null,
-                AdminFlavour.Async,
-                submit)));
-        Assert.Equal("groupSpecs", nullGroupId.ParamName);
-
-        ArgumentException duplicate = Assert.Throws<ArgumentException>(
-            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
-                new GroupSpecEntries(
-                    new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
-                        "g1", new ListConsumerGroupOffsetsSpec()),
-                    new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(
-                        "g1", new ListConsumerGroupOffsetsSpec())),
-                null,
-                AdminFlavour.Async,
-                submit)));
-        Assert.Equal("groupSpecs", duplicate.ParamName);
-        Assert.Contains("'g1'", duplicate.Message, StringComparison.Ordinal);
-
-        ArgumentException nullSpec = Assert.Throws<ArgumentException>(
-            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
-                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-                {
-                    ["g1"] = null!,
-                },
-                null,
-                AdminFlavour.Async,
-                submit)));
-        Assert.Equal("groupSpecs", nullSpec.ParamName);
-
-        // A `default(TopicPartition)` carries a null topic, which the ABI would read as an
-        // absent name rather than as the request the caller wrote.
-        ArgumentException nullTopic = Assert.Throws<ArgumentException>(
-            () => AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
-                new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-                {
-                    ["g1"] = new ListConsumerGroupOffsetsSpec
-                    {
-                        TopicPartitions = new[] { default(TopicPartition) },
-                    },
-                },
-                null,
-                AdminFlavour.Async,
-                submit)));
-        Assert.Equal("groupSpecs", nullTopic.ParamName);
-
-        Assert.False(submitted, "a malformed request must never reach the submit");
+        RemoveMembersReadBack sent = ReadBack(options);
+        Assert.True(sent.RemoveAll);
+        Assert.Empty(sent.Members);
+        Assert.Null(sent.Reason);
+        Assert.Equal(-1, sent.TimeoutMs);
     }
 
-    /// <summary>One group asking for all of its partitions — the minimal well-formed call.</summary>
-    private static IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> OneGroup() =>
-        new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
+    [Fact]
+    public void RemoveMembersOptions_TheMembers_CrossAtCreation_ARepeatCollapsed()
+    {
+        RemoveMembersFromConsumerGroupOptions options = new RemoveMembersFromConsumerGroupOptions(
+            new[] { new MemberToRemove("instance-1"), new MemberToRemove("instance-é"), new MemberToRemove("instance-1") })
         {
-            ["g1"] = new ListConsumerGroupOffsetsSpec(),
+            Reason = "rebalance",
         };
 
-    /// <summary>
-    /// Drives one <c>list_consumer_group_offsets_async</c> submit and reports every argument
-    /// that crossed — <b>including both levels of the jagged selection</b> — then settles the
-    /// operation through the production trampoline so the per-operation <c>GCHandle</c> is
-    /// released before the client is disposed.
-    /// </summary>
-    /// <param name="groupSpecs">The per-group selections to request.</param>
-    /// <param name="options">The options under test, or <see langword="null"/>.</param>
-    private static OffsetsCaptured CaptureOffsets(
-        IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
-        ListConsumerGroupOffsetsOptions? options)
+        RemoveMembersReadBack sent = ReadBack(options);
+        Assert.False(sent.RemoveAll);
+        Assert.Equal(new[] { "instance-1", "instance-é" }, sent.Members.OrderBy(id => id, StringComparer.Ordinal));
+        Assert.Equal("rebalance", sent.Reason);
+        Assert.Equal(-1, sent.TimeoutMs);
+    }
+
+    [Fact]
+    public void ListConsumerGroupOffsetsSpec_AllPartitionsAndAnEmptySelection_CrossDifferently()
+    {
+        Assert.Null(ReadBack(new ListConsumerGroupOffsetsSpec()));
+        Assert.Empty(ReadBack(new ListConsumerGroupOffsetsSpec { TopicPartitions = Array.Empty<TopicPartition>() })!);
+
+        TopicPartition[] selected =
+        {
+            new TopicPartition("alpha", 0),
+            new TopicPartition("beta-é", 11),
+            new TopicPartition("alpha", 2),
+        };
+        Assert.Equal(selected, ReadBack(new ListConsumerGroupOffsetsSpec { TopicPartitions = selected }));
+    }
+
+    [Fact]
+    public void ListConsumerGroupOffsets_BadArguments_AreRejectedBeforeTheCall()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        OffsetsCaptured captured = new OffsetsCaptured();
-        AsyncListConsumerGroupOffsetsResult result = AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(
-            groupSpecs,
-            options,
-            AdminFlavour.Async,
-            (handle, ids, all, topics, partitions, counts, count, timeoutMs, stable, callback, userData) =>
+        ArgumentNullException nullGroupId = Assert.Throws<ArgumentNullException>(
+            () => admin.ListConsumerGroupOffsets((string)null!, null));
+        Assert.Equal("groupId", nullGroupId.ParamName);
+
+        ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
+            () => admin.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!, null));
+        Assert.Equal("groupSpecs", missing.ParamName);
+
+        AssertRejected(
+            admin,
+            new GroupSpecEntries(new KeyValuePair<string, ListConsumerGroupOffsetsSpec>(null!, new ListConsumerGroupOffsetsSpec())),
+            "The group specs must not contain a null group id.");
+        AssertRejected(
+            admin,
+            new GroupSpecEntries(
+                new KeyValuePair<string, ListConsumerGroupOffsetsSpec>("g1", new ListConsumerGroupOffsetsSpec()),
+                new KeyValuePair<string, ListConsumerGroupOffsetsSpec>("g1", new ListConsumerGroupOffsetsSpec())),
+            "The group specs must not contain the group id 'g1' more than once.");
+        AssertRejected(
+            admin,
+            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["g1"] = null! },
+            "The spec for group id 'g1' must not be null.");
+        AssertRejected(
+            admin,
+            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                captured.TimeoutMs = timeoutMs;
-                captured.RequireStable = stable;
-                captured.GroupCount = count;
-                captured.UserData = userData;
-
-                // ⚠ Decoded HERE, both levels: production unpins every group id, every topic
-                // name and every inner array the moment this returns (ffi §A4), so reading
-                // any of it afterwards would be a use-after-unpin.
-                captured.GroupIds = Decode(ids);
-                captured.AllPartitions = all.ToArray();
-                captured.PartitionCounts = counts.ToArray();
-
-                List<bool> innerNull = new List<bool>(count);
-                List<IReadOnlyList<TopicPartition>> selections =
-                    new List<IReadOnlyList<TopicPartition>>(count);
-                for (int i = 0; i < count; i++)
-                {
-                    innerNull.Add(topics[i] == IntPtr.Zero && partitions[i] == IntPtr.Zero);
-
-                    List<TopicPartition> pairs = new List<TopicPartition>(counts[i]);
-                    for (int j = 0; j < counts[i]; j++)
-                    {
-                        IntPtr topic = Marshal.ReadIntPtr(topics[i], j * IntPtr.Size);
-                        pairs.Add(new TopicPartition(
-                            Utf8Marshal.PtrToString(topic) ?? "<null>",
-                            Marshal.ReadInt32(partitions[i], j * sizeof(int))));
-                    }
-
-                    selections.Add(pairs);
-                }
-
-                captured.InnerPointersNull = innerNull;
-                captured.Selections = selections;
-            }));
-
-        FirePerKeyFailures(
-            AdminCallbacks.ListConsumerGroupOffsets.Invoke, captured.GroupIds, captured.UserData);
-
-        Assert.NotEmpty(captured.GroupIds);
-        Assert.All(
-            captured.GroupIds,
-            groupId => Assert.NotNull(result.PartitionsToOffsetAndMetadata(groupId).Get().Exception));
-        return captured;
+                ["g1"] = new ListConsumerGroupOffsetsSpec { TopicPartitions = new[] { default(TopicPartition) } },
+            },
+            "The spec for group id 'g1' must not select a topic partition with a null topic.");
     }
 
-    /// <summary>
-    /// What crossed the <c>list_consumer_group_offsets_async</c> seam: the flat per-group
-    /// arrays plus the decoded contents of both inner levels, indexed the same way.
-    /// </summary>
-    private sealed class OffsetsCaptured
+    private static void AssertRejected(
+        NativeAdminClient admin, IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs, string message)
     {
-        internal int TimeoutMs { get; set; } = int.MinValue;
+        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(groupSpecs, null));
+        Assert.Equal("groupSpecs", rejected.ParamName);
+        Assert.StartsWith(message, rejected.Message, StringComparison.Ordinal);
+    }
 
-        internal bool RequireStable { get; set; }
-
-        internal int GroupCount { get; set; } = int.MinValue;
-
-        internal IReadOnlyList<string> GroupIds { get; set; } = Array.Empty<string>();
-
-        /// <summary>The discriminant, per group index — the only "all versus none" signal.</summary>
-        internal IReadOnlyList<bool> AllPartitions { get; set; } = Array.Empty<bool>();
-
-        internal IReadOnlyList<int> PartitionCounts { get; set; } = Array.Empty<int>();
-
-        /// <summary>Whether both inner pointers were NULL, per group index.</summary>
-        internal IReadOnlyList<bool> InnerPointersNull { get; set; } = Array.Empty<bool>();
-
-        /// <summary>The decoded (topic, partition) pairs, per group index.</summary>
-        internal IReadOnlyList<IReadOnlyList<TopicPartition>> Selections { get; set; } =
-            Array.Empty<IReadOnlyList<TopicPartition>>();
-
-        internal IntPtr UserData { get; set; }
-
-        /// <summary>
-        /// The index a group id crossed at, so every per-group assertion is made against the
-        /// group it names rather than against an assumed enumeration order.
-        /// </summary>
-        /// <param name="groupId">The requested group id.</param>
-        internal int IndexOf(string groupId)
+    private static (int TimeoutMs, bool RequireStable) ReadBack(ListConsumerGroupOffsetsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewListConsumerGroupOffsetsOptions(options);
+        try
         {
-            int index = GroupIds.ToList().IndexOf(groupId);
-            Assert.True(index >= 0, $"group id '{groupId}' never reached the submit");
-            return index;
+            return (
+                ReadInt32(native, Native.ListConsumerGroupOffsetsOptionsTimeoutMs),
+                ReadFlag(native, Native.ListConsumerGroupOffsetsOptionsRequireStable));
         }
+        finally
+        {
+            NativeAdminClient.FreeListConsumerGroupOffsetsOptions(native);
+        }
+    }
+
+    private static int ReadBack(AlterConsumerGroupOffsetsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewAlterConsumerGroupOffsetsOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.AlterConsumerGroupOffsetsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeAlterConsumerGroupOffsetsOptions(native);
+        }
+    }
+
+    private static int ReadBack(DeleteConsumerGroupOffsetsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDeleteConsumerGroupOffsetsOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.DeleteConsumerGroupOffsetsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDeleteConsumerGroupOffsetsOptions(native);
+        }
+    }
+
+    private static int ReadBack(DeleteConsumerGroupsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDeleteConsumerGroupsOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.DeleteConsumerGroupsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDeleteConsumerGroupsOptions(native);
+        }
+    }
+
+    private static RemoveMembersReadBack ReadBack(RemoveMembersFromConsumerGroupOptions options)
+    {
+        IntPtr native = NativeAdminClient.NewRemoveMembersFromConsumerGroupOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr reason = Native.RemoveMembersOptionsReason(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return new RemoveMembersReadBack(
+                ReadList(native, Native.RemoveMembersOptionsMembers, ReadGroupInstanceId),
+                Utf8Marshal.PtrToString(reason),
+                ReadFlag(native, Native.RemoveMembersOptionsRemoveAll),
+                ReadInt32(native, Native.RemoveMembersOptionsTimeoutMs));
+        }
+        finally
+        {
+            NativeAdminClient.FreeRemoveMembersFromConsumerGroupOptions(native);
+        }
+    }
+
+    private static IReadOnlyList<TopicPartition>? ReadBack(ListConsumerGroupOffsetsSpec spec)
+    {
+        IntPtr native = NativeAdminClient.NewNativeGroupSpec(spec);
+        try
+        {
+            return ReadOptionalList(native, Native.ListConsumerGroupOffsetsSpecTopicPartitions, OffsetMapMarshalShared.CopyKey);
+        }
+        finally
+        {
+            NativeAdminClient.DestroyGroupSpec(native);
+        }
+    }
+
+    private static string ReadGroupInstanceId(IntPtr member)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr id = Native.MemberToRemoveGroupInstanceId(member, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return Utf8Marshal.PtrToString(id)!;
+    }
+
+    /// <summary>The four fields of a C <c>RemoveMembersFromConsumerGroupOptions_t</c>, read back through its getters.</summary>
+    private sealed class RemoveMembersReadBack
+    {
+        internal RemoveMembersReadBack(IReadOnlyList<string> members, string? reason, bool removeAll, int timeoutMs)
+        {
+            Members = members;
+            Reason = reason;
+            RemoveAll = removeAll;
+            TimeoutMs = timeoutMs;
+        }
+
+        internal IReadOnlyList<string> Members { get; }
+
+        internal string? Reason { get; }
+
+        internal bool RemoveAll { get; }
+
+        internal int TimeoutMs { get; }
     }
 
     /// <summary>
@@ -1087,10 +876,6 @@ public sealed class AdminP5SubmitArgumentTests
     /// dictionary cannot — a null key, or the same key twice — so the preconditions guarding
     /// against a hostile implementation of the parameter type are reachable from a test.
     /// </summary>
-    /// <remarks>
-    /// Only <see cref="Count"/> and enumeration are exercised by production; the rest of the
-    /// interface is present because the interface requires it, and says so if called.
-    /// </remarks>
     private sealed class GroupSpecEntries : IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>
     {
         private readonly KeyValuePair<string, ListConsumerGroupOffsetsSpec>[] _entries;

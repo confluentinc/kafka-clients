@@ -19,14 +19,9 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Describes the records to delete from one partition in a call to
-/// <see cref="IAdmin.DeleteRecords"/> — the .NET realization of Java's
+/// <see cref="IAdmin.DeleteRecords"/> — Java's
 /// <c>org.apache.kafka.clients.admin.RecordsToDelete</c>.
 /// </summary>
-/// <remarks>
-/// The value-equality members are part of Java's public shape
-/// (<c>RecordsToDelete.java:51-69</c>) and are mirrored here, including Java's
-/// <c>hashCode()</c> of <c>(int) offset</c>.
-/// </remarks>
 public sealed class RecordsToDelete : IEquatable<RecordsToDelete>
 {
     private readonly long _offset;
@@ -42,8 +37,7 @@ public sealed class RecordsToDelete : IEquatable<RecordsToDelete>
     /// </summary>
     /// <param name="offset">
     /// The offset before which all records will be deleted. Use <c>-1</c> to truncate to
-    /// the high watermark (Java's documented behaviour, carried through the ABI
-    /// unchanged).
+    /// the high watermark.
     /// </param>
     /// <returns>The request entry.</returns>
     public static RecordsToDelete BeforeOffset(long offset) => new RecordsToDelete(offset);
@@ -54,10 +48,8 @@ public sealed class RecordsToDelete : IEquatable<RecordsToDelete>
     /// </summary>
     /// <returns>The offset.</returns>
     /// <remarks>
-    /// A <b>method</b>, not a property, although it is a pure field read: C# forbids a
-    /// property and a method sharing a name, and <see cref="BeforeOffset(long)"/> — the
-    /// only way to construct this type — already owns it. Java has exactly the same pair,
-    /// so mirroring it costs nothing.
+    /// A method, as Java's: C# forbids a property named like the
+    /// <see cref="BeforeOffset(long)"/> factory.
     /// </remarks>
     public long BeforeOffset() => _offset;
 
@@ -71,10 +63,7 @@ public sealed class RecordsToDelete : IEquatable<RecordsToDelete>
     /// <inheritdoc/>
     public override bool Equals(object? obj) => Equals(obj as RecordsToDelete);
 
-    /// <summary>
-    /// Java's <c>hashCode()</c> literally — <c>(int) offset</c>, truncating rather than
-    /// mixing, so equal values agree across the two clients.
-    /// </summary>
+    /// <summary>The offset truncated to <see langword="int"/> — Java's <c>hashCode()</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode() => unchecked((int)_offset);
 

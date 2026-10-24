@@ -13,89 +13,65 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeLogDirs"/> — the .NET realization of Java's
-/// <c>DescribeLogDirsResult</c>: one future <b>per broker</b>, each yielding that
-/// broker's log directories keyed by path (<c>DescribeLogDirsResult.java:41, :50</c>).
+/// The result of <see cref="IAsyncAdmin.DescribeLogDirs"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DescribeLogDirsResult</c>: one future per broker id, each
+/// yielding that broker's log directories keyed by path.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>The key is a bare <see cref="int"/> broker id</b> — the first scalar key in M15;
-/// every earlier one was a string, a base64-parsed <see cref="Uuid"/>, or a composite.
-/// </para>
-/// <para>
-/// ⚠ <b>Two different errors live in this RPC and mean different things.</b> A broker whose
-/// query failed faults <em>its own</em> future (the header: "a per-broker failure is not
-/// a call failure"). A <em>log directory</em> that is offline does <b>not</b> fault
-/// anything — the future succeeds and the offending
-/// <see cref="LogDirDescription.Error"/> is non-null. The two are also owned differently.
-/// The per-broker error is <b>owned</b>: it arrives with that broker's own callback and is
-/// freed once it has been copied into the <see cref="KafkaException"/>. The per-directory
-/// error is <b>borrowed</b> from that broker's log-dir map and is never destroyed on its
-/// own; it is copied out before the map is.
-/// </para>
+/// A broker whose query failed faults only its own future. A log directory that is offline faults
+/// nothing: the broker's future succeeds and that directory's <see cref="LogDirDescription.Error"/>
+/// is non-null.
 /// </remarks>
 /// <seealso cref="DescribeLogDirsResult"/>
 public sealed class AsyncDescribeLogDirsResult
 {
-    private readonly IReadOnlyDictionary<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> _descriptions;
     private readonly IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> _futures;
+    private readonly IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> _nativeDescriptions;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the per-broker futures — Java's package-private
-    /// <c>DescribeLogDirsResult(Map&lt;Integer, KafkaFuture&lt;Map&lt;String, LogDirDescription&gt;&gt;&gt;)</c>
-    /// (<c>:33</c>).
-    /// </summary>
-    internal AsyncDescribeLogDirsResult(
-        IReadOnlyDictionary<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> descriptions)
+
+    private AsyncDescribeLogDirsResult(
+        IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> nativeDescriptions,
+        SafeAdminResultHandle native)
     {
-        _descriptions = descriptions;
-        _futures = AsyncAdminFutures.Wrap(descriptions);
+        Dictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> futures =
+            new Dictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>(nativeDescriptions.Count);
+        foreach (KeyValuePair<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> entry in nativeDescriptions)
+        {
+            futures.Add(entry.Key, new AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>(entry.Value));
+        }
+
+        _futures = futures;
+        _nativeDescriptions = nativeDescriptions;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeLogDirsResult From(
-        KeyedAdminOperation<int, IReadOnlyDictionary<string, LogDirDescription>> operation) =>
-        new AsyncDescribeLogDirsResult(operation.Tasks);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// One future per requested broker, each yielding that broker's log directories
-    /// keyed by path — Java's <c>descriptions()</c> (<c>:41</c>).
+    /// keyed by path — Java's <c>descriptions()</c>.
     /// </summary>
     public IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions =>
         _futures;
 
     /// <summary>
     /// Every broker's log directories in one map, succeeding only if every broker answered
-    /// without error — Java's <c>allDescriptions()</c> (<c>:50</c>).
+    /// without error — Java's <c>allDescriptions()</c>.
     /// </summary>
-    /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
+    /// <returns>A future yielding the whole map, or faulting with the first failure to complete.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>> AllDescriptions() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>(Gather(_descriptions));
+        new AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>(
+            KafkaFutureImpl.GatherAll(_nativeDescriptions, EqualityComparer<int>.Default));
 
-    private static async Task<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>> Gather(
-        IReadOnlyDictionary<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> descriptions)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever
-        // key happens to be enumerated first.
-        await Task.WhenAll(descriptions.Values).ConfigureAwait(false);
-
-        Dictionary<int, IReadOnlyDictionary<string, LogDirDescription>> all =
-            new Dictionary<int, IReadOnlyDictionary<string, LogDirDescription>>(descriptions.Count);
-        foreach (KeyValuePair<int, Task<IReadOnlyDictionary<string, LogDirDescription>>> entry in descriptions)
-        {
-            all.Add(entry.Key, entry.Value.Result);
-        }
-
-        return all;
-    }
+    internal static AsyncDescribeLogDirsResult OfClient(
+        (IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions,
+            SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeLogDirsResult(native.Descriptions, native.Result);
 }

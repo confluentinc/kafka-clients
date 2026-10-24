@@ -15,34 +15,20 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The kind of leader election to conduct — the .NET realization of Java's
-/// <c>org.apache.kafka.common.ElectionType</c>, passed to
-/// <see cref="Admin.IAdmin.ElectLeaders"/>.
+/// The kind of leader election to conduct — Java's <c>org.apache.kafka.common.ElectionType</c>,
+/// passed to <see cref="Admin.IAdmin.ElectLeaders"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Each member's numeric value is Java's <c>ElectionType.value</c> byte</b> —
-/// <c>PREFERRED((byte) 0)</c>, <c>UNCLEAN((byte) 1)</c> (<c>ElectionType.java:27</c>) —
-/// <b>not</b> a C#-assigned ordinal. The C ABI transports the code as a bare
-/// <c>int32_t</c> (<c>kafka_admin_AdminClient_elect_leaders</c>'s <c>election_type</c>:
-/// "Java's <c>ElectionType</c> byte value — <c>0</c> = <c>PREFERRED</c>, <c>1</c> =
-/// <c>UNCLEAN</c>"), so an auto-assigned value would silently request the wrong
-/// election. The codes are asserted member-by-member in the unit tests.
+/// Each member's value is Java's <c>ElectionType.value</c> byte, not an ordinal. The value does
+/// not cross the C ABI: the call passes the matching <c>kafka_common_ElectionType_t</c>
+/// singleton.
 /// </para>
 /// <para>
-/// <b>Namespace.</b> Java's package is <c>org.apache.kafka.common</c> — not
-/// <c>clients.admin</c> — so this lives at the root <c>Confluent.Kafka</c> namespace
-/// (decision D13), beside <see cref="AclOperation"/>, <see cref="Node"/> and
-/// <see cref="TopicCollection"/>.
-/// </para>
-/// <para>
-/// Java's <c>value</c> field and <c>valueOf(byte)</c> factory have no counterpart here: a
-/// C# enum already exposes its underlying value by a cast, and the wire-code mapping the
-/// factory performs is done by the ABI. Java throws <c>IllegalArgumentException</c> from
-/// <c>valueOf</c> for any other byte; the .NET analogue is
-/// <see cref="System.ArgumentOutOfRangeException"/> raised by
-/// <see cref="Admin.IAdmin.ElectLeaders"/> for a value cast into this enum from outside
-/// its two members.
+/// Java's <c>value</c> field and <c>valueOf(byte)</c> factory are not ported: a cast gives the
+/// value. Where Java's <c>valueOf</c> throws <c>IllegalArgumentException</c> for another byte,
+/// <see cref="Admin.IAdmin.ElectLeaders"/> throws <see cref="System.ArgumentOutOfRangeException"/>
+/// for a value cast in from outside the two members.
 /// </para>
 /// </remarks>
 public enum ElectionType

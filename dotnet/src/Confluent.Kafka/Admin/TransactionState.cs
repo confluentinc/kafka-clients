@@ -15,23 +15,17 @@
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The state of a transaction — Java's
-/// <c>org.apache.kafka.clients.admin.TransactionState</c> (<c>:24-32</c>).
+/// The state of a transaction — Java's <c>org.apache.kafka.clients.admin.TransactionState</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>The wire value is Java's <c>toString()</c> display spelling</b> (<c>"PrepareAbort"</c>,
-/// <c>"CompleteCommit"</c>, …, <c>:39-46</c>), <em>not</em> <c>name()</c> — and this enum is a
-/// writer as well as a reader, since <see cref="ListTransactionsOptions.FilteredStates"/>
-/// crosses the boundary. The members below are spelled to match, so a renamed member would
-/// change the wire format silently; the bidirectional table that owns the spelling lives in
-/// <c>Confluent.Kafka.Internal.Interop.TransactionMarshal</c>, which also states why
-/// <c>Enum.Parse</c> is wrong in the read direction.
+/// The wire value is Java's <c>toString()</c> spelling (<c>"PrepareAbort"</c>, …), not
+/// <c>name()</c>, in both directions: <see cref="ListTransactionsOptions.FilteredStates"/> writes
+/// it. So the spelling of each member is part of the wire format.
 /// </para>
 /// <para>
-/// ⚠ The broker-side <c>coordinator.transaction.TransactionState</c> has a ninth constant
-/// <c>DEAD</c> with no client counterpart; it is deliberately absent here, and decodes to
-/// <see cref="Unknown"/> as Java's <c>parse</c> (<c>:48-49</c>) does.
+/// The broker's <c>DEAD</c> state has no client counterpart: it reads as
+/// <see cref="Unknown"/>, as Java's <c>parse</c> does.
 /// </para>
 /// <para>
 /// Members are in Java's declaration order, so <c>default(TransactionState)</c> is
@@ -41,30 +35,30 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public enum TransactionState
 {
-    /// <summary>Java's <c>ONGOING</c> (<c>:25</c>); wire spelling <c>"Ongoing"</c>.</summary>
+    /// <summary>Java's <c>ONGOING</c>; wire spelling <c>"Ongoing"</c>.</summary>
     Ongoing,
 
-    /// <summary>Java's <c>PREPARE_ABORT</c> (<c>:26</c>); wire spelling <c>"PrepareAbort"</c>.</summary>
+    /// <summary>Java's <c>PREPARE_ABORT</c>; wire spelling <c>"PrepareAbort"</c>.</summary>
     PrepareAbort,
 
-    /// <summary>Java's <c>PREPARE_COMMIT</c> (<c>:27</c>); wire spelling <c>"PrepareCommit"</c>.</summary>
+    /// <summary>Java's <c>PREPARE_COMMIT</c>; wire spelling <c>"PrepareCommit"</c>.</summary>
     PrepareCommit,
 
-    /// <summary>Java's <c>COMPLETE_ABORT</c> (<c>:28</c>); wire spelling <c>"CompleteAbort"</c>.</summary>
+    /// <summary>Java's <c>COMPLETE_ABORT</c>; wire spelling <c>"CompleteAbort"</c>.</summary>
     CompleteAbort,
 
-    /// <summary>Java's <c>COMPLETE_COMMIT</c> (<c>:29</c>); wire spelling <c>"CompleteCommit"</c>.</summary>
+    /// <summary>Java's <c>COMPLETE_COMMIT</c>; wire spelling <c>"CompleteCommit"</c>.</summary>
     CompleteCommit,
 
-    /// <summary>Java's <c>EMPTY</c> (<c>:30</c>); wire spelling <c>"Empty"</c>.</summary>
+    /// <summary>Java's <c>EMPTY</c>; wire spelling <c>"Empty"</c>.</summary>
     Empty,
 
-    /// <summary>Java's <c>PREPARE_EPOCH_FENCE</c> (<c>:31</c>); wire spelling <c>"PrepareEpochFence"</c>.</summary>
+    /// <summary>Java's <c>PREPARE_EPOCH_FENCE</c>; wire spelling <c>"PrepareEpochFence"</c>.</summary>
     PrepareEpochFence,
 
     /// <summary>
-    /// Java's <c>UNKNOWN</c> (<c>:32</c>); wire spelling <c>"Unknown"</c>, and the value
-    /// <c>parse</c> yields for any name it does not recognise.
+    /// Java's <c>UNKNOWN</c>; wire spelling <c>"Unknown"</c>, and the value <c>parse</c> yields
+    /// for any name it does not recognise.
     /// </summary>
     Unknown,
 }

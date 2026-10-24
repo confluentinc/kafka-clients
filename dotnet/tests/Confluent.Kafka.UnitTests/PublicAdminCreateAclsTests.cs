@@ -23,41 +23,19 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>createAcls</c> end to end against <see cref="MockAdminClient"/>, no broker (M15/P6).
+/// <c>CreateAcls</c> end to end against the mocks, which fail every binding with the mock's own answer, as Java's mock
+/// does: per-binding results keyed by <see cref="AclBinding"/> value, <c>All()</c>, the preconditions and the options.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>There is no happy path here, and that is Java's behaviour rather than a gap.</b>
-/// Java's <c>MockAdminClient.createAcls</c> throws
-/// <c>UnsupportedOperationException("Not implemented yet")</c>
-/// (<c>MockAdminClient.java:806-808</c>) and the Rust mock mirrors it as one exceptional
-/// future <em>per binding</em> (<c>admin-client.md</c> §9). That still exercises the whole
-/// receive path: the walk reads a real <c>kafka_admin_CreateAclsResult_t</c>, reassembles
-/// each key from a real borrowed <c>kafka_common_acl_AclBinding_t</c>, and reads each per-key
-/// error through <see cref="KafkaException.FromBorrowedHandle"/> — so the key reader and
-/// the borrowed-error rule are covered by real native memory, not by a stand-in.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>Every lookup below goes through <see cref="AclBinding"/>'s value equality</b>, and
-/// several deliberately use a <em>freshly constructed</em> binding rather than the instance
-/// that was submitted. Without value equality every such lookup misses silently while an
-/// enumeration-only test stays green — the reason PLAN D39 made it a requirement.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminCreateAclsTests
 {
     private const string NotImplemented = "Not implemented yet";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// ⚠ <b>The value-equality test (T-N6).</b> A binding built fresh, equal by value to the
-    /// one submitted, finds its own awaitable in <see cref="CreateAclsResult.Values"/>.
-    /// </summary>
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("keyed-by-value") });
@@ -71,15 +49,10 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// Each binding gets <b>its own</b> awaitable, and the key the result hands back round
-    /// trips through the ABI unchanged — the seven flat accessors reassembled into the nested
-    /// Java shape (PLAN D36).
-    /// </summary>
     [Fact]
     public async Task EachBinding_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding alpha = new AclBinding(
@@ -95,8 +68,6 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Equal(2, result.Values.Count);
         Assert.NotSame(result.Values[alpha].Get(), result.Values[beta].Get());
 
-        // Every column survived the round trip: a swapped pair in the projector or the reader
-        // would produce a key that no longer equals the one submitted.
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
@@ -106,14 +77,10 @@ public sealed class PublicAdminCreateAclsTests
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
-    /// <summary>
-    /// One binding can be awaited without awaiting the others — the per-key granularity Java
-    /// publishes, and the discriminator against a single shared awaitable.
-    /// </summary>
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding first = Binding("solo-first");
@@ -127,13 +94,10 @@ public sealed class PublicAdminCreateAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// <c>All()</c> faults when any binding failed — Java's <c>KafkaFuture.allOf</c>.
-    /// </summary>
     [Fact]
     public async Task All_FaultsWhenAnyBindingFails()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
@@ -143,14 +107,10 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// <c>All()</c> over an empty request completes — there is nothing to wait for, and Java's
-    /// <c>allOf</c> of nothing is a completed future.
-    /// </summary>
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(Array.Empty<AclBinding>());
@@ -159,13 +119,10 @@ public sealed class PublicAdminCreateAclsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// A repeated binding collapses to one entry — Java keys its result on a <c>Map</c>.
-    /// </summary>
     [Fact]
     public async Task DuplicateBindings_CollapseToOneEntry()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
@@ -174,14 +131,10 @@ public sealed class PublicAdminCreateAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// A non-ASCII resource name survives out and back — the UTF-8 round trip through both
-    /// the row projector and the binding reader (ffi §A3/§B3).
-    /// </summary>
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding binding = Binding("tópico-café-日本");
@@ -194,14 +147,10 @@ public sealed class PublicAdminCreateAclsTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// Preconditions are rejected before any native call (ffi §B5): a null collection and a null
-    /// element. A negative timeout is not one (M15/P13.5 X2): it is sent as 0.
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
@@ -219,23 +168,15 @@ public sealed class PublicAdminCreateAclsTests
                 new[] { Binding("ok") }, new CreateAclsOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>
-    /// Using the client after it is closed throws <see cref="ObjectDisposedException"/>
-    /// rather than reaching a destroyed handle.
-    /// </summary>
     [Fact]
     public void AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.CreateAcls(new[] { Binding("gone") }));
     }
 
-    /// <summary>
-    /// <see cref="CreateAclsOptions"/> ships Java's defaults: an unset timeout, and nothing
-    /// else — Java's type adds no field to <c>AbstractOptions</c>.
-    /// </summary>
     [Fact]
     public void Options_DefaultToJavasDefaults() => Assert.Null(new CreateAclsOptions().TimeoutMs);
 

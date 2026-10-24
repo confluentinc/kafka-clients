@@ -13,54 +13,46 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeAcls"/> — the .NET realization of Java's
-/// <c>DescribeAclsResult</c>: <b>one</b> future over the whole matching collection
-/// (<c>DescribeAclsResult.java:30</c>).
+/// The result of <see cref="IAsyncAdmin.DescribeAcls"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DescribeAclsResult</c>: one future over the matching ACLs.
 /// </summary>
 /// <remarks>
-/// ⚠ <b>There is no <c>All()</c>.</b> Java publishes only <c>values()</c> (<c>:39</c>), and
-/// <c>kafka_admin_DescribeAclsResult_t</c> declares no <c>get_error</c> of any kind — so
-/// there is no per-key outcome to aggregate and any failure faults this single future.
+/// Java publishes only <c>values()</c>, so there is no <c>All()</c>; any failure faults this one
+/// future.
 /// </remarks>
 /// <seealso cref="DescribeAclsResult"/>
 public sealed class AsyncDescribeAclsResult
 {
-    private readonly Task<IReadOnlyCollection<AclBinding>> _future;
+    private readonly KafkaFutureImpl<IReadOnlyCollection<AclBinding>> _values;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the single future — Java's package-private
-    /// <c>DescribeAclsResult(KafkaFuture&lt;Collection&lt;AclBinding&gt;&gt;)</c>
-    /// (<c>:34</c>).
-    /// </summary>
-    internal AsyncDescribeAclsResult(Task<IReadOnlyCollection<AclBinding>> future)
+    private AsyncDescribeAclsResult(KafkaFutureImpl<IReadOnlyCollection<AclBinding>> values, SafeAdminResultHandle native)
     {
-        _future = future;
+        _values = values;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeAclsResult From(SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation) =>
-        new AsyncDescribeAclsResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// The ACL bindings matching the filter, in the order the broker reported them —
-    /// Java's <c>values()</c> (<c>:39</c>).
+    /// Java's <c>values()</c>.
     /// </summary>
     /// <returns>
     /// A future yielding the bindings, or faulting with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
-    /// <remarks>
-    /// It wraps the underlying task itself, so every call returns an equal future over the <b>same</b> task —
-    /// no second task whose fault could go unobserved.
-    /// </remarks>
-    public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> Values() => new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(_future);
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
+    public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> Values() =>
+        new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(_values);
+
+    internal static AsyncDescribeAclsResult OfClient(
+        (KafkaFutureImpl<IReadOnlyCollection<AclBinding>> Values, SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeAclsResult(native.Values, native.Result);
 }

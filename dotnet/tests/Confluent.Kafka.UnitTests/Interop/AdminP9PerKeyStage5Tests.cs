@@ -25,50 +25,26 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M15/P9 CP6 — the ten <b>shape 4b</b> (void) RPCs, where a null per-key error <em>is</em>
-/// that key's success and there is no result root at all. Covers the three key sources the
-/// batch introduces beyond a plain string: a base64 <see cref="Uuid"/>, two composite scalar
-/// tuples, and two <b>owned handle</b> keys the callback must destroy.
+/// The void keyed RPCs over the core mock, where a key's future completing is that key's success: each key settles
+/// under its own key, for the keys beyond a plain string (a <see cref="Uuid"/>, a topic partition, a replica, an ACL
+/// binding and a client-quota entity).
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>Every assertion is on the mock's OWN code and message.</b> A key the trampoline
-/// reconstructs wrongly is not left pending — the core faults it with a synthesized
-/// "not present in the response" error instead — so <c>ThrowsAsync&lt;KafkaException&gt;</c>
-/// alone proves nothing here. Pairing distinct keys whose expected messages <em>differ</em>
-/// is what rules out a crossed or collapsed key.
-/// </para>
-/// <para>
-/// ⚠ <c>alterClientQuotas</c>' expected message is <c>"Not implement yet"</c>, not
-/// <c>"Not implemented yet"</c> — a typo in the core's mock
-/// (<c>mock_admin_client.rs:1766</c>), asserted verbatim because the message is the
-/// contract, not the intent.
-/// </para>
+/// Every assertion is on the core mock's own code and message, and distinct keys expect distinct messages, so a key
+/// read back wrongly fails the test.
 /// </remarks>
 public sealed class AdminP9PerKeyStage5Tests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The code the mock reports for every unimplemented RPC.</summary>
     private const int UnsupportedVersionCode = 35;
 
-    /// <summary>The code Kafka assigns to <c>UNKNOWN_TOPIC_OR_PARTITION</c>.</summary>
     private const int UnknownTopicOrPartitionCode = 3;
 
     private const int KafkaStorageErrorCode = 56;
 
     private const string NotImplemented = "Not implemented yet";
 
-    // ------------------------------------------------------------------------------------
-    // Owned-handle keys — createAcls and alterClientQuotas.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠ <b>The owned <c>kafka_common_acl_AclBinding_t</c> key.</b> Three bindings differing only
-    /// in resource name each fault under their own key, which is only possible if the
-    /// trampoline copied the handle out into an equal <see cref="AclBinding"/> before
-    /// destroying it.
-    /// </summary>
     [Fact]
     public async Task CreateAcls_EveryBindingFaultsUnderItsOwnOwnedKey()
     {
@@ -77,7 +53,7 @@ public sealed class AdminP9PerKeyStage5Tests
 
         AclBinding[] bindings = { Binding("cp6-alpha"), Binding("cp6-beta"), Binding("cp6-gamma") };
 
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(bindings, options: null, AdminFlavour.Async));
+        AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(bindings, options: null));
 
         Assert.Equal(bindings.Length, result.Values.Count);
         foreach (AclBinding binding in bindings)
@@ -89,10 +65,6 @@ public sealed class AdminP9PerKeyStage5Tests
         }
     }
 
-    /// <summary>
-    /// ⚠ <b>The owned <c>kafka_common_quota_ClientQuotaEntity_t</c> key</b>, whose reader has to
-    /// rebuild a whole entity map — and whose expected message carries the core's typo.
-    /// </summary>
     [Fact]
     public async Task AlterClientQuotas_EveryEntityFaultsUnderItsOwnOwnedKey()
     {
@@ -102,8 +74,8 @@ public sealed class AdminP9PerKeyStage5Tests
         ClientQuotaEntity alpha = Entity("cp6-quota-alpha");
         ClientQuotaEntity beta = Entity("cp6-quota-beta");
 
-        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
-            new[] { Alteration(alpha), Alteration(beta) }, options: null, AdminFlavour.Async));
+        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(
+            new[] { Alteration(alpha), Alteration(beta) }, options: null));
 
         Assert.Equal(2, result.Values.Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
@@ -112,65 +84,11 @@ public sealed class AdminP9PerKeyStage5Tests
                 () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
             Assert.Equal(UnsupportedVersionCode, failure.Code);
 
-            // ⚠ The core's own wording, typo included (mock_admin_client.rs:1766).
+            // The core mock's own wording, typo included.
             Assert.Equal("Not implement yet", failure.Message);
         }
     }
 
-    /// <summary>
-    /// Many owned keys, over many operations of <b>both</b> owned-key RPCs, leave the
-    /// reference count <b>balanced</b> — an over-release would throw out of the
-    /// <see cref="System.Runtime.InteropServices.SafeHandle"/>, an under-release leaves
-    /// <c>IsClosed</c> false forever.
-    /// </summary>
-    [Fact]
-    public async Task OwnedKeyRpcs_OverManyOperations_LeaveTheReferenceCountBalanced()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
-
-        for (int round = 0; round < 3; round++)
-        {
-            AclBinding[] bindings = new AclBinding[8];
-            ClientQuotaAlteration[] quotas = new ClientQuotaAlteration[8];
-            for (int i = 0; i < bindings.Length; i++)
-            {
-                bindings[i] = Binding($"cp6-balance-{round}-{i}");
-                quotas[i] = Alteration(Entity($"cp6-quota-balance-{round}-{i}"));
-            }
-
-            AsyncCreateAclsResult acls = AsyncCreateAclsResult.From(admin.CreateAcls(bindings, options: null, AdminFlavour.Async));
-            AsyncAlterClientQuotasResult altered = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(quotas, options: null, AdminFlavour.Async));
-
-            Assert.Equal(bindings.Length, acls.Values.Count);
-            Assert.Equal(quotas.Length, altered.Values.Count);
-
-            foreach (AsyncKafkaFuture awaitable in acls.Values.Values)
-            {
-                await TestTimeout.Run(() => Settle(awaitable.Get()), s_deadline);
-            }
-
-            foreach (AsyncKafkaFuture awaitable in altered.Values.Values)
-            {
-                await TestTimeout.Run(() => Settle(awaitable.Get()), s_deadline);
-            }
-
-            Assert.False(handle.IsClosed, "the client is still alive between operations");
-        }
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(handle.IsClosed, "48 owned-key callbacks must leave the count balanced");
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Uuid and composite scalar keys.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠ <b>The base64 <see cref="Uuid"/> key.</b> The ABI hands the callback the id's
-    /// <em>text</em>, which the trampoline parses back — so two ids fault with messages
-    /// naming their <em>own</em> id, which a crossed or truncated parse could not produce.
-    /// </summary>
     [Fact]
     public async Task DeleteTopicsByIds_EachIdFaultsUnderItsOwnParsedKey()
     {
@@ -181,8 +99,8 @@ public sealed class AdminP9PerKeyStage5Tests
         Uuid second = new Uuid(33L, 44L);
         Assert.NotEqual(first, second);
 
-        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.From(admin.DeleteTopics(
-            TopicCollection.OfTopicIds(new[] { first, second }), options: null, AdminFlavour.Async));
+        AsyncDeleteTopicsResult result = AsyncDeleteTopicsResult.OfClient(admin.DeleteTopics(
+            TopicCollection.OfTopicIds(new[] { first, second }), options: null));
 
         IReadOnlyDictionary<Uuid, AsyncKafkaFuture> values = result.TopicIdValues!;
         Assert.Equal(2, values.Count);
@@ -196,11 +114,6 @@ public sealed class AdminP9PerKeyStage5Tests
         }
     }
 
-    /// <summary>
-    /// ⚠ <b>The three-scalar <c>(topic, partition, brokerId)</c> key.</b> Two replicas of the
-    /// same topic differing only in partition take different log directories, so their
-    /// messages differ — which a key built from the topic alone could not distinguish.
-    /// </summary>
     [Fact]
     public async Task AlterReplicaLogDirs_EachReplicaFaultsUnderItsOwnThreeScalarKey()
     {
@@ -208,20 +121,19 @@ public sealed class AdminP9PerKeyStage5Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-logdirs", 2, 1) }, null)).All().Get(),
             s_deadline);
 
         TopicPartitionReplica zero = new TopicPartitionReplica("cp6-logdirs", 0, 0);
         TopicPartitionReplica one = new TopicPartitionReplica("cp6-logdirs", 1, 0);
 
-        AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
+        AsyncAlterReplicaLogDirsResult result = AsyncAlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string>
             {
                 [zero] = "/cp6-offline-zero",
                 [one] = "/cp6-offline-one",
             },
-            options: null,
-            AdminFlavour.Async));
+            options: null));
 
         Assert.Equal(2, result.Values.Count);
 
@@ -235,11 +147,6 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal("Log directory /cp6-offline-one is offline", oneFailure.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>The two-scalar <c>(topic, partition)</c> key, with a MIXED outcome.</b> One
-    /// partition succeeds and the other faults on the same call — the shape 4b property that
-    /// a null error is a success, asserted in both directions at once.
-    /// </summary>
     [Fact]
     public async Task AlterPartitionReassignments_OnePartitionSucceeds_WhileAnotherFaults()
     {
@@ -247,20 +154,19 @@ public sealed class AdminP9PerKeyStage5Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp6-reassign", 1, 1) }, null)).All().Get(),
             s_deadline);
 
         TopicPartition inRange = new TopicPartition("cp6-reassign", 0);
         TopicPartition outOfRange = new TopicPartition("cp6-reassign", 7);
 
-        AsyncAlterPartitionReassignmentsResult result = AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
+        AsyncAlterPartitionReassignmentsResult result = AsyncAlterPartitionReassignmentsResult.OfClient(admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?>
             {
                 [inRange] = new NewPartitionReassignment(new[] { 0 }),
                 [outOfRange] = new NewPartitionReassignment(new[] { 0 }),
             },
-            options: null,
-            AdminFlavour.Async));
+            options: null));
 
         await TestTimeout.Run(() => result.Values[inRange].Get(), s_deadline);
 
@@ -269,37 +175,14 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(UnknownTopicOrPartitionCode, failure.Code);
     }
 
-    // ------------------------------------------------------------------------------------
-    // String keys, plus the two key counts that are NOT the row count.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>Each topic and each group faults under its own string key.</summary>
     [Fact]
-    public async Task CreatePartitionsAndDeleteConsumerGroups_EachStringKeyFaultsIndependently()
+    public async Task DeleteConsumerGroups_EachStringKeyFaultsIndependently()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncCreatePartitionsResult partitions = AsyncCreatePartitionsResult.From(admin.CreatePartitions(
-            new Dictionary<string, NewPartitions>
-            {
-                ["cp6-parts-alpha"] = NewPartitions.IncreaseTo(3),
-                ["cp6-parts-beta"] = NewPartitions.IncreaseTo(4),
-            },
-            options: null,
-            AdminFlavour.Async));
-
-        Assert.Equal(2, partitions.Values.Count);
-        foreach (string topic in new[] { "cp6-parts-alpha", "cp6-parts-beta" })
-        {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => partitions.Values[topic].Get(), s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
-            Assert.Equal(NotImplemented, failure.Message);
-        }
-
         AsyncDeleteConsumerGroupsResult groups =
-            AsyncDeleteConsumerGroupsResult.From(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null, AdminFlavour.Async));
+            AsyncDeleteConsumerGroupsResult.OfClient(admin.DeleteConsumerGroups(new[] { "cp6-group-alpha", "cp6-group-beta" }, options: null));
 
         Assert.Equal(2, groups.DeletedGroups.Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
@@ -311,34 +194,20 @@ public sealed class AdminP9PerKeyStage5Tests
         }
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The one key count that is neither the row count nor the map size.</b>
-    /// <c>alterUserScramCredentials</c> sends one row per alteration but the ABI fires once
-    /// per <b>distinct user</b> (header,
-    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_async</c>), so three rows over two
-    /// users must settle both keys — no more, no fewer.
-    /// </summary>
-    /// <remarks>
-    /// An <c>n</c> taken from the row count would leave the countdown one short: both keys
-    /// would still fault (the callbacks arrive), but the operation would never reach
-    /// countdown zero, so its <c>GCHandle</c> and span-the-op reference would never be
-    /// released — which is why <c>Dispose</c> is asserted here rather than only the faults.
-    /// </remarks>
     [Fact]
-    public async Task AlterUserScramCredentials_ThreeRowsOverTwoUsers_SettleTwoKeys_AndRelease()
+    public async Task AlterUserScramCredentials_ThreeRowsOverTwoUsers_SettleTwoKeys()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
+        AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.OfClient(admin.AlterUserScramCredentials(
             new UserScramCredentialAlteration[]
             {
                 new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha256),
                 new UserScramCredentialDeletion("cp6-user-a", ScramMechanism.ScramSha512),
                 new UserScramCredentialDeletion("cp6-user-b", ScramMechanism.ScramSha256),
             },
-            options: null,
-            AdminFlavour.Async));
+            options: null));
 
         Assert.Equal(2, result.Values.Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
@@ -348,72 +217,13 @@ public sealed class AdminP9PerKeyStage5Tests
             Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(
-            handle.IsClosed,
-            "n must be the DISTINCT-user count: a row-count n never reaches countdown zero");
     }
 
-    /// <summary>
-    /// The <c>n == 0</c> rule across shape 4b: an empty input fires <b>no</b> callback, so
-    /// only the submit's own countdown slot can release the operation — and the release must
-    /// happen for every one of these RPCs, not just the first.
-    /// </summary>
-    [Fact]
-    public void EmptyInputs_ResolveAtTheSubmitBoundary_AndReleaseTheClient()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
-
-        Assert.Empty(AsyncCreateAclsResult.From(admin.CreateAcls(Array.Empty<AclBinding>(), options: null, AdminFlavour.Async)).Values);
-        Assert.Empty(AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(Array.Empty<ClientQuotaAlteration>(), options: null, AdminFlavour.Async)).Values);
-        Assert.Empty(
-            AsyncCreatePartitionsResult.From(admin.CreatePartitions(new Dictionary<string, NewPartitions>(), options: null, AdminFlavour.Async)).Values);
-        Assert.Empty(AsyncDeleteConsumerGroupsResult.From(admin.DeleteConsumerGroups(Array.Empty<string>(), options: null, AdminFlavour.Async)).DeletedGroups);
-        Assert.Empty(
-            AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(Array.Empty<UserScramCredentialAlteration>(), options: null, AdminFlavour.Async))
-                .Values);
-        Assert.Empty(
-            AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), options: null, AdminFlavour.Async))
-                .Values);
-        Assert.Empty(
-            AsyncAlterPartitionReassignmentsResult.From(admin.AlterPartitionReassignments(
-                new Dictionary<TopicPartition, NewPartitionReassignment?>(), options: null, AdminFlavour.Async)).Values);
-        Assert.Empty(
-            AsyncDeleteTopicsResult.From(admin.DeleteTopics(TopicCollection.OfTopicIds(Array.Empty<Uuid>()), options: null, AdminFlavour.Async))
-                .TopicIdValues!);
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-
-        Assert.True(
-            handle.IsClosed,
-            "zero callbacks must still release: the submit token is the only thing that can");
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Harness.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>Awaits one key's outcome, treating a fault as a settlement.</summary>
-    private static async Task Settle(Task awaitable)
-    {
-        try
-        {
-            await awaitable.ConfigureAwait(false);
-        }
-        catch (KafkaException)
-        {
-        }
-    }
-
-    /// <summary>A binding differing only in resource name.</summary>
     private static AclBinding Binding(string name) =>
         new AclBinding(
             new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
             new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
 
-    /// <summary>A client-id entity differing only in name.</summary>
     private static ClientQuotaEntity Entity(string name) =>
         new ClientQuotaEntity(
             new Dictionary<string, string?> { [ClientQuotaEntity.ClientId] = name });

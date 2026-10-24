@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,22 +22,26 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.DescribeTopicsOptions</c>.
 /// </summary>
 /// <remarks>
-/// A plain settable POCO rather than Java's fluent builder, and every default matches
-/// Java's — the same shape and the same reasoning as
-/// <see cref="CreateTopicsOptions"/>. The ABI has no options handle, so this is
-/// destructured at the P/Invoke site.
+/// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
 /// </remarks>
 public sealed class DescribeTopicsOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it
-    /// unset so the client's <c>default.api.timeout.ms</c> applies — Java's
-    /// <c>AbstractOptions.timeoutMs()</c>, an <c>Integer</c> that is likewise nullable.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+
+    private bool _includeAuthorizedOperations;
+
+    private int _partitionSizeLimitPerResponse = 2000;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Ask the broker to report each topic's authorized operations — Java's
@@ -43,38 +49,38 @@ public sealed class DescribeTopicsOptions
     /// Java's does.
     /// </summary>
     /// <remarks>
-    /// While this is <see langword="false"/> the broker reports nothing, which is exactly
-    /// the case <see cref="TopicDescription.AuthorizedOperations"/> renders as
-    /// <see langword="null"/> rather than as an empty collection.
+    /// While this is <see langword="false"/>, <see cref="TopicDescription.AuthorizedOperations"/>
+    /// is <see langword="null"/>, not an empty collection.
     /// </remarks>
-    public bool IncludeAuthorizedOperations { get; set; }
+    public bool IncludeAuthorizedOperations
+    {
+        get => _includeAuthorizedOperations;
+        set
+        {
+            _includeAuthorizedOperations = value;
+            Setters.Ran(nameof(IncludeAuthorizedOperations));
+        }
+    }
 
     /// <summary>
     /// The maximum number of partitions the broker may return in a single response —
-    /// Java's <c>partitionSizeLimitPerResponse()</c>. Defaults to <b>2000</b>, Java's own
-    /// default (<c>DescribeTopicsOptions.java:28</c>), and is an <c>int</c> rather than a
-    /// nullable one because Java's is too.
+    /// Java's <c>partitionSizeLimitPerResponse()</c>. Defaults to 2000, as Java's does.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Java notes the option is effective only for a by-<em>name</em> request, and is
-    /// capped by the broker's <c>max.request.partition.size.limit</c>. Java sends it as the
-    /// DescribeTopicPartitions request's <c>ResponsePartitionLimit</c>
-    /// (<c>KafkaAdminClient.java:2239</c>).
-    /// </para>
-    /// <para>
-    /// The core does the same: a by-name describe sends the paginated
-    /// DescribeTopicPartitions request with this value as its <c>ResponsePartitionLimit</c>,
-    /// and falls back to Metadata, where the value is not used, on a broker that does not
-    /// support it. A by-id describe always goes through Metadata, as in Java.
-    /// </para>
-    /// <para>
-    /// Must not be negative — <b>stricter than Java</b>, which accepts any <c>int</c>.
-    /// The ABI maps a negative back to Java's 2000 default (the private helper
-    /// <c>describe_topics_options</c> in <c>rust/src/ffi/admin.rs</c>, whose doc the generated
-    /// header does not carry), so a negative would be silently reinterpreted; it is rejected
-    /// with <see cref="System.ArgumentOutOfRangeException"/> before any native call (ffi §B5).
-    /// </para>
+    /// Only a by-name describe uses it, as the DescribeTopicPartitions request's
+    /// <c>ResponsePartitionLimit</c>, capped by the broker's
+    /// <c>max.request.partition.size.limit</c>. A by-id describe, and a by-name one on a
+    /// broker without DescribeTopicPartitions, go through Metadata, which does not use it.
     /// </remarks>
-    public int PartitionSizeLimitPerResponse { get; set; } = 2000;
+    public int PartitionSizeLimitPerResponse
+    {
+        get => _partitionSizeLimitPerResponse;
+        set
+        {
+            _partitionSizeLimitPerResponse = value;
+            Setters.Ran(nameof(PartitionSizeLimitPerResponse));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

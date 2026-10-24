@@ -13,63 +13,37 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.CreateAcls"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.CreateAclsResult</c>: one future <b>per ACL
-/// binding</b>, handed back the moment the request is submitted.
+/// The result of <see cref="IAsyncAdmin.CreateAcls"/> — Java's
+/// <c>org.apache.kafka.clients.admin.CreateAclsResult</c>: one future per ACL binding.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Java stores <c>Map&lt;AclBinding, KafkaFuture&lt;Void&gt;&gt; futures</c>
-/// (<c>CreateAclsResult.java:30</c>), so awaiting one of these tells you whether that
-/// binding was created and hands back nothing; a binding that fails faults only
-/// <em>its own</em> <see cref="AsyncKafkaFuture"/>.
-/// </para>
-/// <para>
-/// ⚠ The dictionary is keyed by <see cref="AclBinding"/> itself, so a lookup works with any
-/// value-equal binding — <c>Values[new AclBinding(pattern, entry)]</c> hits the entry you
-/// requested.
-/// </para>
+/// A binding that fails faults only its own future. The dictionary is keyed by
+/// <see cref="AclBinding"/> value equality, so any value-equal binding finds its entry.
 /// </remarks>
 /// <seealso cref="CreateAclsResult"/>
 public sealed class AsyncCreateAclsResult
 {
     private readonly IReadOnlyDictionary<AclBinding, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal success
-    /// token (result shape 2 — the ABI has no <c>get_value</c> here, so a null per-key error
-    /// <em>is</em> the success value) and must not reach the public surface.
-    /// </summary>
-    /// <remarks>
-    /// Each entry wraps the <b>same</b> task as the bridge's — no second task whose fault could
-    /// go unobserved. It reuses the bridge's own comparer so the view and the sources cannot
-    /// disagree about key identity.
-    /// </remarks>
-    internal AsyncCreateAclsResult(
-        IReadOnlyDictionary<AclBinding, Task<bool>> values, IEqualityComparer<AclBinding> comparer)
+    private AsyncCreateAclsResult(
+        IReadOnlyDictionary<AclBinding, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        Dictionary<AclBinding, AsyncKafkaFuture> erased = new Dictionary<AclBinding, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<AclBinding, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncCreateAclsResult From(VoidKeyedAdminOperation<AclBinding> operation) =>
-        new AsyncCreateAclsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// One future per requested binding, keyed by the binding — Java's <c>values()</c>.
@@ -77,9 +51,24 @@ public sealed class AsyncCreateAclsResult
     public IReadOnlyDictionary<AclBinding, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> binding has been created, and faults with the first
-    /// failure if any binding failed — Java's <c>all()</c> (<c>KafkaFuture.allOf</c>).
+    /// Completes when every binding has been created, and faults with the first failure to
+    /// complete if any binding failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() => new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+
+    internal static AsyncCreateAclsResult OfClient(
+        (IReadOnlyDictionary<AclBinding, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<AclBinding, AsyncKafkaFuture> values =
+            new Dictionary<AclBinding, AsyncKafkaFuture>(native.Values.Count);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<AclBinding, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncCreateAclsResult(values, nativeFutures, native.Result);
+    }
 }

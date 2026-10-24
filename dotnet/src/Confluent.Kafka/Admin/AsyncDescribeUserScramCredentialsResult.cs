@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -23,80 +22,57 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeUserScramCredentials"/> — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult</c>: three accessors
-/// derived from one underlying response (<c>:37</c>), each treating a per-user failure
-/// differently.
+/// <c>org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult</c>: three accessors over one response,
+/// each treating a per-user failure differently.
 /// </summary>
+/// <remarks>
+/// Each call of an accessor returns a new future, as Java's do.
+/// </remarks>
 /// <seealso cref="DescribeUserScramCredentialsResult"/>
 public sealed class AsyncDescribeUserScramCredentialsResult
 {
-    private readonly Task<DescribeUserScramCredentialsViews> _views;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncDescribeUserScramCredentialsResult(Task<DescribeUserScramCredentialsViews> views)
+    private AsyncDescribeUserScramCredentialsResult(SafeAdminResultHandle native)
     {
-        _views = views;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeUserScramCredentialsResult From(
-        SingleAdminOperation<DescribeUserScramCredentialsViews> operation) =>
-        new AsyncDescribeUserScramCredentialsResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// Every described user, keyed by name — Java's <c>all()</c> (<c>:54</c>). Faults with the
-    /// <b>first</b> per-user failure if any user could not be described (<c>:68-69</c>).
+    /// Every described user, keyed by name — Java's <c>all()</c>. Faults with the <b>first</b> per-user failure
+    /// if any user could not be described; a user that was not found is in the map with no credentials.
     /// </summary>
     /// <returns>A future over the whole map.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>>(AllCore());
-
-    private async Task<IReadOnlyDictionary<string, UserScramCredentialsDescription>> AllCore()
-    {
-        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
-        return views.AllError is null ? views.All : throw views.AllError;
-    }
+        new AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>>(
+            NativeAdminClient.DescribeUserScramCredentialsAll(_native));
 
     /// <summary>
-    /// The users the response carried — Java's <c>users()</c> (<c>:92</c>).
+    /// The users the response carried — Java's <c>users()</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ Deliberately does <b>not</b> fault on a per-user failure: Java's javadoc says the list
-    /// "will include users that have a credential but that could not be described"
-    /// (<c>:89-90</c>). Only a failure of the call itself faults it.
+    /// A per-user failure does not fault it: as Java's javadoc says, the list includes users that
+    /// have a credential but could not be described. A user that was not found is left out.
     /// </remarks>
     /// <returns>A future over the user names.</returns>
     public AsyncKafkaFuture<IReadOnlyList<string>> Users() =>
-        new AsyncKafkaFuture<IReadOnlyList<string>>(UsersCore());
-
-    private async Task<IReadOnlyList<string>> UsersCore()
-    {
-        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
-        return views.Users;
-    }
+        new AsyncKafkaFuture<IReadOnlyList<string>>(NativeAdminClient.DescribeUserScramCredentialsUsers(_native));
 
     /// <summary>
-    /// One user's credentials — Java's <c>description(String)</c> (<c>:114</c>). Faults when
-    /// the response carried no such user (<c>:124-125</c>) or when that user failed
-    /// (<c>:128-131</c>).
+    /// One user's credentials — Java's <c>description(String)</c>. Faults with <c>RESOURCE_NOT_FOUND</c> when
+    /// the user was not part of the request or has no credentials, or with the user's own failure.
     /// </summary>
     /// <param name="userName">The user to look up.</param>
     /// <returns>A future over that user's description.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="userName"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="userName"/> contains a NUL character or an unpaired surrogate (see the
-    /// <see cref="IAsyncAdmin"/> remarks): the lookup would otherwise ask for a different, truncated
-    /// user name.
+    /// <paramref name="userName"/> contains a NUL character or an unpaired surrogate.
     /// </exception>
     /// <remarks>
-    /// Both guards throw <b>synchronously</b> — this method is deliberately not <c>async</c>,
-    /// so a precondition failure is not deferred into the returned <see cref="AsyncKafkaFuture"/>
-    /// (ffi §A5). A null <paramref name="userName"/> is rejected stricter than Java, whose
-    /// <c>description(null)</c> returns a future failed with <c>"No such user: null"</c>
-    /// (<c>DescribeUserScramCredentialsResult.java:122-125</c>) — the binding's rule for null
-    /// keys (see the <see cref="IAsyncAdmin"/> remarks).
+    /// Both checks throw at the call. A null <paramref name="userName"/> is a deviation: Java's
+    /// <c>description(null)</c> returns a future failed with <c>"No such user: null"</c>.
     /// </remarks>
     public AsyncKafkaFuture<UserScramCredentialsDescription> Description(string userName)
     {
@@ -107,27 +83,10 @@ public sealed class AsyncDescribeUserScramCredentialsResult
 
         AdminStrings.Validate(userName, nameof(userName));
 
-        return new AsyncKafkaFuture<UserScramCredentialsDescription>(DescriptionCore(userName));
+        return new AsyncKafkaFuture<UserScramCredentialsDescription>(
+            NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName));
     }
 
-    private async Task<UserScramCredentialsDescription> DescriptionCore(string userName)
-    {
-        DescribeUserScramCredentialsViews views = await _views.ConfigureAwait(false);
-
-        using (Utf8Marshal.PinnedUtf8String pinnedUser = Utf8Marshal.Pin(userName))
-        {
-            // ⚠ The error is OWNED, and so is the written description — the opposite of the
-            // all() view's borrowed one, hence ReadAndDestroy rather than the plain read.
-            IntPtr error = NativeMethods.DescribeUserScramCredentialsResultDescription(
-                views.Root, pinnedUser.Pointer, out IntPtr description);
-
-            KafkaException? failure = KafkaException.FromHandle(error);
-            if (failure is not null)
-            {
-                throw failure;
-            }
-
-            return UserScramCredentialMarshal.ReadAndDestroy(description);
-        }
-    }
+    internal static AsyncDescribeUserScramCredentialsResult OfClient(SafeAdminResultHandle native) =>
+        new AsyncDescribeUserScramCredentialsResult(native);
 }

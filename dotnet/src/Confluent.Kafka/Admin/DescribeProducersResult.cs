@@ -15,54 +15,41 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of a <c>describeProducers</c> call — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one future
+/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c>: one future
 /// per topic partition.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ Java publishes <b>no</b> per-partition map, only the <see cref="PartitionResult"/> lookup
-/// and <see cref="All"/> (<c>:36</c>, <c>:44</c>).
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its partition (or, for
-/// <see cref="All"/>, every partition) has completed, and needs no thread-pool thread: the futures here are composed
-/// on the waiting thread, never over a <c>Task</c>.
-/// </para>
+/// Java publishes no per-partition map, only the <see cref="PartitionResult"/> lookup and
+/// <see cref="All"/>.
 /// </remarks>
 /// <seealso cref="AsyncDescribeProducersResult"/>
 public sealed class DescribeProducersResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> _futures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>Wraps one future per topic partition.</summary>
-    /// <param name="futures">One future per requested partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
-    internal DescribeProducersResult(
-        IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures)
+    private DescribeProducersResult(
+        IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures, SafeAdminResultHandle native)
     {
-        _futures = futures ?? throw new ArgumentNullException(nameof(futures));
+        _futures = futures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static DescribeProducersResult From(
-        KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation) =>
-        new DescribeProducersResult(SyncAdminFutures.Wrap(operation.SyncSources));
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c> (<c>:36</c>).</summary>
+    /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c>.</summary>
     /// <param name="partition">A topic partition from the request.</param>
-    /// <returns>That partition's future, over its own latch: an equal future on every call.</returns>
+    /// <returns>That partition's future; every call returns an equal future.</returns>
     /// <exception cref="ArgumentException">
-    /// The partition was not in the request — Java's <c>IllegalArgumentException</c>
-    /// (<c>:39-40</c>), thrown <b>synchronously</b> because it is a usage error.
+    /// The partition was not in the request (Java's <c>IllegalArgumentException</c>), thrown at the call.
     /// </exception>
     public KafkaFuture<PartitionProducerState> PartitionResult(TopicPartition partition) =>
         _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState> future)
@@ -76,38 +63,54 @@ public sealed class DescribeProducersResult
 
     /// <summary>
     /// Every partition's producers in one map, succeeding only if every partition did —
-    /// Java's <c>all()</c> (<c>:44</c>).
+    /// Java's <c>all()</c>.
     /// </summary>
-    /// <returns>A future yielding the whole map, or failing with the first failure in key order.</returns>
-    /// <remarks>
-    /// <para>
-    /// Every partition is waited for first, so a failure fails the aggregate with the first failure in key order
-    /// exactly as Java's <c>allOf(...).thenApply(...)</c> chain does, rather than whichever partition a reader happens
-    /// to reach first. Each call builds a new aggregate.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>Recorded divergence</b> — see <see cref="DescribeTransactionsResult.All"/>, which
-    /// states it once for both siblings: Java wraps this one's unreachable gather failure in a
-    /// <c>KafkaException</c> (<c>:54</c>) and that one's in a plain <c>RuntimeException</c>,
-    /// and neither wrap is expressible here.
-    /// </para>
-    /// </remarks>
-    public KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionProducerState>> All() =>
-        SyncAdminFutures.GatherAll(_futures, EqualityComparer<TopicPartition>.Default);
+    /// <returns>A future yielding the whole map, or failing with the first failure to complete.</returns>
+    public KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionProducerState>> All()
+    {
+        IReadOnlyDictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures = _futures;
+        KafkaFuture<PartitionProducerState>[] values = new KafkaFuture<PartitionProducerState>[futures.Count];
+        int next = 0;
+        foreach (KafkaFuture<PartitionProducerState> future in futures.Values)
+        {
+            values[next++] = future;
+        }
+
+        return KafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<TopicPartition, PartitionProducerState>>(() =>
+        {
+            Dictionary<TopicPartition, PartitionProducerState> states = new Dictionary<TopicPartition, PartitionProducerState>(futures.Count);
+            foreach (KeyValuePair<TopicPartition, KafkaFuture<PartitionProducerState>> entry in futures)
+            {
+                states.Add(entry.Key, entry.Value.GetNow(null!));
+            }
+
+            return states;
+        });
+    }
+
+    internal static DescribeProducersResult OfClient(
+        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures =
+            new Dictionary<TopicPartition, KafkaFuture<PartitionProducerState>>(native.Partitions.Count);
+        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<PartitionProducerState>> entry in native.Partitions)
+        {
+            futures.Add(entry.Key, new KafkaFuture<PartitionProducerState>(entry.Value));
+        }
+
+        return new DescribeProducersResult(futures, native.Result);
+    }
 
     /// <summary>
     /// The active producers of one partition — Java's nested
-    /// <c>DescribeProducersResult.PartitionProducerState</c> (<c>:61</c>).
+    /// <c>DescribeProducersResult.PartitionProducerState</c>.
     /// </summary>
-    /// <remarks>
-    /// ⚠ Java declares no <c>equals</c>/<c>hashCode</c> here, so neither is added — unlike
-    /// <see cref="ProducerState"/>, which declares both.
-    /// </remarks>
+    /// <remarks>It has no value equality, as Java declares no <c>equals</c> or <c>hashCode</c> here.</remarks>
     public sealed class PartitionProducerState
     {
         private readonly List<ProducerState> _activeProducers;
 
-        /// <summary>Creates a partition state — Java's public constructor (<c>:64</c>).</summary>
+        /// <summary>Creates a partition state — Java's public constructor.</summary>
         /// <param name="activeProducers">That partition's active producers.</param>
         /// <exception cref="ArgumentNullException"><paramref name="activeProducers"/> is null.</exception>
         public PartitionProducerState(IEnumerable<ProducerState> activeProducers)
@@ -122,11 +125,11 @@ public sealed class DescribeProducersResult
 
         /// <summary>
         /// The active producers, in the order the broker reported them — Java's
-        /// <c>activeProducers()</c> (<c>:68</c>).
+        /// <c>activeProducers()</c>.
         /// </summary>
         public IReadOnlyList<ProducerState> ActiveProducers => _activeProducers;
 
-        /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:73</c>).</summary>
+        /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
         /// <returns>The rendering.</returns>
         public override string ToString() =>
             string.Format(

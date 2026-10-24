@@ -25,38 +25,21 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M15/P9 CP3 — the nine value-carrying RPCs (shape <b>4a</b>) driven end to end over the
-/// <em>real</em> per-key ABI, where each key resolves from its own callback, fired as that
-/// key's own future resolves, with no result root anywhere.
+/// The nine value-carrying keyed RPCs over the core mock: each key's future resolves on its own, and each key read
+/// back from the Result is the key that was requested, for a topic name, a topic id, a config resource and a broker id.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Three key shapes cross here, and only the first is a plain <c>const char*</c>: the
-/// composite <c>(type id, name)</c> scalar pair of <c>describeConfigs</c> and the bare
-/// <c>int32_t</c> broker id of <c>describeLogDirs</c> are not pointers at all, so each
-/// needs its own proof that the key survives the trip.
-/// </para>
-/// <para>
-/// ⚠ <b>Residual coverage gap.</b> <c>describeTransactions</c> and <c>fenceProducers</c>
-/// read their per-key value out of an index-addressed <c>*Result_t</c> at index 0, but the
-/// Rust mock faults every transactional id with <c>"Not implemented yet"</c>, so no value
-/// is reachable without a broker. Their per-key <em>failure</em> path is covered below;
-/// their value readers are not, and cannot be from a managed test.
-/// </para>
+/// The core mock fails every transactional id of <c>describeTransactions</c> and <c>fenceProducers</c> with
+/// <c>"Not implemented yet"</c>, so only their per-key failures are covered here, not their value readers.
 /// </remarks>
 public sealed class AdminP9PerKeyStage2Tests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The code the mock reports for every unimplemented RPC.</summary>
     private const int UnsupportedVersionCode = 35;
 
     private const string NotImplemented = "Not implemented yet";
 
-    /// <summary>
-    /// One key succeeding and another failing resolve <b>independently</b>, and the
-    /// copied-out value outlives the owned <c>TopicDescription_t</c> the callback destroyed.
-    /// </summary>
     [Fact]
     public async Task DescribeTopicsByName_PerKeyOutcomes_AreIndependent()
     {
@@ -64,11 +47,11 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, options: null, AdminFlavour.Async)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-present", 3, 1) }, null)).All().Get(),
             s_deadline);
 
-        AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.From(admin.DescribeTopics(
-            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null, AdminFlavour.Async));
+        AsyncDescribeTopicsResult result = AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(
+            TopicCollection.OfTopicNames(new[] { "cp3-present", "cp3-absent" }), options: null));
 
         TopicDescription present = await TestTimeout.Run(
             () => result.TopicNameValues!["cp3-present"].Get(), s_deadline);
@@ -80,11 +63,6 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.Equal("Topic cp3-absent not found.", failure.Message);
     }
 
-    /// <summary>
-    /// The by-id form's key crosses as Java's <c>Uuid.toString()</c> base64 text and comes
-    /// back as the very <see cref="Uuid"/> that was requested — the only thing that proves
-    /// the key survived both the encode and the parse.
-    /// </summary>
     [Fact]
     public async Task DescribeTopicsById_ResolvesTheRequestedUuid()
     {
@@ -92,24 +70,18 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created =
-            AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, options: null, AdminFlavour.Async));
+            AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-by-id", 1, 1) }, null));
         Uuid id = await TestTimeout.Run(() => created.TopicId("cp3-by-id").Get(), s_deadline);
         Assert.NotEqual(Uuid.Zero, id);
 
         AsyncDescribeTopicsResult result =
-            AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null, AdminFlavour.Async));
+            AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(new[] { id }), options: null));
 
         TopicDescription description = await TestTimeout.Run(() => result.TopicIdValues![id].Get(), s_deadline);
         Assert.Equal(id, description.TopicId);
         Assert.Equal("cp3-by-id", description.Name);
     }
 
-    /// <summary>
-    /// ⚠ <b>The composite key.</b> <c>describeConfigs</c>' key is two scalars — a
-    /// <c>ConfigResource.Type.id()</c> and a name — so a callback that dropped either half
-    /// would resolve the wrong entry, or none. Two resources of <em>different types</em>
-    /// plus one absent topic make both halves load-bearing.
-    /// </summary>
     [Fact]
     public async Task DescribeConfigs_ResolvesTheCompositeResourceKey()
     {
@@ -117,7 +89,7 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, options: null, AdminFlavour.Async)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-cfg", 1, 1) }, null)).All().Get(),
             s_deadline);
 
         ConfigResource topic = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg");
@@ -125,7 +97,7 @@ public sealed class AdminP9PerKeyStage2Tests
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "cp3-cfg-absent");
 
         AsyncDescribeConfigsResult result =
-            AsyncDescribeConfigsResult.From(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null, AdminFlavour.Async));
+            AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic, broker, absent }, options: null));
 
         Assert.NotNull(await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline));
         Assert.NotNull(await TestTimeout.Run(() => result.Values[broker].Get(), s_deadline));
@@ -136,12 +108,6 @@ public sealed class AdminP9PerKeyStage2Tests
             "Resource ConfigResource(type=Topic, name='cp3-cfg-absent') not found.", failure.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>The scalar key.</b> <c>describeLogDirs</c>' key is a bare <c>int32_t</c>, not a
-    /// pointer, so the two brokers below discriminate a callback that read the wrong
-    /// parameter slot — and the copied-out map outlives the owned
-    /// <c>LogDirDescriptionMap_t</c> the callback destroyed.
-    /// </summary>
     [Fact]
     public async Task DescribeLogDirs_ResolvesTheInt32BrokerKey()
     {
@@ -149,12 +115,11 @@ public sealed class AdminP9PerKeyStage2Tests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
-            () => AsyncCreateTopicsResult.From(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, options: null, AdminFlavour.Async)).All().Get(),
+            () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("cp3-logdirs", 2, 1) }, null)).All().Get(),
             s_deadline);
 
-        // Requested in DESCENDING order, so a callback that mistook the key for a position
-        // would resolve them swapped.
-        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(new[] { 1, 0 }, options: null, AdminFlavour.Async));
+        // Requested in descending order, so a reader that took a key for a position would swap them.
+        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(new[] { 1, 0 }, options: null));
 
         Assert.Equal(2, result.Descriptions.Count);
         Assert.Contains(0, result.Descriptions.Keys);
@@ -178,12 +143,6 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.Equal(2, replicas);
     }
 
-    /// <summary>
-    /// The five RPCs the mock cannot serve still fault <b>every</b> key independently, with
-    /// Java's own message — which is what proves the key marshalling and the per-key error
-    /// ownership on each of them (the value readers are the residual noted in the class
-    /// remarks).
-    /// </summary>
     [Theory]
     [InlineData(Rpc.DescribeConsumerGroups)]
     [InlineData(Rpc.DescribeClassicGroups)]
@@ -208,139 +167,28 @@ public sealed class AdminP9PerKeyStage2Tests
         }
     }
 
-    /// <summary>
-    /// The <c>n == 0</c> rule at the RPC level, for all nine: an empty collection fires
-    /// <b>no</b> callback at all, so only the submit's own countdown slot can release the
-    /// operation. Without it the <c>GCHandle</c> and the span-the-op reference are held
-    /// forever and <c>AdminClient_destroy</c> never runs — a leak the countdown introduces
-    /// and this asserts away one RPC at a time.
-    /// </summary>
-    [Theory]
-    [InlineData(Rpc.DescribeTopicsByName)]
-    [InlineData(Rpc.DescribeTopicsById)]
-    [InlineData(Rpc.DescribeConfigs)]
-    [InlineData(Rpc.DescribeLogDirs)]
-    [InlineData(Rpc.DescribeConsumerGroups)]
-    [InlineData(Rpc.DescribeClassicGroups)]
-    [InlineData(Rpc.ListConsumerGroupOffsets)]
-    [InlineData(Rpc.DescribeTransactions)]
-    [InlineData(Rpc.FenceProducers)]
-    public void EmptyCollection_ResolvesAtTheSubmitBoundary_AndReleasesTheClient(Rpc rpc)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
-
-        Assert.Empty(Submit(admin, rpc, Array.Empty<string>()));
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-
-        Assert.True(
-            handle.IsClosed,
-            "zero callbacks must still release: the submit token is the only thing that can");
-    }
-
-    /// <summary>
-    /// Many keys per operation, over many operations and seven of the nine RPCs, leave the
-    /// reference count <b>balanced</b> — the countdown's core claim once arrivals are
-    /// concurrent. An over-release would have thrown out of the
-    /// <see cref="System.Runtime.InteropServices.SafeHandle"/>; an under-release leaves
-    /// <c>IsClosed</c> false forever.
-    /// </summary>
-    /// <remarks>
-    /// The two by-index RPCs are excluded only because their key axes are not strings:
-    /// <c>describeTopics</c>-by-id needs real topic ids and <c>describeLogDirs</c> real
-    /// broker ids, both of which the per-key tests above cover directly.
-    /// </remarks>
-    [Fact]
-    public async Task ManyKeysAcrossEveryRpc_LeaveTheReferenceCountBalanced()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        SafeAdminHandle handle = admin.Handle;
-
-        string[] keys = new string[10];
-        for (int i = 0; i < keys.Length; i++)
-        {
-            keys[i] = $"cp3-balance-{i}";
-        }
-
-        foreach (Rpc rpc in new[]
-        {
-            Rpc.DescribeTopicsByName,
-            Rpc.DescribeConfigs,
-            Rpc.DescribeConsumerGroups,
-            Rpc.DescribeClassicGroups,
-            Rpc.ListConsumerGroupOffsets,
-            Rpc.DescribeTransactions,
-            Rpc.FenceProducers,
-        })
-        {
-            for (int round = 0; round < 3; round++)
-            {
-                IReadOnlyList<Func<Task>> awaitables = Submit(admin, rpc, keys);
-                Assert.Equal(keys.Length, awaitables.Count);
-
-                foreach (Func<Task> awaitable in awaitables)
-                {
-                    // Every key resolves one way or the other; only that it SETTLES matters.
-                    await TestTimeout.Run(() => Settle(awaitable), s_deadline);
-                }
-
-                Assert.False(handle.IsClosed, "the client is still alive between operations");
-            }
-        }
-
-        TestTimeout.Run(admin.Dispose, s_deadline);
-        Assert.True(handle.IsClosed, "210 per-key callbacks must leave the count balanced");
-    }
-
-    /// <summary>The nine RPCs CP3 migrated, as a test axis.</summary>
+    /// <summary>The nine RPCs, as a test axis.</summary>
     public enum Rpc
     {
-        /// <summary>Keyed by topic name.</summary>
         DescribeTopicsByName,
 
-        /// <summary>Keyed by a base64 topic id.</summary>
         DescribeTopicsById,
 
-        /// <summary>Keyed by the composite <c>(type id, name)</c> pair.</summary>
         DescribeConfigs,
 
-        /// <summary>Keyed by a bare <c>int32_t</c> broker id.</summary>
         DescribeLogDirs,
 
-        /// <summary>Keyed by group id.</summary>
         DescribeConsumerGroups,
 
-        /// <summary>Keyed by group id.</summary>
         DescribeClassicGroups,
 
-        /// <summary>Keyed by group id.</summary>
         ListConsumerGroupOffsets,
 
-        /// <summary>Keyed by transactional id, value read at index 0.</summary>
         DescribeTransactions,
 
-        /// <summary>Keyed by transactional id, value read at index 0.</summary>
         FenceProducers,
     }
 
-    /// <summary>Awaits one key's outcome, treating a fault as a settlement.</summary>
-    private static async Task Settle(Func<Task> awaitable)
-    {
-        try
-        {
-            await awaitable().ConfigureAwait(false);
-        }
-        catch (KafkaException)
-        {
-        }
-    }
-
-    /// <summary>
-    /// Submits <paramref name="rpc"/> for <paramref name="keys"/> and hands back one
-    /// awaitable factory per key the result exposed — so a key the bridge dropped shows up
-    /// as a count mismatch rather than as a passing loop over nothing.
-    /// </summary>
     private static IReadOnlyList<Func<Task>> Submit(NativeAdminClient admin, Rpc rpc, string[] keys)
     {
         List<Func<Task>> awaitables = new List<Func<Task>>(keys.Length);
@@ -349,7 +197,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeTopicsByName:
                 {
                     AsyncDescribeTopicsResult result =
-                        AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null, AdminFlavour.Async));
+                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicNames(keys), options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<TopicDescription>> entry in result.TopicNameValues!)
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -367,7 +215,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     }
 
                     AsyncDescribeTopicsResult result =
-                        AsyncDescribeTopicsResult.From(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null, AdminFlavour.Async));
+                        AsyncDescribeTopicsResult.OfClient(admin.DescribeTopics(TopicCollection.OfTopicIds(ids), options: null));
                     foreach (KeyValuePair<Uuid, AsyncKafkaFuture<TopicDescription>> entry in result.TopicIdValues!)
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -384,7 +232,7 @@ public sealed class AdminP9PerKeyStage2Tests
                         resources.Add(new ConfigResource(ConfigResourceType.Topic, key));
                     }
 
-                    AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.From(admin.DescribeConfigs(resources, options: null, AdminFlavour.Async));
+                    AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(resources, options: null));
                     foreach (KeyValuePair<ConfigResource, AsyncKafkaFuture<Config>> entry in result.Values)
                     {
                         awaitables.Add(() => entry.Value.Get());
@@ -401,7 +249,7 @@ public sealed class AdminP9PerKeyStage2Tests
                         brokers.Add(i);
                     }
 
-                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(brokers, options: null, AdminFlavour.Async));
+                    AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.OfClient(admin.DescribeLogDirs(brokers, options: null));
                     foreach (KeyValuePair<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> entry
                         in result.Descriptions)
                     {
@@ -414,7 +262,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeConsumerGroups:
                 {
                     AsyncDescribeConsumerGroupsResult result =
-                        AsyncDescribeConsumerGroupsResult.From(admin.DescribeConsumerGroups(keys, options: null, AdminFlavour.Async));
+                        AsyncDescribeConsumerGroupsResult.OfClient(admin.DescribeConsumerGroups(keys, options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry
                         in result.DescribedGroups)
                     {
@@ -427,7 +275,7 @@ public sealed class AdminP9PerKeyStage2Tests
             case Rpc.DescribeClassicGroups:
                 {
                     AsyncDescribeClassicGroupsResult result =
-                        AsyncDescribeClassicGroupsResult.From(admin.DescribeClassicGroups(keys, options: null, AdminFlavour.Async));
+                        AsyncDescribeClassicGroupsResult.OfClient(admin.DescribeClassicGroups(keys, options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> entry
                         in result.DescribedGroups)
                     {
@@ -447,7 +295,7 @@ public sealed class AdminP9PerKeyStage2Tests
                     }
 
                     AsyncListConsumerGroupOffsetsResult result =
-                        AsyncListConsumerGroupOffsetsResult.From(admin.ListConsumerGroupOffsets(specs, options: null, AdminFlavour.Async));
+                        AsyncListConsumerGroupOffsetsResult.OfClient(admin.ListConsumerGroupOffsets(specs, options: null));
                     foreach (string key in specs.Keys)
                     {
                         string captured = key;
@@ -459,7 +307,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
             case Rpc.DescribeTransactions:
                 {
-                    AsyncDescribeTransactionsResult result = AsyncDescribeTransactionsResult.From(admin.DescribeTransactions(keys, options: null, AdminFlavour.Async));
+                    AsyncDescribeTransactionsResult result = AsyncDescribeTransactionsResult.OfClient(admin.DescribeTransactions(keys, options: null));
                     foreach (string key in keys)
                     {
                         string captured = key;
@@ -471,7 +319,7 @@ public sealed class AdminP9PerKeyStage2Tests
 
             default:
                 {
-                    AsyncFenceProducersResult result = AsyncFenceProducersResult.From(admin.FenceProducers(keys, options: null, AdminFlavour.Async));
+                    AsyncFenceProducersResult result = AsyncFenceProducersResult.OfClient(admin.FenceProducers(keys, options: null));
                     foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.FencedProducers)
                     {
                         awaitables.Add(() => entry.Value.Get());

@@ -14,495 +14,631 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A broker-less, in-memory admin client for tests — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.MockAdminClient</c>, and the only unit-test vehicle
-/// for this binding.
+/// A broker-less, in-memory admin client for tests, Java's <c>org.apache.kafka.clients.admin.MockAdminClient</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// The ABI returns the <em>same</em> client handle type as the real constructor, so the
-/// entire RPC surface works against the mock unchanged — a test exercises the real
-/// marshalling, the real bridge and the real teardown, differing only in what the core
-/// does behind them.
-/// </para>
-/// <para>
-/// Brokers are <c>localhost:1000+id</c>, the controller is broker 0, the default
-/// partition count is 1 and the default replication factor is
-/// <c>min(numBrokers, 3)</c>. <b>Clipped to today's ABI:</b> Java's mock also accepts an
-/// explicit broker list and controller; the ABI exposes only the broker count, so that
-/// is what this constructor takes. Java's <c>addTopic</c>, <c>markTopicForDeletion</c>
-/// and the broker log-dir seeder are likewise clipped — they are not at the C ABI.
-/// </para>
+/// Every RPC runs through the same marshalling and teardown as the real client. Build one with <see cref="Create"/>
+/// and its <see cref="Builder"/>, or with Java's two constructors. <c>Close</c> does nothing, as Java's mock does;
+/// <c>Dispose</c> frees the mock.
 /// </remarks>
 public sealed class MockAdminClient : IAdmin
 {
-    private readonly NativeAdminClient _native;
+    /// <summary>
+    /// The cluster id of a mock whose <see cref="Builder"/> sets none, Java's <c>MockAdminClient.DEFAULT_CLUSTER_ID</c>.
+    /// </summary>
+    public const string DefaultClusterId = "I4ZmrWqfT2e-upky_4fdPA";
 
     /// <summary>
-    /// Creates a mock admin client simulating <paramref name="numBrokers"/> brokers —
-    /// Java's <c>MockAdminClient.create().numBrokers(n).build()</c>.
+    /// The log directories of each broker of a mock whose <see cref="Builder"/> sets none, Java's
+    /// <c>MockAdminClient.DEFAULT_LOG_DIRS</c>.
     /// </summary>
-    /// <param name="numBrokers">
-    /// The number of brokers to simulate; at least 1. Java rejects fewer by throwing,
-    /// because the mock places every partition leader and the controller on broker 0.
-    /// </param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="numBrokers"/> is less than 1.</exception>
-    /// <exception cref="KafkaException">The core could not create the mock.</exception>
-    public MockAdminClient(int numBrokers = 1)
+    public static IReadOnlyList<string> DefaultLogDirs { get; } = new ReadOnlyCollection<string>(new[] { "/tmp/kafka-logs" });
+
+    private readonly NativeAdminClient _native;
+
+    private MockAdminClient(NativeAdminClient native)
     {
-        _native = NativeAdminClient.CreateMock(numBrokers);
+        _native = native;
     }
+
+    /// <summary>
+    /// Creates a mock with one broker, Java's <c>Node.noNode()</c>, which is also the controller: Java's
+    /// <c>new MockAdminClient()</c>.
+    /// </summary>
+    /// <exception cref="KafkaException">The core could not create the mock.</exception>
+    public MockAdminClient()
+        : this(NativeAdminClient.StartMock(MockAdminClientBuilderCore.NewMock(), AdminFlavour.Sync))
+    {
+    }
+
+    /// <summary>
+    /// Creates a mock over <paramref name="brokers"/> whose controller is <paramref name="controller"/>, Java's
+    /// <c>new MockAdminClient(List&lt;Node&gt;, Node)</c>.
+    /// </summary>
+    /// <param name="brokers">The brokers.</param>
+    /// <param name="controller">The controller, one of <paramref name="brokers"/>.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="brokers"/> contains a null element, <paramref name="controller"/> is null or not one of them
+    /// (Java's message for both), or a host or rack cannot cross the C ABI unchanged.
+    /// </exception>
+    public MockAdminClient(IReadOnlyList<Node> brokers, Node controller)
+        : this(NativeAdminClient.StartMock(MockAdminClientBuilderCore.NewMock(brokers, controller), AdminFlavour.Sync))
+    {
+    }
+
+    /// <summary>Returns a new <see cref="Builder"/> with one broker, Java's <c>MockAdminClient.create()</c>.</summary>
+    /// <returns>The builder.</returns>
+    /// <exception cref="KafkaException">The core could not create the builder.</exception>
+    public static Builder Create() => new Builder(MockAdminClientBuilderCore.Create());
 
     /// <inheritdoc/>
     public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null) =>
-        CreateTopicsResult.From(_native.CreateTopics(newTopics, options, AdminFlavour.Sync));
+        CreateTopicsResult.OfClient(_native.CreateTopics(newTopics, options));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>
-        DeleteTopicsResult.From(_native.DeleteTopics(topics, options, AdminFlavour.Sync));
+        DeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(
         IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
-        DeleteTopicsResult.From(_native.DeleteTopics(
+        DeleteTopicsResult.OfClient(_native.DeleteTopics(
             TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
-            options, AdminFlavour.Sync));
+            options));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
-        DescribeTopicsResult.From(_native.DescribeTopics(topics, options, AdminFlavour.Sync));
+        DescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(
         IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null) =>
-        DescribeTopicsResult.From(_native.DescribeTopics(
-            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
-            options, AdminFlavour.Sync));
+        DescribeTopicsResult.OfClient(_native.DescribeTopics(
+            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            options));
 
     /// <inheritdoc/>
-    public ListTopicsResult ListTopics(ListTopicsOptions? options = null) =>
-        ListTopicsResult.From(_native.ListTopics(options, AdminFlavour.Sync));
+    public ListTopicsResult ListTopics(ListTopicsOptions? options = null)
+    {
+        var (namesToListings, result) = _native.ListTopics(options);
+        return new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(namesToListings), result);
+    }
 
     /// <inheritdoc/>
     public CreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null) =>
-        CreatePartitionsResult.From(_native.CreatePartitions(newPartitions, options, AdminFlavour.Sync));
+        CreatePartitionsResult.OfClient(_native.CreatePartitions(newPartitions, options));
 
     /// <inheritdoc/>
     public DeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options = null) =>
-        DeleteRecordsResult.From(_native.DeleteRecords(recordsToDelete, options, AdminFlavour.Sync));
+        DeleteRecordsResult.OfClient(_native.DeleteRecords(recordsToDelete, options));
 
     /// <inheritdoc/>
     public DescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
-        DescribeClusterResult.From(_native.DescribeCluster(options, AdminFlavour.Sync));
+        DescribeClusterResult.OfClient(_native.DescribeCluster(options));
 
     /// <inheritdoc/>
     public ListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
         ListConfigResourcesOptions? options = null) =>
-        ListConfigResourcesResult.From(
-            _native.ListConfigResources(configResourceTypes, options, AdminFlavour.Sync));
+        ListConfigResourcesResult.OfClient(_native.ListConfigResources(configResourceTypes, options));
 
     /// <inheritdoc/>
     public DescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
-        DescribeConfigsResult.From(_native.DescribeConfigs(resources, options, AdminFlavour.Sync));
+        DescribeConfigsResult.OfClient(_native.DescribeConfigs(resources, options));
 
     /// <inheritdoc/>
     public AlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options = null) =>
-        AlterConfigsResult.From(_native.IncrementalAlterConfigs(configs, options, AdminFlavour.Sync));
+        AlterConfigsResult.OfClient(_native.IncrementalAlterConfigs(configs, options));
 
 
     /// <inheritdoc/>
     public DescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null) =>
-        DescribeLogDirsResult.From(_native.DescribeLogDirs(brokers, options, AdminFlavour.Sync));
+        DescribeLogDirsResult.OfClient(_native.DescribeLogDirs(brokers, options));
 
     /// <inheritdoc/>
     public AlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
         AlterReplicaLogDirsOptions? options = null) =>
-        AlterReplicaLogDirsResult.From(
-            _native.AlterReplicaLogDirs(replicaAssignment, options, AdminFlavour.Sync));
+        AlterReplicaLogDirsResult.OfClient(
+            _native.AlterReplicaLogDirs(replicaAssignment, options));
 
     /// <inheritdoc/>
     public DescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options = null) =>
-        DescribeReplicaLogDirsResult.From(_native.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Sync));
+        DescribeReplicaLogDirsResult.OfClient(_native.DescribeReplicaLogDirs(replicas, options));
 
     /// <inheritdoc/>
     public ElectLeadersResult ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
         ElectLeadersOptions? options = null) =>
-        ElectLeadersResult.From(_native.ElectLeaders(electionType, partitions, options, AdminFlavour.Sync));
+        ElectLeadersResult.OfClient(_native.ElectLeaders(electionType, partitions, options));
 
     /// <inheritdoc/>
     public AlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options = null) =>
-        AlterPartitionReassignmentsResult.From(
-            _native.AlterPartitionReassignments(reassignments, options, AdminFlavour.Sync));
+        AlterPartitionReassignmentsResult.OfClient(
+            _native.AlterPartitionReassignments(reassignments, options));
 
     /// <inheritdoc/>
     public AlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         AlterConsumerGroupOffsetsOptions? options = null) =>
-        AlterConsumerGroupOffsetsResult.From(
-            _native.AlterConsumerGroupOffsets(groupId, offsets, options, AdminFlavour.Sync));
+        AlterConsumerGroupOffsetsResult.OfClient(
+            _native.AlterConsumerGroupOffsets(groupId, offsets, options));
 
     /// <inheritdoc/>
     public DeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
         DeleteConsumerGroupOffsetsOptions? options = null) =>
-        DeleteConsumerGroupOffsetsResult.From(
-            _native.DeleteConsumerGroupOffsets(groupId, partitions, options, AdminFlavour.Sync));
+        DeleteConsumerGroupOffsetsResult.OfClient(
+            _native.DeleteConsumerGroupOffsets(groupId, partitions, options));
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null) =>
-        ListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(partitions, options, AdminFlavour.Sync));
+        ListPartitionReassignmentsResult.OfClient(
+            _native.ListPartitionReassignments(partitions, options));
 
     /// <inheritdoc/>
     public ListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options) =>
-        ListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(null, options, AdminFlavour.Sync));
+        ListPartitionReassignmentsResult.OfClient(
+            _native.ListPartitionReassignments(null, options));
 
     /// <inheritdoc/>
     public ListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null) =>
-        ListOffsetsResult.From(_native.ListOffsets(topicPartitionOffsets, options, AdminFlavour.Sync));
+        ListOffsetsResult.OfClient(_native.ListOffsets(topicPartitionOffsets, options));
 
     /// <inheritdoc/>
     public ListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
-        ListGroupsResult.From(_native.ListGroups(options, AdminFlavour.Sync));
+        ListGroupsResult.OfClient(_native.ListGroups(options));
 
     /// <inheritdoc/>
     public DescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null) =>
-        DescribeConsumerGroupsResult.From(_native.DescribeConsumerGroups(groupIds, options, AdminFlavour.Sync));
+        DescribeConsumerGroupsResult.OfClient(_native.DescribeConsumerGroups(groupIds, options));
 
     /// <inheritdoc/>
     public DescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null) =>
-        DescribeClassicGroupsResult.From(_native.DescribeClassicGroups(groupIds, options, AdminFlavour.Sync));
+        DescribeClassicGroupsResult.OfClient(_native.DescribeClassicGroups(groupIds, options));
 
     /// <inheritdoc/>
     public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
-        string groupId, ListConsumerGroupOffsetsOptions? options = null)
-    {
-        if (groupId is null)
-        {
-            throw new ArgumentNullException(nameof(groupId));
-        }
-
-        // Here, so that a rejected id blames this overload's own parameter rather than the
-        // batched form's `groupSpecs` (M15/P13.3 (c)).
-        AdminStrings.Validate(groupId, nameof(groupId));
-
-        // Java's default overload (Admin.java:912-918): delegate to the batched form
-        // with a fresh spec, whose null TopicPartitions means "every committed
-        // partition", and let the batched form ignore any partitions on the options.
-        return ListConsumerGroupOffsets(
-            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-            {
-                [groupId] = new ListConsumerGroupOffsetsSpec(),
-            },
-            options);
-    }
+        string groupId, ListConsumerGroupOffsetsOptions? options = null) =>
+        ListConsumerGroupOffsetsResult.OfClient(_native.ListConsumerGroupOffsets(groupId, options));
 
     /// <inheritdoc/>
     public ListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options = null) =>
-        ListConsumerGroupOffsetsResult.From(
-            _native.ListConsumerGroupOffsets(groupSpecs, options, AdminFlavour.Sync));
+        ListConsumerGroupOffsetsResult.OfClient(
+            _native.ListConsumerGroupOffsets(groupSpecs, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.deleteConsumerGroups</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:773-775</c>); the Rust mock surfaces that as a faulted
-    /// future per group id (<c>admin-client.md</c> §9), which this binding does not
-    /// need to special-case — it delegates to the same native mock every other RPC
-    /// here does.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so every group id's future fails with that message.
     /// </remarks>
     public DeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
-        DeleteConsumerGroupsResult.From(_native.DeleteConsumerGroups(groupIds, options, AdminFlavour.Sync));
+        DeleteConsumerGroupsResult.OfClient(
+            _native.DeleteConsumerGroups(groupIds, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.removeMembersFromConsumerGroup</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:801-803</c>); the Rust mock surfaces that as a single
-    /// faulted future (<c>admin-client.md</c> §9), which this binding does not need to
-    /// special-case — it delegates to the same native mock every other RPC here does.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so the call's one future fails with that message.
     /// </remarks>
     public RemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
-        RemoveMembersFromConsumerGroupResult.From(
-            _native.RemoveMembersFromConsumerGroup(groupId, options, AdminFlavour.Sync));
+        RemoveMembersFromConsumerGroupResult.OfClient(
+            _native.RemoveMembersFromConsumerGroup(groupId, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.createAcls</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:806-808</c>); the Rust mock mirrors that as one exceptional
-    /// future <em>per binding</em> rather than a panic (<c>admin-client.md</c> §9), so every
-    /// binding's future fails with that message instead of succeeding.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so every binding's future fails with that message.
     /// </remarks>
     public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
-        CreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Sync));
+        CreateAclsResult.OfClient(_native.CreateAcls(acls, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.deleteAcls</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:816-818</c>); the Rust mock mirrors that as one exceptional
-    /// future <em>per filter</em> rather than a panic (<c>admin-client.md</c> §9), so every
-    /// filter's future fails with that message instead of succeeding.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so every filter's future fails with that message.
     /// </remarks>
     public DeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
-        DeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Sync));
+        DeleteAclsResult.OfClient(_native.DeleteAcls(filters, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.describeAcls</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:811-813</c>); the Rust mock mirrors that as one exceptional
-    /// future for the whole call (<c>admin-client.md</c> §9), so
-    /// <see cref="DescribeAclsResult.Values"/> fails with that message.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so <see cref="DescribeAclsResult.Values"/> fails with that message.
     /// </remarks>
     public DescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null) =>
-        DescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Sync));
+        DescribeAclsResult.OfClient(_native.DescribeAcls(filter, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.describeClientQuotas</c> throws
-    /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
-    /// (<c>MockAdminClient.java:1244-1246</c>); the Rust mock surfaces that as one exceptional
-    /// future for the whole call (<c>admin-client.md</c> §9), so
-    /// <see cref="DescribeClientQuotasResult.Entities"/> fails with that message.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
+    /// so <see cref="DescribeClientQuotasResult.Entities"/> fails with that message.
     /// </remarks>
     public DescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
-        DescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Sync));
+        DescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.alterClientQuotas</c> throws
-    /// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
-    /// (<c>MockAdminClient.java:1249-1251</c>); the Rust mock surfaces that as one exceptional
-    /// future <em>per entity</em> (<c>admin-client.md</c> §9), so every entity's future
-    /// fails with that message instead of succeeding.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
+    /// so every entity's future fails with that message.
     /// </remarks>
     public AlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
-        AlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Sync));
+        AlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.describeUserScramCredentials</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:1254</c>); the Rust mock mirrors that as one exceptional future
-    /// for the whole call (<c>admin-client.md</c> §9), so every accessor fails with that
-    /// message. This is faithful, not a gap.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so every accessor fails with that message.
     /// </remarks>
     public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
         DescribeUserScramCredentialsOptions? options = null) =>
-        DescribeUserScramCredentialsResult.From(
-            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Sync));
+        DescribeUserScramCredentialsResult.OfClient(
+            _native.DescribeUserScramCredentials(users, options));
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Java's <c>MockAdminClient.alterUserScramCredentials</c> throws
-    /// <c>UnsupportedOperationException("Not implemented yet")</c>
-    /// (<c>MockAdminClient.java:1259</c>); the Rust mock mirrors that <em>per user</em>, so
-    /// every user's future fails with that message.
+    /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
+    /// so every user's future fails with that message.
     /// </remarks>
     public AlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options = null) =>
-        AlterUserScramCredentialsResult.From(
-            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Sync));
+        AlterUserScramCredentialsResult.OfClient(
+            _native.AlterUserScramCredentials(alterations, options));
 
     /// <inheritdoc/>
     public CreateDelegationTokenResult CreateDelegationToken(
         CreateDelegationTokenOptions? options = null) =>
-        CreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Sync));
+        CreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
 
     /// <inheritdoc/>
     public RenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null) =>
-        RenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Sync));
+        RenewDelegationTokenResult.OfClient(_native.RenewDelegationToken(hmac, options));
 
     /// <inheritdoc/>
     public ExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
-        ExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Sync));
+        ExpireDelegationTokenResult.OfClient(_native.ExpireDelegationToken(hmac, options));
 
     /// <inheritdoc/>
     public DescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null) =>
-        DescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Sync));
+        DescribeDelegationTokenResult.OfClient(_native.DescribeDelegationToken(options));
 
     /// <inheritdoc/>
     public DescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
-        DescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Sync));
+        DescribeFeaturesResult.OfClient(_native.DescribeFeatures(options));
 
     /// <inheritdoc/>
     public UpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null) =>
-        UpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Sync));
+        UpdateFeaturesResult.OfClient(_native.UpdateFeatures(featureUpdates, options));
+
+    /// <inheritdoc/>
+    public UnregisterControllerResult UnregisterController(int controllerId, UnregisterControllerOptions? options = null) =>
+        UnregisterControllerResult.OfClient(_native.UnregisterController(controllerId, options));
 
     /// <inheritdoc/>
     public FenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null) =>
-        FenceProducersResult.From(_native.FenceProducers(transactionalIds, options, AdminFlavour.Sync));
+        FenceProducersResult.OfClient(_native.FenceProducers(transactionalIds, options));
 
     /// <inheritdoc/>
     public DescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null) =>
-        DescribeTransactionsResult.From(
-            _native.DescribeTransactions(transactionalIds, options, AdminFlavour.Sync));
+        DescribeTransactionsResult.OfClient(
+            _native.DescribeTransactions(transactionalIds, options));
 
     /// <inheritdoc/>
     public DescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null) =>
-        DescribeProducersResult.From(_native.DescribeProducers(partitions, options, AdminFlavour.Sync));
+        DescribeProducersResult.OfClient(_native.DescribeProducers(partitions, options));
 
     /// <inheritdoc/>
     public ListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
-        ListTransactionsResult.From(_native.ListTransactionsOperation(options, AdminFlavour.Sync));
+        ListTransactionsResult.OfClient(_native.ListTransactions(options));
 
     /// <inheritdoc/>
     public AbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options = null) =>
-        AbortTransactionResult.From(_native.AbortTransaction(spec, options, AdminFlavour.Sync));
+        AbortTransactionResult.OfClient(_native.AbortTransaction(spec, options));
 
     /// <inheritdoc/>
     public TerminateTransactionResult ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options = null) =>
-        TerminateTransactionResult.From(
-            _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Sync));
+        TerminateTransactionResult.OfClient(
+            _native.ForceTerminateTransaction(transactionalId, options));
+
+    /// <summary>Does nothing, as Java's mock; <see cref="Dispose"/> frees the mock.</summary>
+    public void Close()
+    {
+    }
+
+    /// <summary>Does nothing and reads no timeout, as Java's mock; <see cref="Dispose"/> frees the mock.</summary>
+    public void Close(TimeSpan timeout)
+    {
+    }
 
     /// <inheritdoc/>
-    public void Close(TimeSpan timeout) => _native.CloseSync(timeout);
-
-    /// <summary>
-    /// Closes the client with Java's no-argument <c>close()</c> semantics — <b>blocking the
-    /// calling thread</b>, without a bound, until the background task finishes — then releases
-    /// it. Idempotent, and a no-op after <see cref="Close(TimeSpan)"/>.
-    /// </summary>
-    /// <remarks>
-    /// Called from <c>async</c> code this ties up a pool thread for as long as the close waits;
-    /// async callers should use <see cref="AsyncMockAdminClient"/> and
-    /// <c>await using</c>.
-    /// </remarks>
     public void Dispose() => _native.Dispose();
 
-    // ---- Seeding — inherent, never on IAdmin (admin-client.md §9) ----
+    /// <summary>
+    /// Makes <paramref name="controller"/>, which must be one of the mock's brokers, the controller that
+    /// <c>DescribeCluster</c> reports, as Java's <c>MockAdminClient.controller(Node)</c>; otherwise throws
+    /// <see cref="ArgumentException"/> and leaves the controller unchanged.
+    /// </summary>
+    public void Controller(Node controller) => _native.Controller(controller);
 
     /// <summary>
-    /// Makes the next <paramref name="numberOfRequests"/> operations fail with a timeout —
+    /// Adds a topic with a random topic id, as Java's <c>MockAdminClient.addTopic(boolean, String, List, Map)</c>;
+    /// throws <see cref="ArgumentException"/> with the core's message when the topic exists or a partition names a
+    /// node that is not one of the mock's brokers. A <see langword="null"/> <paramref name="configs"/> is Java's
+    /// <c>null</c>.
+    /// </summary>
+    public void AddTopic(
+        bool @internal,
+        string name,
+        IReadOnlyList<TopicPartitionInfo> partitions,
+        IReadOnlyDictionary<string, string>? configs) =>
+        _native.AddTopic(@internal, name, partitions, configs);
+
+    /// <summary>
+    /// Marks a topic as being deleted, so that <c>DescribeTopics</c> and <c>DescribeConfigs</c> no longer find it, as
+    /// Java's <c>MockAdminClient.markTopicForDeletion(String)</c>; throws <see cref="ArgumentException"/> for an
+    /// unknown topic.
+    /// </summary>
+    public void MarkTopicForDeletion(string name) => _native.MarkTopicForDeletion(name);
+
+    /// <summary>
+    /// Makes the next <paramref name="numberOfRequest"/> operations fail with a timeout —
     /// Java's <c>MockAdminClient.timeoutNextRequest(int)</c>.
     /// </summary>
-    /// <param name="numberOfRequests">How many subsequent operations to time out.</param>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    public void TimeoutNextRequest(int numberOfRequests) =>
-        _native.TimeoutNextRequest(numberOfRequests);
+    /// <param name="numberOfRequest">How many subsequent operations to time out.</param>
+    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    public void TimeoutNextRequest(int numberOfRequest) =>
+        _native.TimeoutNextRequest(numberOfRequest);
 
     /// <summary>
     /// Seeds the offsets <see cref="ListOffsets"/> reports for <c>OffsetSpec.Earliest</c> —
     /// Java's <c>MockAdminClient.updateBeginningOffsets(Map)</c>. <b>Merges</b> into what
     /// was seeded before.
     /// </summary>
-    /// <param name="offsets">The beginning offset per topic partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <param name="newOffsets">The beginning offset per topic partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
-        _native.UpdateBeginningOffsets(offsets);
+    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateBeginningOffsets(newOffsets);
 
     /// <summary>
     /// Seeds the offsets <see cref="ListOffsets"/> reports for every <c>OffsetSpec</c> other
     /// than earliest and for-timestamp — Java's
     /// <c>MockAdminClient.updateEndOffsets(Map)</c>. <b>Merges</b>.
     /// </summary>
-    /// <param name="offsets">The end offset per topic partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <param name="newOffsets">The end offset per topic partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
-        _native.UpdateEndOffsets(offsets);
+    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateEndOffsets(newOffsets);
 
     /// <summary>
     /// Seeds the committed offsets <c>ListConsumerGroupOffsets</c> reports — Java's
     /// <c>MockAdminClient.updateConsumerGroupOffsets(Map)</c>. <b>Merges</b>.
     /// </summary>
-    /// <param name="offsets">The committed offset per topic partition.</param>
+    /// <param name="newOffsets">The committed offset per topic partition.</param>
     /// <remarks>
     /// The mock keys these by partition only and ignores the group id, so there is no group
     /// parameter; the real client has no such restriction.
     /// </remarks>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// A key has a null topic, or a topic containing a NUL character or an unpaired surrogate
     /// (see the <see cref="IAdmin"/> remarks).
     /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> offsets) =>
-        _native.UpdateConsumerGroupOffsets(offsets);
+    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    public void UpdateConsumerGroupOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateConsumerGroupOffsets(newOffsets);
 
     /// <summary>
-    /// Seeds the feature levels <see cref="DescribeFeatures"/> reports and
-    /// <see cref="UpdateFeatures"/> validates against. <b>Replaces</b> what was seeded
-    /// before, unlike the offset setters.
+    /// Hides a topic from the next <paramref name="fetchesRemainingUntilVisible"/> listings and descriptions, as Java's
+    /// <c>MockAdminClient.setFetchesRemainingUntilVisible(String, int)</c>; throws <see cref="ArgumentException"/>
+    /// with the core's message for an unknown topic.
     /// </summary>
-    /// <param name="featureLevels">
-    /// The current, minimum-supported and maximum-supported level per feature.
-    /// </param>
-    /// <remarks>
-    /// Java takes these as three separate <c>MockAdminClient.Builder</c> setters
-    /// (<c>featureLevels</c> / <c>minSupportedFeatureLevels</c> /
-    /// <c>maxSupportedFeatureLevels</c>); the ABI exposes one setter over a shared key set,
-    /// so the three levels travel together per feature — the shape Python binds too.
-    /// </remarks>
-    /// <exception cref="ArgumentNullException"><paramref name="featureLevels"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// A key is null, or contains a NUL character or an unpaired surrogate (see the
-    /// <see cref="IAdmin"/> remarks).
-    /// </exception>
-    /// <exception cref="ObjectDisposedException">The client has been closed.</exception>
-    public void SetFeatureLevels(
-        IReadOnlyDictionary<string, (short Level, short MinSupported, short MaxSupported)> featureLevels) =>
-        _native.SetFeatureLevels(featureLevels);
+    public void SetFetchesRemainingUntilVisible(string topicName, int fetchesRemainingUntilVisible) =>
+        _native.SetFetchesRemainingUntilVisible(topicName, fetchesRemainingUntilVisible);
+
+    /// <summary>
+    /// Builds a <see cref="MockAdminClient"/>, Java's <c>MockAdminClient.Builder</c>. Each setter returns this builder; a
+    /// setter the core rejects throws <see cref="ArgumentException"/> with the core's message and leaves the
+    /// builder unchanged. <see cref="Build"/> may be called again.
+    /// </summary>
+    public sealed class Builder
+    {
+        private readonly MockAdminClientBuilderCore _core;
+
+        /// <summary>Creates a builder with one broker, Java's <c>new MockAdminClient.Builder()</c>.</summary>
+        /// <exception cref="KafkaException">The core could not create the builder.</exception>
+        public Builder()
+            : this(MockAdminClientBuilderCore.New())
+        {
+        }
+
+        internal Builder(MockAdminClientBuilderCore core)
+        {
+            _core = core;
+        }
+
+        /// <summary>Sets the cluster id, Java's <c>clusterId(String)</c>.</summary>
+        /// <param name="clusterId">The cluster id.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="clusterId"/> is null.</exception>
+        public Builder ClusterId(string clusterId)
+        {
+            _core.ClusterId(clusterId);
+            return this;
+        }
+
+        /// <summary>Sets the brokers, Java's <c>brokers(List&lt;Node&gt;)</c>.</summary>
+        /// <param name="brokers">The brokers.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="brokers"/> is null.</exception>
+        public Builder Brokers(IReadOnlyList<Node> brokers)
+        {
+            _core.Brokers(brokers);
+            return this;
+        }
+
+        /// <summary>Sets the number of brokers, Java's <c>numBrokers(int)</c>.</summary>
+        /// <param name="numBrokers">The number of brokers.</param>
+        /// <returns>This builder.</returns>
+        public Builder NumBrokers(int numBrokers)
+        {
+            _core.NumBrokers(numBrokers);
+            return this;
+        }
+
+        /// <summary>Makes the broker at <paramref name="index"/> the controller, Java's <c>controller(int)</c>.</summary>
+        /// <param name="index">The index of the broker.</param>
+        /// <returns>This builder.</returns>
+        public Builder Controller(int index)
+        {
+            _core.Controller(index);
+            return this;
+        }
+
+        /// <summary>Sets each broker's log directories, Java's <c>brokerLogDirs(List&lt;List&lt;String&gt;&gt;)</c>.</summary>
+        /// <param name="brokerLogDirs">The log directories, one list per broker id.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="brokerLogDirs"/> is null.</exception>
+        public Builder BrokerLogDirs(IReadOnlyList<IReadOnlyList<string>> brokerLogDirs)
+        {
+            _core.BrokerLogDirs(brokerLogDirs);
+            return this;
+        }
+
+        /// <summary>Sets the default replication factor, Java's <c>defaultReplicationFactor(int)</c>.</summary>
+        /// <param name="defaultReplicationFactor">The replication factor of a topic created without one.</param>
+        /// <returns>This builder.</returns>
+        public Builder DefaultReplicationFactor(int defaultReplicationFactor)
+        {
+            _core.DefaultReplicationFactor(defaultReplicationFactor);
+            return this;
+        }
+
+        /// <summary>Sets whether the mock uses a KRaft controller, Java's <c>usingRaftController(boolean)</c>.</summary>
+        /// <param name="usingRaftController">Whether the mock uses a KRaft controller.</param>
+        /// <returns>This builder.</returns>
+        public Builder UsingRaftController(bool usingRaftController)
+        {
+            _core.UsingRaftController(usingRaftController);
+            return this;
+        }
+
+        /// <summary>Sets the default partition count, Java's <c>defaultPartitions(short)</c>.</summary>
+        /// <param name="numPartitions">The partition count of a topic created without one.</param>
+        /// <returns>This builder.</returns>
+        public Builder DefaultPartitions(short numPartitions)
+        {
+            _core.DefaultPartitions(numPartitions);
+            return this;
+        }
+
+        /// <summary>Sets the finalized feature levels, Java's <c>featureLevels(Map&lt;String, Short&gt;)</c>.</summary>
+        /// <param name="featureLevels">The level per feature.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="featureLevels"/> is null.</exception>
+        public Builder FeatureLevels(IReadOnlyDictionary<string, short> featureLevels)
+        {
+            _core.FeatureLevels(featureLevels);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the minimum supported feature levels, Java's <c>minSupportedFeatureLevels(Map&lt;String, Short&gt;)</c>.
+        /// </summary>
+        /// <param name="minSupportedFeatureLevels">The minimum supported level per feature.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="minSupportedFeatureLevels"/> is null.</exception>
+        public Builder MinSupportedFeatureLevels(IReadOnlyDictionary<string, short> minSupportedFeatureLevels)
+        {
+            _core.MinSupportedFeatureLevels(minSupportedFeatureLevels);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the maximum supported feature levels, Java's <c>maxSupportedFeatureLevels(Map&lt;String, Short&gt;)</c>.
+        /// </summary>
+        /// <param name="maxSupportedFeatureLevels">The maximum supported level per feature.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="maxSupportedFeatureLevels"/> is null.</exception>
+        public Builder MaxSupportedFeatureLevels(IReadOnlyDictionary<string, short> maxSupportedFeatureLevels)
+        {
+            _core.MaxSupportedFeatureLevels(maxSupportedFeatureLevels);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the configs overlaid onto every group's, Java's <c>defaultGroupConfigs(Map&lt;String, String&gt;)</c>.
+        /// </summary>
+        /// <param name="defaultGroupConfigs">The default group configs.</param>
+        /// <returns>This builder.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="defaultGroupConfigs"/> is null.</exception>
+        public Builder DefaultGroupConfigs(IReadOnlyDictionary<string, string> defaultGroupConfigs)
+        {
+            _core.DefaultGroupConfigs(defaultGroupConfigs);
+            return this;
+        }
+
+        /// <summary>Builds a mock from the current settings, Java's <c>build()</c>.</summary>
+        /// <returns>The mock.</returns>
+        /// <exception cref="ArgumentException">The settings name no broker or a controller that is not one of them.</exception>
+        public MockAdminClient Build() => new MockAdminClient(NativeAdminClient.StartMock(_core.Build(), AdminFlavour.Sync));
+    }
 }

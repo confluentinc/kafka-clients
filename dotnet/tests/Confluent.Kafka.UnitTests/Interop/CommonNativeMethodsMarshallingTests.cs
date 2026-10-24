@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// Pins the declarations of <c>kafka_common_Error_source_err</c>, the <c>int8_t</c> error predicates,
-/// <c>kafka_common_Node_is_fenced_err</c> and the <c>kafka_admin_TopicMetadataAndConfig_config</c> getter.
+/// <c>kafka_common_Node_is_fenced_err</c> and the <c>kafka_admin_CreateTopicsResult_config_err</c> accessor.
 /// </summary>
 public sealed class CommonNativeMethodsMarshallingTests
 {
@@ -69,18 +69,20 @@ public sealed class CommonNativeMethodsMarshallingTests
     }
 
     [Fact]
-    public void TopicMetadataAndConfig_IsReadThroughTheConfigGetter_NotTheFlatAccessors()
+    public void CreateTopicsConfig_IsReadThroughTheResultsConfigAccessor_NotTheFlatAccessors()
     {
         string[] flat = Imports()
             .Select(method => method.GetCustomAttribute<DllImportAttribute>()!.EntryPoint!)
-            .Where(entryPoint => entryPoint.StartsWith("kafka_admin_TopicMetadataAndConfig_config_", StringComparison.Ordinal))
+            .Where(entryPoint => entryPoint.StartsWith("kafka_admin_TopicMetadataAndConfig_", StringComparison.Ordinal))
             .ToArray();
         Assert.Empty(flat);
 
-        MethodInfo getter = Import("kafka_admin_TopicMetadataAndConfig_config");
-        Assert.Equal(nameof(NativeMethods.TopicMetadataAndConfigConfig), getter.Name);
+        MethodInfo getter = Import("kafka_admin_CreateTopicsResult_config_err");
+        Assert.Equal(nameof(NativeMethods.CreateTopicsResultConfig), getter.Name);
         Assert.Equal(typeof(IntPtr), getter.ReturnType);
-        Assert.Equal(new[] { typeof(IntPtr) }, getter.GetParameters().Select(p => p.ParameterType));
+        Assert.Equal(
+            new[] { typeof(IntPtr), typeof(IntPtr), typeof(IntPtr).MakeByRefType() },
+            getter.GetParameters().Select(p => p.ParameterType));
     }
 
     private static MethodInfo Import(string entryPoint)

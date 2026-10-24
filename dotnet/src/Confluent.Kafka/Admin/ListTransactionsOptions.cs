@@ -17,95 +17,113 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for listing transactions — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ListTransactionsOptions</c>
-/// (<c>ListTransactionsOptions.java:29</c>).
+/// <c>org.apache.kafka.clients.admin.ListTransactionsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// ⚠ <b>Three different neutral encodings.</b> The two collection filters conflate null with
-/// empty and both mean "every transaction"; <see cref="FilteredDuration"/> is neutral at
-/// <c>-1</c>, so a <c>0</c> is a real filter; and <see cref="FilteredTransactionalIdPattern"/>
-/// defaults to <see langword="null"/> — the field has no initializer — while <c>""</c> also
-/// means no filter on the wire, as Java's javadoc (<c>:119-120</c>) says: the request drops an
-/// empty pattern (<c>ListTransactionsHandler.buildBatchedRequest</c>).
-/// </para>
-/// <para>
-/// Deviation: Java's <c>filteredStates()</c> (<c>:93</c>) / <c>filteredProducerIds()</c>
-/// (<c>:103</c>) hand back the live mutable <c>HashSet</c>; these properties expose read-only
-/// de-duplicated copies, so a caller cannot mutate the stored filter through the returned
-/// collection.
-/// </para>
 /// </remarks>
 public sealed class ListTransactionsOptions
 {
     private IReadOnlyCollection<TransactionState> _filteredStates = Array.Empty<TransactionState>();
     private IReadOnlyCollection<long> _filteredProducerIds = Array.Empty<long>();
+    private int? _timeoutMs;
+    private long _filteredDuration = -1L;
+    private string? _filteredTransactionalIdPattern;
 
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// The transaction states to filter on, or an empty collection — the default — to return
-    /// transactions in every state. Java's <c>filterStates</c> (<c>:43</c>) and
-    /// <c>filteredStates()</c> (<c>:93</c>).
+    /// transactions in every state. Java's <c>filterStates</c> and
+    /// <c>filteredStates()</c>.
     /// </summary>
     /// <value>Never <see langword="null"/>; a de-duplicated read-only copy.</value>
     /// <exception cref="ArgumentNullException">
-    /// The value is <see langword="null"/> — Java's <c>new HashSet&lt;&gt;(states)</c> (<c>:44</c>)
-    /// raises a <c>NullPointerException</c>. There is no way to ask for "no states": empty means all.
+    /// The value is <see langword="null"/>, which Java's <c>new HashSet&lt;&gt;(states)</c>
+    /// rejects. An empty collection means every state.
     /// </exception>
     public IReadOnlyCollection<TransactionState> FilteredStates
     {
         get => _filteredStates;
-        set => _filteredStates = CopyOf(value, nameof(value));
+        set
+        {
+            _filteredStates = CopyOf(value, nameof(value));
+            Setters.Ran(nameof(FilteredStates));
+        }
     }
 
     /// <summary>
     /// The producer ids to filter on, or an empty collection — the default — to return
-    /// transactions from every producer. Java's <c>filterProducerIds</c> (<c>:56</c>) and
-    /// <c>filteredProducerIds()</c> (<c>:103</c>).
+    /// transactions from every producer. Java's <c>filterProducerIds</c> and
+    /// <c>filteredProducerIds()</c>.
     /// </summary>
     /// <value>Never <see langword="null"/>; a de-duplicated read-only copy.</value>
     /// <exception cref="ArgumentNullException">
-    /// The value is <see langword="null"/> — Java's <c>new HashSet&lt;&gt;(producerIdFilters)</c>
-    /// (<c>:57</c>) raises a <c>NullPointerException</c>.
+    /// The value is <see langword="null"/>, which Java's
+    /// <c>new HashSet&lt;&gt;(producerIdFilters)</c> rejects.
     /// </exception>
     public IReadOnlyCollection<long> FilteredProducerIds
     {
         get => _filteredProducerIds;
-        set => _filteredProducerIds = CopyOf(value, nameof(value));
+        set
+        {
+            _filteredProducerIds = CopyOf(value, nameof(value));
+            Setters.Ran(nameof(FilteredProducerIds));
+        }
     }
 
     /// <summary>
     /// Return only transactions running longer than this many milliseconds; negative — the
-    /// default <c>-1</c> (<c>:33</c>) — applies no duration filter. Java's
-    /// <c>filterOnDuration</c> (<c>:69</c>) and <c>filteredDuration()</c> (<c>:112</c>).
+    /// default <c>-1</c> — applies no duration filter. Java's
+    /// <c>filterOnDuration</c> and <c>filteredDuration()</c>.
     /// </summary>
-    /// <remarks>⚠ <c>0</c> is a real filter ("longer than 0 ms"), not the neutral value.</remarks>
-    public long FilteredDuration { get; set; } = -1L;
+    /// <remarks><c>0</c> is a filter ("longer than 0 ms"), not the neutral value.</remarks>
+    public long FilteredDuration
+    {
+        get => _filteredDuration;
+        set
+        {
+            _filteredDuration = value;
+            Setters.Ran(nameof(FilteredDuration));
+        }
+    }
 
     /// <summary>
     /// A transactional-id regular-expression pattern to filter on, or <see langword="null"/> —
-    /// the default — for no filter. Java's <c>filterOnTransactionalIdPattern</c> (<c>:82</c>) and
-    /// <c>filteredTransactionalIdPattern()</c> (<c>:122</c>).
+    /// the default — for no filter. Java's <c>filterOnTransactionalIdPattern</c> and
+    /// <c>filteredTransactionalIdPattern()</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ <see langword="null"/> and <c>""</c> are distinct <em>values</em> of this option — they
-    /// are unequal, as Java's <c>equals</c> makes them — but both mean "no pattern filter":
-    /// Java's javadoc says so (<c>:119-120</c>), and the request drops an empty pattern, as
-    /// Java's <c>ListTransactionsHandler.buildBatchedRequest</c> does. The binding forwards
-    /// either one unchanged and leaves that to the core.
+    /// <see langword="null"/> and <c>""</c> are unequal values, as in Java's <c>equals</c>, but
+    /// both mean "no pattern filter", as Java's javadoc says.
     /// </remarks>
-    public string? FilteredTransactionalIdPattern { get; set; }
+    public string? FilteredTransactionalIdPattern
+    {
+        get => _filteredTransactionalIdPattern;
+        set
+        {
+            _filteredTransactionalIdPattern = value;
+            Setters.Ran(nameof(FilteredTransactionalIdPattern));
+        }
+    }
 
     /// <summary>
-    /// Value equality over the four filters, deliberately <em>excluding</em> the timeout — Java's
-    /// <c>equals</c> (<c>:138</c>), unlike <see cref="DescribeProducersOptions.Equals(object?)"/>.
+    /// Value equality over the four filters, without the timeout — Java's <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two options carry the same filters.</returns>
@@ -119,7 +137,7 @@ public sealed class ListTransactionsOptions
         && SetEquals(_filteredStates, other._filteredStates)
         && SetEquals(_filteredProducerIds, other._filteredProducerIds);
 
-    /// <summary>The hash of the four filters, excluding the timeout — Java's <c>hashCode</c> (<c>:149</c>).</summary>
+    /// <summary>The hash of the four filters, excluding the timeout — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -145,8 +163,7 @@ public sealed class ListTransactionsOptions
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>:127</c>), which — unlike
-    /// <see cref="Equals(object?)"/> — does include the timeout.
+    /// A diagnostic rendering matching Java's <c>toString()</c>, which includes the timeout.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
@@ -160,11 +177,6 @@ public sealed class ListTransactionsOptions
             FilteredTransactionalIdPattern ?? "null",
             TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
 
-    /// <summary>Java's <c>new HashSet&lt;&gt;(x)</c> — de-duplicating, null-rejecting.</summary>
-    /// <typeparam name="T">The element type.</typeparam>
-    /// <param name="value">The caller's collection.</param>
-    /// <param name="parameterName">The setter's parameter name, for the exception.</param>
-    /// <returns>An immutable, de-duplicated copy.</returns>
     private static IReadOnlyCollection<T> CopyOf<T>(IReadOnlyCollection<T> value, string parameterName)
         where T : struct
     {
@@ -178,12 +190,9 @@ public sealed class ListTransactionsOptions
             : new ReadOnlyCollection<T>(new List<T>(new HashSet<T>(value)));
     }
 
-    /// <summary>Order-independent comparison, matching the <c>Set</c> Java compares.</summary>
-    /// <typeparam name="T">The element type.</typeparam>
-    /// <param name="left">The first collection.</param>
-    /// <param name="right">The second collection.</param>
-    /// <returns>Whether the two hold the same elements.</returns>
     private static bool SetEquals<T>(IReadOnlyCollection<T> left, IReadOnlyCollection<T> right)
         where T : struct =>
         left.Count == right.Count && new HashSet<T>(left).SetEquals(right);
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

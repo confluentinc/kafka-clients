@@ -15,31 +15,11 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// An operation that can be authorized on a Kafka resource — the .NET realization of
-/// Java's <c>org.apache.kafka.common.acl.AclOperation</c>. Reached today through
-/// <see cref="Admin.TopicDescription.AuthorizedOperations"/>.
+/// An operation that can be authorized on a Kafka resource — Java's
+/// <c>org.apache.kafka.common.acl.AclOperation</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>Every member's numeric value is the Kafka <em>wire</em> code</b>
-/// (Java's <c>AclOperation.code()</c>, <c>AclOperation.java:45-120</c>), <b>not</b> a
-/// C#-assigned ordinal. The C ABI transports these codes as bare <c>int32_t</c>
-/// (<c>kafka_admin_TopicDescription_authorized_operation</c> returns "the
-/// <c>AclOperation</c> wire code"), so an auto-assigned value would silently mislabel
-/// every operation the broker reports. The codes are asserted member-by-member in the
-/// unit tests.
-/// </para>
-/// <para>
-/// <b>Namespace.</b> Java's package is <c>org.apache.kafka.common.acl</c> — under
-/// <c>common</c>, not <c>clients.admin</c> — so it lives at the root
-/// <c>Confluent.Kafka</c> namespace, following the same rule that puts
-/// <see cref="Uuid"/>, <see cref="Node"/> and <see cref="TopicCollection"/> there.
-/// </para>
-/// <para>
-/// <b>Only the enum lands here.</b> The rest of the ACL family (<c>AclBinding</c>,
-/// <c>AccessControlEntry</c>, <c>ResourcePattern</c>, …) arrives with the ACL RPCs; this
-/// type is present because <c>TopicDescription.authorizedOperations()</c> needs it.
-/// </para>
+/// Each member's value is the Kafka wire code (Java's <c>code()</c>), not an ordinal.
 /// </remarks>
 public enum AclOperation
 {

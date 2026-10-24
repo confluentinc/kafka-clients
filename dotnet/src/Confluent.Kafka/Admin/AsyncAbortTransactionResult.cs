@@ -12,40 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AbortTransaction"/> — Java's
-/// <c>org.apache.kafka.clients.admin.AbortTransactionResult</c> (<c>:27</c>).
+/// <c>org.apache.kafka.clients.admin.AbortTransactionResult</c>.
 /// </summary>
 /// <remarks>
-/// Java retains a single-entry <c>Map&lt;TopicPartition, KafkaFuture&lt;Void&gt;&gt;</c>
-/// (<c>:28</c>) but publishes only <see cref="All"/> (<c>:41</c>), so there is no per-partition
-/// view to restore and the ABI exposes no result handle.
+/// Java publishes only <see cref="All"/>, so there is no per-partition view.
 /// </remarks>
 /// <seealso cref="AbortTransactionResult"/>
 public sealed class AsyncAbortTransactionResult
 {
-    private readonly Task _all;
+    private readonly KafkaFutureImpl<object?> _future;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncAbortTransactionResult(Task all)
+    private AsyncAbortTransactionResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
-        _all = all;
+        _future = future;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncAbortTransactionResult From(SingleAdminOperation<bool> operation) =>
-        new AsyncAbortTransactionResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>
-    /// Whether the transaction was aborted — Java's <c>all()</c> (<c>:41</c>).
-    /// </summary>
-    /// <returns>A future that completes when the abort has.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(_all);
+    /// <inheritdoc cref="AbortTransactionResult.All"/>
+    public AsyncKafkaFuture All() => AsyncKafkaFuture.AllOf(new AsyncKafkaFuture(_future));
+
+    internal static AsyncAbortTransactionResult OfClient((KafkaFutureImpl<object?> All, SafeAdminResultHandle Result) native) =>
+        new AsyncAbortTransactionResult(native.All, native.Result);
 }

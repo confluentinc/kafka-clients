@@ -24,31 +24,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins <see cref="ListGroupsOptions"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ListGroupsOptions</c>.
+/// <see cref="ListGroupsOptions"/> against Java's <c>org.apache.kafka.clients.admin.ListGroupsOptions</c>: its three
+/// factories (<see cref="ListGroupsOptions.ForConsumerGroups"/> sets two filters), and each filter's normalization of
+/// null and empty to the empty set, tested per filter.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The normalization is the whole behavior of this class, so it is tested per filter
-/// rather than sampled.</b> Java puts the same
-/// <c>(x == null || x.isEmpty()) ? Set.of() : Set.copyOf(x)</c> ternary in all three setters
-/// (<c>:68</c>, <c>:77</c>, <c>:86</c>), and the .NET realization routes two of them through
-/// one helper and the third through another — so a single-filter test would leave the
-/// string path, the one that differs, unproven.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="ListGroupsOptions.ForConsumerGroups"/> is the one factory that sets two
-/// filters</b> (<c>:39-41</c>), and the empty protocol type it asks for is easy to mistake
-/// for a placeholder. Both members are asserted by name.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminListGroupsOptionsTests
 {
-    /// <summary>
-    /// A freshly constructed instance matches Java's field initializers — three empty sets
-    /// (<c>:30-32</c>) and an unset timeout — so <c>options: null</c> at a call site will
-    /// behave like one.
-    /// </summary>
     [Fact]
     public void Defaults_MatchJavasFieldInitializers()
     {
@@ -60,10 +41,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Empty(options.Types);
     }
 
-    /// <summary>
-    /// The public property set is exactly the timeout plus Java's three filters — no member
-    /// dropped, none invented.
-    /// </summary>
     [Fact]
     public void PublicShape_IsTheTimeoutPlusJavasThreeFilters()
     {
@@ -74,7 +51,6 @@ public sealed class PublicAdminListGroupsOptionsTests
                 .Select(property => property.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
 
-        // Java's three static factories, and nothing else static.
         Assert.Equal(
             new[] { "ForConsumerGroups", "ForShareGroups", "ForStreamsGroups" },
             typeof(ListGroupsOptions)
@@ -86,8 +62,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Equal(typeof(int?), timeout.PropertyType);
         Assert.NotNull(timeout.SetMethod);
 
-        // Java's Set<T> becomes IReadOnlyCollection<T>, settable so the object initializer
-        // reads the way Java's chained setters do.
         foreach ((string name, Type element) in new[]
                  {
                      (nameof(ListGroupsOptions.GroupStates), typeof(GroupState)),
@@ -101,10 +75,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         }
     }
 
-    /// <summary>
-    /// <c>forConsumerGroups()</c> (<c>:38</c>) sets <b>both</b> the group-type and the
-    /// protocol-type filter, and leaves the state filter alone.
-    /// </summary>
     [Fact]
     public void ForConsumerGroups_SetsBothTheTypeAndProtocolTypeFilters()
     {
@@ -114,9 +84,7 @@ public sealed class PublicAdminListGroupsOptionsTests
             new[] { GroupType.Consumer, GroupType.Classic }.OrderBy(type => type),
             options.Types.OrderBy(type => type));
 
-        // ⚠ The empty string is a member of the set, not a placeholder: it is the protocol
-        // type of a classic group that is not using one. "consumer" is
-        // ConsumerProtocol.PROTOCOL_TYPE (ConsumerProtocol.java:45).
+        // The empty string is a member, not a placeholder: the protocol type of a classic group that uses none.
         Assert.Equal(
             new[] { "", "consumer" }.OrderBy(protocolType => protocolType, StringComparer.Ordinal),
             options.ProtocolTypes.OrderBy(protocolType => protocolType, StringComparer.Ordinal));
@@ -125,11 +93,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Null(options.TimeoutMs);
     }
 
-    /// <summary>
-    /// <c>forShareGroups()</c> (<c>:48</c>) and <c>forStreamsGroups()</c> (<c>:57</c>) set
-    /// the group-type filter only — no protocol-type filter, unlike
-    /// <see cref="ListGroupsOptions.ForConsumerGroups"/>.
-    /// </summary>
     [Fact]
     public void ForShareAndStreamsGroups_SetTheTypeFilterOnly()
     {
@@ -146,10 +109,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Null(streams.TimeoutMs);
     }
 
-    /// <summary>
-    /// Every factory mints a fresh instance, as Java's <c>new ListGroupsOptions()</c> does —
-    /// so configuring one caller's options cannot reach another's.
-    /// </summary>
     [Fact]
     public void Factories_MintAFreshInstancePerCall()
     {
@@ -163,10 +122,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Null(ListGroupsOptions.ForShareGroups().TimeoutMs);
     }
 
-    /// <summary>
-    /// Null and empty both normalize to the empty set on all three filters — Java's
-    /// <c>(x == null || x.isEmpty()) ? Set.of()</c> (<c>:68</c>, <c>:77</c>, <c>:86</c>).
-    /// </summary>
     [Fact]
     public void Filters_NormalizeNullAndEmptyToTheEmptySet()
     {
@@ -181,8 +136,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Empty(options.Types);
         Assert.Empty(options.ProtocolTypes);
 
-        // A caller that defeats the non-nullable annotation still gets Java's behavior
-        // rather than a stored null, so the getters keep their never-null contract.
         options.GroupStates = new[] { GroupState.Stable };
         options.Types = new[] { GroupType.Consumer };
         options.ProtocolTypes = new[] { "consumer" };
@@ -196,10 +149,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Empty(options.ProtocolTypes);
     }
 
-    /// <summary>
-    /// Each filter stores a de-duplicated copy, so a later mutation of the caller's
-    /// collection is not observed — Java's <c>Set.copyOf</c>.
-    /// </summary>
     [Fact]
     public void Filters_StoreADeduplicatedDefensiveCopy()
     {
@@ -235,10 +184,6 @@ public sealed class PublicAdminListGroupsOptionsTests
             options.ProtocolTypes.OrderBy(protocolType => protocolType, StringComparer.Ordinal));
     }
 
-    /// <summary>
-    /// The stored copy is immutable, so a caller who downcasts it cannot rewrite this
-    /// instance's filter behind its back — Java's <c>Set.copyOf</c> result throws too.
-    /// </summary>
     [Fact]
     public void Filters_StoreAnImmutableCopy()
     {
@@ -254,11 +199,6 @@ public sealed class PublicAdminListGroupsOptionsTests
         Assert.Throws<NotSupportedException>(() => ((IList<string>)options.ProtocolTypes).Add("share"));
     }
 
-    /// <summary>
-    /// A null protocol type is rejected — Java's <c>Set.copyOf</c> throws
-    /// <c>NullPointerException</c> on a null element, and the element type here is
-    /// non-nullable.
-    /// </summary>
     [Fact]
     public void ProtocolTypes_RejectANullElement()
     {
@@ -269,14 +209,9 @@ public sealed class PublicAdminListGroupsOptionsTests
 
         Assert.Contains("must not be null", error.Message, StringComparison.Ordinal);
 
-        // The rejected set never lands: the filter is still Java's Set.of().
         Assert.Empty(options.ProtocolTypes);
     }
 
-    /// <summary>
-    /// The timeout is the nullable per-request timeout every options type in this binding
-    /// carries — Java's inherited <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
     [Fact]
     public void TimeoutMs_IsNullableAndRoundTrips()
     {

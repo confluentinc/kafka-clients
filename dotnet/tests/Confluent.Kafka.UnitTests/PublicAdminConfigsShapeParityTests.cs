@@ -26,20 +26,15 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P3 Stage 2's surface against the Java classes it
-/// mirrors.
+/// The public shape of the configs surface (<c>DescribeConfigs</c>, <c>IncrementalAlterConfigs</c>, their options,
+/// results and value types) against the Java classes it mirrors.
 /// </summary>
 /// <remarks>
-/// ⚠ <b>C# upcasts and widens silently, so these have to be reflection assertions.</b> A
-/// behavioural test passes equally against <c>Task</c> and <c>Task&lt;Map&gt;</c>, against a
-/// property and a method, and against <c>T</c> and <c>T?</c>.
+/// These are reflection assertions: a behavioural test passes equally against a property and a method, or against
+/// <c>T</c> and <c>T?</c>.
 /// </remarks>
 public sealed class PublicAdminConfigsShapeParityTests
 {
-    /// <summary>
-    /// The two new RPCs return their <c>*Result</c> <b>synchronously</b>
-    /// (<c>admin-client.md</c> §1), with Java's parameter shape.
-    /// </summary>
     [Fact]
     public void IAdmin_TheTwoNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
@@ -48,16 +43,13 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         Assert.Equal(typeof(DescribeConfigsResult), describe.ReturnType);
 
-        // ⚠ Java's incrementalAlterConfigs returns AlterConfigsResult — there is no
-        // IncrementalAlterConfigsResult in Java or in the ABI.
+        // Java's incrementalAlterConfigs returns AlterConfigsResult: there is no IncrementalAlterConfigsResult.
         Assert.Equal(typeof(AlterConfigsResult), alter.ReturnType);
 
-        // describeConfigs(Collection<ConfigResource>, DescribeConfigsOptions)
         Assert.Equal(
             new[] { typeof(IReadOnlyCollection<ConfigResource>), typeof(DescribeConfigsOptions) },
             describe.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // incrementalAlterConfigs(Map<ConfigResource, Collection<AlterConfigOp>>, AlterConfigsOptions)
         Assert.Equal(
             new[]
             {
@@ -66,7 +58,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             },
             alter.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // The options parameter is optional and nullable on each; the required one is not.
         foreach (MethodInfo rpc in new[] { describe, alter })
         {
             ParameterInfo[] parameters = rpc.GetParameters();
@@ -76,20 +67,12 @@ public sealed class PublicAdminConfigsShapeParityTests
             Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(parameters[1]));
         }
 
-        // IAdmin has NO Task-returning member (Close is void since M15/P14 S5g; IAsyncAdmin is the async twin).
         Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
                 .Select(method => method.Name));
     }
 
-    /// <summary>
-    /// ⚠ <b>The two results are one line apart in Java and easy to swap</b>:
-    /// <c>DescribeConfigsResult.all()</c> carries the whole map, while
-    /// <c>AlterConfigsResult.all()</c> is <c>KafkaFuture&lt;Void&gt;</c>. Both shapes are
-    /// pinned here, together, because that is where the confusion lives. Since M15/P14 S5a the
-    /// futures are <see cref="KafkaFuture{T}"/> / <see cref="KafkaFuture"/>.
-    /// </summary>
     [Fact]
     public void TheTwoResults_DifferExactlyAsJavasDo()
     {
@@ -104,32 +87,17 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         PropertyInfo alterValues = typeof(AlterConfigsResult).GetProperty(nameof(AlterConfigsResult.Values))!;
 
-        // ⚠ KafkaFuture, not KafkaFuture<bool>: the void bridge's success token must not leak out.
         Assert.Equal(typeof(IReadOnlyDictionary<ConfigResource, KafkaFuture>), alterValues.PropertyType);
         Assert.Null(alterValues.SetMethod);
 
         MethodInfo alterAll = typeof(AlterConfigsResult).GetMethod(nameof(AlterConfigsResult.All), Type.EmptyTypes)!;
 
-        // ⚠ A BARE KafkaFuture — this is the line that differs from DescribeConfigsResult.
         Assert.Equal(typeof(KafkaFuture), alterAll.ReturnType);
 
-        // Java's constructors are package-private / protected; nothing public builds one.
         Assert.Empty(typeof(DescribeConfigsResult).GetConstructors());
         Assert.Empty(typeof(AlterConfigsResult).GetConstructors());
     }
 
-    /// <summary>
-    /// ⚠ <b>P1's five <see cref="ConfigEntry"/> members are unchanged</b>, and the four Java
-    /// members Stage 2 adds have Java's types and nullability.
-    /// </summary>
-    /// <remarks>
-    /// The boundary condition for reopening P1's foundation: this asserts the shipped five
-    /// by name, type and nullability, so a widening or a rename during the extension turns
-    /// it red. The constructor surface is pinned separately, by
-    /// <c>PublicAdminShapeParityTests.ConfigEntry_PublishesBothConstructorsJavaHas</c>
-    /// (rewritten in M15/P13.2 when the 8-argument constructor was published), and is
-    /// deliberately not duplicated here.
-    /// </remarks>
     [Fact]
     public void ConfigEntry_KeepsP1sFiveMembers_AndGainsJavasFour()
     {
@@ -143,13 +111,10 @@ public sealed class PublicAdminConfigsShapeParityTests
             NullableAnnotation.NotAnnotated,
             NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Name))));
 
-        // Java's value() is nullable — "null is returned if the config is unset or if
-        // isSensitive is true" (ConfigEntry.java:86).
         Assert.Equal(
             NullableAnnotation.Annotated,
             NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Value))));
 
-        // The four new ones.
         Assert.Equal(
             typeof(ConfigEntry.ConfigSource), Property(typeof(ConfigEntry), nameof(ConfigEntry.Source)).PropertyType);
         Assert.Equal(
@@ -160,17 +125,14 @@ public sealed class PublicAdminConfigsShapeParityTests
             typeof(IReadOnlyList<ConfigEntry.ConfigSynonym>),
             Property(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms)).PropertyType);
 
-        // documentation() is nullable — "or null when the broker did not report it".
         Assert.Equal(
             NullableAnnotation.Annotated,
             NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Documentation))));
 
-        // synonyms() is a LIST, not a set — the order is Java's precedence order.
         Assert.Equal(
             NullableAnnotation.NotAnnotated,
             NullableAnnotation.Flag(Property(typeof(ConfigEntry), nameof(ConfigEntry.Synonyms))));
 
-        // Every accessor is read-only, and there are exactly these nine.
         Assert.Equal(
             new[]
             {
@@ -181,15 +143,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.All(typeof(ConfigEntry).GetProperties(), property => Assert.Null(property.SetMethod));
     }
 
-    /// <summary>
-    /// <see cref="ConfigEntry.IsDefault"/> is <b>derived</b> from
-    /// <see cref="ConfigEntry.Source"/>, exactly as Java derives it — not stored.
-    /// </summary>
-    /// <remarks>
-    /// This is P1's own recorded plan carried out: it recorded that "when <c>Source</c>
-    /// lands it becomes the source of truth and <c>IsDefault</c> derives from it, exactly as
-    /// in Java". A stored flag could contradict the source; a derived one cannot.
-    /// </remarks>
     [Fact]
     public void IsDefault_IsDerivedFromSource_NotStored()
     {
@@ -209,7 +162,6 @@ public sealed class PublicAdminConfigsShapeParityTests
                 $"{source} is not DEFAULT_CONFIG, so IsDefault must be false");
         }
 
-        // The public 2-argument constructor defaults the source to UNKNOWN (Java :45).
         ConfigEntry plain = new ConfigEntry("k", "v");
         Assert.Equal(ConfigEntry.ConfigSource.Unknown, plain.Source);
         Assert.Equal(ConfigEntry.ConfigType.Unknown, plain.Type);
@@ -218,22 +170,16 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.False(plain.IsDefault);
     }
 
-    /// <summary>
-    /// The two name-encoded enums stay <b>nested</b> inside <see cref="ConfigEntry"/>
-    /// (decision D16) and carry Java's members in Java's declaration order.
-    /// </summary>
     [Fact]
     public void TheTwoNameEncodedEnums_StayNested_WithJavasMembers()
     {
         Assert.Equal(typeof(ConfigEntry), typeof(ConfigEntry.ConfigType).DeclaringType);
         Assert.Equal(typeof(ConfigEntry), typeof(ConfigEntry.ConfigSource).DeclaringType);
 
-        // ConfigEntry.java:199-210, in declaration order.
         Assert.Equal(
             new[] { "Unknown", "Boolean", "String", "Int", "Short", "Long", "Double", "List", "Class", "Password" },
             Enum.GetNames(typeof(ConfigEntry.ConfigType)));
 
-        // ConfigEntry.java:215-225, in declaration order.
         Assert.Equal(
             new[]
             {
@@ -244,10 +190,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             Enum.GetNames(typeof(ConfigEntry.ConfigSource)));
     }
 
-    /// <summary>
-    /// <c>ConfigEntry.ConfigSynonym</c> stays nested with Java's three accessors and value
-    /// equality, and no public constructor (Java's is package-private).
-    /// </summary>
     [Fact]
     public void ConfigSynonym_MirrorsJavasShape()
     {
@@ -267,17 +209,12 @@ public sealed class PublicAdminConfigsShapeParityTests
             typeof(ConfigEntry.ConfigSource),
             Property(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Source)).PropertyType);
 
-        // value() "may be null if the configuration is sensitive" (ConfigEntry.java:257).
         Assert.Equal(
             NullableAnnotation.Annotated,
             NullableAnnotation.Flag(
                 Property(typeof(ConfigEntry.ConfigSynonym), nameof(ConfigEntry.ConfigSynonym.Value))));
     }
 
-    /// <summary>
-    /// <see cref="AlterConfigOp"/> mirrors Java's constructor, its two accessors — as
-    /// <b>properties</b> per decision D18 — and its value equality.
-    /// </summary>
     [Fact]
     public void AlterConfigOp_MirrorsJavasShape()
     {
@@ -294,8 +231,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         ConfigEntry entry = new ConfigEntry("k", "v");
         AlterConfigOp op = new AlterConfigOp(entry, AlterConfigOpType.Set);
 
-        // Java compares the entry with Objects.equals, so equal-valued distinct entries are
-        // equal — which only holds because ConfigEntry has value equality.
         Assert.Equal(new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set), op);
         Assert.Equal(
             new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set).GetHashCode(), op.GetHashCode());
@@ -304,9 +239,7 @@ public sealed class PublicAdminConfigsShapeParityTests
 
         Assert.StartsWith("AlterConfigOp{opType=SET, configEntry=ConfigEntry(", op.ToString(), StringComparison.Ordinal);
 
-        // ⚠ Java renders both booleans LOWERCASE (ConfigEntry.java:183-194); C#'s
-        // bool.ToString() would give "True"/"False". The literal text is asserted rather
-        // than re-derived from the implementation.
+        // Java renders both booleans in lowercase, where bool.ToString() gives "True" and "False".
         Assert.Contains("isSensitive=false, isReadOnly=false", entry.ToString(), StringComparison.Ordinal);
         Assert.Contains(
             "isSensitive=true, isReadOnly=true",
@@ -322,16 +255,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// <see cref="AlterConfigOpType"/> carries Java's <c>OpType.id()</c> wire codes, has
-    /// exactly Java's four members, and is <b>flattened out of</b> <see cref="AlterConfigOp"/>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The flattening is forced, not stylistic: Java's accessor is <c>opType()</c> and D18
-    /// makes it a property <c>OpType</c>, which cannot coexist with a nested type of the
-    /// same name (<c>CS0102</c>). Contrast the two enums above, which stay nested because
-    /// Java's accessors there are <c>source()</c> / <c>type()</c> — different names.
-    /// </remarks>
     [Theory]
     [InlineData(AlterConfigOpType.Set, 0)]
     [InlineData(AlterConfigOpType.Delete, 1)]
@@ -343,7 +266,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(opType, (AlterConfigOpType)id);
     }
 
-    /// <inheritdoc cref="AlterConfigOpType_CarriesJavasWireIds"/>
     [Fact]
     public void AlterConfigOpType_IsFlattened_WithExactlyJavasFourMembers()
     {
@@ -353,20 +275,11 @@ public sealed class PublicAdminConfigsShapeParityTests
             new[] { "Append", "Delete", "Set", "Subtract" },
             Enum.GetNames(typeof(AlterConfigOpType)).OrderBy(name => name, StringComparer.Ordinal));
 
-        // The forcing condition, asserted rather than asserted-in-prose: AlterConfigOp
-        // really does have a member named OpType, so a nested type of that name is CS0102.
+        // AlterConfigOp has a member named OpType, so a nested type of that name would be CS0102: the enum is flattened.
         Assert.NotNull(typeof(AlterConfigOp).GetProperty("OpType"));
         Assert.Null(typeof(AlterConfigOp).GetNestedType("OpType"));
     }
 
-    /// <summary>
-    /// An undefined <see cref="AlterConfigOpType"/> is rejected by the constructor (M15/P13.4
-    /// G2-4). Java's <c>OpType</c> is closed (<c>AlterConfigOp.java:46-67</c>) and has no
-    /// <c>UNKNOWN</c> to normalize to, unlike <see cref="ConfigResourceType"/>. <c>99</c> is
-    /// an arbitrary out-of-range code; <c>-1</c> is the value the binding's internal zero-op
-    /// sentinel row uses, which a caller must not be able to smuggle in as an op.
-    /// </summary>
-    /// <param name="code">The undefined numeric op-type code.</param>
     [Theory]
     [InlineData(99)]
     [InlineData(-1)]
@@ -382,10 +295,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(undefined, thrown.ActualValue);
     }
 
-    /// <summary>
-    /// Every defined <see cref="AlterConfigOpType"/> member still constructs, so the
-    /// undefined-value guard rejects nothing Java accepts.
-    /// </summary>
     [Fact]
     public void AlterConfigOp_AcceptsEveryDefinedOpType()
     {
@@ -398,12 +307,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// <see cref="Config"/> has Java's map semantics (M15/P13.4 G2-5): Java's constructor
-    /// <c>put</c>s each entry by name (<c>Config.java:36-40</c>), so a repeated name is one
-    /// entry and the <b>last</b> wins. It keeps the <b>first</b> occurrence's position, so
-    /// the ABI's sorted order holds whenever nothing repeats.
-    /// </summary>
     [Fact]
     public void Config_DuplicateNames_AreOneEntry_TheLastWinning_InTheFirstPosition()
     {
@@ -421,10 +324,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal("3", config.Get("a")!.Value);
     }
 
-    /// <summary>
-    /// <c>Get(null)</c> returns <see langword="null"/>, as Java's <c>HashMap.get(null)</c>
-    /// does (<c>Config.java:52-54</c>) — it no longer throws.
-    /// </summary>
     [Fact]
     public void Config_GetNull_ReturnsNull()
     {
@@ -434,11 +333,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Null(new Config(Array.Empty<ConfigEntry>()).Get(null));
     }
 
-    /// <summary>
-    /// <see cref="Config.Entries"/> is read-only at runtime — Java's
-    /// <c>Collections.unmodifiableCollection(entries.values())</c> (<c>Config.java:45-47</c>)
-    /// — so the view cannot be cast back to a list and changed.
-    /// </summary>
     [Fact]
     public void Config_Entries_CannotBeCastBackAndMutated()
     {
@@ -451,12 +345,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(new[] { "a" }, config.Entries.Select(entry => entry.Name));
     }
 
-    /// <summary>
-    /// Equality is Java's map equality (<c>Config.java:56-66</c>, <c>:68-71</c>): two
-    /// <b>distinct</b> instances holding equal entries in a different order are equal with
-    /// the same hash, and a single differing value makes them unequal — so neither
-    /// reference equality nor a constant-true <c>Equals</c> passes.
-    /// </summary>
     [Fact]
     public void Config_Equality_IsOrderInsensitiveMapEquality()
     {
@@ -468,7 +356,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.True(reversed.Equals(forward));
         Assert.Equal(forward.GetHashCode(), reversed.GetHashCode());
 
-        // A repeated name collapses before comparison, as Java's put does.
         Config withReplacedDuplicate = new Config(
             new[] { new ConfigEntry("a", "0"), new ConfigEntry("b", "2"), new ConfigEntry("a", "1") });
         Assert.True(forward.Equals(withReplacedDuplicate));
@@ -487,11 +374,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.True(new Config(Array.Empty<ConfigEntry>()).Equals(new Config(Array.Empty<ConfigEntry>())));
     }
 
-    /// <summary>
-    /// <c>ToString</c> is Java's layout — <c>"Config(entries=" + entries.values() + ")"</c>
-    /// (<c>Config.java:73-76</c>) — with each entry rendered by
-    /// <see cref="ConfigEntry.ToString"/>, in <see cref="Config.Entries"/> order.
-    /// </summary>
     [Fact]
     public void Config_ToString_IsJavasLayout_InEntriesOrder()
     {
@@ -503,12 +385,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal("Config(entries=[" + b + ", " + a + "])", new Config(new[] { b, a }).ToString());
     }
 
-    /// <summary>
-    /// The value members are <b>overrides declared on</b> <see cref="Config"/> — with no
-    /// <c>IEquatable&lt;Config&gt;</c> (the <see cref="NewTopic"/> precedent) — and
-    /// <see cref="Config.Get"/>'s parameter is annotated nullable, since a null name now
-    /// returns null rather than throwing.
-    /// </summary>
     [Fact]
     public void Config_ValueMembers_AreDeclaredOverrides_AndGetTakesANullableName()
     {
@@ -536,17 +412,10 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(get.ReturnParameter));
 
 #if NET8_0_OR_GREATER
-        // The same reading through the runtime's own decoder, where it exists.
         Assert.Equal(NullabilityState.Nullable, new NullabilityInfoContext().Create(name).ReadState);
 #endif
     }
 
-    /// <summary>
-    /// Java's <c>ConfigResource.Type</c> constant names (<c>ConfigResource.java:36-41</c>),
-    /// written out by hand — not derived from the .NET member names — so a mapping that
-    /// merely upper-cases PascalCase cannot pass (<c>BrokerLogger</c> must become
-    /// <c>BROKER_LOGGER</c>).
-    /// </summary>
     private static readonly Dictionary<ConfigResourceType, string> s_javaResourceTypes =
         new Dictionary<ConfigResourceType, string>
         {
@@ -558,7 +427,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             [ConfigResourceType.Group] = "GROUP",
         };
 
-    /// <summary>Java's <c>AlterConfigOp.OpType</c> constant names (<c>AlterConfigOp.java:46-67</c>), by hand.</summary>
     private static readonly Dictionary<AlterConfigOpType, string> s_javaOpTypes =
         new Dictionary<AlterConfigOpType, string>
         {
@@ -568,7 +436,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             [AlterConfigOpType.Subtract] = "SUBTRACT",
         };
 
-    /// <summary>Java's <c>ConfigEntry.ConfigSource</c> constant names (<c>ConfigEntry.java:215-225</c>), by hand.</summary>
     private static readonly Dictionary<ConfigEntry.ConfigSource, string> s_javaSources =
         new Dictionary<ConfigEntry.ConfigSource, string>
         {
@@ -583,7 +450,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             [ConfigEntry.ConfigSource.Unknown] = "UNKNOWN",
         };
 
-    /// <summary>Java's <c>ConfigEntry.ConfigType</c> constant names (<c>ConfigEntry.java:199-210</c>), by hand.</summary>
     private static readonly Dictionary<ConfigEntry.ConfigType, string> s_javaConfigTypes =
         new Dictionary<ConfigEntry.ConfigType, string>
         {
@@ -599,12 +465,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             [ConfigEntry.ConfigType.Password] = "PASSWORD",
         };
 
-    /// <summary>
-    /// <see cref="ConfigResource.ToString"/> prints Java's constant name for every
-    /// <see cref="ConfigResourceType"/> member (M15/P13.4 G2-8, D5 = a;
-    /// <c>ConfigResource.java:120-122</c>). The loop runs over <c>Enum.GetValues</c>, so a
-    /// member added without a Java name fails here.
-    /// </summary>
     [Fact]
     public void ConfigResource_ToString_PrintsJavasTypeConstantName_ForEveryMember()
     {
@@ -618,11 +478,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// <see cref="AlterConfigOp.ToString"/> prints Java's constant name for every
-    /// <see cref="AlterConfigOpType"/> member (<c>AlterConfigOp.java:119-124</c>), with the
-    /// entry rendered by <see cref="ConfigEntry.ToString"/>.
-    /// </summary>
     [Fact]
     public void AlterConfigOp_ToString_PrintsJavasOpTypeConstantName_ForEveryMember()
     {
@@ -639,13 +494,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// <see cref="ConfigEntry.ToString"/> prints Java's constant names for every
-    /// <see cref="ConfigEntry.ConfigSource"/> and <see cref="ConfigEntry.ConfigType"/>
-    /// member (<c>ConfigEntry.java:183-194</c>), and
-    /// <see cref="ConfigEntry.ConfigSynonym.ToString"/> for every source
-    /// (<c>:285-290</c>). Each loop runs over <c>Enum.GetValues</c>.
-    /// </summary>
     [Fact]
     public void ConfigEntry_AndSynonym_ToString_PrintJavasConstantNames_ForEveryMember()
     {
@@ -675,11 +523,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// A <see langword="null"/> value or documentation renders as <c>null</c>, as Java's
-    /// string concatenation does — in the entry, in a synonym, and inside a
-    /// <see cref="Config"/>'s rendering.
-    /// </summary>
     [Fact]
     public void ConfigRenderings_PrintANullAsNull()
     {
@@ -696,11 +539,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             new Config(new[] { new ConfigEntry("a", "1") }).ToString());
     }
 
-    /// <summary>
-    /// A source or type that is not a defined member — the public eight-argument
-    /// <see cref="ConfigEntry"/> constructor stores what it is given — has no Java name,
-    /// and prints as its numeric value (the documented fallback).
-    /// </summary>
     [Fact]
     public void ConfigEntry_AnUndefinedSourceOrType_PrintsItsNumericValue()
     {
@@ -713,10 +551,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             new ConfigEntry.ConfigSynonym("a", "1", (ConfigEntry.ConfigSource)(-5)).ToString());
     }
 
-    /// <summary>
-    /// A sensitive value still renders as <c>Redacted</c> — whether it is set or
-    /// <see langword="null"/> — as Java's <c>isSensitive ? "Redacted" : value</c> does.
-    /// </summary>
     [Fact]
     public void ConfigEntry_ASensitiveValue_StillRendersRedacted()
     {
@@ -751,9 +585,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             type: type,
             documentation: documentation);
 
-    /// <summary>
-    /// The two new options types match Java's fields and defaults exactly.
-    /// </summary>
     [Fact]
     public void Options_MatchJavasFieldsAndDefaults()
     {
@@ -784,15 +615,6 @@ public sealed class PublicAdminConfigsShapeParityTests
         }
     }
 
-    /// <summary>
-    /// ⚠ <b>No <c>IncrementalAlterConfigsResult</c> type exists</b> — Java's return type is
-    /// <see cref="AlterConfigsResult"/>, and inventing a name for the RPC instead would be a
-    /// <c>definition-of-done.md</c> §7 violation.
-    /// </summary>
-    /// <remarks>
-    /// The whole exported surface is swept, so the type cannot reappear elsewhere and
-    /// satisfy a narrower check.
-    /// </remarks>
     [Fact]
     public void NoIncrementalAlterConfigsResultType_Exists()
     {
@@ -801,12 +623,6 @@ public sealed class PublicAdminConfigsShapeParityTests
             type => type.Name.IndexOf("IncrementalAlterConfigsResult", StringComparison.Ordinal) >= 0);
     }
 
-    /// <summary>
-    /// Both new config types live under <c>Confluent.Kafka.Admin</c> (Java's
-    /// <c>clients.admin</c> package), unlike <see cref="ConfigResource"/> and
-    /// <see cref="ConfigResourceType"/>, which are <c>common.config</c> and sit at the root
-    /// (decisions D13 / D16).
-    /// </summary>
     [Fact]
     public void TheNamespaceSplit_FollowsJavasPackages()
     {

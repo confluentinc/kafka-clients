@@ -14,65 +14,55 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeClientQuotas"/> — the .NET realization of Java's
-/// <c>DescribeClientQuotasResult</c>: <b>one</b> future over the whole entity-to-quota
-/// map (<c>DescribeClientQuotasResult.java:31</c>).
+/// The result of <see cref="IAsyncAdmin.DescribeClientQuotas"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DescribeClientQuotasResult</c>: one future over the whole
+/// entity-to-quota map.
 /// </summary>
 /// <remarks>
-/// ⚠ <b>There is no <c>All()</c>.</b> Java publishes only <c>entities()</c> (<c>:46</c>), and
-/// <c>kafka_admin_DescribeClientQuotasResult_t</c> declares no <c>get_error</c> of any kind —
-/// so there is no per-entity outcome to aggregate and any failure faults this single future.
+/// Java publishes only <c>entities()</c>, so there is no <c>All()</c>; any failure faults this one
+/// future.
 /// </remarks>
 /// <seealso cref="DescribeClientQuotasResult"/>
 public sealed class AsyncDescribeClientQuotasResult
 {
     private readonly AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> _future;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps the single future — Java's <b>public</b>
-    /// <c>DescribeClientQuotasResult(KafkaFuture&lt;Map&lt;ClientQuotaEntity, Map&lt;String, Double&gt;&gt;&gt;)</c>
-    /// (<c>:39</c>).
-    /// </summary>
-    /// <remarks>
-    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
-    /// <c>design/current/STATUS.md</c>.
-    /// </remarks>
-    /// <param name="entities">The future over the entity-to-quota map.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="entities"/> is a default value, bound to no task — this constructor's null, where Java
-    /// stores the null and throws <c>NullPointerException</c> on first use.
-    /// </exception>
+    // Internal, unlike Java's public constructor: a recorded deviation.
     internal AsyncDescribeClientQuotasResult(
         AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities)
     {
         _future = entities != default ? entities : throw new ArgumentNullException(nameof(entities));
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeClientQuotasResult From(
-        SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation) =>
-        new AsyncDescribeClientQuotasResult(new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(operation.Task));
+    private AsyncDescribeClientQuotasResult(
+        KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities, SafeAdminResultHandle native)
+    {
+        _future = new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities);
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
-    /// The quotas of every entity matching the filter — Java's <c>entities()</c>
-    /// (<c>:46</c>). A quota type an entity has no value for is simply absent.
+    /// The quotas of every entity matching the filter — Java's <c>entities()</c>.
+    /// A quota type an entity has no value for is simply absent.
     /// </summary>
     /// <returns>
     /// A future yielding the map, or faulting with the call's own
     /// <see cref="KafkaException"/>.
     /// </returns>
-    /// <remarks>
-    /// This is the stored future itself, so every call returns an equal future over the <b>same</b> task —
-    /// no second task whose fault could go unobserved.
-    /// </remarks>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities() => _future;
+
+    internal static AsyncDescribeClientQuotasResult OfClient(
+        (KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities,
+        SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeClientQuotasResult(native.Entities, native.Result);
 }

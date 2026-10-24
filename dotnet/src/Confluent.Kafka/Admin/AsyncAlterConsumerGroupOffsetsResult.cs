@@ -13,161 +13,51 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Threading.Tasks;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.AlterConsumerGroupOffsets"/> — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult</c>
-/// (<c>AlterConsumerGroupOffsetsResult.java:33</c>): <b>one</b> future over a map whose
-/// values are the per-partition outcomes.
+/// The result of <see cref="IAsyncAdmin.AlterConsumerGroupOffsets"/> — Java's
+/// <c>org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult</c>: the outcome per partition and for the whole request.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>A per-partition failure is a map VALUE here, not a faulted future</b> — the
-/// same shape as <see cref="AsyncElectLeadersResult"/>. Java's stored field is
-/// <c>KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;</c> (<c>:33</c>): one future
-/// whose resolved map carries every partition's own <c>Errors</c> code, <c>Errors.NONE</c>
-/// meaning success. So a failed partition resolves the <em>same</em> successful future as
-/// every other partition; <see cref="PartitionResult"/> is what turns a non-<c>NONE</c>
-/// entry into a fault, exactly where Java's <c>partitionResult</c> does.
-/// </para>
-/// <para>
-/// ⚠ <b>A whole-request failure faults the future itself</b>, not the map. So both
-/// accessors rethrow that error unchanged — <see cref="PartitionResult"/> even for a
-/// partition that was never requested, because Java's continuation tests the
-/// <c>throwable</c> before it looks at the map (<c>:46-47</c>).
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="All"/> is the core's outcome, not a derivation over the map.</b> The one
-/// native result carries both the per-partition errors and Java's <c>all()</c> outcome; both
-/// are read off it before the future resolves, so <see cref="All"/> rethrows the core's
-/// fault — including Java's aggregate message naming every failed partition — rather than
-/// rebuilding it here.
-/// </para>
-/// <para>
-/// ⚠ <b>The ABI accessor set cannot tell you the map-value shape.</b>
-/// <c>kafka_admin_AlterConsumerGroupOffsetsResult_t</c> exposes the same indexed accessors
-/// (<c>count</c>, <c>get_topic</c>, <c>get_partition</c>, <c>get_error</c>, <c>destroy</c>)
-/// as <c>kafka_admin_ElectLeadersResult_t</c> and
-/// <c>kafka_admin_AlterPartitionReassignmentsResult_t</c> — accessor-set identity is
-/// evidence of nothing (<c>admin-client.md</c> §1.4); the Java return type is what
-/// separates them. See <c>AdminCallbacks.AlterConsumerGroupOffsetsOptionalError</c> for the
-/// reader that carries this.
-/// </para>
+/// Each call of an accessor returns a new future, as Java's do.
 /// </remarks>
 /// <seealso cref="AlterConsumerGroupOffsetsResult"/>
 public sealed class AsyncAlterConsumerGroupOffsetsResult
 {
-    private readonly Task<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> _future;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the single future — Java's package-private
-    /// <c>AlterConsumerGroupOffsetsResult(KafkaFuture&lt;Map&lt;TopicPartition, Errors&gt;&gt;)</c>
-    /// (<c>:35-37</c>) — resolved with the per-partition map and the core's own
-    /// <c>all()</c> outcome.
-    /// </summary>
-    /// <param name="future">
-    /// The single future: <c>PerKey</c> is the per-partition map (a <see langword="null"/>
-    /// value is Java's <c>Errors.NONE</c>), <c>All</c> the fault Java's <c>all()</c> reports,
-    /// or <see langword="null"/> when it succeeds.
-    /// </param>
-    internal AsyncAlterConsumerGroupOffsetsResult(
-        Task<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> future)
+    private AsyncAlterConsumerGroupOffsetsResult(SafeAdminResultHandle native)
     {
-        _future = future;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncAlterConsumerGroupOffsetsResult From(
-        SingleAdminOperation<(IReadOnlyDictionary<TopicPartition, KafkaException?> PerKey, KafkaException? All)> operation) =>
-        new AsyncAlterConsumerGroupOffsetsResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// The outcome of altering the offset for one partition — Java's
-    /// <c>partitionResult(TopicPartition)</c> (<c>:42-63</c>).
+    /// The outcome of altering the offset for one partition — Java's <c>partitionResult(TopicPartition)</c>.
     /// </summary>
     /// <param name="partition">A partition from the request this result came from.</param>
     /// <returns>
-    /// A future that completes when that partition's offset was altered successfully, and
-    /// faults otherwise.
+    /// A new future that completes when that partition's offset was altered, and fails with the partition's error, or
+    /// with the call's error when the whole request failed. For a partition that was not in the request it fails with
+    /// an <see cref="ArgumentException"/>, as Java's does.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// Delivered on the returned <see cref="AsyncKafkaFuture"/> (not thrown synchronously — Java's own
-    /// check happens inside the <c>whenComplete</c> continuation, not before it):
-    /// <paramref name="partition"/> was not part of this request. Java throws
-    /// <c>IllegalArgumentException</c> on the same condition (<c>:48-50</c>). A whole-request
-    /// failure is delivered instead, when there is one — Java tests it first.
+    /// <paramref name="partition"/> has a null topic, or a topic with a NUL character or an unpaired surrogate.
     /// </exception>
-    /// <remarks>
-    /// A fresh future per call, as Java allocates a fresh <c>KafkaFutureImpl</c> per
-    /// <c>partitionResult</c> call (<c>:43</c>). Admin is batch/administrative, so there is
-    /// no per-record path to budget (<c>admin-client.md</c> §10).
-    /// </remarks>
-    public AsyncKafkaFuture PartitionResult(TopicPartition partition) => new AsyncKafkaFuture(PartitionResultCore(partition));
-
-    private async Task PartitionResultCore(TopicPartition partition)
-    {
-        // A call-level failure propagates by the await itself — Java's `throwable != null`
-        // branch (:46-47), which is tested before the map is looked at.
-        IReadOnlyDictionary<TopicPartition, KafkaException?> perKey = (await _future.ConfigureAwait(false)).PerKey;
-
-        if (!perKey.TryGetValue(partition, out KafkaException? error))
-        {
-            // Java's `IllegalArgumentException` (:48-50) — text is Java's verbatim.
-            throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Alter offset for partition \"{0}\" was not attempted",
-                    partition));
-        }
-
-        // `error == null` here mirrors Java's `Errors.NONE` (:53-54); a non-null value is
-        // that partition's own error and is thrown as-is (:56).
-        if (error is not null)
-        {
-            throw error;
-        }
-    }
+    public AsyncKafkaFuture PartitionResult(TopicPartition partition) =>
+        new AsyncKafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsPartitionResult(_native, partition));
 
     /// <summary>
-    /// Completes when every partition's offset was altered successfully, and faults
-    /// otherwise — Java's <c>all()</c> (<c>:67-82</c>).
+    /// Completes when every partition's offset was altered, and fails otherwise — Java's <c>all()</c>.
     /// </summary>
-    /// <returns>A future representing the whole request.</returns>
-    /// <remarks>
-    /// <para>
-    /// The fault is the core's <c>kafka_admin_AlterConsumerGroupOffsetsResult_all</c>,
-    /// rethrown unchanged: a failed partition's error carrying the message
-    /// <c>Failed altering group offsets for the following partitions: [&lt;topic&gt;-&lt;partition&gt;, ...]</c>,
-    /// with <b>every</b> failed partition listed, sorted by topic name then partition id —
-    /// Java's <c>thenApply</c> body (<c>:68-81</c>). A whole-request failure faults the
-    /// future instead and propagates unchanged through the <see langword="await"/>, as it
-    /// does through Java's <c>thenApply</c>.
-    /// </para>
-    /// <para>
-    /// A fresh future per call, as Java allocates a fresh <c>KafkaFutureImpl</c> via
-    /// <c>thenApply</c> per <c>all()</c> call. Admin is batch/administrative, so there is
-    /// no per-record path to budget (<c>admin-client.md</c> §10).
-    /// </para>
-    /// </remarks>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AllCore());
+    /// <returns>A new future over the whole request; its failure is the core's, naming every failed partition.</returns>
+    public AsyncKafkaFuture All() => new AsyncKafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsAll(_native));
 
-    private async Task AllCore()
-    {
-        // A call-level failure propagates by the await itself.
-        KafkaException? all = (await _future.ConfigureAwait(false)).All;
-
-        if (all is not null)
-        {
-            throw all;
-        }
-    }
+    internal static AsyncAlterConsumerGroupOffsetsResult OfClient(SafeAdminResultHandle native) => new AsyncAlterConsumerGroupOffsetsResult(native);
 }

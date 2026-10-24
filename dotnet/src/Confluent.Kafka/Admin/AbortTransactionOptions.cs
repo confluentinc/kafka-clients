@@ -14,27 +14,39 @@
 
 using System.Globalization;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for aborting a hanging transaction — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.AbortTransactionOptions</c>
-/// (<c>AbortTransactionOptions.java:19</c>).
+/// <c>org.apache.kafka.clients.admin.AbortTransactionOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>Java declares no option of its own; the timeout is all there is.</para>
 /// </remarks>
 public sealed class AbortTransactionOptions
 {
-    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:22</c>).</summary>
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "AbortTransactionOptions(timeoutMs={0})",
             TimeoutMs.HasValue ? TimeoutMs.Value.ToString(CultureInfo.InvariantCulture) : "null");
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

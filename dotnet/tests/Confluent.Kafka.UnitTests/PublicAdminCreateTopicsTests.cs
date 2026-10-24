@@ -14,41 +14,45 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.UnitTests.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The per-key bridge as a user sees it: <see cref="IAdmin.CreateTopics"/> returns
-/// <b>immediately</b> with one awaitable per topic, and each awaitable carries that
-/// topic's own outcome. Driven end to end against <see cref="MockAdminClient"/> — no
-/// broker.
+/// <see cref="IAdmin.CreateTopics"/> end to end against the mocks: one future per topic carrying that topic's own
+/// outcome, the derived accessors and their cancellation, the options, and the C options and topic the call builds.
 /// </summary>
 public sealed class PublicAdminCreateTopicsTests
 {
+    private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The C code Kafka assigns to <c>INVALID_REPLICATION_FACTOR</c>.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+
     private const int InvalidReplicationFactorCode = 38;
 
-    /// <summary>The C code Kafka assigns to <c>TOPIC_ALREADY_EXISTS</c>.</summary>
     private const int TopicAlreadyExistsCode = 36;
 
-    /// <summary>
-    /// <b>The discriminating bridge test.</b> One call, one topic that succeeds and one
-    /// that fails: each <see cref="Task"/> must carry <em>its own</em> outcome. An
-    /// implementation that faults everything as soon as any key fails — the natural
-    /// mistake when one aggregate callback resolves N awaiters — fails here and nowhere
-    /// else.
-    /// </summary>
+    private const string CreateTopicsThreadExited = "The AdminClient thread has exited. Call: createTopics";
+
     [Fact]
     public async Task MixedOutcome_EachTopicCarriesItsOwnResult()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         // Replication factor 5 against a 1-broker mock is rejected; the other is fine.
@@ -58,8 +62,6 @@ public sealed class PublicAdminCreateTopicsTests
             new NewTopic("mixed-bad", 1, 5),
         });
 
-        // `Values` is Java's `values()` — Map<String, KafkaFuture<Void>>: it says whether
-        // the topic was created, and the metadata comes from the typed accessors.
         await TestTimeout.Run(() => result.Values["mixed-ok"].Get(), s_deadline);
 
         int numPartitions = 0;
@@ -72,15 +74,10 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal("Replication factor: 5 is larger than brokers: 1", failure.Message);
     }
 
-    /// <summary>
-    /// Awaiting one topic works without awaiting the others — including when one of the
-    /// others has failed. That is the whole point of per-key granularity, and it is what
-    /// collapsing the result into a single aggregate awaitable would destroy.
-    /// </summary>
     [Fact]
     public async Task OneTopicCanBeAwaited_WithoutTouchingTheOthers()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -91,23 +88,15 @@ public sealed class PublicAdminCreateTopicsTests
 
         await TestTimeout.Run(() => result.Values["solo-ok"].Get(), s_deadline);
 
-        // The failed sibling is deliberately left unawaited above; observe it now so the
-        // test leaves no unobserved fault behind. AWAIT it rather than read `.Exception`:
-        // the per-key tasks are completed one callback at a time and the await above
-        // resumes asynchronously (RunContinuationsAsynchronously), so the sibling can
-        // still be pending when it does — reading `.Exception` there raced (it failed
-        // about 1 run in 8 on net8.0, at 61097faa too).
+        // Await the failed sibling rather than read its Exception: the futures complete one at a time, so it can still be
+        // pending here.
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.Values["solo-bad"].Get(), s_deadline));
     }
 
-    /// <summary>
-    /// <c>All()</c> mirrors Java's <c>all()</c>: it succeeds only when every topic
-    /// succeeded, and faults with the first failure otherwise.
-    /// </summary>
     [Fact]
     public async Task All_SucceedsWhenEveryTopicSucceeds_AndFaultsOtherwise()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult ok = admin.CreateTopics(new[]
@@ -127,23 +116,16 @@ public sealed class PublicAdminCreateTopicsTests
             () => TestTimeout.Run(() => mixed.All().Get(), s_deadline));
         Assert.Equal(InvalidReplicationFactorCode, failure.Code);
 
-        // The successful sibling is still successful — All faulting does not fault it.
         await TestTimeout.Run(() => mixed.Values["all-c"].Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The <c>thenApply</c>-style accessors — Java's <c>config</c> / <c>topicId</c> /
-    /// <c>numPartitions</c> / <c>replicationFactor</c> — each derive from that topic's own
-    /// awaitable, including the non-ASCII config value round-trip that guards against
-    /// <c>LPStr</c> marshalling (ffi §B3).
-    /// </summary>
     [Fact]
     public async Task DerivedAccessors_ProjectOneTopicsOwnResult()
     {
         const string Topic = "derived-topic";
         const string ConfigValue = "délété-🎈";
 
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -172,7 +154,6 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal(2, replicationFactor);
         Assert.NotEqual(Uuid.Zero, topicId);
 
-        // The id round-trips through the ABI's base64 text form.
         Assert.Equal(topicId, Uuid.Parse(topicId.ToString()));
 
         Assert.Equal("compact", config.Get("cleanup.policy")!.Value);
@@ -180,45 +161,189 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Null(config.Get("not.set.at.all"));
     }
 
-    /// <summary>
-    /// A derived accessor for a topic that was not part of the request reports the
-    /// mistake as an argument error, naming the parameter — a precondition, not a Kafka
-    /// outcome (ffi §B5). It is raised <b>synchronously</b>, at the call site: a usage
-    /// error is not an operation outcome, so it must not be deferred into a
-    /// <see cref="Task"/> the caller might await much later, or never.
-    /// </summary>
     [Fact]
-    public async Task DerivedAccessor_ForAnUnrequestedTopic_ThrowsArgumentExceptionSynchronously()
+    public async Task DerivedAccessor_ForAnUnrequestedTopic_FailsItsFuture_WithTheCoresArgumentError()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        const string Unrequested = "Topic unknown was not part of the createTopics request";
+
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        // Assert.Throws (not ThrowsAsync): the exception must escape the call itself,
-        // before any Task is handed back.
-        ArgumentException failure =
-            Assert.Throws<ArgumentException>(() => { _ = result.Config("unknown"); });
-        Assert.Equal("topic", failure.ParamName);
-        Assert.StartsWith(
-            "Topic 'unknown' was not part of this createTopics request.",
-            failure.Message,
-            StringComparison.Ordinal);
+        Func<Task>[] gets =
+        {
+            () => result.Config("unknown").Get(),
+            () => result.TopicId("unknown").Get(),
+            () => result.NumPartitions("unknown").Get(),
+            () => result.ReplicationFactor("unknown").Get(),
+        };
+        foreach (Func<Task> get in gets)
+        {
+            ArgumentException failure =
+                await Assert.ThrowsAsync<ArgumentException>(() => TestTimeout.Run(get, s_deadline));
+            Assert.Equal(Unrequested, failure.Message);
+        }
+
+        MockAdminClient syncAdmin = MockAdminClient.Create().Build();
+        using IDisposable syncDisposal = TestTimeout.Disposal(syncAdmin);
+        CreateTopicsResult syncResult = syncAdmin.CreateTopics(new[] { new NewTopic("known", 1, 1) });
+        KafkaFuture<int> unknown = syncResult.NumPartitions("unknown");
+        Assert.Equal(Unrequested, Assert.Throws<ArgumentException>(() => unknown.Get()).Message);
+        Assert.True(unknown.IsCompletedExceptionally);
 
         ArgumentNullException nullTopic =
             Assert.Throws<ArgumentNullException>(() => { _ = result.TopicId(null!); });
         Assert.Equal("topic", nullTopic.ParamName);
     }
 
-    /// <summary>
-    /// A topic that already exists fails with that topic's error, message and code — the
-    /// contract that a per-topic failure is not a call failure.
-    /// </summary>
+    [Fact]
+    public void CancellingAValuesFuture_LeavesTheAccessorsAllAndAFreshValuesFuturePending()
+    {
+        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        try
+        {
+            CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });
+            KafkaFuture<int> numPartitions = result.NumPartitions("linked");
+            KafkaFuture<Config> config = result.Config("linked");
+            KafkaFuture allBefore = result.All();
+            KafkaFuture cancelled = result.Values["linked"];
+
+            Assert.True(cancelled.Cancel(true));
+
+            Assert.True(cancelled.IsCancelled);
+            KafkaFuture allAfter = result.All();
+            KafkaFuture fresh = result.Values["linked"];
+            Assert.False(numPartitions.IsDone);
+            Assert.False(config.IsDone);
+            Assert.False(allBefore.IsDone);
+            Assert.False(allAfter.IsDone);
+            Assert.False(fresh.IsDone);
+
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+
+            AssertCreateTopicsThreadExited(BlockingCall.RunGet(() => numPartitions.Get()));
+            AssertCreateTopicsThreadExited(BlockingCall.RunGet(() => config.Get()));
+            AssertCreateTopicsThreadExited(BlockingCall.RunWait(() => allBefore.Get()));
+            AssertCreateTopicsThreadExited(BlockingCall.RunWait(() => allAfter.Get()));
+            AssertCreateTopicsThreadExited(BlockingCall.RunWait(() => fresh.Get()));
+            Assert.IsType<OperationCanceledException>(BlockingCall.RunWait(() => cancelled.Get()));
+        }
+        finally
+        {
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+            TestTimeout.Dispose(admin);
+        }
+    }
+
+    [Fact]
+    public async Task CancellingAnAsyncValuesFuture_LeavesTheAccessorsAllAndAFreshValuesFuturePending()
+    {
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        try
+        {
+            AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });
+            AsyncKafkaFuture<int> numPartitions = result.NumPartitions("linked");
+            AsyncKafkaFuture<Config> config = result.Config("linked");
+            AsyncKafkaFuture allBefore = result.All();
+            AsyncKafkaFuture cancelled = result.Values["linked"];
+
+            Assert.True(cancelled.Cancel(true));
+
+            Assert.True(cancelled.IsCancelled);
+            AsyncKafkaFuture allAfter = result.All();
+            AsyncKafkaFuture fresh = result.Values["linked"];
+            Assert.False(numPartitions.IsDone);
+            Assert.False(config.IsDone);
+            Assert.False(allBefore.IsDone);
+            Assert.False(allAfter.IsDone);
+            Assert.False(fresh.IsDone);
+
+            await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
+
+            AssertCreateTopicsThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => numPartitions.Get(), BlockingCall.Deadline)));
+            AssertCreateTopicsThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => config.Get(), BlockingCall.Deadline)));
+            AssertCreateTopicsThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => allBefore.Get(), BlockingCall.Deadline)));
+            AssertCreateTopicsThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => allAfter.Get(), BlockingCall.Deadline)));
+            AssertCreateTopicsThreadExited(await Record.ExceptionAsync(() => TestTimeout.Run(() => fresh.Get(), BlockingCall.Deadline)));
+            Assert.IsAssignableFrom<OperationCanceledException>(
+                await Record.ExceptionAsync(() => TestTimeout.Run(() => cancelled.Get(), BlockingCall.Deadline)));
+        }
+        finally
+        {
+            await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
+            await TestTimeout.DisposeAsync(admin);
+        }
+    }
+
+    [Fact]
+    public async Task Values_IsAFreshDependantPerAccess_SoOneReadAfterACancelIsNotCancelled()
+    {
+        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        AsyncKafkaAdminClient asyncAdmin = new AsyncKafkaAdminClient(s_unreachable);
+        try
+        {
+            CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
+            AsyncCreateTopicsResult asyncResult = asyncAdmin.CreateTopics(new[] { new NewTopic("t", 1, 1) });
+            KafkaFuture first = result.Values["t"];
+            AsyncKafkaFuture asyncFirst = asyncResult.Values["t"];
+            Assert.True(first.Cancel(true));
+            Assert.True(asyncFirst.Cancel(true));
+
+            KafkaFuture fresh = result.Values["t"];
+            AsyncKafkaFuture asyncFresh = asyncResult.Values["t"];
+
+            Assert.NotEqual(first, fresh);
+            Assert.NotEqual(asyncFirst, asyncFresh);
+            Assert.False(fresh.IsCancelled);
+            Assert.False(asyncFresh.IsCancelled);
+            Assert.False(fresh.IsDone);
+            Assert.False(asyncFresh.IsDone);
+        }
+        finally
+        {
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+            TestTimeout.Dispose(admin);
+            await TestTimeout.Run(() => asyncAdmin.Close(TimeSpan.Zero), BlockingCall.Deadline);
+            await TestTimeout.DisposeAsync(asyncAdmin);
+        }
+    }
+
+    [Fact]
+    public void Refinement_OfACancelledTopicFuture_IsCancelledAsADependant()
+    {
+        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        try
+        {
+            CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("linked", 1, 1) });
+            KafkaFutureImpl<object?> key = new KafkaFutureImpl<object?>();
+            CreateTopicsRefinements refinements = new CreateTopicsRefinements(
+                result.Native!,
+                new Dictionary<string, KafkaFutureImpl<object?>>(StringComparer.Ordinal) { ["linked"] = key });
+            KafkaFutureImpl<int> numPartitions = refinements.NumPartitions("linked");
+            KafkaFutureImpl<object?> dependant = key.ThenApply(static _ => (object?)null);
+            Assert.False(numPartitions.IsDone);
+
+            Assert.True(key.Cancel(true));
+
+            Assert.True(dependant.IsCancelled);
+            Assert.False(dependant.Cancel(true));
+            Assert.True(numPartitions.IsCancelled);
+            Assert.False(numPartitions.Cancel(true));
+            Assert.Throws<OperationCanceledException>(() => numPartitions.Get());
+        }
+        finally
+        {
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+            TestTimeout.Dispose(admin);
+        }
+    }
+
     [Fact]
     public async Task ExistingTopic_FailsOnlyThatTopic()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult first = admin.CreateTopics(new[] { new NewTopic("dup", 1, 1) });
@@ -238,15 +363,28 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => second.Values["fresh"].Get(), s_deadline);
     }
 
-    /// <summary>
-    /// A repeated topic name yields <b>one</b> entry, as Java's map-keyed result does
-    /// (<c>KafkaAdminClient.createTopics</c> populates its future map only for a name it
-    /// has not seen).
-    /// </summary>
     [Fact]
-    public async Task RepeatedTopicName_YieldsOneEntry()
+    public async Task NonAsciiTopicName_RoundTripsThroughTheKeyAndTheErrorMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        const string Topic = "témas-日本語-🎉";
+
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
+        AsyncCreateTopicsResult second = admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) });
+
+        Assert.Equal(new[] { Topic }, second.Values.Keys);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => second.Values[Topic].Get(), s_deadline));
+        Assert.Equal(TopicAlreadyExistsCode, failure.Code);
+        Assert.Equal($"Topic {Topic} exists already.", failure.Message);
+    }
+
+    [Fact]
+    public async Task RepeatedTopicName_YieldsOneEntry_ThatJavasMockFailsAsExisting()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -256,21 +394,21 @@ public sealed class PublicAdminCreateTopicsTests
         });
 
         Assert.Single(result.Values);
-        await TestTimeout.Run(() => result.All().Get(), s_deadline);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            () => TestTimeout.Run(() => result.Values["repeated"].Get(), s_deadline));
+        Assert.Equal(TopicAlreadyExistsCode, failure.Code);
+        Assert.Equal("Topic repeated exists already.", failure.Message);
+        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
 
-        // The FIRST occurrence is the one that was sent, as in Java.
-        int numPartitions = 0;
-        await TestTimeout.Run(async () => numPartitions = await result.NumPartitions("repeated").Get(), s_deadline);
-        Assert.Equal(1, numPartitions);
+        IReadOnlyCollection<string> names = Array.Empty<string>();
+        await TestTimeout.Run(async () => names = await admin.ListTopics().Names().Get(), s_deadline);
+        Assert.Equal(new[] { "repeated" }, names);
     }
 
-    /// <summary>
-    /// An empty request is legal: an empty result whose <c>All()</c> completes at once.
-    /// </summary>
     [Fact]
     public async Task EmptyRequest_YieldsAnEmptyResultThatCompletes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(Array.Empty<NewTopic>());
@@ -279,17 +417,10 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// The replica-assignment form travels end to end. The two <see cref="NewTopic"/>
-    /// forms are mutually exclusive <b>by construction</b> — this constructor leaves the
-    /// partition count and replication factor unset, and there is no way to set them
-    /// afterwards — which is what keeps the ABI's "assignments present ⇒ those two are
-    /// not sent" switch from being something a caller can contradict.
-    /// </summary>
     [Fact]
     public async Task ReplicaAssignmentForm_IsMutuallyExclusiveAndRoundTrips()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         NewTopic assigned = new NewTopic(
@@ -307,13 +438,6 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// Java's option defaults, mirrored exactly — including
-    /// <see cref="CreateTopicsOptions.RetryOnQuotaViolation"/>, the one whose default is
-    /// <see langword="true"/> rather than the C# default for its type. A
-    /// <see langword="null"/> options argument must behave identically to a fresh
-    /// instance.
-    /// </summary>
     [Fact]
     public void OptionDefaults_MirrorJava()
     {
@@ -324,13 +448,6 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.True(options.RetryOnQuotaViolation);
     }
 
-    /// <summary>
-    /// Both <c>bool</c> parameters travel across the ABI correctly for every combination.
-    /// They sit next to each other and immediately before the callback pointer, so a
-    /// missing <c>MarshalAs(UnmanagedType.I1)</c> — which would widen a one-byte C
-    /// <c>bool</c> to a four-byte Win32 <c>BOOL</c> — is the classic way to corrupt the
-    /// argument that follows.
-    /// </summary>
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -338,7 +455,7 @@ public sealed class PublicAdminCreateTopicsTests
     [InlineData(true, true)]
     public async Task BothBoolOptions_CrossTheAbiForEveryCombination(bool validateOnly, bool retryOnQuotaViolation)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
@@ -352,16 +469,10 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// An explicit timeout crosses the ABI and the call still completes. (The exact
-    /// millisecond value that reaches the P/Invoke — including a <see langword="null"/>
-    /// mapping to <b>negative</b>, not zero — is pinned deterministically in
-    /// <c>AdminSubmitArgumentTests</c>, which can read the argument itself.)
-    /// </summary>
     [Fact]
     public async Task ExplicitTimeout_CrossesTheAbi()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(
@@ -371,29 +482,12 @@ public sealed class PublicAdminCreateTopicsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// M15/P13.3 D13 — a <c>createTopics</c> entry is now read through
-    /// <c>kafka_admin_TopicMetadataAndConfig_config</c> with the <c>describeConfigs</c>
-    /// reader, so it is a full <see cref="ConfigEntry"/>. Against the mock that entry is
-    /// exactly Java's mock's: <c>MockAdminClient.config(NewTopic)</c> builds
-    /// <c>new ConfigEntry(key, value)</c> (<c>MockAdminClient.java:426-434</c>), whose source,
-    /// type, documentation, synonyms and flags are all the two-argument constructor's
-    /// defaults — which the header states for a <c>createTopics</c> entry (no synonyms, a null
-    /// type and documentation; the null type reads as <see cref="ConfigEntry.ConfigType.Unknown"/>).
-    /// </summary>
-    /// <remarks>
-    /// Not discriminating between the old flat reader and this one: against the mock both
-    /// produce <see cref="ConfigEntry.ConfigSource.Unknown"/>. The difference — the core's
-    /// real source instead of one guessed from <c>is_default</c> — shows only against a
-    /// broker. The removal itself is pinned structurally in
-    /// <c>CommonNativeMethodsMarshallingTests</c>.
-    /// </remarks>
     [Fact]
     public async Task ConfigEntries_AreJavasMockEntries_ReadThroughTheConfigGetter()
     {
         const string Topic = "d13-config-entries";
 
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created = admin.CreateTopics(new[]
@@ -418,58 +512,33 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.False(entry.IsReadOnly);
     }
 
-    /// <summary>
-    /// M15/P13.3 D16 — Java's <c>NewTopic.configs(Map)</c> accepts a null value and sends it,
-    /// and the ABI keeps a NULL <c>value</c> as that null (header,
-    /// <c>kafka_admin_NewTopic_put_config</c>). So the topic is created, and both the
-    /// <c>createTopics</c> config result and <c>describeConfigs</c> report the entry with a
-    /// <see langword="null"/> value — not the empty string, and not a missing entry.
-    /// </summary>
     [Fact]
-    public async Task NullConfigValue_IsSentAsJavasNull()
+    public void NullConfigValue_IsRejectedBeforeAnythingIsSent()
     {
-        const string Topic = "d16-null-config";
-        const string Name = "retention.ms";
-
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncCreateTopicsResult created = admin.CreateTopics(new[]
+        ArgumentException failure = Assert.Throws<ArgumentException>(() => admin.CreateTopics(new[]
         {
-            new NewTopic(Topic, 1, 1)
+            new NewTopic("fine", 1, 1),
+            new NewTopic("null-config", 1, 1)
             {
-                Configs = new Dictionary<string, string> { [Name] = null!, ["cleanup.policy"] = "compact" },
+                Configs = new Dictionary<string, string> { ["retention.ms"] = null!, ["cleanup.policy"] = "compact" },
             },
-        });
+        }));
+        Assert.Equal("newTopics", failure.ParamName);
+        Assert.StartsWith(
+            "The topics to create must not contain a null configuration value.",
+            failure.Message,
+            StringComparison.Ordinal);
 
-        await TestTimeout.Run(() => created.All().Get(), s_deadline);
-
-        Config fromCreate = default!;
-        await TestTimeout.Run(async () => fromCreate = await created.Config(Topic).Get(), s_deadline);
-        ConfigEntry? createEntry = fromCreate.Get(Name);
-        Assert.NotNull(createEntry);
-        Assert.Null(createEntry!.Value);
-        Assert.Equal("compact", fromCreate.Get("cleanup.policy")!.Value);
-
-        ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
-        AsyncDescribeConfigsResult described = admin.DescribeConfigs(new[] { resource });
-        Config fromDescribe = default!;
-        await TestTimeout.Run(async () => fromDescribe = await described.Values[resource].Get(), s_deadline);
-        ConfigEntry? describeEntry = fromDescribe.Get(Name);
-        Assert.NotNull(describeEntry);
-        Assert.Null(describeEntry!.Value);
-        Assert.Equal("compact", fromDescribe.Get("cleanup.policy")!.Value);
+        Assert.Empty(admin.ListTopics().Names().Get());
     }
 
-    /// <summary>
-    /// Every precondition fires <b>before</b> any native call, with the .NET exception
-    /// the mistake deserves rather than a <see cref="KafkaException"/> (ffi §B5), and
-    /// names its parameter.
-    /// </summary>
     [Fact]
     public void Preconditions_FireBeforeAnyNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException nullTopics =
@@ -484,34 +553,18 @@ public sealed class PublicAdminCreateTopicsTests
             nullElement.Message,
             StringComparison.Ordinal);
 
-        // A null configuration VALUE is no longer a precondition failure: it is Java's null,
-        // and it is sent (M15/P13.3 D16 — see NullConfigValue_IsSentAsJavasNull).
-
-        // Nor is a negative timeout (M15/P13.5 X2): it is sent as 0, Java's calcDeadlineMs
-        // clamp, so it fails through the result rather than synchronously.
+        // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         Assert.Null(Record.Exception(
             () => admin.CreateTopics(
                 new[] { new NewTopic("neg", 1, 1) },
                 new CreateTopicsOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>
-    /// <see cref="NewTopic"/>'s own preconditions, likewise before anything native.
-    /// <c>-1</c> is Java-legal for both counts — it is <c>NO_NUM_PARTITIONS</c> /
-    /// <c>NO_REPLICATION_FACTOR</c> (<c>CreateTopicsRequest.java:82-83</c>), what Java's
-    /// <c>NewTopic</c> sends for an empty <c>Optional</c> — so it is accepted by both
-    /// constructors and <b>stored as <c>-1</c></b>, not folded to <see langword="null"/>
-    /// (Java keeps <c>Optional.of(-1)</c> apart from <c>Optional.empty()</c>). Below
-    /// <c>-1</c> stays rejected (M15/P13.2 D7): the ABI reads <em>every</em> negative as
-    /// "unset", so <c>-2</c> would silently create with the broker defaults where Java's
-    /// broker rejects it.
-    /// </summary>
     [Fact]
     public void NewTopicPreconditions_AcceptMinusOne_AndRejectWhatTheAbiWouldReinterpret()
     {
         Assert.Equal("name", Assert.Throws<ArgumentNullException>(() => new NewTopic(null!, 1, 1)).ParamName);
 
-        // -1 through both count constructors, and stored as -1.
         NewTopic viaNonNullable = new NewTopic("t", -1, (short)-1);
         Assert.Equal(-1, viaNonNullable.NumPartitions);
         Assert.Equal((short)-1, viaNonNullable.ReplicationFactor);
@@ -520,11 +573,9 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal(-1, viaNullable.NumPartitions);
         Assert.Equal((short)-1, viaNullable.ReplicationFactor);
 
-        // Each independently of the other.
         Assert.Equal(-1, new NewTopic("t", (int?)-1, (short?)3).NumPartitions);
         Assert.Equal((short)-1, new NewTopic("t", (int?)3, (short?)-1).ReplicationFactor);
 
-        // And null stays null — the two spellings of "broker default" are distinct values.
         NewTopic unset = new NewTopic("t", (int?)null, (short?)null);
         Assert.Null(unset.NumPartitions);
         Assert.Null(unset.ReplicationFactor);
@@ -581,18 +632,10 @@ public sealed class PublicAdminCreateTopicsTests
                 () => new NewTopic("t", new Dictionary<int, IReadOnlyList<int>> { [0] = null! })).ParamName);
     }
 
-    /// <summary>
-    /// <c>-1</c> reaches the core as Java's wire value and means "the broker default" —
-    /// driven end to end: the mock resolves it to its own defaults, exactly as it does an
-    /// unset count (<c>mock_admin_client.rs</c> <c>default_partitions</c> = 1,
-    /// <c>default_replication_factor</c> = <c>min(brokers, 3)</c> = 2 here). The ABI has no
-    /// <c>NewTopic</c> getter and <c>NewTopicMarshal</c> calls the P/Invoke directly, so
-    /// the argument is observed through its effect rather than captured.
-    /// </summary>
     [Fact]
     public async Task MinusOneCounts_CreateWithTheBrokerDefaults_LikeUnsetOnes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(2).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[]
@@ -616,22 +659,342 @@ public sealed class PublicAdminCreateTopicsTests
         Assert.Equal(new[] { 2, 2, 1 }, factors);
     }
 
-    /// <summary>
-    /// <c>MockAdminClient_new</c> returns <b>null</b> for fewer than one broker — Java's
-    /// <c>MockAdminClient.Builder.build()</c> throw in the FFI's idiom. The binding must
-    /// reject it before the call rather than dereference the null.
-    /// </summary>
     [Fact]
-    public void MockAdminClient_RejectsFewerThanOneBroker()
+    public void MockAdminClient_Builder_RejectsNoBrokerAtBuild_AndANegativeCountAtTheSetter()
     {
-        ArgumentOutOfRangeException failure =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new MockAdminClient(0));
-        Assert.Equal("numBrokers", failure.ParamName);
-        Assert.StartsWith(
-            "A mock admin client requires at least one broker.",
-            failure.Message,
-            StringComparison.Ordinal);
+        MockAdminClient.Builder builder = MockAdminClient.Create().NumBrokers(0);
+        ArgumentException noBroker = Assert.Throws<ArgumentException>(() => builder.Build());
+        Assert.Equal("Index 0 out of bounds for length 0", noBroker.Message);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => new MockAdminClient(-5));
+        ArgumentException negative = Assert.Throws<ArgumentException>(() => MockAdminClient.Create().NumBrokers(-5));
+        Assert.Equal("fromIndex(0) > toIndex(-5)", negative.Message);
+    }
+
+    [Fact]
+    public void NoSetterRan_TheCOptionsCarryTheCoresDefaults()
+    {
+        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(null));
+        Assert.Equal((-1, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions()));
+        Assert.Empty(new CreateTopicsOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal((expected, (sbyte)0, (sbyte)1), ReadBack(new CreateTopicsOptions { TimeoutMs = timeoutMs }));
+    }
+
+    [Fact]
+    public void EachSetter_ReachesTheCOptions_AndASetterRunTwiceSendsItsLastValue()
+    {
+        Assert.Equal((-1, (sbyte)1, (sbyte)1), ReadBack(new CreateTopicsOptions { ValidateOnly = true }));
+        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new CreateTopicsOptions { RetryOnQuotaViolation = false }));
+
+        CreateTopicsOptions options = new CreateTopicsOptions { ValidateOnly = true, RetryOnQuotaViolation = false, TimeoutMs = 10 };
+        options.ValidateOnly = false;
+        options.RetryOnQuotaViolation = true;
+        options.TimeoutMs = 20;
+        Assert.Equal((20, (sbyte)0, (sbyte)1), ReadBack(options));
+    }
+
+    [Fact]
+    public void OnlyTheSettersThatRan_ReachTheCOptions_InTheOrderTheyLastRan()
+    {
+        CreateTopicsOptions options = new CreateTopicsOptions();
+        options.RetryOnQuotaViolation = false;
+        options.TimeoutMs = 5;
+        options.RetryOnQuotaViolation = true;
+        Assert.Equal(
+            new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
+            options.Setters.InOrder);
+        Assert.Equal(
+            new[] { nameof(CreateTopicsOptions.TimeoutMs), nameof(CreateTopicsOptions.RetryOnQuotaViolation) },
+            Built(options));
+        Assert.Equal(new[] { nameof(CreateTopicsOptions.ValidateOnly) }, Built(new CreateTopicsOptions { ValidateOnly = false }));
+        Assert.Empty(Built(new CreateTopicsOptions()));
+    }
+
+    [Fact]
+    public void TheNativeTopic_CarriesTheCountsAndTheConfigs()
+    {
+        NewTopic counted = new NewTopic("counted-é", 3, (short)2)
+        {
+            Configs = new Dictionary<string, string> { ["segment.ms"] = "2", ["cleanup.policy"] = "compact" },
+        };
+        WithNativeTopic(counted, native =>
+        {
+            Assert.Equal("counted-é", Utf8Marshal.PtrToString(Read(native, Native.NewTopicName)));
+            Assert.Equal(3, ReadInt(native, Native.NewTopicNumPartitions));
+            Assert.Equal(2, ReadShort(native, Native.NewTopicReplicationFactor));
+            Assert.Equal(IntPtr.Zero, Read(native, Native.NewTopicReplicasAssignments));
+            Assert.Equal(
+                new (string?, string?)[] { ("cleanup.policy", "compact"), ("segment.ms", "2") },
+                ReadMap<string?, string?>(Read(native, Native.NewTopicConfigs), Utf8Marshal.PtrToString, Utf8Marshal.PtrToString));
+        });
+
+        WithNativeTopic(new NewTopic("unset", (int?)null, (short?)null), native =>
+        {
+            Assert.Equal(-1, ReadInt(native, Native.NewTopicNumPartitions));
+            Assert.Equal(-1, ReadShort(native, Native.NewTopicReplicationFactor));
+            Assert.Equal(IntPtr.Zero, Read(native, Native.NewTopicConfigs));
+        });
+    }
+
+    [Fact]
+    public void TheNativeTopic_CarriesTheReplicaAssignments()
+    {
+        NewTopic assigned = new NewTopic(
+            "assigned",
+            new Dictionary<int, IReadOnlyList<int>> { [2] = Array.Empty<int>(), [0] = new[] { 4 }, [1] = new[] { 5, 6 } });
+        WithNativeTopic(assigned, native =>
+        {
+            Assert.Equal(-1, ReadInt(native, Native.NewTopicNumPartitions));
+            Assert.Equal(-1, ReadShort(native, Native.NewTopicReplicationFactor));
+            (int Partition, int[] Brokers)[] assignments = ReadMap(
+                Read(native, Native.NewTopicReplicasAssignments),
+                static key => Marshal.ReadInt32(key),
+                static list => ReadInt32List(list));
+            Assert.Equal(new[] { 0, 1, 2 }, assignments.Select(a => a.Partition));
+            Assert.Equal(new[] { 4 }, assignments[0].Brokers);
+            Assert.Equal(new[] { 5, 6 }, assignments[1].Brokers);
+            Assert.Empty(assignments[2].Brokers);
+        });
+    }
+
+    [Fact]
+    public void AMapFuture_HoldsItsMap_UntilItsDelivery()
+    {
+        MockAdminClient admin = MockAdminClient.Create().Build();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        SafeKafkaFutureHandle first;
+        SafeKafkaFutureHandle second;
+        SafeHandle map;
+        using (new DrainGate(CompletionOf(admin)))
+        {
+            CreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic("one", 1, 1), new NewTopic("two", 1, 1) });
+            first = HandleOf(KeyOf(result, "one"));
+            second = HandleOf(KeyOf(result, "two"));
+            map = OwnerOf(first);
+            Assert.Same(map, OwnerOf(second));
+            Assert.False(map.IsClosed);
+            Assert.False(first.IsClosed);
+        }
+
+        FlushUntil(CompletionOf(admin), () => first.IsClosed && second.IsClosed && map.IsClosed);
+        Assert.True(first.IsClosed);
+        Assert.True(second.IsClosed);
+        Assert.True(map.IsClosed);
+    }
+
+    private static void AssertCreateTopicsThreadExited(object? thrown) =>
+        BlockingCall.AssertThrew(thrown, 7, CreateTopicsThreadExited);
+
+    private static (int TimeoutMs, sbyte ValidateOnly, sbyte RetryOnQuotaViolation) ReadBack(CreateTopicsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewCreateTopicsOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.CreateTopicsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte validateOnly = Native.CreateTopicsOptionsShouldValidateOnly(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte retry = Native.CreateTopicsOptionsShouldRetryOnQuotaViolation(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return (timeoutMs, validateOnly, retry);
+        }
+        finally
+        {
+            NativeAdminClient.FreeCreateTopicsOptions(native);
+        }
+    }
+
+    private static List<string> Built(CreateTopicsOptions options)
+    {
+        List<string> ran = new List<string>();
+        IntPtr native = AdminOptionsMarshal.Build(
+            NativeMethods.CreateTopicsOptionsNew,
+            options,
+            options.Setters,
+            (IntPtr n, CreateTopicsOptions o, string setter, ref IntPtr outErr) => ran.Add(setter),
+            NativeMethods.CreateTopicsOptionsDestroy);
+        NativeAdminClient.FreeCreateTopicsOptions(native);
+        return ran;
+    }
+
+    private static void WithNativeTopic(NewTopic topic, Action<IntPtr> read)
+    {
+        IntPtr native = NativeAdminClient.NewNativeTopic(topic);
+        try
+        {
+            read(native);
+        }
+        finally
+        {
+            NativeAdminClient.DestroyNewTopic(native);
+        }
+    }
+
+    private static IntPtr Read(IntPtr native, Native.Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr value = getter(native, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static int ReadInt(IntPtr native, Native.Int32Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int value = getter(native, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static short ReadShort(IntPtr native, Native.Int16Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        short value = getter(native, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static (TKey, TValue)[] ReadMap<TKey, TValue>(IntPtr map, Func<IntPtr, TKey> key, Func<IntPtr, TValue> value)
+    {
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int count = NativeMethods.MapSize(map, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            (TKey, TValue)[] entries = new (TKey, TValue)[count];
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr k = NativeMethods.MapKey(map, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr v = NativeMethods.MapValue(map, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                entries[i] = (key(k), value(v));
+            }
+
+            return entries;
+        }
+        finally
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.MapDestroy(map, ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref destroyErr);
+        }
+    }
+
+    private static int[] ReadInt32List(IntPtr list)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(list, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int[] values = new int[count];
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr element = NativeMethods.ListGet(list, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            values[i] = Marshal.ReadInt32(element);
+        }
+
+        return values;
+    }
+
+    private static CompletionThread CompletionOf(object admin)
+    {
+        object native = admin.GetType().GetField("_native", Private)!.GetValue(admin)!;
+        return (CompletionThread)typeof(NativeAdminClient).GetField("_completion", Private)!.GetValue(native)!;
+    }
+
+    private static KafkaFutureImpl<object?> KeyOf(CreateTopicsResult result, string topic) =>
+        ((CreateTopicsRefinements)typeof(CreateTopicsResult).GetField("_native", Private)!.GetValue(result)!).Values[topic];
+
+    private static SafeKafkaFutureHandle HandleOf(KafkaFutureImpl<object?> future)
+    {
+        object source = typeof(KafkaFutureImpl<object?>).GetField("_source", Private)!.GetValue(future)!;
+        return (SafeKafkaFutureHandle)typeof(NativeFutureSource<object?>).GetField("_handle", Private)!.GetValue(source)!;
+    }
+
+    private static SafeHandle OwnerOf(SafeKafkaFutureHandle future) =>
+        (SafeHandle)typeof(SafeKafkaFutureHandle).GetField("_owner", Private)!.GetValue(future)!;
+
+    private static void Flush(CompletionThread completion)
+    {
+        using ManualResetEventSlim drained = new ManualResetEventSlim();
+        completion.PostAfterDrain(drained.Set);
+        Assert.True(drained.Wait(BlockingCall.Deadline));
+    }
+
+    // The core queues a future's delivery from a task of its own, so one drain can run before it is queued.
+    private static void FlushUntil(CompletionThread completion, Func<bool> done)
+    {
+        Stopwatch elapsed = Stopwatch.StartNew();
+        do
+        {
+            Flush(completion);
+        }
+        while (!done() && elapsed.Elapsed < BlockingCall.Deadline);
+    }
+
+    /// <summary>Holds a client's drain thread inside a posted action until disposed.</summary>
+    private sealed class DrainGate : IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new ManualResetEventSlim();
+
+        internal DrainGate(CompletionThread completion)
+        {
+            using ManualResetEventSlim entered = new ManualResetEventSlim();
+            completion.Post(() =>
+            {
+                entered.Set();
+                _release.Wait(BlockingCall.Deadline);
+            });
+            Assert.True(entered.Wait(BlockingCall.Deadline));
+        }
+
+        public void Dispose() => _release.Set();
+    }
+
+    /// <summary>The C getters only these tests call, to read the C options and the C topic back.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
+
+        internal delegate IntPtr Getter(IntPtr self, ref IntPtr outErr);
+
+        internal delegate int Int32Getter(IntPtr self, ref IntPtr outErr);
+
+        internal delegate short Int16Getter(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int CreateTopicsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsOptions_should_validate_only_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte CreateTopicsOptionsShouldValidateOnly(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateTopicsOptions_should_retry_on_quota_violation_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte CreateTopicsOptionsShouldRetryOnQuotaViolation(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewTopic_name_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr NewTopicName(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewTopic_num_partitions_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int NewTopicNumPartitions(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewTopic_replication_factor_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern short NewTopicReplicationFactor(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewTopic_replicas_assignments_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr NewTopicReplicasAssignments(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_NewTopic_configs_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr NewTopicConfigs(IntPtr self, ref IntPtr outErr);
     }
 }

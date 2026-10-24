@@ -21,19 +21,12 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the client-quota value-type family (<see cref="ClientQuotaMatchType"/>,
-/// <see cref="ClientQuotaEntity"/>, <see cref="ClientQuotaFilterComponent"/>,
-/// <see cref="ClientQuotaFilter"/>, <see cref="ClientQuotaAlteration"/>) against the Java classes
-/// it restores. The family's defining property is that three of its distinctions are
-/// <b>ternary</b>, not binary: a filter component matches an exact name / the built-in default /
-/// any specified name; an entity's entry value is a name / the default entity / absent; and an
-/// op's value sets a quota / clears it, where <c>0.0</c> is a legal value.
+/// Checks the client-quota value types against their Java classes, above all their three-way distinctions: a filter
+/// component matches an exact name, the default entity or any specified name; an entity's value is a name, the default
+/// entity or absent; and an op sets a quota or clears it, <c>0.0</c> being a legal value.
 /// </summary>
 public class PublicClientQuotaTypesTests
 {
-    // ---- ClientQuotaMatchType: the ABI wire constants ----
-
-    /// <summary>The enum values are the ABI's <c>match_types</c> constants, not arbitrary.</summary>
     [Fact]
     public void ClientQuotaMatchType_HasTheAbiWireValues()
     {
@@ -42,12 +35,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(2, (int)ClientQuotaMatchType.Specified);
     }
 
-    // ---- ClientQuotaFilterComponent: the three-state match ----
-
-    /// <summary>
-    /// Java's three factories (<c>:51</c> / <c>:61</c> / <c>:71</c>) produce three distinct match
-    /// types, with a name only on the exact one.
-    /// </summary>
     [Fact]
     public void FilterComponent_ThreeFactories_ProduceThreeMatchTypes()
     {
@@ -72,11 +59,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(ClientQuotaEntity.User, specified.EntityType);
     }
 
-    /// <summary>
-    /// The one defect a <c>string?</c> model would ship: "the default user's quota" and "every
-    /// named user's quota" must not compare — or hash — alike, although neither carries a name
-    /// (PLAN §2.2 / D37).
-    /// </summary>
     [Fact]
     public void FilterComponent_DefaultAndSpecified_AreDistinct()
     {
@@ -88,7 +70,7 @@ public class PublicClientQuotaTypesTests
         Assert.NotEqual(dflt, specified);
         Assert.NotEqual(dflt.GetHashCode(), specified.GetHashCode());
 
-        // And a dictionary — the shape that fails silently when a hash collapses two states.
+        // A dictionary is where a hash that merges two states fails silently.
         var byComponent = new Dictionary<ClientQuotaFilterComponent, string>
         {
             [dflt] = "default-user",
@@ -100,7 +82,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal("any-named-user", byComponent[ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User)]);
     }
 
-    /// <summary>Equal components compare and hash alike — Java's <c>equals</c> (<c>:93</c>).</summary>
     [Fact]
     public void FilterComponent_ValueEquality()
     {
@@ -115,10 +96,6 @@ public class PublicClientQuotaTypesTests
         Assert.False(a.Equals("not a component"));
     }
 
-    /// <summary>
-    /// <c>OfEntity</c> keeps Java's <c>Objects.requireNonNull(entityName)</c> (<c>:51</c>); every
-    /// factory keeps the private ctor's <c>requireNonNull(entityType)</c> (<c>:39</c>).
-    /// </summary>
     [Fact]
     public void FilterComponent_RejectsNullArguments()
     {
@@ -143,17 +120,12 @@ public class PublicClientQuotaTypesTests
                 () => ClientQuotaFilterComponent.OfEntityType(null!)).ParamName);
     }
 
-    /// <summary>
-    /// No public constructor (Java's is private, <c>:39</c>), so the illegal fourth state — an
-    /// <see cref="ClientQuotaMatchType.Exact"/> match with no name — is unrepresentable.
-    /// </summary>
     [Fact]
     public void FilterComponent_HasNoPublicConstructor()
     {
         Assert.Empty(typeof(ClientQuotaFilterComponent).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
     }
 
-    /// <summary>The rendering names the match type, so the three states are distinguishable in logs.</summary>
     [Fact]
     public void FilterComponent_ToString_NamesTheMatchType()
     {
@@ -170,9 +142,6 @@ public class PublicClientQuotaTypesTests
             ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User).ToString());
     }
 
-    // ---- ClientQuotaEntity ----
-
-    /// <summary>The three entity-type constants and the validity predicate — Java <c>:33-37</c>.</summary>
     [Fact]
     public void Entity_EntityTypeConstants()
     {
@@ -190,11 +159,6 @@ public class PublicClientQuotaTypesTests
         Assert.False(ClientQuotaEntity.IsValidEntityType(null));
     }
 
-    /// <summary>
-    /// The second ternary: a <c>null</c> entry value names the built-in default entity, <c>""</c>
-    /// is a real (empty) name, and a name is a name — three distinct entities, which a
-    /// <c>IReadOnlyDictionary&lt;string, string&gt;</c> could not express.
-    /// </summary>
     [Fact]
     public void Entity_NullValueIsNeitherEmptyNorAName()
     {
@@ -209,7 +173,7 @@ public class PublicClientQuotaTypesTests
         Assert.NotEqual(defaultUser, namedUser);
         Assert.NotEqual(emptyNamedUser, namedUser);
 
-        // Three distinct dictionary keys — how these arrive on the quota RPC results (PLAN D39).
+        // Three distinct dictionary keys, as these arrive on the quota RPC results.
         var quotas = new Dictionary<ClientQuotaEntity, double>
         {
             [defaultUser] = 1.0,
@@ -230,10 +194,6 @@ public class PublicClientQuotaTypesTests
             quotas[new ClientQuotaEntity(new Dictionary<string, string?> { [ClientQuotaEntity.User] = "alice" })]);
     }
 
-    /// <summary>
-    /// A null entry value is also not the same as <em>omitting</em> the type — one names the
-    /// default user, the other constrains nothing about users.
-    /// </summary>
     [Fact]
     public void Entity_NullValueIsNotAnAbsentEntry()
     {
@@ -246,10 +206,6 @@ public class PublicClientQuotaTypesTests
         Assert.Empty(empty.Entries);
     }
 
-    /// <summary>
-    /// Value equality is entry-wise and order-independent — Java delegates to <c>Map.equals</c>
-    /// (<c>:61</c>).
-    /// </summary>
     [Fact]
     public void Entity_ValueEqualityIsOrderIndependent()
     {
@@ -277,10 +233,6 @@ public class PublicClientQuotaTypesTests
         Assert.False(a.Equals("not an entity"));
     }
 
-    /// <summary>
-    /// The entries are copied, so mutating the source map cannot silently change a live key's
-    /// hash.
-    /// </summary>
     [Fact]
     public void Entity_CopiesItsEntries()
     {
@@ -294,7 +246,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal("alice", entity.Entries[ClientQuotaEntity.User]);
     }
 
-    /// <summary>A null map is a precondition failure, not a later null-reference.</summary>
     [Fact]
     public void Entity_RejectsNullEntries()
     {
@@ -303,7 +254,6 @@ public class PublicClientQuotaTypesTests
             Assert.Throws<ArgumentNullException>(() => new ClientQuotaEntity(null!)).ParamName);
     }
 
-    /// <summary>The rendering shows a default-entity entry as <c>null</c> — Java <c>:74</c>.</summary>
     [Fact]
     public void Entity_ToString()
     {
@@ -318,12 +268,6 @@ public class PublicClientQuotaTypesTests
                 .ToString());
     }
 
-    // ---- ClientQuotaFilter ----
-
-    /// <summary>
-    /// <c>Contains</c> (<c>:49</c>) is non-strict, <c>ContainsOnly</c> (<c>:59</c>) is strict, and
-    /// <c>All</c> (<c>:66</c>) is empty and non-strict.
-    /// </summary>
     [Fact]
     public void Filter_ThreeFactories()
     {
@@ -342,11 +286,9 @@ public class PublicClientQuotaTypesTests
         Assert.False(all.Strict);
         Assert.Empty(all.Components);
 
-        // Strictness is part of the value: same components, different filter.
         Assert.NotEqual(contains, containsOnly);
     }
 
-    /// <summary>Equal filters compare and hash alike — Java's <c>equals</c> (<c>:85</c>).</summary>
     [Fact]
     public void Filter_ValueEquality()
     {
@@ -365,8 +307,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
         Assert.Equal(ClientQuotaFilter.All(), ClientQuotaFilter.All());
 
-        // The component ternary carries through the filter: swapping Default for Specified is a
-        // different filter, not a cosmetic difference.
         ClientQuotaFilter specified = ClientQuotaFilter.Contains(new[]
         {
             ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
@@ -377,7 +317,6 @@ public class PublicClientQuotaTypesTests
         Assert.False(a.Equals("not a filter"));
     }
 
-    /// <summary>The components are copied, so mutating the source array cannot alter the filter.</summary>
     [Fact]
     public void Filter_CopiesItsComponents()
     {
@@ -391,7 +330,6 @@ public class PublicClientQuotaTypesTests
             filter);
     }
 
-    /// <summary>Null components are rejected before they can reach the boundary (ffi §A5).</summary>
     [Fact]
     public void Filter_RejectsNullComponents()
     {
@@ -409,7 +347,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal("components", ex.ParamName);
     }
 
-    /// <summary>The rendering carries both halves — Java <c>:98</c>.</summary>
     [Fact]
     public void Filter_ToString()
     {
@@ -422,13 +359,6 @@ public class PublicClientQuotaTypesTests
                 new[] { ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.User) }).ToString());
     }
 
-    // ---- ClientQuotaAlteration (+ Op) ----
-
-    /// <summary>
-    /// The third ternary: <c>Op(key, null)</c> <em>clears</em> the quota while
-    /// <c>Op(key, 0.0)</c> sets it to zero — <c>0.0</c> being a legal quota value, no sentinel
-    /// could carry the distinction.
-    /// </summary>
     [Fact]
     public void Op_NullValueIsNotZero()
     {
@@ -443,7 +373,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(zero, new ClientQuotaAlteration.Op("producer_byte_rate", 0.0));
     }
 
-    /// <summary>Value equality over key and value — Java's <c>Op.equals</c> (<c>:58</c>).</summary>
     [Fact]
     public void Op_ValueEquality()
     {
@@ -461,7 +390,6 @@ public class PublicClientQuotaTypesTests
             () => new ClientQuotaAlteration.Op(null!, 1.0)).ParamName);
     }
 
-    /// <summary>The alteration pairs an entity with its ops — Java <c>:83</c>.</summary>
     [Fact]
     public void Alteration_CarriesEntityAndOps()
     {
@@ -479,12 +407,10 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(2, alteration.Ops.Count);
         Assert.Contains(new ClientQuotaAlteration.Op("consumer_byte_rate", null), alteration.Ops);
 
-        // Copied, so a later mutation of the caller's array does not reach the alteration.
         ops[0] = new ClientQuotaAlteration.Op("producer_byte_rate", 9999.0);
         Assert.Contains(new ClientQuotaAlteration.Op("producer_byte_rate", 1024.0), alteration.Ops);
     }
 
-    /// <summary>Preconditions are checked before anything can reach the boundary (ffi §A5).</summary>
     [Fact]
     public void Alteration_RejectsNullArguments()
     {
@@ -507,11 +433,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal("ops", ex.ParamName);
     }
 
-    /// <summary>
-    /// Java declares no <c>equals</c> / <c>hashCode</c> on <c>ClientQuotaAlteration</c> (only on
-    /// <c>Op</c>), so reference equality is the faithful surface — pinned so a later phase does
-    /// not add value equality by reflex.
-    /// </summary>
     [Fact]
     public void Alteration_UsesReferenceEqualityLikeJava()
     {
@@ -526,7 +447,6 @@ public class PublicClientQuotaTypesTests
         Assert.Equal(a, a);
     }
 
-    /// <summary>The renderings carry the clear-vs-zero distinction — Java <c>:71</c> / <c>:103</c>.</summary>
     [Fact]
     public void Alteration_ToString()
     {

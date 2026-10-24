@@ -12,48 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for describing consumer groups — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions</c>
-/// (<c>DescribeConsumerGroupsOptions.java:26</c>).
+/// <c>org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// <b>Java declares exactly one option of its own</b> — the fluent setter
-/// <c>includeAuthorizedOperations(boolean)</c> (<c>:29</c>) and its getter
-/// <c>includeAuthorizedOperations()</c> (<c>:34</c>) — which collapse into the single
-/// property <see cref="IncludeAuthorizedOperations"/>, the pairing
-/// <see cref="CreateTopicsOptions"/> rules for every options type in this binding.
-/// Everything else on the Java class is inherited from
-/// <c>AbstractOptions&lt;DescribeConsumerGroupsOptions&gt;</c>, which contributes only the
-/// timeout; C# has no <c>extends</c> to mirror here because the options types in this
-/// binding are flat POCOs, so <see cref="TimeoutMs"/> is declared directly — the same call
-/// every sibling options type already makes.
-/// </para>
-/// <para>
-/// ⚠ <b>Java's class is <em>not</em> deprecated</b>: <c>describeConsumerGroups</c> has no
-/// generation-newer replacement, so no <see cref="System.ObsoleteAttribute"/> appears here.
-/// </para>
 /// </remarks>
 public sealed class DescribeConsumerGroupsOptions
 {
+    private int? _timeoutMs;
+    private bool _includeAuthorizedOperations;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Ask the broker to report each group's authorized operations — Java's
-    /// <c>includeAuthorizedOperations()</c> (<c>:34</c>). Defaults to
-    /// <see langword="false"/>, as Java's uninitialized <c>boolean</c> field does
-    /// (<c>:27</c>).
+    /// <c>includeAuthorizedOperations()</c>. Defaults to
+    /// <see langword="false"/>, as Java's uninitialized <c>boolean</c> field does.
     /// </summary>
     /// <remarks>
-    /// While this is <see langword="false"/> the broker reports nothing, which is exactly
-    /// the case <see cref="ConsumerGroupDescription.AuthorizedOperations"/> renders as
-    /// <see langword="null"/> rather than as an empty collection — the same distinction
-    /// <see cref="DescribeTopicsOptions.IncludeAuthorizedOperations"/> draws for topics.
+    /// While this is <see langword="false"/>,
+    /// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> is <see langword="null"/>,
+    /// not an empty collection.
     /// </remarks>
-    public bool IncludeAuthorizedOperations { get; set; }
+    public bool IncludeAuthorizedOperations
+    {
+        get => _includeAuthorizedOperations;
+        set
+        {
+            _includeAuthorizedOperations = value;
+            Setters.Ran(nameof(IncludeAuthorizedOperations));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

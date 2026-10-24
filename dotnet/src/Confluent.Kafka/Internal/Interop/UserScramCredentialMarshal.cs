@@ -20,154 +20,210 @@ using Confluent.Kafka.Admin;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Reads one <c>kafka_admin_UserScramCredentialsDescription_t</c> — the user name and the
-/// walk over its credential infos.
+/// Builds the owned <c>kafka_admin_UserScramCredentialAlteration_t</c> handles <c>alterUserScramCredentials</c> takes,
+/// and copies the descriptions and user names the <c>describeUserScramCredentials</c> futures deliver into managed
+/// values.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The credential walk is bounded by that description's own
-/// <c>credential_count</c>, never by any outer count</b> (the <c>all()</c> row count, the
-/// <c>users()</c> count). They are unrelated: the inner count is the number of credentials on
-/// this one description, and may be <c>0</c> (a user the broker reports as having none).
-/// Driving it from an outer count compiles and reads both past the end of a short description
-/// and short of a long one.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>The two readers differ only in ownership, and the difference has no managed
-/// symptom.</b> <see cref="Read(IntPtr)"/> is for a description <b>borrowed</b> from
-/// <c>all_get_description</c> — the result root owns it, so destroying it is a double free.
-/// <see cref="ReadAndDestroy(IntPtr)"/> is for a description <b>owned</b> out of
-/// <c>description(user)</c> — not destroying it leaks one per call. Both are shipped side by
-/// side, the <c>OffsetMapMarshal.CopyOutAndDestroy</c> precedent, so the two call sites cannot
-/// be confused.
-/// </para>
-/// <para>
-/// The accessor set is a <b>parameter</b>, for the same reason
-/// <c>AclRowMarshal.ReadFilter</c>'s is: the mock mirrors Java's own
-/// <c>UnsupportedOperationException</c> for this RPC, so the ABI offers no way to construct a
-/// populated result to assert the walk on.
-/// </para>
-/// </remarks>
-internal static class UserScramCredentialMarshal
+internal static unsafe class UserScramCredentialMarshal
 {
-    /// <summary>The production <c>kafka_admin_UserScramCredentialsDescription_*</c> set.</summary>
-    internal static readonly Accessors NativeAccessors = new Accessors(
-        NativeMethods.UserScramCredentialsDescriptionName,
-        NativeMethods.UserScramCredentialsDescriptionCredentialCount,
-        NativeMethods.UserScramCredentialsDescriptionCredentialMechanism,
-        NativeMethods.UserScramCredentialsDescriptionCredentialIterations,
-        NativeMethods.UserScramCredentialsDescriptionDestroy);
+    private delegate void NativeDestroy(IntPtr native, ref IntPtr outErr);
 
-    /// <summary>
-    /// Reads a <b>borrowed</b> description through the production accessors. Does <b>not</b>
-    /// destroy it — the result root owns it.
-    /// </summary>
-    /// <param name="description">The borrowed description, from <c>all_get_description</c>.</param>
-    /// <returns>The copied-out description.</returns>
-    internal static UserScramCredentialsDescription Read(IntPtr description) =>
-        Read(description, NativeAccessors);
+    private delegate IntPtr ToAlteration(IntPtr value, ref IntPtr outErr);
 
-    /// <summary>
-    /// Reads a <b>borrowed</b> description through an injected accessor set. Does <b>not</b>
-    /// destroy it.
-    /// </summary>
-    /// <param name="description">The description, or a stand-in under an injected set.</param>
-    /// <param name="accessors">The four accessors to decode it with.</param>
-    /// <returns>The copied-out description.</returns>
-    internal static UserScramCredentialsDescription Read(IntPtr description, Accessors accessors)
+    internal static IntPtr NewAlteration(UserScramCredentialAlteration alteration)
     {
-        string name = KeyedResultMarshal.ReadStringKey(accessors.Name(description));
-
-        // ⚠ Its own count — never an outer one. See the type remarks.
-        int credentialCount = accessors.CredentialCount(description);
-        List<ScramCredentialInfo> infos = new List<ScramCredentialInfo>(Math.Max(credentialCount, 0));
-        for (int credential = 0; credential < credentialCount; credential++)
+        if (alteration is UserScramCredentialDeletion deletion)
         {
-            int code = accessors.CredentialMechanism(description, credential);
-            infos.Add(new ScramCredentialInfo(
-                code >= byte.MinValue && code <= byte.MaxValue
-                    ? ScramMechanisms.FromType((byte)code)
-                    : ScramMechanism.Unknown,
-                accessors.CredentialIterations(description, credential)));
+            IntPtr native = NewDeletion(deletion);
+            try
+            {
+                return Alteration(native, NativeMethods.UserScramCredentialAlterationDeletion);
+            }
+            finally
+            {
+                DestroyDeletion(native);
+            }
         }
 
-        return new UserScramCredentialsDescription(name, infos);
-    }
-
-    /// <summary>
-    /// Reads an <b>owned</b> description through the production accessors and destroys it.
-    /// </summary>
-    /// <param name="description">The owned description, from <c>description(user)</c>.</param>
-    /// <returns>The copied-out description.</returns>
-    internal static UserScramCredentialsDescription ReadAndDestroy(IntPtr description) =>
-        ReadAndDestroy(description, NativeAccessors);
-
-    /// <summary>
-    /// Reads an <b>owned</b> description through an injected accessor set and destroys it.
-    /// </summary>
-    /// <param name="description">The owned description, or a stand-in under an injected set.</param>
-    /// <param name="accessors">The four accessors to decode it with.</param>
-    /// <returns>The copied-out description.</returns>
-    internal static UserScramCredentialsDescription ReadAndDestroy(
-        IntPtr description, Accessors accessors)
-    {
+        IntPtr upsertion = NewUpsertion((UserScramCredentialUpsertion)alteration);
         try
         {
-            return Read(description, accessors);
+            return Alteration(upsertion, NativeMethods.UserScramCredentialAlterationUpsertion);
         }
         finally
         {
-            // Null-safe. Exactly once, on every path — including a throwing read.
-            accessors.Destroy(description);
+            DestroyUpsertion(upsertion);
         }
     }
 
-    /// <summary>Reads a value indexed by credential.</summary>
-    /// <param name="description">The description.</param>
-    /// <param name="credentialIndex">The credential index within it.</param>
-    /// <returns>The value, or <c>-1</c> when the index is out of range.</returns>
-    internal delegate int CredentialAccessor(IntPtr description, int credentialIndex);
+    internal static void DestroyAlteration(IntPtr alteration) =>
+        Destroy(alteration, NativeMethods.UserScramCredentialAlterationDestroy);
 
-    /// <summary>
-    /// The five <c>kafka_admin_UserScramCredentialsDescription_*</c> accessors, as one set —
-    /// <c>destroy</c> included, because it belongs to this type's ABI bundle and is what
-    /// <see cref="ReadAndDestroy(IntPtr, Accessors)"/> discharges the owned handle through.
-    /// </summary>
-    internal sealed class Accessors
+    internal static IntPtr NewDeletion(UserScramCredentialDeletion deletion)
     {
-        /// <summary>Creates a set, in the ABI's own accessor order.</summary>
-        /// <param name="name">The description's user name, borrowed.</param>
-        /// <param name="credentialCount">Its credential count — the walk's bound.</param>
-        /// <param name="credentialMechanism">One credential's mechanism type code.</param>
-        /// <param name="credentialIterations">One credential's iteration count.</param>
-        /// <param name="destroy">Releases an owned description; null-safe.</param>
-        internal Accessors(
-            Func<IntPtr, IntPtr> name,
-            Func<IntPtr, int> credentialCount,
-            CredentialAccessor credentialMechanism,
-            CredentialAccessor credentialIterations,
-            Action<IntPtr> destroy)
+        using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(deletion.User);
+        IntPtr mechanism = Mechanism(deletion.Mechanism);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native = NativeMethods.UserScramCredentialDeletionNew(user.Pointer, mechanism, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    internal static void DestroyDeletion(IntPtr deletion) =>
+        Destroy(deletion, NativeMethods.UserScramCredentialDeletionDestroy);
+
+    internal static IntPtr NewUpsertion(UserScramCredentialUpsertion upsertion)
+    {
+        IntPtr mechanism = Mechanism(upsertion.CredentialInfo.Mechanism);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr info = NativeMethods.ScramCredentialInfoNew(mechanism, upsertion.CredentialInfo.Iterations, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
         {
-            Name = name;
-            CredentialCount = credentialCount;
-            CredentialMechanism = credentialMechanism;
-            CredentialIterations = credentialIterations;
-            Destroy = destroy;
+            using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(upsertion.User);
+            byte[] password = upsertion.Password;
+            byte[]? salt = upsertion.Salt;
+            byte empty = 0;
+            fixed (byte* passwordData = password)
+            fixed (byte* saltData = salt)
+            {
+                // An empty array crosses as a non-null pointer of length 0, which kafka_Bytes_t keeps apart from null.
+                KafkaBytes passwordBytes = new KafkaBytes(
+                    password.Length == 0 ? (IntPtr)(&empty) : (IntPtr)passwordData, password.Length);
+                IntPtr native = salt is null
+                    ? NativeMethods.UserScramCredentialUpsertionWithBytes(user.Pointer, info, passwordBytes, ref outErr)
+                    : NativeMethods.UserScramCredentialUpsertionWithSalt(
+                        user.Pointer,
+                        info,
+                        passwordBytes,
+                        new KafkaBytes(salt.Length == 0 ? (IntPtr)(&empty) : (IntPtr)saltData, salt.Length),
+                        ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                return native;
+            }
+        }
+        finally
+        {
+            Destroy(info, NativeMethods.ScramCredentialInfoDestroy);
+        }
+    }
+
+    internal static void DestroyUpsertion(IntPtr upsertion) =>
+        Destroy(upsertion, NativeMethods.UserScramCredentialUpsertionDestroy);
+
+    internal static IReadOnlyDictionary<string, UserScramCredentialsDescription> CopyOutDescriptions(IntPtr descriptions)
+    {
+        Dictionary<string, UserScramCredentialsDescription> copied =
+            new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal);
+        if (descriptions == IntPtr.Zero)
+        {
+            return copied;
         }
 
-        /// <summary><c>name()</c>.</summary>
-        internal Func<IntPtr, IntPtr> Name { get; }
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.MapSize(descriptions, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr user = NativeMethods.MapKey(descriptions, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr description = NativeMethods.MapValue(descriptions, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            copied[Utf8Marshal.PtrToString(user) ?? string.Empty] = CopyOutDescription(description);
+        }
 
-        /// <summary><c>credential_count()</c> — the walk's bound.</summary>
-        internal Func<IntPtr, int> CredentialCount { get; }
+        return copied;
+    }
 
-        /// <summary><c>credential_mechanism(j)</c>.</summary>
-        internal CredentialAccessor CredentialMechanism { get; }
+    internal static UserScramCredentialsDescription CopyOutDescription(IntPtr description)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr name = NativeMethods.UserScramCredentialsDescriptionName(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr infos = NativeMethods.UserScramCredentialsDescriptionCredentialInfos(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            int count = NativeMethods.ListSize(infos, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            List<ScramCredentialInfo> copied = new List<ScramCredentialInfo>(count);
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr info = NativeMethods.ListGet(infos, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                copied.Add(CopyOutCredentialInfo(info));
+            }
 
-        /// <summary><c>credential_iterations(j)</c>.</summary>
-        internal CredentialAccessor CredentialIterations { get; }
+            return new UserScramCredentialsDescription(Utf8Marshal.PtrToString(name) ?? string.Empty, copied);
+        }
+        finally
+        {
+            Destroy(infos, NativeMethods.ListDestroy);
+        }
+    }
 
-        /// <summary><c>destroy()</c> — only ever applied to an <b>owned</b> description.</summary>
-        internal Action<IntPtr> Destroy { get; }
+    internal static IReadOnlyList<string> CopyOutUsers(IntPtr users)
+    {
+        List<string> copied = new List<string>();
+        if (users == IntPtr.Zero)
+        {
+            return copied;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(users, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        copied.Capacity = count;
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr user = NativeMethods.ListGet(users, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            copied.Add(Utf8Marshal.PtrToString(user) ?? string.Empty);
+        }
+
+        return copied;
+    }
+
+    private static ScramCredentialInfo CopyOutCredentialInfo(IntPtr info)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr mechanism = NativeMethods.ScramCredentialInfoMechanism(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        sbyte type = NativeMethods.ScramMechanismType(mechanism, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int iterations = NativeMethods.ScramCredentialInfoIterations(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new ScramCredentialInfo(ScramMechanisms.FromType(unchecked((byte)type)), iterations);
+    }
+
+    private static IntPtr Mechanism(ScramMechanism mechanism)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native = NativeMethods.ScramMechanismFromType(unchecked((sbyte)mechanism), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    private static IntPtr Alteration(IntPtr value, ToAlteration convert)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native = convert(value, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    private static void Destroy(IntPtr native, NativeDestroy destroy)
+    {
+        if (native == IntPtr.Zero)
+        {
+            return;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        destroy(native, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(outErr);
+        }
     }
 }

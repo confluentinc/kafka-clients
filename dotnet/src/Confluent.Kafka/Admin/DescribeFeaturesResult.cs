@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Metadata = Confluent.Kafka.Admin.FeatureMetadata;
 
@@ -20,45 +21,31 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.DescribeFeatures"/> — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>.
+/// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>: one future over the whole feature
+/// metadata.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>ONE future over a composite, not a fan-out.</b> Java stores a single
-/// <c>KafkaFuture&lt;FeatureMetadata&gt;</c> (<c>:28</c>) with one accessor (<c>:34</c>), even
-/// though the ABI exposes two independent tables plus an optional scalar. The
-/// <c>describeCluster</c> snapshot supplies the read-the-whole-root mechanism; it does not
-/// supply its four-way fan-out, because Java publishes four futures there and one here.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the description has completed, and
-/// needs no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
-/// </para>
-/// </remarks>
 /// <seealso cref="AsyncDescribeFeaturesResult"/>
 public sealed class DescribeFeaturesResult
 {
-    private readonly KafkaFuture<Metadata> _featureMetadata;
+    private readonly KafkaFutureImpl<Metadata> _featureMetadata;
+    private readonly SafeAdminResultHandle _native;
 
-    internal DescribeFeaturesResult(KafkaFuture<Metadata> featureMetadata)
+    private DescribeFeaturesResult(KafkaFutureImpl<Metadata> featureMetadata, SafeAdminResultHandle native)
     {
         _featureMetadata = featureMetadata;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static DescribeFeaturesResult From(SingleAdminOperation<FeatureMetadata> operation) =>
-        new DescribeFeaturesResult(new KafkaFuture<Metadata>(operation.SyncSource));
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// The cluster's feature metadata — Java's <c>featureMetadata()</c> (<c>:34</c>).
+    /// The cluster's feature metadata — Java's <c>featureMetadata()</c>.
     /// </summary>
     /// <returns>A future over the metadata.</returns>
-    /// <remarks>
-    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
-    /// completion.
-    /// </remarks>
-    public KafkaFuture<Metadata> FeatureMetadata() => _featureMetadata;
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
+    public KafkaFuture<Metadata> FeatureMetadata() => new KafkaFuture<Metadata>(_featureMetadata);
+
+    internal static DescribeFeaturesResult OfClient(
+        (KafkaFutureImpl<Metadata> FeatureMetadata, SafeAdminResultHandle Result) native) =>
+        new DescribeFeaturesResult(native.FeatureMetadata, native.Result);
 }

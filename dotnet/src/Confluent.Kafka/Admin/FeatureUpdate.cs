@@ -24,31 +24,28 @@ namespace Confluent.Kafka.Admin;
 public sealed class FeatureUpdate
 {
     /// <summary>
-    /// What kind of change the update performs — Java's nested <c>FeatureUpdate.UpgradeType</c>
-    /// (<c>:28</c>).
+    /// What kind of change the update performs — Java's nested <c>FeatureUpdate.UpgradeType</c>.
     /// </summary>
     public enum UpgradeType : byte
     {
-        /// <summary>Unrecognized — Java's <c>UNKNOWN</c> (<c>:29</c>).</summary>
+        /// <summary>Unrecognized — Java's <c>UNKNOWN</c>.</summary>
         Unknown = 0,
 
-        /// <summary>Raise the feature level — Java's <c>UPGRADE</c> (<c>:30</c>).</summary>
+        /// <summary>Raise the feature level — Java's <c>UPGRADE</c>.</summary>
         Upgrade = 1,
 
         /// <summary>
-        /// Lower the level, but only where no metadata is lost — Java's <c>SAFE_DOWNGRADE</c>
-        /// (<c>:31</c>).
+        /// Lower the level, but only where no metadata is lost — Java's <c>SAFE_DOWNGRADE</c>.
         /// </summary>
         SafeDowngrade = 2,
 
         /// <summary>
-        /// Lower the level, allowing metadata loss — Java's <c>UNSAFE_DOWNGRADE</c>
-        /// (<c>:32</c>).
+        /// Lower the level, allowing metadata loss — Java's <c>UNSAFE_DOWNGRADE</c>.
         /// </summary>
         UnsafeDowngrade = 3,
     }
 
-    /// <summary>Creates an update — Java's <c>:67</c>.</summary>
+    /// <summary>Creates an update — Java's constructor.</summary>
     /// <param name="maxVersionLevel">
     /// The new maximum version level. <c>0</c> deletes the finalized feature and must be
     /// accompanied by a downgrade type.
@@ -56,7 +53,7 @@ public sealed class FeatureUpdate
     /// <param name="upgradeType">The kind of change.</param>
     /// <exception cref="ArgumentException">
     /// <paramref name="maxVersionLevel"/> is <c>0</c> with
-    /// <see cref="UpgradeType.Upgrade"/> (<c>:68</c>), or is negative (<c>:73</c>).
+    /// <see cref="UpgradeType.Upgrade"/>, or is negative.
     /// </exception>
     public FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)
     {
@@ -80,24 +77,23 @@ public sealed class FeatureUpdate
     }
 
     /// <summary>
-    /// The new maximum version level — Java's <c>maxVersionLevel()</c> (<c>:80</c>).
+    /// The new maximum version level — Java's <c>maxVersionLevel()</c>.
     /// </summary>
     public short MaxVersionLevel { get; }
 
     /// <summary>
-    /// The kind of change — Java's <c>upgradeType()</c> (<c>:84</c>). Named
-    /// <see cref="Type"/> because C# forbids a member with the same name as the nested
-    /// <see cref="UpgradeType"/> it returns.
+    /// The kind of change — Java's <c>upgradeType()</c>. It is named <see cref="Type"/>, a
+    /// recorded deviation: C# forbids a member named like the nested <see cref="UpgradeType"/>.
     /// </summary>
     public UpgradeType Type { get; }
 
-    /// <summary>Value equality over both fields — Java's <c>equals</c> (<c>:89</c>).</summary>
+    /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same update.</returns>
     public override bool Equals(object? obj) =>
         obj is FeatureUpdate other && MaxVersionLevel == other.MaxVersionLevel && Type == other.Type;
 
-    /// <summary>The hash of both fields — Java's <c>hashCode</c> (<c>:103</c>).</summary>
+    /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -108,11 +104,10 @@ public sealed class FeatureUpdate
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c> (<c>FeatureUpdate.java:108-110</c>),
-    /// with the upgrade type printed as <b>Java's constant name</b>, as Java's <c>%s</c> of the
-    /// enum does — <c>FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}</c>. The
-    /// constructor stores an undefined <see cref="UpgradeType"/> as given, and that one renders
-    /// as its numeric value.
+    /// A diagnostic rendering matching Java's <c>toString()</c>, the upgrade type printed as Java's
+    /// constant name: <c>FeatureUpdate{maxVersionLevel:1, upgradeType:SAFE_DOWNGRADE}</c>. An
+    /// undefined <see cref="UpgradeType"/>, which the constructor stores as given, renders as its
+    /// number.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
@@ -122,10 +117,6 @@ public sealed class FeatureUpdate
             MaxVersionLevel,
             JavaName(Type));
 
-    /// <summary>
-    /// Java's <c>UpgradeType</c> constant name for each member (<c>FeatureUpdate.java:28-32</c>),
-    /// falling back to the numeric value for an undefined one.
-    /// </summary>
     private static string JavaName(UpgradeType upgradeType) => upgradeType switch
     {
         UpgradeType.Unknown => "UNKNOWN",
@@ -137,16 +128,14 @@ public sealed class FeatureUpdate
 }
 
 /// <summary>
-/// The static member Java declares on <see cref="FeatureUpdate.UpgradeType"/> itself, which a
-/// C# enum cannot carry — host-language scaffolding, not new Kafka surface. The <c>code()</c>
-/// accessor (<c>FeatureUpdate.java:40</c>) needs none: a cast yields it.
+/// Java's static <c>UpgradeType.fromCode</c>, which a C# enum cannot carry. Java's
+/// <c>code()</c> needs no counterpart: a cast yields it.
 /// </summary>
 public static class UpgradeTypes
 {
     /// <summary>
-    /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>
-    /// (<c>FeatureUpdate.java:44</c>). Falls back to
-    /// <see cref="FeatureUpdate.UpgradeType.Unknown"/>; never throws.
+    /// The upgrade type for a code — Java's <c>UpgradeType.fromCode(int)</c>. An unknown code
+    /// gives <see cref="FeatureUpdate.UpgradeType.Unknown"/>; it never throws.
     /// </summary>
     /// <param name="code">The code.</param>
     /// <returns>The upgrade type.</returns>

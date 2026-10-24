@@ -19,17 +19,17 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// One transaction in a listing — Java's
-/// <c>org.apache.kafka.clients.admin.TransactionListing</c> (<c>:21</c>).
+/// <c>org.apache.kafka.clients.admin.TransactionListing</c>.
 /// </summary>
 public sealed class TransactionListing
 {
-    /// <summary>Creates a transaction listing — Java's constructor (<c>:26-34</c>).</summary>
+    /// <summary>Creates a transaction listing — Java's constructor.</summary>
     /// <param name="transactionalId">The transactional id.</param>
     /// <param name="producerId">The producer id.</param>
     /// <param name="state">The transaction state.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="transactionalId"/> is null — stricter than Java, whose constructor
-    /// stores it unchecked (<c>:26-34</c>).
+    /// <paramref name="transactionalId"/> is null: stricter than Java, whose constructor stores
+    /// it unchecked, a recorded deviation.
     /// </exception>
     public TransactionListing(string transactionalId, long producerId, TransactionState state)
     {
@@ -38,19 +38,19 @@ public sealed class TransactionListing
         State = state;
     }
 
-    /// <summary>The transactional id — Java's <c>transactionalId()</c> (<c>:36</c>).</summary>
+    /// <summary>The transactional id — Java's <c>transactionalId()</c>.</summary>
     public string TransactionalId { get; }
 
-    /// <summary>The producer id — Java's <c>producerId()</c> (<c>:40</c>).</summary>
+    /// <summary>The producer id — Java's <c>producerId()</c>.</summary>
     public long ProducerId { get; }
 
     /// <summary>
-    /// The transaction state — Java's <c>state()</c> (<c>:44</c>). Named for the accessor,
-    /// not for Java's <c>transactionState</c> field (<c>:24</c>).
+    /// The transaction state — Java's <c>state()</c>, named for the accessor, not for Java's
+    /// <c>transactionState</c> field.
     /// </summary>
     public TransactionState State { get; }
 
-    /// <summary>Value equality over all three fields — Java's <c>equals</c> (<c>:49</c>).</summary>
+    /// <summary>Value equality over all three fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same listing.</returns>
     public override bool Equals(object? obj) =>
@@ -59,7 +59,7 @@ public sealed class TransactionListing
         && string.Equals(TransactionalId, other.TransactionalId, StringComparison.Ordinal)
         && State == other.State;
 
-    /// <summary>The hash of all three fields — Java's <c>hashCode</c> (<c>:59</c>).</summary>
+    /// <summary>The hash of all three fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -71,7 +71,7 @@ public sealed class TransactionListing
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:64</c>).</summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(

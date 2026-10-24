@@ -25,34 +25,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P2b's surface against the Java classes it mirrors.
+/// The public shape of <c>ListTopics</c>, <c>CreatePartitions</c> and <c>DeleteRecords</c>, their options, results
+/// and value types, against the Java classes they mirror.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b>C# upcasts and widens silently, so these have to be reflection assertions.</b> A
-/// behavioural test passes equally against <c>IReadOnlyDictionary&lt;string, Task&gt;</c>
-/// and <c>IReadOnlyDictionary&lt;string, Task&lt;bool&gt;&gt;</c>, against a property and
-/// a method, and against <c>T</c> and <c>T?</c> — M15/P1 shipped three shape defects
-/// through a green build, 883 green tests and a 0-High first review.
-/// </para>
-/// <para>
-/// ⚠ <b>Return-nullability is read from the Java <em>javadoc and body</em>, not the
-/// signature.</b> Java has no nullable-reference annotations, so a signature alone cannot
-/// say whether <c>null</c> is a legal return. Every nullable assertion below cites the
-/// sentence that decides it — <c>NewPartitions.assignments()</c> is the one member of this
-/// slice that returns <c>null</c>, and its javadoc says so outright
-/// (<c>NewPartitions.java:83</c>: "or null if the assignment will be done by the
-/// controller"). The others were checked the same way and are non-null.
-/// </para>
+/// These are reflection assertions: a behavioural test passes equally against a property and a method, or against
+/// <c>T</c> and <c>T?</c>. Return nullability follows Java's javadoc and body: <c>NewPartitions.Assignments</c> is the
+/// one nullable return, as Java's javadoc says ("or null if the assignment will be done by the controller").
 /// </remarks>
 public sealed class PublicAdminP2bShapeParityTests
 {
-    /// <summary>
-    /// The three new RPCs return their <c>*Result</c> <b>synchronously</b> — Java's
-    /// <c>Admin</c> methods do not block, so the future mapping (<see cref="KafkaFuture{T}"/>
-    /// since M15/P14 S4) belongs on the futures inside the result, never on the method
-    /// (<c>admin-client.md</c> §1). This is DoD §11's spirit for admin.
-    /// </summary>
     [Fact]
     public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
@@ -64,23 +46,20 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(typeof(CreatePartitionsResult), createPartitions.ReturnType);
         Assert.Equal(typeof(DeleteRecordsResult), deleteRecords.ReturnType);
 
-        // listTopics(ListTopicsOptions) — no key array in Java, and none at the ABI.
         Assert.Equal(
             new[] { typeof(ListTopicsOptions) },
             listTopics.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)
         Assert.Equal(
             new[] { typeof(IReadOnlyDictionary<string, NewPartitions>), typeof(CreatePartitionsOptions) },
             createPartitions.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // deleteRecords(Map<TopicPartition, RecordsToDelete>, DeleteRecordsOptions)
         Assert.Equal(
             new[] { typeof(IReadOnlyDictionary<TopicPartition, RecordsToDelete>), typeof(DeleteRecordsOptions) },
             deleteRecords.GetParameters().Select(parameter => parameter.ParameterType));
 
-        // `options` is optional on each, collapsing Java's one-argument `default` overload,
-        // and nullable — `null` means "Java's defaults".
+        // The options are optional, collapsing Java's one-argument default overload, and nullable: null means Java's
+        // defaults.
         foreach (MethodInfo rpc in new[] { listTopics, createPartitions, deleteRecords })
         {
             ParameterInfo options = rpc.GetParameters()[rpc.GetParameters().Length - 1];
@@ -88,21 +67,12 @@ public sealed class PublicAdminP2bShapeParityTests
             Assert.Equal(2, NullableFlag(options));
         }
 
-        // IAdmin has NO Task-returning member — re-asserted because three new members just landed.
-        // Close was the one exception until M15/P14 S5g made it void; IAsyncAdmin is the async twin.
         Assert.Empty(
             typeof(IAdmin).GetMethods()
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
                 .Select(method => method.Name));
     }
 
-    /// <summary>
-    /// <see cref="ListTopicsResult"/> publishes Java's three <b>methods</b>, each yielding
-    /// a <see cref="KafkaFuture{T}"/> (M15/P14 S4) — and <see cref="ListTopicsResult.Names"/> is an
-    /// <c>IReadOnlyCollection&lt;string&gt;</c> because <c>IReadOnlySet&lt;T&gt;</c>
-    /// post-dates the netstandard2.0 floor (CLAUDE.md §3's idiom map), not because Java
-    /// returns a collection — Java returns a <c>Set</c>.
-    /// </summary>
     [Fact]
     public void ListTopicsResult_PublishesJavasThreeProjections()
     {
@@ -117,27 +87,18 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<TopicListing>>), listings.ReturnType);
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<string>>), names.ReturnType);
 
-        // Non-null: Java's namesToListings() returns the future field, and the two
-        // projections are thenApply over it (ListTopicsResult.java:39-55) — none can be
-        // null. The future is a struct since M15/P14 S4, so the exact CLR types above are
-        // what rule out a Nullable<> wrapper; position 0 of a generic struct carries no
-        // annotation, and the value's own non-nullability sits at position 1.
+        // Non-null: Java's future and its two thenApply projections never carry null. The future is a struct, so position 0
+        // carries no annotation and the value's own sits at position 1.
         Assert.Equal(1, NullableAnnotation.Flag(namesToListings.ReturnParameter, 1));
         Assert.Equal(1, NullableAnnotation.Flag(listings.ReturnParameter, 1));
         Assert.Equal(1, NullableAnnotation.Flag(names.ReturnParameter, 1));
 
-        // Java's result has no `all()` and no per-key map: one future is the whole shape.
         Assert.Null(typeof(ListTopicsResult).GetMethod("All", Type.EmptyTypes));
         Assert.Empty(typeof(ListTopicsResult).GetProperties());
 
-        // Java's constructor is package-private; nothing public may build one.
         Assert.Empty(typeof(ListTopicsResult).GetConstructors());
     }
 
-    /// <summary>
-    /// <see cref="TopicListing"/> mirrors Java's three accessors and its one public
-    /// constructor.
-    /// </summary>
     [Fact]
     public void TopicListing_MirrorsJavasShape()
     {
@@ -156,8 +117,7 @@ public sealed class PublicAdminP2bShapeParityTests
         TopicListing listing = new TopicListing("t", new Uuid(1L, 2L), isInternal: true);
         Assert.Equal("t", listing.Name);
         Assert.True(listing.IsInternal);
-        // ⚠ Java renders the boolean LOWERCASE (TopicListing.java:67); C#'s bool.ToString()
-        // would give "True". The literal text is asserted rather than re-derived.
+        // Java renders the boolean in lowercase, where bool.ToString() gives "True".
         Assert.Equal("(name=t, topicId=" + listing.TopicId + ", internal=true)", listing.ToString());
         Assert.Equal(
             "(name=t, topicId=" + listing.TopicId + ", internal=false)",
@@ -166,13 +126,6 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Throws<ArgumentNullException>(() => new TopicListing(null!, Uuid.Zero, false));
     }
 
-    /// <summary>
-    /// <see cref="CreatePartitionsResult"/> is Java's shape-2 pair — a
-    /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c> property plus <c>all()</c>
-    /// (<c>CreatePartitionsResult.java:39, :46</c>). The <c>bool</c> success token the void
-    /// bridge uses internally must <b>not</b> reach the public surface: since M15/P14 S4 each
-    /// value is the void <see cref="KafkaFuture"/>, not a <see cref="KafkaFuture{T}"/>.
-    /// </summary>
     [Fact]
     public void CreatePartitionsResult_PublishesVoidFutures()
     {
@@ -187,22 +140,11 @@ public sealed class PublicAdminP2bShapeParityTests
             nameof(CreatePartitionsResult.All), Type.EmptyTypes)!;
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        // Unlike DeleteTopicsResult there is no by-id form, so neither accessor is
-        // nullable and there is exactly one map.
         Assert.Single(typeof(CreatePartitionsResult).GetProperties());
 
-        // Java's constructor is package-private.
         Assert.Empty(typeof(CreatePartitionsResult).GetConstructors());
     }
 
-    /// <summary>
-    /// <see cref="DeleteRecordsResult"/> is keyed by the shipped
-    /// <see cref="TopicPartition"/> and carries <see cref="DeletedRecords"/> per key
-    /// (<c>DeleteRecordsResult.java:40, :47</c>). Java makes its constructor <b>public</b>
-    /// (<c>DeleteRecordsResult.java:32</c>), uniquely among the admin results bound in P2b;
-    /// since M15/P14 S4 this one is <b>internal on purpose</b>, a recorded Java-parity
-    /// deviation (follow-up FU-5), so the test pins the internal constructor's shape instead.
-    /// </summary>
     [Fact]
     public void DeleteRecordsResult_IsKeyedByTopicPartition_AndItsConstructorIsInternal()
     {
@@ -232,16 +174,6 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Throws<ArgumentNullException>(() => new DeleteRecordsResult(null!));
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="NewPartitions.Assignments"/> is the one nullable member of this
-    /// slice, and the annotation is load-bearing.</b> Java's javadoc
-    /// (<c>NewPartitions.java:83</c>) reads "The replica assignments for the new
-    /// partitions, <b>or null if the assignment will be done by the controller</b>", and
-    /// the body confirms it — <c>increaseTo(int)</c> passes <c>null</c>
-    /// (<c>:44</c>). Collapsing that to an empty list would change the wire request.
-    /// Since M15/P13.2 (G1-4) the list-taking factory's parameter is nullable too, and a
-    /// null there builds the same null-assignments entry.
-    /// </summary>
     [Fact]
     public void NewPartitions_AssignmentsIsNullable_AndTheFactoriesMirrorJava()
     {
@@ -252,7 +184,6 @@ public sealed class PublicAdminP2bShapeParityTests
 
         Assert.Equal(typeof(int), typeof(NewPartitions).GetProperty(nameof(NewPartitions.TotalCount))!.PropertyType);
 
-        // Java's two static factories and no public constructor.
         Assert.Empty(typeof(NewPartitions).GetConstructors());
 
         MethodInfo[] factories = typeof(NewPartitions)
@@ -267,10 +198,8 @@ public sealed class PublicAdminP2bShapeParityTests
             new[] { typeof(int), typeof(IReadOnlyList<IReadOnlyList<int>>) },
             factories[1].GetParameters().Select(p => p.ParameterType));
 
-        // The list parameter is NULLABLE (M15/P13.2 G1-4): Java's increaseTo(n, null) is
-        // increaseTo(n) — both build `new NewPartitions(totalCount, null)`
-        // (NewPartitions.java:42-44, :71-73). Only the OUTER list is nullable; an inner
-        // broker-id list is not (position 1 of the flattened type).
+        // The outer list is nullable, as Java's increaseTo(n, null) is increaseTo(n); an inner broker-id list is not
+        // (position 1 of the flattened type).
         ParameterInfo newAssignments = factories[1].GetParameters()[1];
         Assert.Equal("newAssignments", newAssignments.Name);
         Assert.Equal(2, NullableAnnotation.Flag(newAssignments, 0));
@@ -282,7 +211,6 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(NewPartitions.IncreaseTo(3).ToString(), viaNull.ToString());
         Assert.Equal("(totalCount=3, newAssignments=null)", viaNull.ToString());
 
-        // An empty list is still the present-but-empty request, not the null one.
         NewPartitions viaEmpty = NewPartitions.IncreaseTo(3, Array.Empty<IReadOnlyList<int>>());
         Assert.NotNull(viaEmpty.Assignments);
         Assert.Empty(viaEmpty.Assignments!);
@@ -299,12 +227,6 @@ public sealed class PublicAdminP2bShapeParityTests
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// <see cref="RecordsToDelete"/> keeps Java's static-factory / instance-accessor pair
-    /// of the <em>same name</em>, plus the value-equality members
-    /// (<c>RecordsToDelete.java:39-69</c>) — including Java's truncating
-    /// <c>hashCode()</c> of <c>(int) offset</c>.
-    /// </summary>
     [Fact]
     public void RecordsToDelete_MirrorsJavasFactoryAccessorPair_AndValueEquality()
     {
@@ -318,8 +240,7 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(typeof(long), accessor.ReturnType);
         Assert.Empty(accessor.GetParameters());
 
-        // A METHOD, not a property: C# forbids a property and a method sharing a name, and
-        // the static factory already owns it. Java has the identical pair.
+        // A method, not a property: C# forbids a property and a method sharing a name, and the static factory owns it.
         Assert.Empty(typeof(RecordsToDelete).GetProperties());
         Assert.Empty(typeof(RecordsToDelete).GetConstructors());
 
@@ -330,22 +251,16 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(RecordsToDelete.BeforeOffset(5).GetHashCode(), five.GetHashCode());
         Assert.Equal("(beforeOffset = 5)", five.ToString());
 
-        // Java's hashCode() is `(int) offset` — a truncation, not a mix. Asserted with a
-        // value whose low 32 bits differ from the whole, so a "better" hash goes red.
+        // Java's hashCode() is (int) offset, a truncation: asserted with a value whose low 32 bits differ from the whole.
         Assert.Equal(1, RecordsToDelete.BeforeOffset((1L << 32) + 1).GetHashCode());
 
-        // -1 is Java's documented "truncate to the high watermark" — a value, not a
-        // rejected sentinel.
+        // -1 is Java's "truncate to the high watermark": a value, not a rejected sentinel.
         Assert.Equal(-1, RecordsToDelete.BeforeOffset(-1).BeforeOffset());
 
         Assert.False(five.Equals(null));
         Assert.False(five.Equals("5"));
     }
 
-    /// <summary>
-    /// <see cref="DeletedRecords"/> mirrors Java's single-argument constructor, and
-    /// <b>-1 is a value it carries</b> rather than a failure it represents.
-    /// </summary>
     [Fact]
     public void DeletedRecords_CarriesTheWatermark_IncludingMinusOne()
     {
@@ -360,10 +275,6 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(-1, new DeletedRecords(-1).LowWatermark);
     }
 
-    /// <summary>
-    /// The three new options types carry exactly Java's fields and Java's defaults, so
-    /// <c>options: null</c> at a call site behaves like a freshly constructed instance.
-    /// </summary>
     [Fact]
     public void Options_MatchJavasFieldsAndDefaults()
     {
@@ -384,8 +295,7 @@ public sealed class PublicAdminP2bShapeParityTests
             nameof(create.TimeoutMs),
             nameof(CreatePartitionsOptions.ValidateOnly));
 
-        // Java's DeleteRecordsOptions declares NO members of its own — it is an empty
-        // subclass of AbstractOptions, so the inherited timeout is the whole surface.
+        // Java's DeleteRecordsOptions declares no members of its own, so the inherited timeout is the whole surface.
         DeleteRecordsOptions delete = new DeleteRecordsOptions();
         Assert.Null(delete.TimeoutMs);
         AssertOptionNames(typeof(DeleteRecordsOptions), nameof(delete.TimeoutMs));
@@ -401,10 +311,6 @@ public sealed class PublicAdminP2bShapeParityTests
         }
     }
 
-    /// <summary>
-    /// G1-13: <see cref="ListTopicsOptions"/> has Java's value equality, which compares
-    /// <c>listInternal</c> only and ignores the timeout (<c>ListTopicsOptions.java:67-77</c>).
-    /// </summary>
     [Fact]
     public void G1_13_ListTopicsOptions_EqualityIgnoresTheTimeout()
     {
@@ -412,28 +318,21 @@ public sealed class PublicAdminP2bShapeParityTests
         ListTopicsOptions longTimeout = new ListTopicsOptions { ListInternal = true, TimeoutMs = 99_000 };
         ListTopicsOptions noTimeout = new ListTopicsOptions { ListInternal = true };
 
-        // Differing only in TimeoutMs: equal, with equal hashes.
         Assert.True(shortTimeout.Equals(longTimeout));
         Assert.True(shortTimeout.Equals(noTimeout));
         Assert.Equal(shortTimeout.GetHashCode(), longTimeout.GetHashCode());
         Assert.Equal(shortTimeout.GetHashCode(), noTimeout.GetHashCode());
         Assert.True(new ListTopicsOptions().Equals(new ListTopicsOptions { TimeoutMs = 5 }));
 
-        // Differing in ListInternal: unequal.
         Assert.False(shortTimeout.Equals(new ListTopicsOptions { ListInternal = false, TimeoutMs = 10 }));
         Assert.False(shortTimeout.Equals(null));
         Assert.False(shortTimeout.Equals(new DeleteRecordsOptions()));
 
-        // Both overrides are declared on the type itself.
         Type type = typeof(ListTopicsOptions);
         Assert.Same(type, type.GetMethod(nameof(Equals), new[] { typeof(object) })!.DeclaringType);
         Assert.Same(type, type.GetMethod(nameof(GetHashCode), Type.EmptyTypes)!.DeclaringType);
     }
 
-    /// <summary>
-    /// G1-17: <see cref="ListTopicsOptions"/> renders as Java's <c>toString()</c>
-    /// (<c>ListTopicsOptions.java:60-64</c>): the flag in lowercase, and no timeout.
-    /// </summary>
     [Fact]
     public void G1_17_ListTopicsOptions_ToString_MatchesJava()
     {
@@ -448,32 +347,6 @@ public sealed class PublicAdminP2bShapeParityTests
             expected.OrderBy(name => name, StringComparer.Ordinal),
             optionsType.GetProperties().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
 
-    /// <summary>
-    /// 1 = not-annotated-nullable, 2 = nullable, in the C# compiler's
-    /// <c>NullableAttribute</c> encoding — decoded by
-    /// <see cref="NullableAnnotation"/>, which resolves a member carrying no
-    /// attribute of its own against the nearest enclosing
-    /// <c>NullableContextAttribute</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ Reading this rather than the <see cref="Type"/> is the whole point:
-    /// <c>IReadOnlyList&lt;T&gt;</c> and <c>IReadOnlyList&lt;T&gt;?</c> are the
-    /// <em>same</em> <see cref="Type"/>, so <see cref="PropertyInfo.PropertyType"/> alone
-    /// cannot tell them apart.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>The enclosing-context walk is not a detail.</b> This file originally decoded
-    /// only a member's own attribute and defaulted to 1, on the stated premise that the
-    /// project sets the context to 1 everywhere. That premise was false — the compiler
-    /// picks the context <em>per declaration</em>, and picks 2 where nullable positions
-    /// dominate — and all 7 of the non-nullable assertions here resolved through that
-    /// default without reading any metadata. Widening each one showed 6 would have been
-    /// caught by an attribute the compiler happened to emit, while
-    /// <c>TopicListing.Name</c> could <em>not</em> fail at all. See
-    /// <see cref="NullableAnnotation"/> for the full measurement and the split.
-    /// </para>
-    /// </remarks>
     private static byte NullableFlag(MemberInfo member) => NullableAnnotation.Flag(member);
 
     private static byte NullableFlag(ParameterInfo parameter) => NullableAnnotation.Flag(parameter);

@@ -20,68 +20,48 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The "who may do what, from where" half of an ACL — the .NET realization of Java's
-/// <c>org.apache.kafka.common.acl.AccessControlEntry</c> (<c>:36</c>).
+/// The "who may do what, from where" half of an ACL — Java's
+/// <c>org.apache.kafka.common.acl.AccessControlEntry</c>.
 /// </summary>
 /// <remarks>
-/// A <b>concrete</b> entry: <see cref="Principal"/> and <see cref="Host"/> are never null, and
-/// <see cref="AclOperation.Any"/> / <see cref="AclPermissionType.Any"/> are rejected by the
-/// constructor, as in Java. Use <see cref="AccessControlEntryFilter"/> where those are wanted.
-/// An enum value that is not a defined member is stored as its enum's <c>Unknown</c>, so
-/// <see cref="Operation"/> and <see cref="PermissionType"/> only ever hold a defined member —
-/// as a Java entry does.
+/// A concrete entry: <see cref="Principal"/> and <see cref="Host"/> are never null, and
+/// <see cref="AclOperation.Any"/> and <see cref="AclPermissionType.Any"/> are rejected, as in
+/// Java; <see cref="AccessControlEntryFilter"/> takes them. <see cref="Operation"/> and
+/// <see cref="PermissionType"/> only ever hold a defined member, as a Java entry does.
 /// </remarks>
 public sealed class AccessControlEntry
 {
-    /// <summary>
-    /// Creates an access control entry — Java's
-    /// <c>AccessControlEntry(String, String, AclOperation, AclPermissionType)</c> (<c>:36</c>).
-    /// </summary>
+    /// <summary>Creates an access control entry — Java's constructor.</summary>
     /// <param name="principal">The principal, e.g. <c>User:alice</c>.</param>
     /// <param name="host">The host, or <c>*</c> for all hosts.</param>
     /// <param name="operation">
-    /// The operation; <see cref="AclOperation.Any"/> is rejected. ⚠ A value that is not a
-    /// defined <see cref="AclOperation"/> member — reachable only through an unchecked
-    /// <c>int</c> cast — is stored as <see cref="AclOperation.Unknown"/>, exactly as Java's
-    /// <c>AclOperation.fromCode</c> maps a code it has no member for
-    /// (<c>AclOperation.java:151</c>).
+    /// The operation; <see cref="AclOperation.Any"/> is rejected. A value that is not a defined
+    /// member is stored as <see cref="AclOperation.Unknown"/>, as Java's <c>fromCode</c> maps a code
+    /// it has no member for.
     /// </param>
     /// <param name="permissionType">
-    /// The permission type; <see cref="AclPermissionType.Any"/> is rejected. ⚠ A value that is
-    /// not a defined <see cref="AclPermissionType"/> member is stored as
-    /// <see cref="AclPermissionType.Unknown"/>, as Java's <c>AclPermissionType.fromCode</c>
-    /// maps it (<c>AclPermissionType.java:74</c>).
+    /// The permission type; <see cref="AclPermissionType.Any"/> is rejected. A value that is not a
+    /// defined member is stored as <see cref="AclPermissionType.Unknown"/>, as Java's
+    /// <c>fromCode</c> maps it.
     /// </param>
-    /// <remarks>
-    /// ⚠ <b>Why an undefined value is normalized here</b> (M15/P13.3 F8). Java cannot hold one
-    /// at all, and the ABI reads the code through <c>fromCode</c>, so the core keys the
-    /// <c>createAcls</c> answer for this entry's binding by the <c>Unknown</c> it became.
-    /// Storing the raw value would key the binding's awaitable on a value the answer never
-    /// names, and two bindings differing only in undefined codes would be two keys where the
-    /// core answers one. Normalizing here serves the request key and the key read back alike,
-    /// because both are built by this constructor.
-    /// </remarks>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="principal"/> or <paramref name="host"/> is null (Java's <c>:37-38</c>).
+    /// <paramref name="principal"/> or <paramref name="host"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="operation"/> is <see cref="AclOperation.Any"/> (Java's <c>:40-41</c>), or
-    /// <paramref name="permissionType"/> is <see cref="AclPermissionType.Any"/> (Java's <c>:43-44</c>).
+    /// <paramref name="operation"/> is <see cref="AclOperation.Any"/>, or
+    /// <paramref name="permissionType"/> is <see cref="AclPermissionType.Any"/>.
     /// </exception>
     public AccessControlEntry(string principal, string host, AclOperation operation, AclPermissionType permissionType)
     {
-        // Java's null checks come first, then the two ANY rejections, in this order.
         Principal = principal ?? throw new ArgumentNullException(nameof(principal));
         Host = host ?? throw new ArgumentNullException(nameof(host));
 
-        // Java's fromCode fallback (F8). Any is a defined member, so folding an undefined value
-        // first cannot change which of the two checks below fires.
         operation = AclEnumCodes.DefinedOrUnknown(operation);
         permissionType = AclEnumCodes.DefinedOrUnknown(permissionType);
 
         if (operation == AclOperation.Any)
         {
-            // Java's text with the C# member spelling (dotnet/.claude/rules/bindings.md §2.2 casing rule).
+            // Java's message, with the C# member name.
             throw new ArgumentException("operation must not be Any", nameof(operation));
         }
 
@@ -94,41 +74,35 @@ public sealed class AccessControlEntry
         PermissionType = permissionType;
     }
 
-    /// <summary>The principal — Java's <c>principal()</c> (<c>:51</c>).</summary>
+    /// <summary>The principal — Java's <c>principal()</c>.</summary>
     public string Principal { get; }
 
-    /// <summary>The host, or <c>*</c> for all hosts — Java's <c>host()</c> (<c>:58</c>).</summary>
+    /// <summary>The host, or <c>*</c> for all hosts — Java's <c>host()</c>.</summary>
     public string Host { get; }
 
     /// <summary>
-    /// The operation; never <see cref="AclOperation.Any"/> — Java's <c>operation()</c> (<c>:65</c>).
+    /// The operation; never <see cref="AclOperation.Any"/> — Java's <c>operation()</c>.
     /// </summary>
     public AclOperation Operation { get; }
 
     /// <summary>
     /// The permission type; never <see cref="AclPermissionType.Any"/> — Java's
-    /// <c>permissionType()</c> (<c>:72</c>).
+    /// <c>permissionType()</c>.
     /// </summary>
     public AclPermissionType PermissionType { get; }
 
     /// <summary>
-    /// Whether the operation or permission type is <c>Unknown</c> — Java's <c>isUnknown()</c>
-    /// (<c>:91</c>).
+    /// Whether the operation or permission type is <c>Unknown</c> — Java's <c>isUnknown()</c>.
     /// </summary>
     public bool IsUnknown =>
         Operation == AclOperation.Unknown || PermissionType == AclPermissionType.Unknown;
 
-    /// <summary>
-    /// A filter matching only this entry — Java's <c>toFilter()</c> (<c>:79</c>).
-    /// </summary>
+    /// <summary>A filter matching only this entry — Java's <c>toFilter()</c>.</summary>
     /// <returns>The filter.</returns>
     public AccessControlEntryFilter ToFilter() =>
         new AccessControlEntryFilter(Principal, Host, Operation, PermissionType);
 
-    /// <summary>
-    /// Value equality over all four components — Java's <c>equals</c> (<c>:96</c>, delegating to
-    /// <c>AccessControlEntryData.equals</c> <c>:91</c>).
-    /// </summary>
+    /// <summary>Value equality over all four components — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same entry.</returns>
     public override bool Equals(object? obj) =>
@@ -138,11 +112,7 @@ public sealed class AccessControlEntry
         && Operation == other.Operation
         && PermissionType == other.PermissionType;
 
-    /// <summary>
-    /// The hash of all four components — Java's <c>hashCode</c> (<c>:104</c> →
-    /// <c>AccessControlEntryData:102</c>), same fields and same <c>31 *</c> fold as
-    /// <c>Objects.hash</c>.
-    /// </summary>
+    /// <summary>The hash of all four components — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -158,10 +128,9 @@ public sealed class AccessControlEntry
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:84</c> →
-    /// <c>AccessControlEntryData:76</c>).
-    /// ⚠ The shape only, not the exact text: the operation and permission type print with their .NET
-    /// names (<c>Read</c>, <c>Allow</c>), where Java prints its constants (<c>READ</c>, <c>ALLOW</c>).
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>. The operation and
+    /// permission type print with their .NET names (<c>Read</c>, <c>Allow</c>), where Java prints
+    /// its constants (<c>READ</c>, <c>ALLOW</c>).
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

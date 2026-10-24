@@ -24,9 +24,9 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The rebalance, and the operation that triggered it, wait until each method returns. On
-/// <see cref="IConsumer{TKey, TValue}"/> the methods run on the calling thread, inside the blocking call that
-/// triggered them; on <see cref="IAsyncConsumer{TKey, TValue}"/> they run on the consumer's drain thread,
+/// The rebalance, and the operation that triggered it, wait until each method returns. The methods run only
+/// inside <c>Poll</c>, <c>Unsubscribe</c> and <c>Close</c>: on <see cref="IConsumer{TKey, TValue}"/> on the
+/// calling thread; on <see cref="IAsyncConsumer{TKey, TValue}"/> on the consumer's drain thread,
 /// <c>confluent-kafka-consumer-pump</c>, one at a time. <see cref="IAsyncConsumerRebalanceListener"/> is the
 /// asynchronous form, for <see cref="IAsyncConsumer{TKey, TValue}"/> only.
 /// </para>

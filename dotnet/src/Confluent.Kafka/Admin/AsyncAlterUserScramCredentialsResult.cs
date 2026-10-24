@@ -14,75 +14,67 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.AlterUserScramCredentials"/> — Java's
 /// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsResult</c>: one future
-/// <b>per user</b> (<c>:31</c>).
+/// <b>per user</b>.
 /// </summary>
-/// <remarks>
-/// ⚠ This type sits on an accessor set byte-identical to <see cref="AsyncUpdateFeaturesResult"/>'s
-/// (and to P6's <c>CreateAclsResult</c>), so a cross-wired reader would return a plausible
-/// answer; the readers are pinned apart by a wiring guard in the unit tests.
-/// </remarks>
 /// <seealso cref="AlterUserScramCredentialsResult"/>
 public sealed class AsyncAlterUserScramCredentialsResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps one future per user — Java's <b>public</b>
-    /// <c>AlterUserScramCredentialsResult(Map&lt;String, KafkaFuture&lt;Void&gt;&gt;)</c>
-    /// (<c>AlterUserScramCredentialsResult.java:38</c>), which a caller can use to fabricate a
-    /// result, for a test double say.
-    /// </summary>
-    /// <remarks>
-    /// <b>Internal on purpose</b>, unlike Java's: a recorded Java-parity deviation, follow-up FU-5 in
-    /// <c>design/current/STATUS.md</c>. The dictionary is held by reference, as Java holds its map, so
-    /// <see cref="Values"/> and <see cref="All"/> read whatever it holds when they are called.
-    /// </remarks>
-    /// <param name="futures">One future per user, keyed by user name.</param>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="futures"/> is null — where Java stores the null and throws
-    /// <c>NullPointerException</c> on first use.
-    /// </exception>
+    // Internal, unlike Java's public constructor: a recorded deviation. The dictionary is held
+    // by reference, as Java holds its map.
     internal AsyncAlterUserScramCredentialsResult(IReadOnlyDictionary<string, AsyncKafkaFuture> futures)
     {
         _values = futures ?? throw new ArgumentNullException(nameof(futures));
     }
 
-    internal AsyncAlterUserScramCredentialsResult(
-        IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer)
+    private AsyncAlterUserScramCredentialsResult(
+        IReadOnlyDictionary<string, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        // The bool is the void bridge's internal success token and must not reach the public
-        // surface; each entry wraps the same Task instance.
-        Dictionary<string, AsyncKafkaFuture> erased = new Dictionary<string, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncAlterUserScramCredentialsResult From(VoidKeyedAdminOperation<string> operation) =>
-        new AsyncAlterUserScramCredentialsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle? Native => _native;
 
-    /// <summary>One future per requested user — Java's <c>values()</c> (<c>:46</c>).</summary>
+    /// <summary>One future per requested user — Java's <c>values()</c>.</summary>
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when every user's alteration has been applied — Java's <c>all()</c>
-    /// (<c>:53</c>).
+    /// Completes when every user's alteration has been applied, and faults with the first failure to complete if
+    /// any user failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() =>
+        _nativeFutures is not null
+            ? new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            : AsyncAdminFutures.AllOf(_values.Values);
+
+    internal static AsyncAlterUserScramCredentialsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, AsyncKafkaFuture> values =
+            new Dictionary<string, AsyncKafkaFuture>(native.Values.Count, StringComparer.Ordinal);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncAlterUserScramCredentialsResult(values, nativeFutures, native.Result);
+    }
 }

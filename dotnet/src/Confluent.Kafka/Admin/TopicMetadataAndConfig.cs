@@ -17,26 +17,21 @@ using System;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The metadata a broker returned for a newly created topic — the .NET realization of
-/// Java's <c>CreateTopicsResult.TopicMetadataAndConfig</c>.
+/// The metadata a broker returned for a newly created topic — Java's
+/// <c>CreateTopicsResult.TopicMetadataAndConfig</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Creation can succeed while the metadata is unavailable</b> — the broker may
-/// create the topic and still return nothing about it (an older broker, or a
-/// <c>validateOnly</c> request). Java models that with a second, inner error: the
-/// per-topic future completes <em>successfully</em> with a
-/// <c>TopicMetadataAndConfig</c> whose accessors then throw
-/// (<c>ensureSuccess()</c>). This type does the same: every accessor is a
-/// <b>method</b>, not a property, precisely because it can throw
-/// <see cref="KafkaException"/> — the same reason the consumer's
-/// <c>Assignment()</c> / <c>Subscription()</c> / <c>Paused()</c> are methods.
+/// Creation can succeed while the metadata is unavailable (an older broker, or a
+/// <c>validateOnly</c> request): the per-topic future then succeeds with an instance whose
+/// accessors throw, as Java's do. So each accessor is a method; <see cref="HasMetadata"/> tests
+/// for that state without the throw.
 /// </para>
 /// <para>
-/// Use <see cref="HasMetadata"/> to test for that state without provoking the throw.
-/// It has no Java counterpart (Java offers only the throwing accessors), and is the one
-/// addition here: a .NET caller should not have to use exceptions for control flow to
-/// answer a question the object already knows the answer to.
+/// Each throw is a fresh <see cref="KafkaException"/> with the stored error's
+/// <see cref="KafkaException.Code"/>, message and <see cref="KafkaException.IsRetriable"/>, and
+/// the stored error as its <see cref="System.Exception.InnerException"/>, where Java rethrows the
+/// stored exception itself: a recorded deviation, so that each call has its own stack trace.
 /// </para>
 /// </remarks>
 public sealed class TopicMetadataAndConfig
@@ -45,14 +40,11 @@ public sealed class TopicMetadataAndConfig
     private readonly Uuid _topicId;
     private readonly int _numPartitions;
 
-    // `int`, not `short` — Java's RESULT side is `int replicationFactor`
-    // (CreateTopicsResult.java:112/115/141) and the ABI agrees (`int32_t`). `short` is
-    // the REQUEST side only (NewTopic.replicationFactor()).
     private readonly int _replicationFactor;
     private readonly Config? _config;
 
     /// <summary>
-    /// Initializes a successful instance carrying the broker's metadata.
+    /// Initializes an instance carrying the broker's metadata — Java's four-argument constructor.
     /// </summary>
     /// <param name="topicId">The topic id.</param>
     /// <param name="numPartitions">The partition count.</param>
@@ -68,9 +60,9 @@ public sealed class TopicMetadataAndConfig
     }
 
     /// <summary>
-    /// Initializes an instance for a topic that <b>was created</b> but whose metadata
-    /// the broker did not return — Java's <c>TopicMetadataAndConfig(Throwable)</c>.
-    /// Every accessor then throws.
+    /// Initializes an instance for a topic that was created but whose metadata the broker did
+    /// not return — Java's <c>TopicMetadataAndConfig(ApiException)</c>. Every accessor then
+    /// throws.
     /// </summary>
     /// <param name="exception">The reason the metadata is unavailable.</param>
     /// <exception cref="ArgumentNullException"><paramref name="exception"/> is null.</exception>
@@ -80,12 +72,12 @@ public sealed class TopicMetadataAndConfig
     }
 
     /// <summary>
-    /// Whether the broker returned metadata, i.e. whether the accessors below will
-    /// return rather than throw. No Java counterpart — see the type remarks.
+    /// Whether the broker returned metadata, so that the accessors return rather than throw.
+    /// Java has no counterpart.
     /// </summary>
     public bool HasMetadata => _exception is null;
 
-    /// <summary>The topic id (Java's <c>topicId()</c>).</summary>
+    /// <summary>The topic id — Java's <c>topicId()</c>.</summary>
     /// <returns>The topic id the broker assigned.</returns>
     /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
     public Uuid TopicId()
@@ -94,7 +86,7 @@ public sealed class TopicMetadataAndConfig
         return _topicId;
     }
 
-    /// <summary>The partition count (Java's <c>numPartitions()</c>).</summary>
+    /// <summary>The partition count — Java's <c>numPartitions()</c>.</summary>
     /// <returns>The number of partitions the topic was created with.</returns>
     /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
     public int NumPartitions()
@@ -103,7 +95,7 @@ public sealed class TopicMetadataAndConfig
         return _numPartitions;
     }
 
-    /// <summary>The replication factor (Java's <c>replicationFactor()</c>).</summary>
+    /// <summary>The replication factor — Java's <c>replicationFactor()</c>.</summary>
     /// <returns>The replication factor the topic was created with.</returns>
     /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
     public int ReplicationFactor()
@@ -112,7 +104,7 @@ public sealed class TopicMetadataAndConfig
         return _replicationFactor;
     }
 
-    /// <summary>The topic's configuration (Java's <c>config()</c>).</summary>
+    /// <summary>The topic's configuration — Java's <c>config()</c>.</summary>
     /// <returns>The configuration the broker reported for the topic.</returns>
     /// <exception cref="KafkaException">The broker returned no metadata for this topic.</exception>
     public Config Config()
@@ -121,22 +113,6 @@ public sealed class TopicMetadataAndConfig
         return _config!;
     }
 
-    /// <summary>
-    /// Java's <c>ensureSuccess()</c>: throws the metadata failure.
-    /// </summary>
-    /// <remarks>
-    /// Java rethrows the stored exception <b>itself</b> (<c>throw exception;</c>,
-    /// <c>CreateTopicsResult.java:151-154</c>), so every accessor surfaces the same
-    /// instance with its identity fields intact. The .NET shape is a deliberate, recorded
-    /// deviation (M15/P13.4 D7): it throws a <b>fresh</b> <see cref="KafkaException"/>
-    /// that copies the stored error's <see cref="KafkaException.Code"/>,
-    /// <see cref="System.Exception.Message"/> and <see cref="KafkaException.IsRetriable"/>,
-    /// and carries the stored instance as
-    /// <see cref="System.Exception.InnerException"/>. Rethrowing one stored instance from
-    /// several call sites would overwrite its stack trace on every throw; the fresh
-    /// exception gives each accessor call its own trace while a caller that branches on
-    /// the code or the retriable flag sees exactly what Java's caller would.
-    /// </remarks>
     private void EnsureSuccess()
     {
         if (_exception is not null)

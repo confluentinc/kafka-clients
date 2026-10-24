@@ -12,24 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.DeleteConsumerGroupOffsets"/> — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsOptions</c>
-/// (<c>DeleteConsumerGroupOffsetsOptions.java:22</c>).
+/// Java's <c>org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java's class declares no members of its own — everything comes from
-/// <c>AbstractOptions&lt;DeleteConsumerGroupOffsetsOptions&gt;</c>, which contributes only
-/// the timeout. So <see cref="TimeoutMs"/> is the only member here, the same call every
-/// sibling flat-POCO options type in this binding already makes.
-/// </para>
 /// </remarks>
 public sealed class DeleteConsumerGroupOffsetsOptions
 {
+    private int? _timeoutMs;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

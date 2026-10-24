@@ -109,7 +109,7 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
         try
         {
             admin = TranslateAdmin.SelectsMock(config)
-                ? new MockAdminClient(numBrokers)
+                ? MockAdminClient.Create().NumBrokers(numBrokers).Build()
                 : (IAdmin)new KafkaAdminClient(config);
         }
         catch (Exception ex)
@@ -2092,27 +2092,21 @@ internal sealed class AdminServiceImpl : Proto.AdminService.AdminServiceBase, ID
     }
 
     /// <summary>
-    /// One RAW <c>describeUserScramCredentials</c> row: the user, plus either its credentials or
-    /// the wire error code that <c>description(user)</c> faulted with.
+    /// One RAW <c>describeUserScramCredentials</c> row: the user's key, plus either its
+    /// description or the error that <c>description(user)</c> faulted with.
     /// </summary>
     private static Proto.DescribeUserScramCredentialsEntry ScramCredentialsEntry(
         DescribeUserScramCredentialsResult result, string user)
     {
         Proto.DescribeUserScramCredentialsEntry entry =
-            new Proto.DescribeUserScramCredentialsEntry { User = user };
+            new Proto.DescribeUserScramCredentialsEntry { Key = TranslateAdmin.NameKey(user) };
         try
         {
-            UserScramCredentialsDescription description =
-                result.Description(user).Get();
-            foreach (ScramCredentialInfo info in description.CredentialInfos)
-            {
-                entry.CredentialInfos.Add(TranslateAdmin.ScramInfoToProto(info));
-            }
+            entry.Value = TranslateAdmin.ScramDescriptionToProto(result.Description(user).Get());
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
-            entry.ErrorCode = ex.Code;
-            entry.ErrorMessage = ex.Message ?? string.Empty;
+            entry.Error = Translate.ToProto(ex);
         }
 
         return entry;

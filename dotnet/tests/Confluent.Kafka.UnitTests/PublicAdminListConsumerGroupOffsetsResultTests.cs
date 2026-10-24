@@ -19,39 +19,18 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins <see cref="ListConsumerGroupOffsetsResult"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>.
+/// <see cref="ListConsumerGroupOffsetsResult"/> against Java's
+/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>: no per-key map property, the two
+/// <c>PartitionsToOffsetAndMetadata</c> overloads with the no-argument one's exactly-one-group precondition, and a
+/// partition with no committed offset present with a null value.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>This result publishes no per-key map</b>, unlike its two describe siblings — Java's
-/// <c>futures</c> field has no getter (<c>:38</c>). The shape test asserts that absence
-/// directly, because "add the map property the other results have" is the natural and wrong
-/// thing for a later slice to do.
-/// </para>
-/// <para>
-/// ⚠ <b>The two <c>PartitionsToOffsetAndMetadata</c> forms are overloads</b>, and the
-/// no-argument one has its own precondition — exactly one group — that an optional parameter
-/// could not express. Both the one-group success and the multi-group and empty rejections are
-/// asserted.
-/// </para>
-/// <para>
-/// ⚠ <b>A partition with a <see langword="null"/> offset is present, not absent.</b> That is
-/// Java's documented contract for "the group has no committed offset here" (<c>:47</c>), and
-/// it is the distinction the interop slice has to carry across the ABI's per-partition
-/// <c>has_offset</c> flag.
-/// </para>
-/// <para>
-/// <b>This is a pure value type</b> — the ABI wiring and the client method arrive in later
-/// slices — so everything here is managed and broker-free.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminListConsumerGroupOffsetsResultTests
 {
     private static readonly TopicPartition s_committed = new TopicPartition("orders", 0);
@@ -62,37 +41,34 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         {
             [s_committed] = new OffsetAndMetadata(offset, "m"),
 
-            // Present-but-null: the group committed nothing for this partition (Java :47).
+            // Present with a null value: the group committed nothing for this partition.
             [s_uncommitted] = null,
         };
 
-    private static Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Completed(long offset) =>
-        Task.FromResult(Offsets(offset));
+    private static KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Completed(long offset)
+    {
+        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future = Pending();
+        future.Complete(Offsets(offset));
+        return future;
+    }
 
-    private static TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Pending() =>
-        new TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+    private static KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Pending() =>
+        new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>();
 
     private static AsyncListConsumerGroupOffsetsResult Result(
-        params (string GroupId, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Future)[] entries)
+        params (string GroupId, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Future)[] entries)
     {
-        Dictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
-            new Dictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
+        Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
+            new Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
                 StringComparer.Ordinal);
-        foreach ((string groupId, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future) in entries)
+        foreach ((string groupId, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future) in entries)
         {
-            futures.Add(groupId, future);
+            futures.Add(groupId, new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(future));
         }
 
         return new AsyncListConsumerGroupOffsetsResult(futures);
     }
 
-    /// <summary>
-    /// Java's constructor is <b>package-private</b> (<c>:40</c>), so it is mirrored as
-    /// internal. (<see cref="DescribeClassicGroupsResult"/>'s is public in Java and internal
-    /// here only as a recorded deviation, FU-5 — this one needs none.) M15/P14 S5c: it takes the
-    /// sync flavour's <see cref="KafkaFuture{T}"/>s.
-    /// </summary>
     [Fact]
     public void Constructor_IsInternalMirroringJavasPackagePrivateOne()
     {
@@ -100,17 +76,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
 
         ConstructorInfo constructor = Assert.Single(
             typeof(ListConsumerGroupOffsetsResult).GetConstructors(
-                BindingFlags.NonPublic | BindingFlags.Instance));
+                BindingFlags.NonPublic | BindingFlags.Instance),
+            c => !c.IsPrivate);
         Assert.True(constructor.IsAssembly);
         Assert.Equal(
             typeof(IReadOnlyDictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>),
             Assert.Single(constructor.GetParameters()).ParameterType);
     }
 
-    /// <summary>
-    /// The public surface is exactly Java's three methods, and — unlike the describe results
-    /// — <b>no per-key map property</b>, because Java's <c>futures</c> field has no getter.
-    /// </summary>
     [Fact]
     public void PublicShape_IsJavasThreeMethodsAndNoMapProperty()
     {
@@ -124,20 +97,13 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
                 .Select(method => method.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
 
-        // Java declares no statics on this class.
         Assert.Empty(
             typeof(ListConsumerGroupOffsetsResult)
                 .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 
-        // Java carries no @Deprecated here, so neither does this.
         Assert.Null(typeof(ListConsumerGroupOffsetsResult).GetCustomAttribute<ObsoleteAttribute>());
     }
 
-    /// <summary>
-    /// The two <c>PartitionsToOffsetAndMetadata</c> forms are genuine overloads — one taking
-    /// nothing, one taking a required group id — not a single method with an optional
-    /// parameter that would let <c>null</c> through as "no group".
-    /// </summary>
     [Fact]
     public void PartitionsToOffsetAndMetadata_AreTwoOverloadsWithNoOptionalParameter()
     {
@@ -162,11 +128,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         }
     }
 
-    /// <summary>
-    /// The aggregate's value type is the per-group map of per-partition offsets — Java's
-    /// <c>Map&lt;String, Map&lt;TopicPartition, OffsetAndMetadata&gt;&gt;</c> (<c>:72</c>), as a
-    /// <see cref="KafkaFuture{T}"/> on the sync flavour (M15/P14 S5c).
-    /// </summary>
     [Fact]
     public void All_YieldsAMapOfGroupIdToPartitionOffsets()
     {
@@ -177,10 +138,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
                 .ReturnType);
     }
 
-    /// <summary>
-    /// With exactly one group, the no-argument form yields that group's offsets — Java's
-    /// <c>futures.values().iterator().next()</c> (<c>:54</c>).
-    /// </summary>
     [Fact]
     public async Task PartitionsToOffsetAndMetadata_NoArgument_YieldsTheOnlyGroup()
     {
@@ -193,11 +150,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.Same(result.PartitionsToOffsetAndMetadata("g").Get(), result.PartitionsToOffsetAndMetadata().Get());
     }
 
-    /// <summary>
-    /// Java's guard is <c>futures.size() != 1</c> (<c>:50</c>), so it rejects <b>both</b>
-    /// several groups and none — the empty case is the one a <c>&gt; 1</c> translation would
-    /// silently let through into an empty-sequence crash.
-    /// </summary>
     [Theory]
     [InlineData(0)]
     [InlineData(2)]
@@ -210,9 +162,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
                 .Select(index => (GroupId: "g" + index, Future: Completed(index)))
                 .ToArray());
 
-        // Block-bodied so this binds xUnit's Action overload: the point of the assertion is
-        // that the call throws *synchronously*, which Assert.ThrowsAsync would not distinguish
-        // from a returned task that merely faults.
+        // Block-bodied, so this binds xUnit's Action overload and asserts a synchronous throw, not a faulted task.
         InvalidOperationException error =
             Assert.Throws<InvalidOperationException>(() => { _ = result.PartitionsToOffsetAndMetadata(); });
         Assert.Equal(
@@ -221,10 +171,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
             error.Message);
     }
 
-    /// <summary>
-    /// The group-id form hands back that group's own awaitable, and each group keeps its own
-    /// outcome — Java's <c>futures.get(groupId)</c> (<c>:65</c>).
-    /// </summary>
     [Fact]
     public async Task PartitionsToOffsetAndMetadata_ByGroupId_IsPerGroup()
     {
@@ -234,18 +180,12 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.Equal(2L, (await result.PartitionsToOffsetAndMetadata("b").Get())[s_committed]!.Offset);
     }
 
-    /// <summary>
-    /// A group that was never requested is a caller mistake, so it throws synchronously rather
-    /// than faulting a returned task — Java throws <c>IllegalArgumentException</c> out of the
-    /// method (<c>:63-64</c>). Lookup is ordinal, so case does not match.
-    /// </summary>
     [Fact]
     public void PartitionsToOffsetAndMetadata_ByGroupId_RejectsAnUnrequestedGroupSynchronously()
     {
         AsyncListConsumerGroupOffsetsResult result = Result(("a", Completed(1)));
 
-        // Block-bodied lambdas bind xUnit's Action overload, so what is asserted is a
-        // synchronous throw rather than a faulted task (see the no-argument test above).
+        // Block-bodied, so this asserts a synchronous throw, not a faulted task.
         ArgumentException error =
             Assert.Throws<ArgumentException>(() => { _ = result.PartitionsToOffsetAndMetadata("missing"); });
         Assert.Equal("groupId", error.ParamName);
@@ -258,11 +198,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.Equal("groupId", nullError.ParamName);
     }
 
-    /// <summary>
-    /// A partition the group has no committed offset for is <b>present with a null value</b>,
-    /// not dropped — Java's documented contract (<c>:47</c>, <c>:59-60</c>) and the
-    /// distinction the ABI's per-partition <c>has_offset</c> flag carries.
-    /// </summary>
     [Fact]
     public async Task UncommittedPartition_IsPresentWithANullValueRatherThanAbsent()
     {
@@ -274,15 +209,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.True(offsets.ContainsKey(s_uncommitted));
         Assert.Null(offsets[s_uncommitted]);
 
-        // An unlisted partition is the other thing entirely: not in the map at all.
         Assert.False(offsets.ContainsKey(new TopicPartition("orders", 99)));
     }
 
-    /// <summary>
-    /// <see cref="ListConsumerGroupOffsetsResult.All"/> gathers every group, keyed ordinally,
-    /// and starts a fresh gather per call — which is why it is a method rather than a
-    /// property.
-    /// </summary>
     [Fact]
     public async Task All_GathersEveryGroupOrdinallyAndIsFreshPerCall()
     {
@@ -300,18 +229,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.Null(all["a"][s_uncommitted]);
     }
 
-    /// <summary>
-    /// A per-group failure is not a call failure: the healthy group still resolves while the
-    /// broken one faults its own task, and only the aggregate carries the failure up.
-    /// </summary>
     [Fact]
     public async Task PerGroupFailure_FaultsOnlyThatGroupAndTheAggregate()
     {
-        TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
-        AsyncListConsumerGroupOffsetsResult result = Result(("ok", Completed(1)), ("bad", broken.Task));
+        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
+        AsyncListConsumerGroupOffsetsResult result = Result(("ok", Completed(1)), ("bad", broken));
 
         KafkaException failure = new KafkaException("nope");
-        broken.SetException(failure);
+        broken.CompleteWithError(failure);
 
         Assert.Equal(1L, (await result.PartitionsToOffsetAndMetadata("ok").Get())[s_committed]!.Offset);
 
@@ -321,33 +246,22 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
         Assert.Same(failure, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
     }
 
-    /// <summary>
-    /// <see cref="ListConsumerGroupOffsetsResult.All"/> waits for <em>every</em> group before
-    /// it faults, matching Java's <c>allOf(...).thenApply(...)</c> (<c>:73</c>). A gather
-    /// written without the <c>WhenAll</c> would fault the instant it touched the broken key,
-    /// so the still-pending case is the only one that tells the two apart.
-    /// </summary>
     [Fact]
     public async Task All_WaitsForEveryGroupBeforeItFaults()
     {
-        TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
-        TaskCompletionSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> slow = Pending();
-        AsyncListConsumerGroupOffsetsResult result = Result(("bad", broken.Task), ("slow", slow.Task));
+        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
+        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> slow = Pending();
+        AsyncListConsumerGroupOffsetsResult result = Result(("bad", broken), ("slow", slow));
 
         Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> all = result.All().Get();
 
-        broken.SetException(new KafkaException("gone"));
+        broken.CompleteWithError(new KafkaException("gone"));
         Assert.False(all.IsCompleted);
 
-        slow.SetResult(Offsets(3));
+        slow.Complete(Offsets(3));
         await Assert.ThrowsAsync<KafkaException>(() => all);
     }
 
-    /// <summary>
-    /// The empty result is representable and every accessor behaves: the aggregate yields an
-    /// empty map, and the no-argument form rejects it because Java's <c>size() != 1</c> guard
-    /// covers zero as well.
-    /// </summary>
     [Fact]
     public async Task EmptyResult_AggregatesToAnEmptyMap()
     {

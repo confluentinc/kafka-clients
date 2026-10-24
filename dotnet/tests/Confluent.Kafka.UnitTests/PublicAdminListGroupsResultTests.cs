@@ -19,172 +19,71 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins <see cref="ListGroupsResult"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ListGroupsResult</c>.
+/// Pins <see cref="ListGroupsResult"/> and <see cref="AsyncListGroupsResult"/> against Java's
+/// <c>org.apache.kafka.clients.admin.ListGroupsResult</c>: three accessors, each over its own core future.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The three accessors differ only under partial failure, so every test below that
-/// matters supplies listings <em>and</em> errors together.</b> With an all-success result
-/// <c>All</c> and <c>Valid</c> are indistinguishable and <c>Errors</c> is empty — a suite built
-/// only on that shape would pass against an implementation that had aliased all three to the
-/// same projection, which is precisely the defect this type exists to avoid
-/// (<c>ListGroupsResult.java:52-58</c>).
-/// </para>
-/// <para>
-/// ⚠ <b>The two lists have independent lengths.</b> Java's result is a partition of one mixed
-/// collection (<c>:43-49</c>), so the listing count and the error count are unrelated — the
-/// native result likewise carries two lists with separate counts. At least one case below uses
-/// a shape (one listing, three errors) that a parallel-array reading would misread in both
-/// directions.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminListGroupsResultTests
 {
-    /// <summary>
-    /// With no errors, <c>all()</c> yields every listing (<c>:55</c>) — Java's
-    /// <c>all.complete(validResult)</c> branch.
-    /// </summary>
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
     [Fact]
-    public async Task All_YieldsEveryListing_WhenNoErrorOccurred()
+    public void EachAccessor_YieldsItsOwnFuture_Sync()
     {
-        GroupListing first = Listing("g1");
-        GroupListing second = Listing("g2");
+        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+            IReadOnlyCollection<GroupListing> listings,
+            IReadOnlyCollection<KafkaException> failures) = PartialFailure();
 
-        AsyncListGroupsResult result = ResultOf(new[] { first, second }, Array.Empty<KafkaException>());
+        ListGroupsResult result = ListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
-        Assert.Equal(new[] { first, second }, await result.All().Get());
+        Assert.Same(failures.First(), Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        Assert.Same(listings, result.Valid().Get(s_deadline));
+        Assert.Same(failures, result.Errors().Get(s_deadline));
     }
 
-    /// <summary>
-    /// One error and <c>all()</c> fails, yielding nothing — not even the listings that <b>were</b>
-    /// fetched (<c>:52-53</c>, javadoc <c>:66-67</c>). The exception is the <b>first</b> one, and
-    /// the object itself: Java passes <c>errorsResult.get(0)</c> straight to
-    /// <c>completeExceptionally</c>.
-    /// </summary>
     [Fact]
-    public async Task All_FaultsWithTheFirstError_WhenAnyErrorOccurred()
+    public async Task EachAccessor_YieldsItsOwnFuture_Async()
     {
-        KafkaException first = Error("first");
-        KafkaException second = Error("second");
+        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+            IReadOnlyCollection<GroupListing> listings,
+            IReadOnlyCollection<KafkaException> failures) = PartialFailure();
 
-        AsyncListGroupsResult result = ResultOf(new[] { Listing("g1") }, new[] { first, second });
+        AsyncListGroupsResult result = AsyncListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
-        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
-
-        Assert.Same(first, thrown);
-
-        // ⚠ The successfully fetched listing is NOT yielded as a consolation: `all()` is
-        // all-or-nothing, which is the whole reason `valid()` exists beside it.
-        Assert.Single(await result.Valid().Get());
+        Assert.Same(failures.First(), await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        Assert.Same(listings, await result.Valid().Get());
+        Assert.Same(failures, await result.Errors().Get());
     }
 
-    /// <summary>
-    /// <c>valid()</c> ignores errors completely and yields the partial results (javadoc
-    /// <c>:76-80</c>) — it does not fault, and it does not shrink to empty because an error is
-    /// present.
-    /// </summary>
-    [Fact]
-    public async Task Valid_YieldsThePartialResults_AndIgnoresErrors()
-    {
-        GroupListing listing = Listing("g1");
-
-        AsyncListGroupsResult result = ResultOf(new[] { listing }, new[] { Error("boom") });
-
-        IReadOnlyCollection<GroupListing> valid = await result.Valid().Get();
-
-        Assert.Equal(new[] { listing }, valid);
-    }
-
-    /// <summary>
-    /// <c>errors()</c> yields every error and never faults (javadoc <c>:92-93</c>) — an error is
-    /// an element here, not a failure. All of them, not just the one <c>all()</c> throws.
-    /// </summary>
-    [Fact]
-    public async Task Errors_YieldsEveryError_AndNeverFaults()
-    {
-        KafkaException first = Error("first");
-        KafkaException second = Error("second");
-
-        AsyncListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), new[] { first, second });
-
-        Assert.Equal(new[] { first, second }, await result.Errors().Get());
-
-        // Java's "if nothing can be fetched, an empty collection is yielded" (:77).
-        Assert.Empty(await result.Valid().Get());
-    }
-
-    /// <summary>
-    /// The listing count and the error count are independent: a result may carry one listing and
-    /// three errors. Nothing bounds either list by the other's length.
-    /// </summary>
-    [Fact]
-    public async Task TheTwoLists_HaveIndependentLengths()
-    {
-        GroupListing listing = Listing("g1");
-        KafkaException[] errors = { Error("a"), Error("b"), Error("c") };
-
-        AsyncListGroupsResult result = ResultOf(new[] { listing }, errors);
-
-        Assert.Equal(new[] { listing }, await result.Valid().Get());
-        Assert.Equal(errors, await result.Errors().Get());
-
-        // The reverse shape: more listings than errors, and the single error still governs all().
-        GroupListing[] listings = { Listing("g1"), Listing("g2"), Listing("g3") };
-        AsyncListGroupsResult reversed = ResultOf(listings, new[] { Error("only") });
-
-        Assert.Equal(listings, await reversed.Valid().Get());
-        Assert.Single(await reversed.Errors().Get());
-        await Assert.ThrowsAsync<KafkaException>(() => reversed.All().Get());
-    }
-
-    /// <summary>
-    /// The empty result — no groups and no errors — succeeds on all three accessors rather than
-    /// faulting: with no error present, Java takes the <c>all.complete(validResult)</c> branch
-    /// (<c>:55</c>) whatever the listing count.
-    /// </summary>
     [Fact]
     public async Task Empty_SucceedsOnAllThreeAccessors()
     {
-        AsyncListGroupsResult result = ResultOf(Array.Empty<GroupListing>(), Array.Empty<KafkaException>());
+        using (MockAdminClient admin = MockAdminClient.Create().Build())
+        {
+            ListGroupsResult result = admin.ListGroups();
+            Assert.Empty(result.All().Get(s_deadline));
+            Assert.Empty(result.Valid().Get(s_deadline));
+            Assert.Empty(result.Errors().Get(s_deadline));
+        }
 
-        Assert.Empty(await result.All().Get());
-        Assert.Empty(await result.Valid().Get());
-        Assert.Empty(await result.Errors().Get());
+        await using AsyncMockAdminClient asyncAdmin = AsyncMockAdminClient.Create().Build();
+        AsyncListGroupsResult asyncResult = asyncAdmin.ListGroups();
+        Assert.Empty(await asyncResult.All().Get());
+        Assert.Empty(await asyncResult.Valid().Get());
+        Assert.Empty(await asyncResult.Errors().Get());
     }
 
-    /// <summary>
-    /// Each accessor re-reads the one shared source, so the three stay consistent however often
-    /// they are called — Java's three futures are all completed from a single <c>thenApply</c>
-    /// (<c>:40-60</c>).
-    /// </summary>
-    [Fact]
-    public async Task EveryAccessor_ReadsTheOneSharedSource()
-    {
-        GroupListing listing = Listing("g1");
-        KafkaException error = Error("boom");
-
-        AsyncListGroupsResult result = ResultOf(new[] { listing }, new[] { error });
-
-        Assert.Same(await result.Valid().Get(), await result.Valid().Get());
-        Assert.Same(await result.Errors().Get(), await result.Errors().Get());
-        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
-        Assert.Same(error, await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
-    }
-
-    /// <summary>
-    /// The public shape is Java's three <b>methods</b>, each yielding a <see cref="KafkaFuture{T}"/>
-    /// (M15/P14 S5c: the sync flavour; its async twin <see cref="AsyncListGroupsResult"/> keeps the
-    /// awaitables) — not properties, because each composes a fresh future over the shared source
-    /// rather than reading a field. The shipped <see cref="ListTopicsResult.NamesToListings"/> and
-    /// <see cref="ListConfigResourcesResult.All"/> make the same call.
-    /// </summary>
     [Fact]
     public void PublicShape_IsJavasThreeAccessors_AsMethods()
     {
@@ -198,14 +97,10 @@ public sealed class PublicAdminListGroupsResultTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), all.ReturnType);
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<GroupListing>>), valid.ReturnType);
 
-        // ⚠ Java's Collection<Throwable> narrows to this binding's one flat KafkaException —
-        // every per-group error crossing the ABI is a native error handle.
+        // Java's Collection<Throwable> is a collection of KafkaException here, the binding's one error type.
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<KafkaException>>), errors.ReturnType);
 
-        // Flattened positions of KafkaFuture<IReadOnlyCollection<X>>: 0 = the KafkaFuture (a
-        // generic struct, so oblivious — its own shape is the CLR type asserted above),
-        // 1 = the collection, 2 = its element. Non-null at 1 and 2: each is completed from the
-        // source's value (:55-58), never with null, and holds no null entry.
+        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the collection, 2 = its element.
         foreach (MethodInfo accessor in new[] { all, valid, errors })
         {
             Assert.Equal(NullableAnnotation.Oblivious, NullableFlag(accessor.ReturnParameter, 0));
@@ -213,7 +108,6 @@ public sealed class PublicAdminListGroupsResultTests
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 2));
         }
 
-        // No accessor is a property, and none was invented beyond Java's three.
         Assert.Empty(typeof(ListGroupsResult).GetProperties());
         Assert.Equal(
             new[] { "All", "Errors", "Valid" },
@@ -222,7 +116,6 @@ public sealed class PublicAdminListGroupsResultTests
                 .Select(method => method.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
 
-        // Java's constructor is package-private; nothing public may build one.
         Assert.Empty(typeof(ListGroupsResult).GetConstructors());
     }
 
@@ -231,10 +124,29 @@ public sealed class PublicAdminListGroupsResultTests
 
     private static KafkaException Error(string message) => new KafkaException(message);
 
-    private static AsyncListGroupsResult ResultOf(
-        IReadOnlyCollection<GroupListing> valid,
-        IReadOnlyCollection<KafkaException> errors) =>
-        new AsyncListGroupsResult(Task.FromResult((valid, errors)));
+    private static SafeAdminResultHandle NoResult() => new SafeAdminResultHandle(IntPtr.Zero, NoDestroy);
+
+    private static void NoDestroy(IntPtr result, ref IntPtr outErr)
+    {
+    }
+
+    private static (
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+        IReadOnlyCollection<GroupListing> Listings,
+        IReadOnlyCollection<KafkaException> Failures) PartialFailure()
+    {
+        IReadOnlyCollection<GroupListing> listings = new[] { Listing("g1") };
+        IReadOnlyCollection<KafkaException> failures = new[] { Error("first"), Error("second"), Error("third") };
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
+        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors = new KafkaFutureImpl<IReadOnlyCollection<KafkaException>>();
+        all.CompleteWithError(failures.First());
+        valid.Complete(listings);
+        errors.Complete(failures);
+        return (all, valid, errors, listings, failures);
+    }
 
     private static byte NullableFlag(ParameterInfo parameter, int index) => NullableAnnotation.Flag(parameter, index);
 }

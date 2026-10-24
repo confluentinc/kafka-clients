@@ -25,31 +25,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P7's surface — the eight RPCs, their results, and the
-/// four discriminants — against the Java classes it mirrors.
+/// The public shape of the eight delegation-token, feature and SCRAM RPCs, their results and their four
+/// discriminants, against the Java classes they mirror.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>Four result shapes across eight RPCs, and half of them cannot be told apart by
-/// behaviour.</b> Two are per-key void (<c>alterUserScramCredentials</c>,
-/// <c>updateFeatures</c>), one is a collection, four carry a single root value, and one
-/// derives three accessors from one snapshot. A result that quietly grew a per-key surface
-/// Java does not have, or lost one it does, is caught here and nowhere else.
-/// </para>
-/// <para>
-/// ⚠ <b>Each discriminant is pinned as a NULLABLE property, not as a sentinel.</b> That the
-/// owners filter is <c>IReadOnlyList&lt;KafkaPrincipal&gt;?</c> and the node id is
-/// <c>int?</c> is the public half of what
-/// <c>AdminP7SubmitArgumentTests</c> asserts on the wire.
-/// </para>
+/// Four result shapes across eight RPCs: two per-key void (<c>AlterUserScramCredentials</c>, <c>UpdateFeatures</c>),
+/// one a collection, four a single value, and one deriving three accessors from one snapshot. Each discriminant is a
+/// nullable property, not a sentinel.
 /// </remarks>
 public sealed class PublicAdminP7ShapeParityTests
 {
-    /// <summary>
-    /// All eight RPCs return their <c>*Result</c> <b>synchronously</b> with Java's parameter
-    /// shape (<c>admin-client.md</c> §1), and <c>Close</c> stays the only
-    /// <see cref="Task"/>-returning member on <see cref="IAdmin"/>.
-    /// </summary>
     [Theory]
     [InlineData(nameof(IAdmin.DescribeUserScramCredentials), typeof(DescribeUserScramCredentialsResult))]
     [InlineData(nameof(IAdmin.AlterUserScramCredentials), typeof(AlterUserScramCredentialsResult))]
@@ -71,11 +56,6 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.True(options.IsOptional, $"{name}'s options must be optional");
     }
 
-    /// <summary>
-    /// The RPCs' required parameters mirror Java's: the two MAC-taking calls take a
-    /// <c>byte[]</c>, <c>updateFeatures</c> a map, <c>alterUserScramCredentials</c> a
-    /// collection, and the four remaining take only their options.
-    /// </summary>
     [Fact]
     public void EachRpc_TakesJavasOwnRequiredParameters()
     {
@@ -102,20 +82,14 @@ public sealed class PublicAdminP7ShapeParityTests
             Assert.Empty(Required(optionsOnly));
         }
 
-        // ⚠ describeUserScramCredentials' users are OPTIONAL and nullable: absent means
-        // "every user" (header, kafka_admin_AdminClient_describe_user_scram_credentials), which
-        // Java spells as a second zero-arg overload.
+        // describeUserScramCredentials' users are optional and nullable: absent means every user, which Java spells as a
+        // zero-argument overload.
         ParameterInfo users = typeof(IAdmin)
             .GetMethod(nameof(IAdmin.DescribeUserScramCredentials))!.GetParameters()[0];
         Assert.Equal(typeof(IReadOnlyCollection<string>), users.ParameterType);
         Assert.True(users.IsOptional);
     }
 
-    /// <summary>
-    /// <see cref="IAdmin"/> has no <see cref="Task"/>-returning member — P7 added eight RPCs and none of them is
-    /// <c>async</c>, and <c>Close</c>, the one exception until M15/P14 S5g, is now <c>void</c>
-    /// (<see cref="IAsyncAdmin"/> is the async twin).
-    /// </summary>
     [Fact]
     public void IAdmin_HasNoTaskReturningMember() =>
         Assert.Empty(
@@ -123,13 +97,6 @@ public sealed class PublicAdminP7ShapeParityTests
                 .Where(method => typeof(Task).IsAssignableFrom(method.ReturnType))
                 .Select(method => method.Name));
 
-    /// <summary>
-    /// The two <b>per-key void</b> results publish Java's <c>values()</c> + <c>all()</c> pair
-    /// and nothing more (<c>AlterUserScramCredentialsResult.java:31</c>,
-    /// <c>UpdateFeaturesResult.java:29</c>) — a per-key <see cref="KafkaFuture"/> on the sync flavour and
-    /// <see cref="AsyncKafkaFuture"/> on the async one, never a valued future, because Java's future is
-    /// <c>KafkaFuture&lt;Void&gt;</c> (M15/P14 S5e).
-    /// </summary>
     [Theory]
     [InlineData(typeof(AlterUserScramCredentialsResult), typeof(KafkaFuture))]
     [InlineData(typeof(UpdateFeaturesResult), typeof(KafkaFuture))]
@@ -147,11 +114,6 @@ public sealed class PublicAdminP7ShapeParityTests
             PublicMembers(resultType));
     }
 
-    /// <summary>
-    /// The four <b>single-root-value</b> results publish exactly one accessor each, named for
-    /// the Java method that returns it — a <see cref="KafkaFuture{T}"/> on the sync flavour and an
-    /// <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
-    /// </summary>
     [Theory]
     [InlineData(typeof(CreateDelegationTokenResult), "DelegationToken", typeof(KafkaFuture<DelegationToken>))]
     [InlineData(typeof(RenewDelegationTokenResult), "ExpiryTimestamp", typeof(KafkaFuture<long>))]
@@ -168,11 +130,6 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Equal(new[] { accessor }, PublicMembers(resultType));
     }
 
-    /// <summary>
-    /// <see cref="DescribeDelegationTokenResult"/> publishes Java's single collection accessor
-    /// (<c>DescribeDelegationTokenResult.java:37</c>) — a <see cref="KafkaFuture{T}"/> on the sync flavour and an
-    /// <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
-    /// </summary>
     [Theory]
     [InlineData(typeof(DescribeDelegationTokenResult), typeof(KafkaFuture<IReadOnlyList<DelegationToken>>))]
     [InlineData(typeof(AsyncDescribeDelegationTokenResult), typeof(AsyncKafkaFuture<IReadOnlyList<DelegationToken>>))]
@@ -185,14 +142,6 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Equal(new[] { "DelegationTokens" }, PublicMembers(resultType));
     }
 
-    /// <summary>
-    /// <see cref="DescribeUserScramCredentialsResult"/> publishes Java's <b>three</b>
-    /// accessors, with <c>Description</c> taking the user name
-    /// (<c>DescribeUserScramCredentialsResult.java:47,61,84</c>) — each a <see cref="KafkaFuture{T}"/> on the
-    /// sync flavour and an <see cref="AsyncKafkaFuture{T}"/> on the async one (M15/P14 S5e).
-    /// </summary>
-    /// <param name="result">The Result type of one flavour.</param>
-    /// <param name="future">That flavour's open generic future type.</param>
     [Theory]
     [InlineData(typeof(DescribeUserScramCredentialsResult), typeof(KafkaFuture<>))]
     [InlineData(typeof(AsyncDescribeUserScramCredentialsResult), typeof(AsyncKafkaFuture<>))]
@@ -209,17 +158,10 @@ public sealed class PublicAdminP7ShapeParityTests
             nameof(DescribeUserScramCredentialsResult.Description), new[] { typeof(string) })!;
         Assert.Equal(future.MakeGenericType(typeof(UserScramCredentialsDescription)), description.ReturnType);
 
-        // ⚠ No per-key `Values` here: the keys come back IN the response (an empty request
-        // describes every user), so there is nothing to key a future on before the submit.
+        // No per-key Values: the keys come back in the response, so there is nothing to key a future on before the submit.
         Assert.Equal(new[] { "All", "Description", "Users" }, PublicMembers(result));
     }
 
-    /// <summary>
-    /// Java's constructor is <b>public</b> (<c>AlterUserScramCredentialsResult.java:38</c>); the sync one here is
-    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
-    /// <see cref="KafkaFuture"/> per user, and it still rejects a null map before anything can dereference it
-    /// (reached through <c>InternalsVisibleTo</c>).
-    /// </summary>
     [Fact]
     public void AlterUserScramCredentialsResult_Constructor_IsInternalAndRejectsNull()
     {
@@ -237,10 +179,6 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Equal(new ArgumentNullException("futures").Message, error.Message);
     }
 
-    /// <summary>
-    /// ⚠⚠ Each of the three <b>option-borne</b> discriminants is a nullable property, never a
-    /// sentinel — <see langword="null"/> and "empty" / "zero" are different requests.
-    /// </summary>
     [Fact]
     public void OptionBorneDiscriminants_AreNullableProperties()
     {
@@ -259,17 +197,12 @@ public sealed class PublicAdminP7ShapeParityTests
             typeof(CreateDelegationTokenOptions).GetProperty(
                 nameof(CreateDelegationTokenOptions.Owner))!.PropertyType);
 
-        // …but the renewer list is NOT nullable: Java defaults it to an empty list.
+        // But the renewer list is not nullable: Java defaults it to an empty list.
         Assert.Equal(
             Array.Empty<KafkaPrincipal>(),
             new CreateDelegationTokenOptions().Renewers);
     }
 
-    /// <summary>
-    /// ⚠⚠ The fourth discriminant is the <b>salt</b>, and it lives on the upsertion:
-    /// <see langword="null"/> asks the core to generate one, an empty array is a literal empty
-    /// salt (<c>UserScramCredentialUpsertion.java:70-80</c>).
-    /// </summary>
     [Fact]
     public void Salt_IsNullableOnTheUpsertion()
     {
@@ -284,11 +217,6 @@ public sealed class PublicAdminP7ShapeParityTests
         Assert.Empty(literal.Salt!);
     }
 
-    /// <summary>
-    /// Both alteration kinds derive from Java's abstract <c>UserScramCredentialAlteration</c>,
-    /// which is what lets one collection carry a mixed batch
-    /// (<c>UserScramCredentialAlteration.java:29</c>).
-    /// </summary>
     [Fact]
     public void BothAlterationKinds_ShareJavasAbstractBase()
     {
@@ -301,10 +229,6 @@ public sealed class PublicAdminP7ShapeParityTests
                 nameof(UserScramCredentialAlteration.User))!.PropertyType);
     }
 
-    /// <summary>
-    /// The features family is <c>short</c> throughout — Java's own width, and the one the ABI
-    /// takes. An <c>int</c> anywhere here would silently widen the request.
-    /// </summary>
     [Fact]
     public void FeaturesFamily_IsShortThroughout()
     {
@@ -329,10 +253,6 @@ public sealed class PublicAdminP7ShapeParityTests
             typeof(FeatureUpdate).GetProperty(nameof(FeatureUpdate.MaxVersionLevel))!.PropertyType);
     }
 
-    /// <summary>
-    /// <see cref="FeatureMetadata"/> mirrors Java's three members, with the epoch nullable —
-    /// Java's <c>Optional&lt;Long&gt;</c> (<c>FeatureMetadata.java:58</c>).
-    /// </summary>
     [Fact]
     public void FeatureMetadata_MirrorsJavasThreeMembers()
     {
@@ -346,14 +266,9 @@ public sealed class PublicAdminP7ShapeParityTests
             typeof(long?),
             typeof(FeatureMetadata).GetProperty(nameof(FeatureMetadata.FinalizedFeaturesEpoch))!.PropertyType);
 
-        // Not user-constructible: Java's constructor is package-private.
         Assert.Empty(typeof(FeatureMetadata).GetConstructors());
     }
 
-    /// <summary>
-    /// <see cref="FeatureUpdate.UpgradeType"/> is a <b>nested</b> enum, as in Java, and carries
-    /// Java's four constants in its ordinal order (<c>FeatureUpdate.java:32-44</c>).
-    /// </summary>
     [Fact]
     public void UpgradeType_IsNested_WithJavasConstants()
     {
@@ -366,33 +281,12 @@ public sealed class PublicAdminP7ShapeParityTests
                 .Select(value => value.ToString()));
     }
 
-    /// <summary>
-    /// The three token value types live in the root <c>Confluent.Kafka</c> namespace, matching
-    /// their Java packages (<c>org.apache.kafka.common.security.auth</c> /
-    /// <c>.token.delegation</c>) rather than <c>admin</c> (CLAUDE.md §2).
-    /// </summary>
     [Fact]
     public void TokenValueTypes_LiveInTheRootNamespace() =>
         Assert.All(
             new[] { typeof(KafkaPrincipal), typeof(TokenInformation), typeof(DelegationToken) },
             type => Assert.Equal("Confluent.Kafka", type.Namespace));
 
-    /// <summary>
-    /// Every P7 type the user can name is <c>public</c> and outside <c>Internal</c>
-    /// (CLAUDE.md §2) — the three-view carrier stays internal.
-    /// </summary>
-    [Fact]
-    public void TheViewCarrier_StaysInternal() =>
-        Assert.Null(
-            typeof(IAdmin).Assembly.GetType("Confluent.Kafka.Internal.DescribeUserScramCredentialsViews")!
-                .GetConstructors()
-                .FirstOrDefault(constructor => constructor.IsPublic));
-
-    /// <summary>
-    /// ⚠ The public result stays <b>non-disposable</b> although it now retains a native root
-    /// (M15/P10 Option L): Java's <c>DescribeUserScramCredentialsResult</c> is not closeable,
-    /// and the root is released by the <c>SafeHandle</c>'s critical finalizer.
-    /// </summary>
     [Fact]
     public void DescribeUserScramCredentialsResult_IsNotDisposable() =>
         Assert.False(
@@ -404,7 +298,6 @@ public sealed class PublicAdminP7ShapeParityTests
             .Where(parameter => !parameter.IsOptional)
             .Select(parameter => parameter.ParameterType);
 
-    /// <summary>The declared public instance members of a result type, sorted.</summary>
     private static IEnumerable<string> PublicMembers(Type resultType) =>
         resultType
             .GetMembers(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)

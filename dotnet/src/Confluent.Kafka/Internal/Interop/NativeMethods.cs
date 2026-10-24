@@ -23,7 +23,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// delegate, the metric value-kind constants and small wrappers over the error accessors. A string crosses as an
 /// <see cref="IntPtr"/> to UTF-8 bytes, a C <c>bool</c> as <c>[MarshalAs(UnmanagedType.I1)]</c>, and a handle as an
 /// <see cref="IntPtr"/>, or as its <see cref="SafeHandle"/> where the marshaller should hold a reference for the call
-/// or own a returned handle. The admin declarations are in the other part of the class, <c>NativeMethods.Admin.cs</c>.
+/// or own a returned handle. The admin declarations are in the other parts of the class, the
+/// <c>NativeMethods.Admin*.cs</c> files.
 /// </summary>
 internal static partial class NativeMethods
 {
@@ -241,13 +242,10 @@ internal static partial class NativeMethods
     internal static extern void ClusterDestroy(IntPtr self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_get_cb", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void KafkaFutureGetCb(IntPtr self, KafkaFutureGetCallback cb, IntPtr opaque);
+    internal static extern void KafkaFutureGetCb(SafeKafkaFutureHandle self, KafkaFutureGetCallback cb, IntPtr opaque);
 
     [DllImport(DllName, EntryPoint = "kafka_common_KafkaFuture_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void KafkaFutureDestroy(IntPtr self, ref IntPtr outErr);
-
-    [DllImport(DllName, EntryPoint = "kafka_common_Error_new", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr KafkaErrorNew(int code, IntPtr message);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerConfig_new", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerConfigNew(IntPtr props, ref IntPtr outErr);

@@ -15,52 +15,46 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Threading.Tasks;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of a <c>describeProducers</c> call — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c> (<c>:28</c>): one future
+/// <c>org.apache.kafka.clients.admin.DescribeProducersResult</c>: one future
 /// per topic partition.
 /// </summary>
 /// <remarks>
-/// ⚠ Java publishes <b>no</b> per-partition map, only the <see cref="PartitionResult"/> lookup
-/// and <see cref="All"/> (<c>:36</c>, <c>:44</c>).
+/// Java publishes no per-partition map, only the <see cref="PartitionResult"/> lookup and
+/// <see cref="All"/>.
 /// </remarks>
 /// <seealso cref="DescribeProducersResult"/>
 public sealed class AsyncDescribeProducersResult
 {
-    private readonly IReadOnlyDictionary<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> _futures;
+    private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> _futures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>Wraps one future per topic partition.</summary>
-    /// <param name="futures">One future per requested partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
-    internal AsyncDescribeProducersResult(
-        IReadOnlyDictionary<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> futures)
+    private AsyncDescribeProducersResult(
+        IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> futures,
+        SafeAdminResultHandle native)
     {
-        _futures = futures ?? throw new ArgumentNullException(nameof(futures));
+        _futures = futures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeProducersResult From(
-        KeyedAdminOperation<TopicPartition, DescribeProducersResult.PartitionProducerState> operation) =>
-        new AsyncDescribeProducersResult(operation.Tasks);
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c> (<c>:36</c>).</summary>
+    /// <summary>One partition's producers — Java's <c>partitionResult(TopicPartition)</c>.</summary>
     /// <param name="partition">A topic partition from the request.</param>
     /// <returns>That partition's future.</returns>
     /// <exception cref="ArgumentException">
-    /// The partition was not in the request — Java's <c>IllegalArgumentException</c>
-    /// (<c>:39-40</c>), thrown <b>synchronously</b> because it is a usage error.
+    /// The partition was not in the request (Java's <c>IllegalArgumentException</c>), thrown at the call.
     /// </exception>
     public AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> PartitionResult(TopicPartition partition) =>
-        _futures.TryGetValue(partition, out Task<DescribeProducersResult.PartitionProducerState>? future)
-            ? new AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>(future)
+        _futures.TryGetValue(partition, out AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> future)
+            ? future
             : throw new ArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
@@ -70,33 +64,44 @@ public sealed class AsyncDescribeProducersResult
 
     /// <summary>
     /// Every partition's producers in one map, succeeding only if every partition did —
-    /// Java's <c>all()</c> (<c>:44</c>).
+    /// Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
-    /// <remarks>
-    /// ⚠ <b>Recorded divergence</b> — see <see cref="AsyncDescribeTransactionsResult.All"/>, which
-    /// states it once for both siblings: Java wraps this one's unreachable gather failure in a
-    /// <c>KafkaException</c> (<c>:54</c>) and that one's in a plain <c>RuntimeException</c>,
-    /// and neither wrap is expressible here.
-    /// </remarks>
-    public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>>(Gather(_futures));
-
-    private static async Task<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>> Gather(
-        IReadOnlyDictionary<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> futures)
+    public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>> All()
     {
-        // WhenAll first, so the aggregate faults with the first failure exactly as Java's
-        // allOf(...).thenApply(...) does rather than with whichever key enumerates first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState> states =
-            new Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>(
-                futures.Count, EqualityComparer<TopicPartition>.Default);
-        foreach (KeyValuePair<TopicPartition, Task<DescribeProducersResult.PartitionProducerState>> entry in futures)
+        IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> futures = _futures;
+        AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>[] values =
+            new AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>[futures.Count];
+        int next = 0;
+        foreach (AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> future in futures.Values)
         {
-            states.Add(entry.Key, entry.Value.Result);
+            values[next++] = future;
         }
 
-        return states;
+        return AsyncKafkaFuture.AllOf(values)
+            .ThenApply<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>>(() =>
+            {
+                Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState> states =
+                    new Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>(futures.Count);
+                foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> entry in futures)
+                {
+                    states.Add(entry.Key, entry.Value.GetNow(null!));
+                }
+
+                return states;
+            });
+    }
+
+    internal static AsyncDescribeProducersResult OfClient(
+        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> futures =
+            new Dictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>>(native.Partitions.Count);
+        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> entry in native.Partitions)
+        {
+            futures.Add(entry.Key, new AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>(entry.Value));
+        }
+
+        return new AsyncDescribeProducersResult(futures, native.Result);
     }
 }

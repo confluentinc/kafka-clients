@@ -13,50 +13,37 @@
 // limitations under the License.
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAdmin.RenewDelegationToken"/> — Java's
 /// <c>org.apache.kafka.clients.admin.RenewDelegationTokenResult</c>: one future over the
-/// token's new expiry timestamp (<c>:26</c>).
+/// token's new expiry timestamp.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ This type and <see cref="ExpireDelegationTokenResult"/> sit on <b>byte-identical</b> ABI
-/// accessor sets, so a cross-wired reader would return a plausible answer for either. Their
-/// readers are pinned apart by a wiring guard in the unit tests.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the renewal has completed, and
-/// needs no thread-pool thread: the future here is the operation's own latch, never a <c>Task</c>.
-/// </para>
-/// </remarks>
 /// <seealso cref="AsyncRenewDelegationTokenResult"/>
 public sealed class RenewDelegationTokenResult
 {
-    private readonly KafkaFuture<long> _expiryTimestamp;
+    private readonly KafkaFutureImpl<long> _expiryTimestamp;
+    private readonly SafeAdminResultHandle _native;
 
-    internal RenewDelegationTokenResult(KafkaFuture<long> expiryTimestamp)
+    private RenewDelegationTokenResult(KafkaFutureImpl<long> expiryTimestamp, SafeAdminResultHandle native)
     {
         _expiryTimestamp = expiryTimestamp;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static RenewDelegationTokenResult From(SingleAdminOperation<long> operation) =>
-        new RenewDelegationTokenResult(new KafkaFuture<long>(operation.SyncSource));
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// The new expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>
-    /// (<c>:35</c>).
+    /// The new expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>.
     /// </summary>
     /// <returns>A future over the timestamp.</returns>
-    /// <remarks>
-    /// This is a future over the operation's own latch, so every call returns an <b>equal</b> future — no second
-    /// completion.
-    /// </remarks>
-    public KafkaFuture<long> ExpiryTimestamp() => _expiryTimestamp;
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
+    public KafkaFuture<long> ExpiryTimestamp() => new KafkaFuture<long>(_expiryTimestamp);
+
+    internal static RenewDelegationTokenResult OfClient(
+        (KafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) native) =>
+        new RenewDelegationTokenResult(native.ExpiryTimestamp, native.Result);
 }

@@ -23,10 +23,7 @@ public enum GroupMembershipOperation
     /// <summary>The consumer leaves the group, which triggers a rebalance.</summary>
     LeaveGroup,
 
-    /// <summary>
-    /// The consumer remains in the group; a dynamic member sends no leave heartbeat and is removed by the
-    /// coordinator once its session times out.
-    /// </summary>
+    /// <summary>The consumer remains in the group.</summary>
     RemainInGroup,
 
     /// <summary>A static member remains in the group and a dynamic member leaves it.</summary>

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -23,24 +25,39 @@ namespace Confluent.Kafka.Admin;
 /// </remarks>
 public sealed class AlterPartitionReassignmentsOptions
 {
+    private int? _timeoutMs;
+    private bool _allowReplicationFactorChange = true;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Allow the call to change a partition's replication factor — Java's
     /// <c>allowReplicationFactorChange(boolean)</c> /
-    /// <c>allowReplicationFactorChange()</c>
-    /// (<c>AlterPartitionReassignmentsOptions.java:27, :34, :44</c>). Defaults to
-    /// <b><see langword="true"/></b>, as Java's field does; note this is one of the
-    /// options whose default is not the C# default for its type.
+    /// <c>allowReplicationFactorChange()</c>. Defaults to <b><see langword="true"/></b>, as Java's field does.
     /// </summary>
     /// <remarks>
-    /// When <see langword="false"/>, Java documents that a reassignment which would
-    /// change the replication factor fails with <c>InvalidReplicationFactorException</c>,
-    /// and that a broker too old to understand the option fails with
-    /// <c>UnsupportedVersionException</c> (<c>Admin.java</c>'s
-    /// <c>alterPartitionReassignments</c> javadoc). Both arrive here as an ordinary
-    /// per-partition <see cref="KafkaException"/> on that partition's future.
+    /// When <see langword="false"/>, a reassignment that would change the replication factor fails with
+    /// <c>InvalidReplicationFactorException</c>, and a broker too old for the option fails with
+    /// <c>UnsupportedVersionException</c>, each as a <see cref="KafkaException"/> on that partition's future.
     /// </remarks>
-    public bool AllowReplicationFactorChange { get; set; } = true;
+    public bool AllowReplicationFactorChange
+    {
+        get => _allowReplicationFactorChange;
+        set
+        {
+            _allowReplicationFactorChange = value;
+            Setters.Ran(nameof(AllowReplicationFactorChange));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

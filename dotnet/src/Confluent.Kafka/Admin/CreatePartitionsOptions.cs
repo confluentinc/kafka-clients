@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -21,20 +23,50 @@ namespace Confluent.Kafka.Admin;
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks"/>
 public sealed class CreatePartitionsOptions
 {
+    private int? _timeoutMs;
+
+    private bool _validateOnly;
+
+    private bool _retryOnQuotaViolation = true;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Validate the request without actually creating the partitions — Java's
     /// <c>validateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ValidateOnly { get; set; }
+    public bool ValidateOnly
+    {
+        get => _validateOnly;
+        set
+        {
+            _validateOnly = value;
+            Setters.Ran(nameof(ValidateOnly));
+        }
+    }
 
     /// <summary>
     /// Retry automatically when the broker reports a quota violation — Java's
-    /// <c>retryOnQuotaViolation()</c>. Defaults to <b><see langword="true"/></b>, as
-    /// Java's does; note this is the one option whose default is not the C# default for
-    /// its type.
+    /// <c>retryOnQuotaViolation()</c>. Defaults to <see langword="true"/>, as Java's does.
     /// </summary>
-    public bool RetryOnQuotaViolation { get; set; } = true;
+    public bool RetryOnQuotaViolation
+    {
+        get => _retryOnQuotaViolation;
+        set
+        {
+            _retryOnQuotaViolation = value;
+            Setters.Ran(nameof(RetryOnQuotaViolation));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

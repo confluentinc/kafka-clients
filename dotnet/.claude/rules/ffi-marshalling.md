@@ -10,7 +10,7 @@ Each section leads with **Decision** (the intent, one line), then **Rule**,
 
 ## How this file is organized
 
-Three parts, so each client reads as one complete, self-contained story:
+Four parts, so each client reads as one complete, self-contained story:
 
   - **Part 0 · Shared mechanics** — the *only* genuinely-shared content:
     P/Invoke declarations & the type map (§0.1), native loading / packaging /
@@ -22,12 +22,15 @@ Three parts, so each client reads as one complete, self-contained story:
   - **Part B · Consumer** — the consumer end to end: thread model (§B1),
     handles (§B2), strings (§B3), zero-copy **receive** (§B4), error model
     (§B5), completion callbacks (§B6), async completion (§B7).
+  - **Part C · Admin** — what the admin client adds: its drain thread, futures and
+    teardown (§C1).
 
 **Parts A and B are each self-sufficient** — the shared marshalling mechanism
 (strings, errors, callbacks) is written out *in full in both parts*, tailored to
 that client, so you never cross-reference the other client to understand one.
 Redundancy is intentional. Read Part 0 once, then A or B straight through; each
-section describes only that client's decisions.
+section describes only that client's decisions. Part C is the exception: the admin client
+marshals strings and errors as Part A does (§A3, §A5), so it states only its own decisions.
 
 ---
 
@@ -234,8 +237,8 @@ for a call in flight, so the hook's opaque stays valid until the client's `_dest
 | `KafkaConsumer` | none | the caller: each blocking call drains once at the top; the blocking forms run listener and commit callbacks inline on the caller |
 | `AsyncKafkaConsumer` | `confluent-kafka-consumer-pump` | that thread |
 
-The names match Python's (decision 26). The per-client rules are in §A1/§A7 (producer) and
-§B1/§B7 (consumer). Teardown is in `dotnet/CLAUDE.md` §4 (**Close/Dispose**); the consumer's
+The names match Python's (decision 26). The per-client rules are in §A1/§A7
+(producer), §B1/§B7 (consumer) and §C1 (admin). Teardown is in `dotnet/CLAUDE.md` §4 (**Close/Dispose**); the consumer's
 routes are in §B2's path list.
 
 **Why:** Java's single-Selector NIO model on tokio (CLAUDE.md §8) — unlike
@@ -243,9 +246,9 @@ librdkafka (a thread per broker + a mandatory `rd_kafka_poll` loop, which
 confluent-kafka-dotnet services with a `LongRunning` `callbackTask`). So our
 native thread count is independent of cluster size, there is no poll loop (a drain thread sleeps until the notify hook signals it), and
 the multi-thread runtime is what makes `block_on` from .NET deadlock-free. This
-applies to both clients.
+applies to every client.
 
-**Anti-patterns (both clients):**
+**Anti-patterns (every client):**
 
   - A `callbackTask`-style poll-loop thread — nothing to poll here.
   - Assuming thread-per-broker / native threads scaling with cluster size.
@@ -1486,7 +1489,12 @@ const-ness and its header text decide, not the type name:
     The cases, all on these two paths:
       - **`Dispose` from another thread while an op runs:** `Consumer_wakeup_err`
         first, then wait for the in-flight uses, then path 1's close, join and
-        destroy. The wakeup ends the op, so the in-flight uses drain. `Dispose` does
+        destroy. The wakeup ends an op Java's `wakeup()` interrupts (§B5's list), so its use
+        drains at once. Any other op runs to its end first, and the wait for the uses has no
+        bound of its own, so `Dispose` waits as long as that op: an `Unsubscribe` waits for the
+        leave heartbeat's response up to `default.api.timeout.ms`
+        (`rust/src/consumer/internals/async_kafka_consumer.rs:4502-4507` at `25a4d475`, Java's
+        `unsubscribe`). `Dispose` does
         not throw (ledger 34 (ii); a recorded deviation, `dotnet/CLAUDE.md` §4). A call a
         callback of that op makes, routed to the handle (ledger 114), may take the wakeup
         first: it then throws the wakeup's `KafkaException` (-18) into the callback, as
@@ -2020,7 +2028,7 @@ the precondition exceptions are unchanged.
 
 ## B6 Callback & delegate marshalling — completion callbacks
 
-**Decision:** Four callback *families* cross this boundary, with **different lifetimes**.
+**Decision:** Three callback *families* cross this boundary, with **different lifetimes**.
 All marshal as a rooted `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic, no function
 pointers on the floor) with a no-throw body. Since M19/P1 no consumer callback fires on a
 native thread of its own: each runs inside `Consumer__execute_callbacks` (on the async
@@ -2034,16 +2042,6 @@ consumer, inline in the blocking call, on its caller's thread.
     binding passed, also when the core rejects the call as concurrent (the -2 is queued
     like any completion, §B5). No registration handle, no release hook: the `cb` is the
     sole owner of the per-op `GCHandle` free.
-    **Admin's single-callback group RPCs belong here too (M15/P13.1)** —
-    `alterConsumerGroupOffsets` / `deleteConsumerGroupOffsets` /
-    `removeMembersFromConsumerGroup`. Each fires **exactly once** per submit — also for
-    an empty request, in `removeAll` mode, and inline on the submitting thread when the
-    RPC cannot be submitted — with either an **owned result root** or an **owned**
-    whole-call error. The root's per-key errors are **borrowed**
-    (`_get_error(i)` → `FromBorrowedHandle`, never destroyed) while its `_all` is
-    **owned** (`FromHandle`); the root is destroyed once, after every read, and the
-    callback's `finally` is the **sole** `GCHandle` free — no countdown and no submit
-    token. The hookless Rule below, written for the consumer's eight, holds for them.
   - **Multi-shot registrations** — the **rebalance listener**
     (`ConsumerRebalanceListener_new_err(self_, revoked, assigned, lost)`, passed to
     `subscribe_*`). Registered once, fires **N** times, bound to a *subscription* rather
@@ -2057,28 +2055,6 @@ consumer, inline in the blocking call, on its caller's thread.
     an *operation*. The call copies the registration (BH:29628-29646 at `3f8a5bc6`);
     `self_` stays alive until `onComplete` fired, or until the consumer was destroyed
     (BH:33692-33703 at `3f8a5bc6`).
-  - **N-shot per-operation fan-out — admin's per-key ABI ("shape 4", M15/P9).** One
-    submit, **N independent callbacks** that can run concurrently on different threads,
-    each carrying one key's **owned** value and **owned** error — there is no result
-    root to borrow from, so both go through `FromHandle` / their own `_destroy`, never
-    `FromBorrowedHandle`. Sub-shapes follow **Java's return type**, not the accessor
-    set: **4a** value-carrying → one `Task` per key; **4b** void → one `Task` per key,
-    where a null error *is* the success value. (M15/P14: read 'one `Task` per key' as
-    'one completion per key': a `TaskCompletionSource` with
-    `RunContinuationsAsynchronously` on the async flavour, or a `SyncCompletion` latch on
-    the sync flavour, chosen by the operation's `AdminFlavour`. `AdminCallbacks` and the
-    countdown do not depend on the flavour.) Hookless, so the callback family still
-    owns the `GCHandle` free — but as a **countdown released by the last of N**, armed
-    at `n + 1` with a submit-owned token (which is what makes `n == 0` releasable at
-    all), where `n` is read from that RPC's own ABI doc comment and is **not**
-    uniformly the key count. Each callback resolves **its own key's** `Task`; the
-    countdown decides only when the operation is released and settles, at zero, any
-    requested key no callback answered — it assembles no aggregate.
-    ⚠ **Sub-shape 4c (per-key fan-in → one aggregate `Task`) is retired (M15/P13.1).**
-    Its three RPCs moved to the single-callback ABI and now belong to the first family
-    above; the fan-in bridge was deleted with them. A Java `KafkaFuture<Map<K, V>>` now
-    has one ABI shape here — one callback over a result root — not a countdown over
-    per-key callbacks.
 
 ⚠ **There is no `user_data_destroy` hook any more** (M19/P1). The earlier ABI freed a
 registration's `GCHandle` from a release hook; BH has none for a registration (no
@@ -2246,14 +2222,6 @@ synchronous call.
     included, and its exception surfaces from the call that delivered the callback; inside
     a blocking `ConsumerHandle` commit the callback is reported at once, and the delivering
     call throws after its `Task` ends (ledger 52).
-  - **Converting a shape-4 countdown RPC to a single callback (M15/P13.1):** a
-    leftover countdown armed at **≥ 2** is an **equivalent mutant** — it never reaches
-    zero, the callback's `finally` frees once, and nothing leaks, double-frees or is
-    observable — so replaying the old submit lines proves nothing on those rows. The
-    discriminating test is a **count-0 / pending** row: a seam that does not fire, then
-    assert the operation is still pending and rooted after the submit returns (and past
-    the client's `Dispose`). The mutation `SetPendingCallbacks(0)` +
-    `ReleaseSubmitToken()` frees the handle before the callback and turns that row red.
 
 ---
 
@@ -2349,12 +2317,6 @@ the core's flag's (§B1, ledger 136).
     `AbandonBeforeSubmit` — an `AddRef` throw would then skip the abandon path and
     permanently root the per-op `GCHandle` (M9/P4 M3).
   - Destroying the consumer inside `__execute_callbacks` (§0.3, §B2).
-  - A sync admin Result composed over Tasks (`Task.WhenAll`, an `async` projection,
-    `ContinueWith`) and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`,
-    `.Result`). This is sync-over-async: with `RunContinuationsAsynchronously` the
-    composite needs a thread-pool thread to complete, so a saturated pool starves it.
-    Compose over `SyncFutureSource` instead (`ProjectedSyncFuture`, `AllOfSyncFuture`,
-    `GatheringAllOfSyncFuture`), which runs on the thread that calls `Get()` (M15/P14).
 
 **Tests required:**
 
@@ -2371,3 +2333,137 @@ the core's flag's (§B1, ledger 136).
     continuation runs on it.
   - `Dispose` / `DisposeAsync` return without hanging with an op in flight, and every
     pending `Task` settles (routes: §B2's path list).
+
+---
+
+# Part C · Admin
+
+## C1 Drain thread, futures and teardown
+
+**Decision (M19/P1, decisions 5, 8, 4a):** every RPC returns its Result at once, as Java's
+does (`.claude/rules/admin-client.md` §1). Each future in it is a `KafkaFutureImpl`. When the
+Result is built, each native future gets one `kafka_common_KafkaFuture_get_cb`, and its delivery
+completes the `KafkaFutureImpl` on the client's drain thread. Both flavours share this path; only
+the public struct differs (`KafkaFuture` or `AsyncKafkaFuture`, `dotnet/CLAUDE.md` §4).
+
+The C shapes (BH at `25a4d475`):
+
+  - `kafka_admin_Admin_<rpc>[_with_options]_err` returns an owned `<Rpc>Result_t`. An accessor
+    returns an owned future, a `kafka_Map_t` that owns its futures (`kafka_Map_destroy` frees
+    them, BH:6189-6193), or a future the Result owns (six accessors: BH:6025, BH:6717, BH:6846,
+    BH:7078, BH:7674, BH:13797). `ListTransactionsResult_by_broker_id` returns an owned future
+    whose value is a map of futures owned by that map (BH:8664-8680).
+  - `get_cb`'s `cb` runs inside the client's `__execute_callbacks`. A call still waiting at the
+    client's destroy fires from `_destroy`; one after it fires inline (BH:37968-37983). The
+    `value` is borrowed; the `error` is owned and the `cb` frees it (BH:3803-3809).
+  - A value stays valid until the handle is destroyed, and during a delivery until the `cb`
+    returns (BH:38126-38128). An admin future's `get` runs no callbacks
+    (`rust/src/ffi/admin/mod.rs:520-523`, `rust/src/ffi/kafka_future.rs:394-400` at `25a4d475`),
+    so a done one is read at once (Python's `get_if_done`, `python/_confluentkafka.c:1387-1394`).
+  - `kafka_admin_Admin_destroy_err` fails the calls still pending, then fires every pending
+    callback on the destroying thread; no other call may use the handle meanwhile (BH:4221-4237;
+    `rust/src/ffi/admin/mod.rs:58-66` at `25a4d475`).
+
+**Rule:**
+
+  - **Drain thread** (decision 26, §0.3): one `CompletionThread` per client, the mocks included
+    (over their `__as_Admin` view, BH:9208): `kafka-admin-client-thread` on the sync flavour,
+    `confluent-kafka-admin-pump` on the async one. It runs `kafka_admin_Admin__execute_callbacks_err`
+    when the notify hook signals.
+  - **Eager `get_cb`** (decision 5): one per native future, issued when the Result is built.
+    Python issues it on first use (`python/confluent_kafka/common/kafka_future.py:445-461` at
+    `25a4d475`); only the time differs.
+  - **One SafeHandle per owned future** (decision 8), released in its own delivery after the
+    managed state is settled. The `cb` copies the borrowed `value` out first (CLAUDE.md §6.4) and
+    frees the owned `error`.
+  - **A borrowed future holds a reference on its owner** until its own delivery: the six
+    accessors' futures on the Result's SafeHandle, `by_broker_id`'s inner futures on the outer
+    future's. The Result keeps its own reference for the managed Result's life; its finalizer
+    releases it (a Result's destroy runs no callbacks and blocks nothing). The outer
+    `by_broker_id` delivery issues the inner `get_cb`s while its value is alive, then releases the
+    outer future's own reference. The inner map is built once, by whichever comes first: the outer
+    delivery, or a state read that settles the outer future.
+    A future in a map is borrowed from the map: a SafeHandle holds the map, and each of its
+    futures holds a reference on it until its own delivery, as Python's map futures keep the map's
+    capsule alive (`python/_confluentkafka.c:1555-1571` at `25a4d475`; ledger 182).
+  - **Reads** (decision 8, ledger 56): while the future is pending, its value source
+    (`IFutureValueSource<T>`) reads the handle. `IsDone` asks `kafka_common_KafkaFuture_is_done_err`
+    and settles nothing. `GetNow`, `IsCancelled`, `IsCompletedExceptionally` and `ToString` settle
+    a done handle from `kafka_common_KafkaFuture_get`. `Get()`, `Get(TimeSpan)` and
+    `Get(CancellationToken)` wait in slices and re-read the handle each slice, on any thread, as
+    Python's `get` does (`kafka_future.py:702-720` at `25a4d475`).
+  - Every read P/Invoke takes the SafeHandle as its parameter (decision 6), so the release cannot
+    run during a read. A read that finds the handle closed reads the managed state, which is
+    settled by then.
+  - **No own-thread guard** (ledger 39). A native-backed future answers a `Get` on the drain thread
+    from its handle. A derived future (`ThenApply`, `WhenComplete`, `AllOf`) has no handle: a `Get`
+    on the thread that must complete it waits, as in Java and Python.
+  - **Composition** (decision 4a): `All()` and the refinements are built over `KafkaFutureImpl`
+    (`AllOf`, `ThenApply`) where Java builds them with `allOf` / `thenApply`. A Result whose Java
+    `all()` is its own future takes that future. This is Python's split (root `CLAUDE.md`,
+    Futures). The C `kafka_common_KafkaFuture_all_of` and `_then_apply` are not used.
+  - **Options** (ledger 176): each RPC builds its C options with `<X>Options_new`, which carries
+    the core's Java defaults, then calls `set_<field>` only for the setters that ran, in the order
+    they last ran (a setter run twice counts at its last run), as Python does. Each Options
+    property's setter records, in private state, that it ran; the managed starting value feeds only
+    the getter. The RPC copies the C options during the call (BH,
+    `kafka_admin_Admin_create_topics_with_options`), and the binding destroys them right after it.
+    A setter whose Java form takes a primitive (`DescribeFeaturesOptions.NodeId`,
+    `DescribeProducersOptions.BrokerId`) throws `ArgumentNullException` for `null`, as Python's
+    `TypeError`, and records nothing (ledger 181).
+  - **Teardown** (decision 7): `dotnet/CLAUDE.md` §4 **Close/Dispose**. `Close()`, `Dispose` and
+    `DisposeAsync` call `kafka_admin_Admin_close_cb`, which waits without a limit, as Java's
+    `close()`. `Close(TimeSpan)` calls `kafka_admin_Admin_close_with_timeout_cb`. On
+    `KafkaAdminClient` and `AsyncKafkaAdminClient` a negative timeout throws
+    `ArgumentOutOfRangeException("The timeout cannot be negative.")` before the closed check, as
+    Java does (ledgers 82, 174). The sync flavour waits on a `Completion`, the async one on a
+    `TaskCompletionSource` with `RunContinuationsAsynchronously`; its `CancellationToken` ends only
+    the caller's wait: the close goes on in the core, and the rest of the teardown (join the drain
+    thread, wait for the in-flight uses, destroy) runs when the close ends, as Python's cancelled
+    `await close()` (ledger 175). The destroy fires the pending deliveries on the closing thread,
+    which releases their SafeHandles there. A `Close` from a delivery (a `ThenApply` function, a
+    `WhenComplete` action) schedules the teardown, which the drain thread runs after its drain, as
+    Python's `pump.stop(after=…)` (`python/confluent_kafka/admin/admin.py:505` at `25a4d475`).
+  - **Mocks** (decision 21): `MockAdminClient.Close` and `AsyncMockAdminClient.Close` do nothing
+    and read no timeout, as Java's mock (`MockAdminClient.java:1535`) and Python's
+    (`admin/mock_admin_client.py:307-309` at `25a4d475`). The mock stays usable. `Dispose` runs the
+    teardown with `kafka_admin_MockAdminClient_destroy_err` (BH:9361).
+
+**Why:** the async flavour needs `get_cb` anyway, so one path serves both (decision 5). Keeping each
+handle until its delivery lets every state read ask the core first, as Python does, with no `IsDone`
+lag and no drain-thread guard (decision 8).
+
+**Anti-patterns:**
+
+  - A blocking `kafka_common_KafkaFuture_get` on a pending future, or `Task.Run` around one.
+  - A second `get_cb` on one future, or none.
+  - Destroying an owned future before its delivery ran, or a borrowed one at all; releasing an
+    owner before the last future that borrows from it has been delivered.
+  - Reading the delivered `value` after the `cb` returned.
+  - An own-thread `Get` guard on a native-backed future (decision 8, ledger 39).
+  - The C `all_of` / `then_apply` for `All()` or a refinement.
+  - A sync Result composed over Tasks (`Task.WhenAll`, an `async` projection, `ContinueWith`)
+    and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`, `.Result`). With
+    `RunContinuationsAsynchronously` the composite needs a pool thread to complete, so a saturated
+    pool starves it. Compose over `KafkaFutureImpl` instead: its `Get` waits on the calling thread.
+  - A `cb` that throws into native, or leaves its owned `error` unfreed.
+  - Destroying the client inside `__execute_callbacks` (§0.3).
+  - A mock `Close` that closes, frees or checks anything.
+
+**Tests required:**
+
+  - `IsDone` and `GetNow` answer from the handle before the delivery runs.
+  - A `WhenComplete` action on future A that calls `B.Get()` for a done B answers on the drain thread.
+  - `by_broker_id`'s inner futures stay readable after the outer delivery.
+  - A `GetNow` that settles `ByBrokerId()` before its delivery builds the inner map once. The
+    delivery then issues one `get_cb` per inner future, and the futures the read returned are the
+    ones the delivery completes.
+  - An RPC whose Options had no setter run sends the core's defaults. A setter run twice sends its
+    last value. `DescribeFeatures` without `NodeId` set sends no node id.
+  - Setting `NodeId` or `BrokerId` to `null` throws and leaves the field unset.
+  - After every map future's delivery has run, the map is destroyed once; a map future's `IsDone`
+    before its delivery answers from the handle.
+  - A client destroyed with pending futures settles each of them and releases every future
+    SafeHandle exactly once.
+  - Every `get_cb` error is freed once; the deliveries run on the named drain thread.
+  - A mock `Close` changes nothing: a later RPC works, and `Dispose` frees the mock.

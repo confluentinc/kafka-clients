@@ -13,88 +13,60 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeReplicaLogDirs"/> — the .NET realization of
-/// Java's <c>DescribeReplicaLogDirsResult</c>: one future <b>per replica</b>
-/// (<c>DescribeReplicaLogDirsResult.java:41, :48</c>).
+/// The result of <see cref="IAsyncAdmin.DescribeReplicaLogDirs"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult</c>: one future per replica.
 /// </summary>
 /// <remarks>
-/// <para>
-/// The key is a <b>3-part</b> <see cref="TopicPartitionReplica"/>, reassembled from the
-/// topic, partition id and broker id that each replica's own callback delivers — the
-/// widest composite key in M15.
-/// </para>
-/// <para>
-/// The per-replica error is <b>owned</b>: it arrives with that replica's own callback and is
-/// freed once it has been copied into the <see cref="KafkaException"/>.
-/// </para>
+/// A replica that fails faults only its own future.
 /// </remarks>
 /// <seealso cref="DescribeReplicaLogDirsResult"/>
 public sealed class AsyncDescribeReplicaLogDirsResult
 {
-    private readonly IReadOnlyDictionary<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> _values;
     private readonly IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> _futures;
     private readonly IEqualityComparer<TopicPartitionReplica> _comparer;
+    private readonly IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> _nativeValues;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the per-replica futures — Java's package-private constructor (<c>:34</c>).
-    /// </summary>
-    /// <remarks>
-    /// The bridge's own comparer is threaded through so the aggregate and the per-key map
-    /// cannot disagree about key identity — the same reasoning as
-    /// <see cref="AsyncDescribeConfigsResult"/>, and it matters for the same reason:
-    /// <see cref="TopicPartitionReplica"/> is a reference type with custom value equality.
-    /// </remarks>
-    internal AsyncDescribeReplicaLogDirsResult(
-        IReadOnlyDictionary<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> values,
-        IEqualityComparer<TopicPartitionReplica> comparer)
+
+    private AsyncDescribeReplicaLogDirsResult(
+        IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> nativeValues, SafeAdminResultHandle native)
     {
-        _values = values;
-        _futures = AsyncAdminFutures.Wrap(values);
+        IEqualityComparer<TopicPartitionReplica> comparer = EqualityComparer<TopicPartitionReplica>.Default;
+        Dictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> values =
+            new Dictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>(nativeValues.Count, comparer);
+        foreach (KeyValuePair<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in nativeValues)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(entry.Value));
+        }
+
+        _futures = values;
         _comparer = comparer;
+        _nativeValues = nativeValues;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeReplicaLogDirsResult From(
-        KeyedAdminOperation<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> operation) =>
-        new AsyncDescribeReplicaLogDirsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// One future per requested replica — Java's <c>values()</c> (<c>:41</c>).
+    /// One future per requested replica — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values => _futures;
 
     /// <summary>
     /// Every replica's log-directory information in one map, succeeding only if every
-    /// replica succeeded — Java's <c>all()</c> (<c>:48</c>).
+    /// replica succeeded — Java's <c>all()</c>.
     /// </summary>
-    /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
+    /// <returns>A future yielding the whole map, or faulting with the first failure to complete.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>(Gather(_values, _comparer));
+        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>(KafkaFutureImpl.GatherAll(_nativeValues, _comparer));
 
-    private static async Task<IReadOnlyDictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Gather(
-        IReadOnlyDictionary<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> values,
-        IEqualityComparer<TopicPartitionReplica> comparer)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does.
-        await Task.WhenAll(values.Values).ConfigureAwait(false);
-
-        Dictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo> infos =
-            new Dictionary<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(values.Count, comparer);
-        foreach (KeyValuePair<TopicPartitionReplica, Task<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in values)
-        {
-            infos.Add(entry.Key, entry.Value.Result);
-        }
-
-        return infos;
-    }
+    internal static AsyncDescribeReplicaLogDirsResult OfClient(
+        (IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values, SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeReplicaLogDirsResult(native.Values, native.Result);
 }

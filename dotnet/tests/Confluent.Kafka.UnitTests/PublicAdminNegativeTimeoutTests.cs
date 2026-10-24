@@ -25,26 +25,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M15/P13.5 X2: a negative <c>TimeoutMs</c> is sent as 0, Java's <c>calcDeadlineMs</c> clamp
-/// (<c>KafkaAdminClient.java:496-499</c>), instead of being rejected synchronously. This class
-/// pins the clamp itself — the shared <c>NativeAdminClient.ToNativeTimeoutMs</c> helper, as a
-/// table — and, through <c>ListTopics</c>, what a real client then does with the clamped value.
-/// The value a given RPC sends is pinned only where that RPC's submit-seam test has a
-/// negative-timeout row asserting a captured <c>0</c>. For an RPC without such a row, this class
-/// does not pin the value it sends: that relies on its call site routing the timeout through
-/// the helper.
+/// A negative <c>TimeoutMs</c> is sent as 0, as Java's <c>calcDeadlineMs</c> clamps it, instead of being rejected: the
+/// clamp helper as a table, and through <c>ListTopics</c> what a real client does with the clamped value. The value
+/// each RPC sends is pinned where that RPC's submit test has a negative-timeout row.
 /// </summary>
 public sealed class PublicAdminNegativeTimeoutTests
 {
-    /// <summary>REQUEST_TIMED_OUT, the code the core's admin timeout error carries.</summary>
     private const int RequestTimedOutCode = 7;
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// <see langword="null"/> maps onto the ABI's "unset" sentinel, a negative value onto 0,
-    /// and everything else passes through — <c>Math.max(0, timeoutMs)</c>.
-    /// </summary>
     [Theory]
     [InlineData(null, -1)]
     [InlineData(0, 0)]
@@ -59,12 +49,6 @@ public sealed class PublicAdminNegativeTimeoutTests
         Assert.Equal(expected, (int)helper.Invoke(null, new object?[] { timeoutMs })!);
     }
 
-    /// <summary>
-    /// The differential: on a real client that cannot reach a broker, a negative timeout fails
-    /// through the result exactly as a zero timeout does — the same <c>Code</c> and the same
-    /// <c>Message</c> — and that code is the timeout code. Comparing with 0 asserts the message
-    /// without hard-coding the core's wording.
-    /// </summary>
     [Fact]
     public async Task X2_RealClient_ANegativeTimeout_FailsExactlyAsAZeroTimeout()
     {

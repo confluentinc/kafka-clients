@@ -26,442 +26,650 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// M15/P7's three readers, driven over shapes the ABI cannot produce: the nested
-/// <c>(user, credential)</c> walk, a MAC carrying an interior zero byte, and two feature
-/// tables that differ in size and key set.
+/// The SCRAM description readers over real C handles, and the token MAC and feature readers over injected accessors,
+/// for the shapes the mock admin client cannot produce: a MAC carrying an interior zero byte, and two feature tables
+/// that differ in size and key set.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>Every shape here is unreachable end to end</b>, which is why the accessors are
-/// injected. The two SCRAM RPCs mirror Java's own <c>UnsupportedOperationException</c>, so no
-/// populated <c>DescribeUserScramCredentialsResult_t</c> exists without a broker; the mock's
-/// MAC is a Uuid's UTF-8 and never carries an interior zero; and the mock derives both feature
-/// tables from one seeded key set, so they always agree.
-/// </para>
-/// <para>
-/// ⚠ The <b>wiring</b> — that each reader is built on its own ABI symbols — is
-/// <see cref="AdminP4ReaderWiringTests"/>'s job. Injected accessors prove the walk, not the
-/// binding.
-/// </para>
-/// </remarks>
 public sealed class AdminP7ResultMarshalTests
 {
-    // ------------------------------------------------------------------------------------
-    // The per-description credential walk, and the owned/borrowed reader pair (M15/P10).
-    // ------------------------------------------------------------------------------------
+    private const sbyte ScramSha256 = 1;
 
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this slice.</b> Each description's credentials are walked by
-    /// <b>its own</b> <c>credential_count()</c>, never by any outer count (the <c>all()</c>
-    /// row count, the <c>users()</c> count).
-    /// </summary>
-    /// <remarks>
-    /// The two descriptions are deliberately unequal in <em>both</em> directions — inner
-    /// counts of 0 and 3 against an outer count of 2 — so a reader driven from an outer count
-    /// over-reads on one and truncates on the other.
-    /// </remarks>
+    private const sbyte ScramSha512 = 2;
+
     [Fact]
-    public void CredentialWalk_IsBoundedByTheDescriptionsOwnCredentialCount()
+    public void CopyOutDescription_WalksEachDescriptionsOwnCredentials()
     {
-        using StubDescriptions stub = new StubDescriptions(
-            new StubDescription("empty", Array.Empty<(int, int)>()),
-            new StubDescription("alice", new[] { (1, 4096), (2, 8192), (1, 16384) }));
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+        IntPtr empty = native.Description("empty");
+        IntPtr alice = native.Description("alice", (ScramSha256, 4096), (ScramSha512, 8192), (ScramSha256, 16384));
 
-        UserScramCredentialsDescription empty =
-            UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
-        UserScramCredentialsDescription alice =
-            UserScramCredentialMarshal.Read(stub.Pointer(1), stub.Accessors);
+        UserScramCredentialsDescription emptyCopy = UserScramCredentialMarshal.CopyOutDescription(empty);
+        UserScramCredentialsDescription aliceCopy = UserScramCredentialMarshal.CopyOutDescription(alice);
 
-        Assert.Equal("empty", empty.Name);
-        Assert.Empty(empty.CredentialInfos);
-
-        Assert.Equal("alice", alice.Name);
-        Assert.Equal(3, alice.CredentialInfos.Count);
+        Assert.Equal("empty", emptyCopy.Name);
+        Assert.Empty(emptyCopy.CredentialInfos);
+        Assert.Equal("alice", aliceCopy.Name);
         Assert.Equal(
             new[] { ScramMechanism.ScramSha256, ScramMechanism.ScramSha512, ScramMechanism.ScramSha256 },
-            alice.CredentialInfos.Select(info => info.Mechanism));
-        Assert.Equal(
-            new[] { 4096, 8192, 16384 },
-            alice.CredentialInfos.Select(info => info.Iterations));
+            aliceCopy.CredentialInfos.Select(info => info.Mechanism));
+        Assert.Equal(new[] { 4096, 8192, 16384 }, aliceCopy.CredentialInfos.Select(info => info.Iterations));
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The <c>all_get_description</c> pointer is BORROWED — the plain reader must never
-    /// destroy it</b> (ffi §B2 Category 4): the result root owns it and frees it on its own
-    /// destroy, so a destroy here is a double free with no managed symptom.
-    /// </summary>
     [Fact]
-    public void Read_NeverDestroysTheBorrowedDescription()
+    public void CopyOutDescription_LeavesTheDescriptionItReads()
     {
-        using StubDescriptions stub = new StubDescriptions(
-            new StubDescription("alice", new[] { (1, 4096) }));
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+        IntPtr alice = native.Description("alice", (ScramSha512, 8192));
 
-        UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
-        UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors);
+        UserScramCredentialsDescription first = UserScramCredentialMarshal.CopyOutDescription(alice);
+        UserScramCredentialsDescription second = UserScramCredentialMarshal.CopyOutDescription(alice);
 
-        Assert.Equal(0, stub.DestroyCount(0));
+        Assert.Equal(first, second);
+        Assert.Equal(ScramMechanism.ScramSha512, second.CredentialInfos.Single().Mechanism);
     }
 
-    /// <summary>
-    /// ⚠⚠ The owned twin destroys its description <b>exactly once</b> — the
-    /// <c>description(user)</c> side of the same type. Not destroying it leaks one per call.
-    /// </summary>
     [Fact]
-    public void ReadAndDestroy_DestroysTheOwnedDescriptionExactlyOnce()
+    public void CopyOutDescription_AMechanismJavaDoesNotKnow_IsUnknown()
     {
-        using StubDescriptions stub = new StubDescriptions(
-            new StubDescription("alice", new[] { (2, 8192) }));
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+        IntPtr user = native.Description("u", (99, 4096));
 
-        UserScramCredentialsDescription alice =
-            UserScramCredentialMarshal.ReadAndDestroy(stub.Pointer(0), stub.Accessors);
+        ScramCredentialInfo info = UserScramCredentialMarshal.CopyOutDescription(user).CredentialInfos.Single();
 
-        Assert.Equal("alice", alice.Name);
-        Assert.Equal(ScramMechanism.ScramSha512, alice.CredentialInfos.Single().Mechanism);
-        Assert.Equal(1, stub.DestroyCount(0));
+        Assert.Equal(ScramMechanism.Unknown, info.Mechanism);
+        Assert.Equal(4096, info.Iterations);
     }
 
-    /// <summary>
-    /// ⚠⚠ …and <b>on the throwing path too</b> — the destroy is in a <c>finally</c>, so a read
-    /// that faults mid-walk still releases the handle exactly once rather than leaking it.
-    /// </summary>
-    /// <remarks>
-    /// The probe is a null <c>name()</c>, which is a real ABI-reachable shape and makes
-    /// <c>ReadStringKey</c> throw — deliberately not an exception the reader itself could
-    /// produce and swallow, so a green result cannot come from the throw being normalized.
-    /// </remarks>
     [Fact]
-    public void ReadAndDestroy_DestroysExactlyOnce_WhenTheReadThrows()
+    public void CopyOutDescription_ANonAsciiName_RoundTrips()
     {
-        using StubDescriptions stub = new StubDescriptions(
-            new StubDescription(name: null, new[] { (1, 4096) }));
-
-        Assert.Throws<KafkaException>(
-            () => UserScramCredentialMarshal.ReadAndDestroy(stub.Pointer(0), stub.Accessors));
-
-        Assert.Equal(1, stub.DestroyCount(0));
-    }
-
-    /// <summary>
-    /// A mechanism type the ABI reports outside the two known codes decodes to
-    /// <see cref="ScramMechanism.Unknown"/> — Java's <c>fromType</c> fallback — rather than
-    /// throwing on a broker that learned a third mechanism.
-    /// </summary>
-    [Fact]
-    public void UnknownMechanismCode_DecodesToUnknown()
-    {
-        using StubDescriptions stub = new StubDescriptions(
-            new StubDescription("u", new[] { (99, 4096) }));
+        using NativeScramDescriptions native = new NativeScramDescriptions();
 
         Assert.Equal(
-            ScramMechanism.Unknown,
-            UserScramCredentialMarshal.Read(stub.Pointer(0), stub.Accessors)
-                .CredentialInfos.Single().Mechanism);
+            "ålice-ü-世",
+            UserScramCredentialMarshal.CopyOutDescription(native.Description("ålice-ü-世")).Name);
     }
 
-    // ------------------------------------------------------------------------------------
-    // The MAC — length-delimited, never NUL-scanned (T-N2, read half).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>THE test for the MAC.</b> A MAC whose second byte is <c>0x00</c> is copied out
-    /// <b>whole</b>: its full length, and every byte past the zero. A NUL-scan returns one
-    /// byte here and the truncated MAC round-trips into a broker-side rejection.
-    /// </summary>
     [Fact]
-    public void ReadHmac_SurvivesAnInteriorZeroByte()
+    public void CopyOutDescriptions_KeysEachDescriptionByItsUser()
     {
-        byte[] native = { 0x7F, 0x00, 0x00, 0xA1, 0x00, 0xFE };
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+        IntPtr map = native.Map(
+            ("alice", native.Description("alice", (ScramSha256, 4096))),
+            ("bob", native.Description("bob", (ScramSha512, 8192), (ScramSha256, 4096))));
 
-        using PinnedBytes pinned = new PinnedBytes(native);
+        IReadOnlyDictionary<string, UserScramCredentialsDescription> copied =
+            UserScramCredentialMarshal.CopyOutDescriptions(map);
 
-        Assert.Equal(native, DelegationTokenMarshal.ReadHmac(IntPtr.Zero, pinned.Accessor));
+        Assert.Equal(new[] { "alice", "bob" }, copied.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        Assert.Equal("alice", copied["alice"].Name);
+        Assert.Equal(4096, copied["alice"].CredentialInfos.Single().Iterations);
+        Assert.Equal("bob", copied["bob"].Name);
+        Assert.Equal(
+            new[] { ScramMechanism.ScramSha512, ScramMechanism.ScramSha256 },
+            copied["bob"].CredentialInfos.Select(info => info.Mechanism));
+        Assert.False(copied.ContainsKey("Alice"));
     }
 
-    /// <summary>
-    /// A MAC that is entirely zero bytes still comes back at full length — the degenerate case
-    /// a NUL-scan reports as empty rather than as six zeros.
-    /// </summary>
     [Fact]
-    public void ReadHmac_SurvivesAnAllZeroMac()
+    public void CopyOutDescriptions_AnEmptyMap_IsEmpty()
     {
-        byte[] native = new byte[6];
+        using NativeScramDescriptions native = new NativeScramDescriptions();
 
-        using PinnedBytes pinned = new PinnedBytes(native);
+        Assert.Empty(UserScramCredentialMarshal.CopyOutDescriptions(native.Map()));
+    }
 
-        byte[] hmac = DelegationTokenMarshal.ReadHmac(IntPtr.Zero, pinned.Accessor);
+    [Fact]
+    public void CopyOutDescriptions_ANullMap_IsEmpty() =>
+        Assert.Empty(UserScramCredentialMarshal.CopyOutDescriptions(IntPtr.Zero));
+
+    [Fact]
+    public void CopyOutUsers_KeepsTheListOrder()
+    {
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+
+        Assert.Equal(
+            new[] { "bob", "alice", "ålice" },
+            UserScramCredentialMarshal.CopyOutUsers(native.Users("bob", "alice", "ålice")));
+    }
+
+    [Fact]
+    public void CopyOutUsers_AnEmptyList_IsEmpty()
+    {
+        using NativeScramDescriptions native = new NativeScramDescriptions();
+
+        Assert.Empty(UserScramCredentialMarshal.CopyOutUsers(native.Users()));
+    }
+
+    [Fact]
+    public void CopyOutUsers_ANullList_IsEmpty() => Assert.Empty(UserScramCredentialMarshal.CopyOutUsers(IntPtr.Zero));
+
+    [Fact]
+    public void CopyOutToken_KeepsAMacWithAnInteriorZeroByte()
+    {
+        byte[] mac = { 0x7F, 0x00, 0x00, 0xA1, 0x00, 0xFE };
+        using NativeTokens natives = new NativeTokens();
+
+        DelegationToken token = DelegationTokenMarshal.CopyOutToken(natives.Token("token-1", mac));
+
+        Assert.Equal(mac, token.Hmac);
+    }
+
+    [Fact]
+    public void CopyOutToken_KeepsAnAllZeroMacAtFullLength()
+    {
+        using NativeTokens natives = new NativeTokens();
+
+        byte[] hmac = DelegationTokenMarshal.CopyOutToken(natives.Token("token-1", new byte[6])).Hmac;
+
         Assert.Equal(6, hmac.Length);
         Assert.All(hmac, value => Assert.Equal(0, value));
     }
 
-    /// <summary>
-    /// An absent MAC — a null pointer, or a non-positive length — is the empty array, never a
-    /// null the public <see cref="DelegationToken.Hmac"/> would have to admit.
-    /// </summary>
     [Theory]
     [InlineData(true, 8)]
     [InlineData(false, 0)]
     [InlineData(false, -1)]
-    public void ReadHmac_AbsentIsEmpty_NotNull(bool nullPointer, int length)
+    public void CopyBytes_AbsentIsEmpty_NotNull(bool nullPointer, int length)
     {
-        using PinnedBytes pinned = new PinnedBytes(new byte[] { 1, 2, 3, 4 });
+        GCHandle pin = GCHandle.Alloc(new byte[] { 1, 2, 3, 4 }, GCHandleType.Pinned);
+        try
+        {
+            byte[] copied = DelegationTokenMarshal.CopyBytes(
+                new KafkaBytes(nullPointer ? IntPtr.Zero : pin.AddrOfPinnedObject(), length));
 
-        byte[] hmac = DelegationTokenMarshal.ReadHmac(
-            IntPtr.Zero,
-            (IntPtr token, out int outLength) =>
-            {
-                outLength = length;
-                return nullPointer ? IntPtr.Zero : pinned.Pointer;
-            });
-
-        Assert.NotNull(hmac);
-        Assert.Empty(hmac);
+            Assert.NotNull(copied);
+            Assert.Empty(copied);
+        }
+        finally
+        {
+            pin.Free();
+        }
     }
 
-    // ------------------------------------------------------------------------------------
-    // The two feature tables (T-N6).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this slice.</b> The finalized and supported tables are walked by
-    /// <b>their own</b> counts, over their own key sets — here 1 finalized against 3
-    /// supported, with only one key in common.
-    /// </summary>
-    /// <remarks>
-    /// Driving the supported walk from <c>finalized_count</c> yields a one-entry supported
-    /// table, so both the count and the key set are asserted.
-    /// </remarks>
     [Fact]
-    public void EachFeatureTable_IsWalkedByItsOwnCount()
+    public void CopyOutToken_CopiesEveryField()
     {
-        using StubFeatures stub = new StubFeatures(
-            finalized: new[] { ("metadata.version", (short)3, (short)7) },
-            supported: new[]
-            {
-                ("metadata.version", (short)1, (short)9),
-                ("group.version", (short)0, (short)2),
-                ("transaction.version", (short)0, (short)1),
-            },
-            epoch: 4242L);
+        using NativeTokens natives = new NativeTokens();
+        IntPtr native = natives.Token(
+            "token-ü",
+            new byte[] { 1, 2, 3 },
+            new KafkaPrincipal("User", "ownér"),
+            requester: null,
+            renewers: new[] { new KafkaPrincipal("User", "bob"), new KafkaPrincipal("Group", "ops") },
+            issueTimestamp: 11,
+            maxTimestamp: 33,
+            expiryTimestamp: 22);
 
-        FeatureMetadata metadata = FeatureMetadataMarshal.CopyOut(IntPtr.Zero, stub.Accessors);
+        DelegationToken token = DelegationTokenMarshal.CopyOutToken(native);
 
-        Assert.Single(metadata.FinalizedFeatures);
-        Assert.Equal(3, metadata.SupportedFeatures.Count);
+        TokenInformation info = token.TokenInfo;
+        Assert.Equal("token-ü", info.TokenId);
+        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.Owner);
+        Assert.Equal(new KafkaPrincipal("User", "ownér"), info.TokenRequester);
+        Assert.Equal(
+            new[] { new KafkaPrincipal("User", "bob"), new KafkaPrincipal("Group", "ops") },
+            info.Renewers);
+        Assert.Equal(11, info.IssueTimestamp);
+        Assert.Equal(33, info.MaxTimestamp);
+        Assert.Equal(22, info.ExpiryTimestamp);
+        Assert.Equal(new byte[] { 1, 2, 3 }, token.Hmac);
+    }
+
+    [Fact]
+    public void CopyOutToken_KeepsARequesterThatIsNotTheOwner()
+    {
+        using NativeTokens natives = new NativeTokens();
+        IntPtr native = natives.Token(
+            "token-1",
+            new byte[] { 9 },
+            new KafkaPrincipal("User", "alice"),
+            requester: new KafkaPrincipal("User", "admin"),
+            renewers: Array.Empty<KafkaPrincipal>(),
+            issueTimestamp: 1,
+            maxTimestamp: 3,
+            expiryTimestamp: 2);
+
+        TokenInformation info = DelegationTokenMarshal.CopyOutToken(native).TokenInfo;
+
+        Assert.Equal(new KafkaPrincipal("User", "alice"), info.Owner);
+        Assert.Equal(new KafkaPrincipal("User", "admin"), info.TokenRequester);
+        Assert.Empty(info.Renewers);
+    }
+
+    [Fact]
+    public void CopyOutTokens_KeepsTheListOrder()
+    {
+        using NativeTokens natives = new NativeTokens();
+        IntPtr list = natives.List(natives.Token("b", new byte[] { 2 }), natives.Token("a", new byte[] { 1 }));
+
+        IReadOnlyList<DelegationToken> tokens = DelegationTokenMarshal.CopyOutTokens(list);
+
+        Assert.Equal(new[] { "b", "a" }, tokens.Select(token => token.TokenInfo.TokenId));
+    }
+
+    [Fact]
+    public void CopyOutTokens_ANullList_IsEmpty() => Assert.Empty(DelegationTokenMarshal.CopyOutTokens(IntPtr.Zero));
+
+    [Fact]
+    public void CopyOutToken_NoToken_ThrowsKafkaException()
+    {
+        KafkaException exception = Assert.Throws<KafkaException>(() => DelegationTokenMarshal.CopyOutToken(IntPtr.Zero));
+
+        Assert.Equal("The admin result produced no delegation token.", exception.Message);
+    }
+
+    [Fact]
+    public void CopyOutFinalized_CopiesEachRangeUnderItsName()
+    {
+        using NativeFeatureRanges ranges = new NativeFeatureRanges();
+        IntPtr map = ranges.Finalized(("metadata.version", 3, 7), ("group.version", 0, 1));
+
+        Dictionary<string, FinalizedVersionRange> copied = FeatureMetadataMarshal.CopyOutFinalized(map);
+
+        Assert.Equal(new[] { "group.version", "metadata.version" }, copied.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(3, copied["metadata.version"].MinVersionLevel);
+        Assert.Equal(7, copied["metadata.version"].MaxVersionLevel);
+        Assert.Equal(0, copied["group.version"].MinVersionLevel);
+        Assert.Equal(1, copied["group.version"].MaxVersionLevel);
+    }
+
+    [Fact]
+    public void CopyOutSupported_CopiesEachRangeUnderItsName()
+    {
+        using NativeFeatureRanges ranges = new NativeFeatureRanges();
+        IntPtr map = ranges.Supported(("metadata.version", 1, 9), ("group.version", 0, 2), ("transaction.version", 0, 1));
+
+        Dictionary<string, SupportedVersionRange> copied = FeatureMetadataMarshal.CopyOutSupported(map);
+
         Assert.Equal(
             new[] { "group.version", "metadata.version", "transaction.version" },
-            metadata.SupportedFeatures.Keys.OrderBy(key => key, StringComparer.Ordinal));
-
-        Assert.Equal(3, metadata.FinalizedFeatures["metadata.version"].MinVersionLevel);
-        Assert.Equal(7, metadata.FinalizedFeatures["metadata.version"].MaxVersionLevel);
-        Assert.Equal(1, metadata.SupportedFeatures["metadata.version"].MinVersion);
-        Assert.Equal(9, metadata.SupportedFeatures["metadata.version"].MaxVersion);
+            copied.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(1, copied["metadata.version"].MinVersion);
+        Assert.Equal(9, copied["metadata.version"].MaxVersion);
+        Assert.Equal(2, copied["group.version"].MaxVersion);
     }
 
-    /// <summary>
-    /// The reverse skew — a longer finalized table than supported — so a walk driven from the
-    /// wrong count fails whichever way the tables are sized.
-    /// </summary>
     [Fact]
-    public void EachFeatureTable_IsWalkedByItsOwnCount_WhenFinalizedIsLonger()
+    public void CopyOutFeatures_ANonAsciiName_RoundTrips()
     {
-        using StubFeatures stub = new StubFeatures(
-            finalized: new[] { ("a", (short)1, (short)2), ("b", (short)1, (short)3) },
-            supported: new[] { ("c", (short)0, (short)4) },
-            epoch: 1L);
+        using NativeFeatureRanges ranges = new NativeFeatureRanges();
 
-        FeatureMetadata metadata = FeatureMetadataMarshal.CopyOut(IntPtr.Zero, stub.Accessors);
-
-        Assert.Equal(new[] { "a", "b" }, metadata.FinalizedFeatures.Keys.OrderBy(k => k, StringComparer.Ordinal));
-        Assert.Equal(new[] { "c" }, metadata.SupportedFeatures.Keys);
+        Assert.Equal(
+            new[] { "fé✓ture" },
+            FeatureMetadataMarshal.CopyOutFinalized(ranges.Finalized(("fé✓ture", 1, 2))).Keys);
+        Assert.Equal(
+            new[] { "fé✓ture" },
+            FeatureMetadataMarshal.CopyOutSupported(ranges.Supported(("fé✓ture", 1, 2))).Keys);
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The epoch's presence is the accessor's RETURN, never a sentinel</b> — every
-    /// <see cref="long"/> is a legal epoch, so an absent epoch is <see langword="null"/> and a
-    /// present one of <c>0</c> or <c>-1</c> is kept.
-    /// </summary>
+    [Fact]
+    public void CopyOutFeatures_AnEmptyMap_IsEmpty()
+    {
+        using NativeFeatureRanges ranges = new NativeFeatureRanges();
+
+        Assert.Empty(FeatureMetadataMarshal.CopyOutFinalized(ranges.Finalized()));
+        Assert.Empty(FeatureMetadataMarshal.CopyOutSupported(ranges.Supported()));
+    }
+
+    [Fact]
+    public void CopyOut_NoMetadata_ThrowsKafkaException()
+    {
+        KafkaException thrown = Assert.Throws<KafkaException>(() => FeatureMetadataMarshal.CopyOut(IntPtr.Zero));
+
+        Assert.Equal("The describeFeatures result produced no feature metadata.", thrown.Message);
+    }
+
     [Theory]
-    [InlineData(0L)]
-    [InlineData(-1L)]
-    [InlineData(long.MinValue)]
-    public void PresentEpoch_IsKept_WhateverItsValue(long epoch)
-    {
-        using StubFeatures stub = new StubFeatures(
-            Array.Empty<(string, short, short)>(), Array.Empty<(string, short, short)>(), epoch);
-
-        Assert.Equal(epoch, FeatureMetadataMarshal.CopyOut(IntPtr.Zero, stub.Accessors).FinalizedFeaturesEpoch);
-    }
-
-    /// <summary>An absent epoch is <see langword="null"/>, not <c>0</c>.</summary>
-    [Fact]
-    public void AbsentEpoch_IsNull()
-    {
-        using StubFeatures stub = new StubFeatures(
-            Array.Empty<(string, short, short)>(), Array.Empty<(string, short, short)>(), epoch: null);
-
-        Assert.Null(FeatureMetadataMarshal.CopyOut(IntPtr.Zero, stub.Accessors).FinalizedFeaturesEpoch);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Stand-ins.
-    // ------------------------------------------------------------------------------------
+    [InlineData(0L, 0L)]
+    [InlineData(4242L, 4242L)]
+    [InlineData(long.MaxValue, long.MaxValue)]
+    [InlineData(-1L, null)]
+    [InlineData(-2L, null)]
+    [InlineData(long.MinValue, null)]
+    public void Epoch_ANegativeValueIsAbsent(long native, long? expected) =>
+        Assert.Equal(expected, FeatureMetadataMarshal.ToEpoch(native));
 
     /// <summary>
-    /// One row of the <c>describeUserScramCredentials</c> table. A plain class rather than a
-    /// positional <c>record</c>: the latter needs <c>IsExternalInit</c>, which net462 lacks.
+    /// Real <c>UserScramCredentialsDescription_t</c>s, and the maps and lists of borrowed pointers the readers walk,
+    /// each freed once at <see cref="Dispose"/>.
     /// </summary>
-    private sealed class StubDescription
+    private sealed class NativeScramDescriptions : IDisposable
     {
-        internal StubDescription(string? name, (int Mechanism, int Iterations)[] credentials)
+        private readonly List<IntPtr> _descriptions = new List<IntPtr>();
+        private readonly List<IntPtr> _maps = new List<IntPtr>();
+        private readonly List<IntPtr> _lists = new List<IntPtr>();
+        private readonly List<Utf8Marshal.PinnedUtf8String> _pins = new List<Utf8Marshal.PinnedUtf8String>();
+
+        internal IntPtr Description(string name, params (sbyte Type, int Iterations)[] credentials)
         {
-            Name = name;
-            Credentials = credentials;
-        }
-
-        /// <summary>The user name, or null to drive the reader's throwing path.</summary>
-        internal string? Name { get; }
-
-        internal (int Mechanism, int Iterations)[] Credentials { get; }
-    }
-
-    /// <summary>
-    /// Stand-in <c>UserScramCredentialsDescription_t</c>s: the pinned names, the four read
-    /// accessors over them, and a <b>counting</b> destroy so each handle's release count is
-    /// assertable — the only way to see the owned/borrowed distinction, which has no other
-    /// managed symptom.
-    /// </summary>
-    /// <remarks>
-    /// The stand-in pointer is the 1-based index, so <c>IntPtr.Zero</c> stays distinguishable
-    /// from a valid handle and the destroy counter can attribute a release to one description.
-    /// </remarks>
-    private sealed class StubDescriptions : IDisposable
-    {
-        private readonly StubDescription[] _descriptions;
-        private readonly List<Utf8Marshal.PinnedUtf8String> _names = new List<Utf8Marshal.PinnedUtf8String>();
-        private readonly int[] _destroyCounts;
-
-        internal StubDescriptions(params StubDescription[] descriptions)
-        {
-            _descriptions = descriptions;
-            _destroyCounts = new int[descriptions.Length];
-
-            foreach (StubDescription description in descriptions)
+            IntPtr[] infos = new IntPtr[credentials.Length];
+            IntPtr list = IntPtr.Zero;
+            IntPtr outErr = IntPtr.Zero;
+            try
             {
-                _names.Add(description.Name is null ? null! : Utf8Marshal.Pin(description.Name));
-            }
-
-            Accessors = new UserScramCredentialMarshal.Accessors(
-                description => _names[Index(description)]?.Pointer ?? IntPtr.Zero,
-                description => _descriptions[Index(description)].Credentials.Length,
-                (description, credential) =>
-                    _descriptions[Index(description)].Credentials[credential].Mechanism,
-                (description, credential) =>
-                    _descriptions[Index(description)].Credentials[credential].Iterations,
-                description => _destroyCounts[Index(description)]++);
-        }
-
-        internal UserScramCredentialMarshal.Accessors Accessors { get; }
-
-        /// <summary>The stand-in handle for description <paramref name="index"/>.</summary>
-        internal IntPtr Pointer(int index) => new IntPtr(index + 1);
-
-        /// <summary>How many times description <paramref name="index"/> was destroyed.</summary>
-        internal int DestroyCount(int index) => _destroyCounts[index];
-
-        public void Dispose()
-        {
-            foreach (Utf8Marshal.PinnedUtf8String name in _names)
-            {
-                name?.Dispose();
-            }
-        }
-
-        private static int Index(IntPtr description) => description.ToInt32() - 1;
-    }
-
-    /// <summary>A pinned byte buffer plus a MAC accessor that hands it back with its length.</summary>
-    private sealed class PinnedBytes : IDisposable
-    {
-        private GCHandle _pin;
-
-        internal PinnedBytes(byte[] bytes)
-        {
-            _pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
-            Length = bytes.Length;
-        }
-
-        internal IntPtr Pointer => _pin.AddrOfPinnedObject();
-
-        internal int Length { get; }
-
-        internal DelegationTokenMarshal.HmacAccessor Accessor =>
-            (IntPtr token, out int outLength) =>
-            {
-                outLength = Length;
-                return Pointer;
-            };
-
-        public void Dispose()
-        {
-            if (_pin.IsAllocated)
-            {
-                _pin.Free();
-            }
-        }
-    }
-
-    /// <summary>
-    /// A stand-in <c>DescribeFeaturesResult_t</c>: two independently-sized tables, their
-    /// pinned names, and an epoch whose presence is the accessor's return.
-    /// </summary>
-    private sealed class StubFeatures : IDisposable
-    {
-        private readonly (string Name, short Min, short Max)[] _finalized;
-        private readonly (string Name, short Min, short Max)[] _supported;
-        private readonly List<Utf8Marshal.PinnedUtf8String> _names = new List<Utf8Marshal.PinnedUtf8String>();
-
-        internal StubFeatures(
-            (string Name, short Min, short Max)[] finalized,
-            (string Name, short Min, short Max)[] supported,
-            long? epoch)
-        {
-            _finalized = finalized;
-            _supported = supported;
-
-            IntPtr[] finalizedNames = finalized.Select(Pin).ToArray();
-            IntPtr[] supportedNames = supported.Select(Pin).ToArray();
-
-            Accessors = new FeatureMetadataMarshal.Accessors(
-                result => _finalized.Length,
-                (result, index) => finalizedNames[index],
-                (result, index) => _finalized[index].Min,
-                (result, index) => _finalized[index].Max,
-                result => _supported.Length,
-                (result, index) => supportedNames[index],
-                (result, index) => _supported[index].Min,
-                (result, index) => _supported[index].Max,
-                (IntPtr result, out long value) =>
+                for (int i = 0; i < infos.Length; i++)
                 {
-                    value = epoch ?? 0L;
-                    return epoch is not null;
-                });
+                    IntPtr mechanism = NativeMethods.ScramMechanismFromType(credentials[i].Type, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    infos[i] = NativeMethods.ScramCredentialInfoNew(mechanism, credentials[i].Iterations, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                }
+
+                list = NewList(infos);
+                using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(name);
+                IntPtr description = Native.UserScramCredentialsDescriptionNew(pinned.Pointer, list, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                _descriptions.Add(description);
+                return description;
+            }
+            finally
+            {
+                NativeMethods.ListDestroy(list, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+                foreach (IntPtr info in infos)
+                {
+                    NativeMethods.ScramCredentialInfoDestroy(info, ref outErr);
+                    Assert.Equal(IntPtr.Zero, outErr);
+                }
+            }
         }
 
-        internal FeatureMetadataMarshal.Accessors Accessors { get; }
+        internal IntPtr Map(params (string User, IntPtr Description)[] entries)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = NativeMethods.MapNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            _maps.Add(map);
+            foreach ((string user, IntPtr description) in entries)
+            {
+                NativeMethods.MapPut(map, Pin(user), description, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return map;
+        }
+
+        internal IntPtr Users(params string[] users)
+        {
+            IntPtr list = NewList(users.Select(Pin).ToArray());
+            _lists.Add(list);
+            return list;
+        }
 
         public void Dispose()
         {
+            IntPtr outErr = IntPtr.Zero;
+            foreach (IntPtr map in _maps)
+            {
+                NativeMethods.MapDestroy(map, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (IntPtr list in _lists)
+            {
+                NativeMethods.ListDestroy(list, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (IntPtr description in _descriptions)
+            {
+                Native.UserScramCredentialsDescriptionDestroy(description, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (Utf8Marshal.PinnedUtf8String pin in _pins)
+            {
+                pin.Dispose();
+            }
+        }
+
+        private static IntPtr NewList(IntPtr[] elements)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = NativeMethods.ListNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            foreach (IntPtr element in elements)
+            {
+                NativeMethods.ListAdd(list, element, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return list;
+        }
+
+        private IntPtr Pin(string value)
+        {
+            Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(value);
+            _pins.Add(pinned);
+            return pinned.Pointer;
+        }
+    }
+
+    /// <summary>The C functions only these tests call.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_new_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr UserScramCredentialsDescriptionNew(IntPtr name, IntPtr credentialInfos, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialsDescription_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void UserScramCredentialsDescriptionDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_new_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr TokenInformationNew(
+            IntPtr tokenId, IntPtr owner, IntPtr renewers, long issueTimestamp, long maxTimestamp, long expiryTimestamp, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_with_token_requester_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr TokenInformationWithTokenRequester(
+            IntPtr tokenId,
+            IntPtr owner,
+            IntPtr tokenRequester,
+            IntPtr renewers,
+            long issueTimestamp,
+            long maxTimestamp,
+            long expiryTimestamp,
+            ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_TokenInformation_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void TokenInformationDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_DelegationToken_new_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr DelegationTokenNew(IntPtr tokenInformation, KafkaBytes hmac, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_security_token_delegation_DelegationToken_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void DelegationTokenDestroy(IntPtr self, ref IntPtr outErr);
+
+        internal delegate IntPtr RangeNew(short min, short max, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_FinalizedVersionRange_new", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr FinalizedVersionRangeNew(short minVersionLevel, short maxVersionLevel, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_FinalizedVersionRange_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void FinalizedVersionRangeDestroy(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_SupportedVersionRange_new", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr SupportedVersionRangeNew(short minVersion, short maxVersion, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_admin_SupportedVersionRange_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void SupportedVersionRangeDestroy(IntPtr self, ref IntPtr outErr);
+    }
+
+    /// <summary>
+    /// Real <c>DelegationToken_t</c>s and lists of them, built through the core's constructors, each freed once at
+    /// <see cref="Dispose"/>.
+    /// </summary>
+    private sealed class NativeTokens : IDisposable
+    {
+        private readonly List<IntPtr> _tokens = new List<IntPtr>();
+        private readonly List<IntPtr> _lists = new List<IntPtr>();
+
+        internal IntPtr Token(string tokenId, byte[] hmac) =>
+            Token(tokenId, hmac, new KafkaPrincipal("User", "alice"), null, Array.Empty<KafkaPrincipal>(), 1, 3, 2);
+
+        internal IntPtr Token(
+            string tokenId,
+            byte[] hmac,
+            KafkaPrincipal owner,
+            KafkaPrincipal? requester,
+            KafkaPrincipal[] renewers,
+            long issueTimestamp,
+            long maxTimestamp,
+            long expiryTimestamp)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr ownerHandle = DelegationTokenMarshal.NewPrincipal(owner);
+            IntPtr requesterHandle = requester is null ? IntPtr.Zero : DelegationTokenMarshal.NewPrincipal(requester);
+            IntPtr[] renewerHandles = DelegationTokenMarshal.NewPrincipals(renewers);
+            IntPtr renewerList = NewList(renewerHandles);
+            IntPtr info = IntPtr.Zero;
+            try
+            {
+                using Utf8Marshal.PinnedUtf8String id = Utf8Marshal.Pin(tokenId);
+                info = requester is null
+                    ? Native.TokenInformationNew(
+                        id.Pointer, ownerHandle, renewerList, issueTimestamp, maxTimestamp, expiryTimestamp, ref outErr)
+                    : Native.TokenInformationWithTokenRequester(
+                        id.Pointer,
+                        ownerHandle,
+                        requesterHandle,
+                        renewerList,
+                        issueTimestamp,
+                        maxTimestamp,
+                        expiryTimestamp,
+                        ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr token = DelegationTokenMarshal.WithHmac(
+                    hmac,
+                    bytes =>
+                    {
+                        IntPtr err = IntPtr.Zero;
+                        IntPtr created = Native.DelegationTokenNew(info, bytes, ref err);
+                        KafkaException.ThrowIfFfiFailed(ref err);
+                        return created;
+                    });
+                _tokens.Add(token);
+                return token;
+            }
+            finally
+            {
+                if (info != IntPtr.Zero)
+                {
+                    Native.TokenInformationDestroy(info, ref outErr);
+                    Assert.Equal(IntPtr.Zero, outErr);
+                }
+
+                NativeMethods.ListDestroy(renewerList, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+                DelegationTokenMarshal.DestroyPrincipals(renewerHandles);
+                DelegationTokenMarshal.DestroyPrincipal(requesterHandle);
+                DelegationTokenMarshal.DestroyPrincipal(ownerHandle);
+            }
+        }
+
+        internal IntPtr List(params IntPtr[] tokens)
+        {
+            IntPtr list = NewList(tokens);
+            _lists.Add(list);
+            return list;
+        }
+
+        public void Dispose()
+        {
+            IntPtr outErr = IntPtr.Zero;
+            foreach (IntPtr list in _lists)
+            {
+                NativeMethods.ListDestroy(list, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (IntPtr token in _tokens)
+            {
+                Native.DelegationTokenDestroy(token, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+        }
+
+        private static IntPtr NewList(IntPtr[] elements)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = NativeMethods.ListNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            foreach (IntPtr element in elements)
+            {
+                NativeMethods.ListAdd(list, element, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return list;
+        }
+    }
+
+    /// <summary>
+    /// Maps of feature names to real <c>FinalizedVersionRange_t</c> / <c>SupportedVersionRange_t</c>s, built
+    /// through the core's constructors. A map the binding builds does not own what it holds, so each range,
+    /// map and name is freed once at <see cref="Dispose"/>.
+    /// </summary>
+    private sealed class NativeFeatureRanges : IDisposable
+    {
+        private readonly List<IntPtr> _finalized = new List<IntPtr>();
+        private readonly List<IntPtr> _supported = new List<IntPtr>();
+        private readonly List<IntPtr> _maps = new List<IntPtr>();
+        private readonly List<Utf8Marshal.PinnedUtf8String> _names = new List<Utf8Marshal.PinnedUtf8String>();
+
+        internal IntPtr Finalized(params (string Name, short Min, short Max)[] features) =>
+            Map(features, _finalized, Native.FinalizedVersionRangeNew);
+
+        internal IntPtr Supported(params (string Name, short Min, short Max)[] features) =>
+            Map(features, _supported, Native.SupportedVersionRangeNew);
+
+        public void Dispose()
+        {
+            IntPtr outErr = IntPtr.Zero;
+            foreach (IntPtr map in _maps)
+            {
+                NativeMethods.MapDestroy(map, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (IntPtr range in _finalized)
+            {
+                Native.FinalizedVersionRangeDestroy(range, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
+            foreach (IntPtr range in _supported)
+            {
+                Native.SupportedVersionRangeDestroy(range, ref outErr);
+                Assert.Equal(IntPtr.Zero, outErr);
+            }
+
             foreach (Utf8Marshal.PinnedUtf8String name in _names)
             {
                 name.Dispose();
             }
         }
 
-        private IntPtr Pin((string Name, short Min, short Max) feature)
+        private IntPtr Map(
+            (string Name, short Min, short Max)[] features, List<IntPtr> ranges, Native.RangeNew newRange)
         {
-            Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(feature.Name);
-            _names.Add(pinned);
-            return pinned.Pointer;
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = NativeMethods.MapNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            _maps.Add(map);
+            foreach ((string name, short min, short max) in features)
+            {
+                Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(name);
+                _names.Add(pinned);
+                IntPtr range = newRange(min, max, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                ranges.Add(range);
+                NativeMethods.MapPut(map, pinned.Pointer, range, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return map;
         }
     }
 }

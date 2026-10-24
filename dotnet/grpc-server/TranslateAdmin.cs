@@ -1482,6 +1482,20 @@ internal static class TranslateAdmin
             Iterations = info.Iterations,
         };
 
+    /// <summary>Binding <see cref="UserScramCredentialsDescription"/> -&gt; proto.</summary>
+    internal static Proto.UserScramCredentialsDescription ScramDescriptionToProto(
+        UserScramCredentialsDescription description)
+    {
+        Proto.UserScramCredentialsDescription proto =
+            new Proto.UserScramCredentialsDescription { Name = description.Name };
+        foreach (ScramCredentialInfo info in description.CredentialInfos)
+        {
+            proto.CredentialInfos.Add(ScramInfoToProto(info));
+        }
+
+        return proto;
+    }
+
     /// <summary>
     /// Proto <c>UserScramCredentialAlteration</c>s -&gt; the binding's upsertion / deletion
     /// objects. <c>is_deletion</c> is the discriminant and cannot be inferred — both forms carry

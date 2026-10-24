@@ -20,27 +20,14 @@ using System.Text;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A resource's configuration — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.Config</c>: a collection of
-/// <see cref="ConfigEntry"/> plus lookup by name.
+/// A resource's configuration — Java's <c>org.apache.kafka.clients.admin.Config</c>: a collection
+/// of <see cref="ConfigEntry"/> plus lookup by name.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Java's <c>Config</c> is a <c>HashMap</c> keyed by entry name (<c>Config.java:31-40</c>),
-/// so this type has map semantics too: <b>one entry per name</b>, the <b>last</b>
-/// occurrence winning, and value equality over the name → entry mapping regardless of
-/// order.
-/// </para>
-/// <para>
-/// Unlike Java's <c>HashMap</c>, whose iteration order is unspecified,
-/// <see cref="Entries"/> keeps a deterministic order: the order the entries were supplied
-/// in, a replaced duplicate keeping its <b>first</b> occurrence's position. So the ABI's
-/// sorted-by-name order survives unchanged whenever there are no duplicates.
-/// </para>
-/// <para>
-/// Value members are overrides only — there is no <c>IEquatable&lt;Config&gt;</c>, the
-/// same shape as <see cref="NewTopic"/>.
-/// </para>
+/// It has Java's map semantics: one entry per name, the last occurrence winning, and value
+/// equality over the name → entry mapping regardless of order. Unlike Java's <c>HashMap</c>,
+/// <see cref="Entries"/> keeps the order the entries were supplied in, a replaced duplicate
+/// keeping its first occurrence's position.
 /// </remarks>
 public sealed class Config
 {
@@ -53,9 +40,8 @@ public sealed class Config
     /// instance is immutable regardless of what the caller does next.
     /// </summary>
     /// <param name="entries">
-    /// The configuration entries. Two entries with the same name are one entry: the last
-    /// wins, as Java's <c>entries.put(entry.name(), entry)</c> does
-    /// (<c>Config.java:36-40</c>), and it takes the first one's position in
+    /// The configuration entries. Two entries with the same name are one entry: the last wins, as
+    /// Java's <c>entries.put(entry.name(), entry)</c> does, and it takes the first one's position in
     /// <see cref="Entries"/>.
     /// </param>
     /// <exception cref="ArgumentNullException">
@@ -95,10 +81,9 @@ public sealed class Config
     }
 
     /// <summary>
-    /// The configuration entries (Java's <c>entries()</c>), one per name. As the ABI
-    /// reports them: sorted by name. Read-only, as Java's
-    /// <c>Collections.unmodifiableCollection(entries.values())</c> is
-    /// (<c>Config.java:45-47</c>) — the view cannot be cast back to a mutable list.
+    /// The configuration entries (Java's <c>entries()</c>), one per name, in the order they were
+    /// supplied: sorted by name for a configuration the core described. Read-only, as Java's
+    /// <c>Collections.unmodifiableCollection(entries.values())</c> is.
     /// </summary>
     public IReadOnlyCollection<ConfigEntry> Entries => _entries;
 
@@ -108,9 +93,8 @@ public sealed class Config
     /// throwing.
     /// </summary>
     /// <param name="name">
-    /// The configuration key. A <see langword="null"/> key returns <see langword="null"/>,
-    /// as Java's <c>HashMap.get(null)</c> does (<c>Config.java:52-54</c>): no entry has a
-    /// null name.
+    /// The configuration key. A <see langword="null"/> key returns <see langword="null"/>, as
+    /// Java's <c>HashMap.get(null)</c> does.
     /// </param>
     /// <returns>The matching entry, or <see langword="null"/>.</returns>
     public ConfigEntry? Get(string? name)
@@ -124,9 +108,8 @@ public sealed class Config
     }
 
     /// <summary>
-    /// Value equality — Java's <c>equals</c> (<c>Config.java:56-66</c>), which is map
-    /// equality: the same set of names, each mapping to an equal
-    /// <see cref="ConfigEntry"/>. Order does not matter.
+    /// Value equality — Java's <c>equals</c>, which is map equality: the same set of names, each
+    /// mapping to an equal <see cref="ConfigEntry"/>. Order does not matter.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two configurations hold the same entries.</returns>
@@ -154,10 +137,9 @@ public sealed class Config
     }
 
     /// <summary>
-    /// An order-insensitive hash — Java's <c>hashCode</c> (<c>Config.java:68-71</c>) is the
-    /// map's, which <c>AbstractMap</c> defines as the sum over the entries of
-    /// <c>key.hashCode() ^ value.hashCode()</c>; this sums the same combination with the
-    /// .NET hashes.
+    /// An order-insensitive hash — Java's <c>hashCode</c> is the map's, the sum over the entries of
+    /// <c>key.hashCode() ^ value.hashCode()</c>; this sums the same combination with the .NET
+    /// hashes.
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
@@ -175,9 +157,8 @@ public sealed class Config
     }
 
     /// <summary>
-    /// A diagnostic rendering in Java's layout — <c>"Config(entries=" + entries.values() + ")"</c>
-    /// (<c>Config.java:73-76</c>): <c>Config(entries=[e1, e2])</c>, each entry rendered by
-    /// <see cref="ConfigEntry.ToString"/>, in <see cref="Entries"/> order.
+    /// A diagnostic rendering in Java's layout, <c>Config(entries=[e1, e2])</c>, each entry
+    /// rendered by <see cref="ConfigEntry.ToString"/>, in <see cref="Entries"/> order.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()

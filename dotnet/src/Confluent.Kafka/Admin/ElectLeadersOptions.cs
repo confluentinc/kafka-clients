@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,18 +22,21 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java's <c>ElectLeadersOptions</c> declares <b>no members of its own</b> — it is an
-/// empty <c>final</c> subclass of <c>AbstractOptions</c> (<c>ElectLeadersOptions.java:29-30</c>),
-/// so <see cref="TimeoutMs"/> is the whole surface. The ABI agrees:
-/// <c>elect_leaders_async</c> takes no option argument beyond the timeout, and its header
-/// says so — "<c>ElectLeadersOptions</c> has no other field in Java". The type still
-/// exists because Java's does, and because a later Kafka release adding a field must not
-/// become a signature change here.
-/// </para>
 /// </remarks>
 public sealed class ElectLeadersOptions
 {
+    private int? _timeoutMs;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

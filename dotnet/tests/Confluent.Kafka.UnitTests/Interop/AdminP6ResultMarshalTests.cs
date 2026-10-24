@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -28,1162 +28,421 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Drives <c>deleteAcls</c>' two-level walk — <see cref="KeyedResultMarshal.Complete"/> with
-/// <see cref="DeleteAclsResultMarshal.FilterResultsReader"/> as its value reader (M15/P6).
+/// Copies ACL bindings and filters, and client-quota entities and their quota maps, out of real C handles through
+/// <see cref="AclMarshal"/> and <see cref="ClientQuotaMarshal"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The defect this file exists to catch is conflating the two error channels.</b>
-/// <c>get_error(i)</c> is the <em>filter's</em> future failing and faults that filter's
-/// <see cref="Task"/>; <c>get_result_error(i, j)</c> is Java's <c>FilterResult.error()</c>
-/// and is a stored <b>value</b> inside a <em>successfully completed</em>
-/// <c>FilterResults</c>. A filter-level success carrying an inner error therefore
-/// <b>completes</b> <c>Values[filter]</c> while <b>faulting</b> <c>All()</c> — the two are
-/// supposed to disagree, and an implementation that routes the inner error to the fault
-/// channel passes every one-channel test.
-/// </para>
-/// <para>
-/// <b>Why the walk is driven directly.</b> The Rust mock fails every filter
-/// (<c>MockAdminClient.java:816-818</c>, mirrored per <c>admin-client.md</c> §9), so a
-/// filter-level <em>success</em> — and with it every inner entry — is unreachable end to
-/// end. <c>PublicAdminDeleteAclsTests</c> covers what the mock <em>can</em> produce over
-/// real native memory; this file covers the rest by injecting the accessors into
-/// production's own walk (<c>definition-of-done.md</c> §12).
-/// </para>
-/// <para>
-/// ⚠ <b>Every error handle here is a real <c>kafka_common_KafkaError_t</c> that the
-/// <em>fixture</em> owns and destroys.</b> Both channels are <c>const</c>, so the walk must
-/// treat both as borrowed; if it destroyed either, the fixture's own destroy would be a
-/// double free and would abort the process rather than fail an assertion (T-N10).
-/// </para>
-/// </remarks>
 public sealed class AdminP6ResultMarshalTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>A stand-in for the <c>DeleteAclsResult_t *</c>; never dereferenced.</summary>
-    private static readonly IntPtr s_root = new IntPtr(0x6060);
+    public static TheoryData<ResourceType> ResourceTypes => Values<ResourceType>();
 
-    /// <summary>
-    /// A stand-in for the owned <c>FilterResults_t *</c> a per-key callback is
-    /// handed; never dereferenced.
-    /// </summary>
-    private static readonly IntPtr s_value = new IntPtr(0x6161);
+    public static TheoryData<PatternType> PatternTypes => Values<PatternType>();
 
-    /// <summary>The malformed-row text, copied from <c>AclRowMarshal.ReadBinding</c>.</summary>
-    private const string NoBindingWithinCount =
-        "The admin result produced no ACL binding for an index within its own count.";
+    public static TheoryData<AclOperation> Operations => Values<AclOperation>();
 
-    // ------------------------------------------------------------------------------------
-    // AclRowMarshal.ReadFilter — the key reader's null-versus-absent rule.
-    // ------------------------------------------------------------------------------------
+    public static TheoryData<AclPermissionType> PermissionTypes => Values<AclPermissionType>();
 
-    /// <summary>
-    /// ⚠⚠ On the <b>read</b> path too, <see langword="null"/> and <c>""</c> are different
-    /// values: a null pointer means "matches any" and must stay <see langword="null"/>.
-    /// Coalescing it to <c>""</c> would make every <c>Values[filter]</c> lookup miss.
-    /// </summary>
     [Fact]
-    public void ReadFilter_KeepsNullApartFromEmpty()
+    public void CopyOutFilter_KeepsNullApartFromEmpty()
     {
-        using Fixture fixture = new Fixture();
+        AclBindingFilter nulls = new AclBindingFilter(
+            new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Literal),
+            new AccessControlEntryFilter(null, null, AclOperation.Read, AclPermissionType.Allow));
+        AclBindingFilter empties = new AclBindingFilter(
+            new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Literal),
+            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.Read, AclPermissionType.Allow));
 
-        IntPtr wildcard = fixture.AddFilterPointer(
-            ResourceType.Topic, null, PatternType.Any, null, null,
-            AclOperation.Any, AclPermissionType.Any);
-        IntPtr literalEmpty = fixture.AddFilterPointer(
-            ResourceType.Topic, string.Empty, PatternType.Any, string.Empty, string.Empty,
-            AclOperation.Any, AclPermissionType.Any);
+        AclBindingFilter fromNulls = RoundTrip(nulls);
+        AclBindingFilter fromEmpties = RoundTrip(empties);
 
-        AclBindingFilter any = AclRowMarshal.ReadFilter(wildcard, fixture.FilterAccessors);
-        Assert.Null(any.PatternFilter.Name);
-        Assert.Null(any.EntryFilter.Principal);
-        Assert.Null(any.EntryFilter.Host);
-
-        AclBindingFilter empty = AclRowMarshal.ReadFilter(literalEmpty, fixture.FilterAccessors);
-        Assert.Equal(string.Empty, empty.PatternFilter.Name);
-        Assert.Equal(string.Empty, empty.EntryFilter.Principal);
-        Assert.Equal(string.Empty, empty.EntryFilter.Host);
-
-        // The two are different filters, which is the whole point.
-        Assert.NotEqual(any, empty);
+        Assert.Null(fromNulls.PatternFilter.Name);
+        Assert.Null(fromNulls.EntryFilter.Principal);
+        Assert.Null(fromNulls.EntryFilter.Host);
+        Assert.Equal(string.Empty, fromEmpties.PatternFilter.Name);
+        Assert.Equal(string.Empty, fromEmpties.EntryFilter.Principal);
+        Assert.Equal(string.Empty, fromEmpties.EntryFilter.Host);
+        Assert.Equal(nulls, fromNulls);
+        Assert.Equal(empties, fromEmpties);
+        Assert.NotEqual(fromNulls, fromEmpties);
     }
 
-    /// <summary>
-    /// The seven flat accessors land in their own seven slots, asserted with seven
-    /// <em>distinct</em> values so a swapped pair cannot pass.
-    /// </summary>
     [Fact]
-    public void ReadFilter_RestoresEverySlot()
+    public void CopyOutFilter_RestoresEverySlot()
     {
-        using Fixture fixture = new Fixture();
+        AclBindingFilter filter = new AclBindingFilter(
+            new ResourcePatternFilter(ResourceType.Group, "grüppe-ü", PatternType.Prefixed),
+            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.Describe, AclPermissionType.Deny));
 
-        IntPtr pointer = fixture.AddFilterPointer(
-            ResourceType.TransactionalId, "txn-1", PatternType.Prefixed,
-            "User:alice", "10.0.0.1", AclOperation.DescribeConfigs, AclPermissionType.Deny);
+        AclBindingFilter copied = RoundTrip(filter);
 
-        AclBindingFilter filter = AclRowMarshal.ReadFilter(pointer, fixture.FilterAccessors);
-
-        Assert.Equal(ResourceType.TransactionalId, filter.PatternFilter.ResourceType);
-        Assert.Equal("txn-1", filter.PatternFilter.Name);
-        Assert.Equal(PatternType.Prefixed, filter.PatternFilter.PatternType);
-        Assert.Equal("User:alice", filter.EntryFilter.Principal);
-        Assert.Equal("10.0.0.1", filter.EntryFilter.Host);
-        Assert.Equal(AclOperation.DescribeConfigs, filter.EntryFilter.Operation);
-        Assert.Equal(AclPermissionType.Deny, filter.EntryFilter.PermissionType);
+        Assert.Equal(ResourceType.Group, copied.PatternFilter.ResourceType);
+        Assert.Equal("grüppe-ü", copied.PatternFilter.Name);
+        Assert.Equal(PatternType.Prefixed, copied.PatternFilter.PatternType);
+        Assert.Equal("User:bjørn", copied.EntryFilter.Principal);
+        Assert.Equal("10.0.0.1", copied.EntryFilter.Host);
+        Assert.Equal(AclOperation.Describe, copied.EntryFilter.Operation);
+        Assert.Equal(AclPermissionType.Deny, copied.EntryFilter.PermissionType);
+        Assert.Equal(filter, copied);
     }
 
-    /// <summary>
-    /// A null filter pointer inside the result's own count is rejected rather than turned
-    /// into a filter nobody asked for.
-    /// </summary>
-    [Fact]
-    public void ReadFilter_NullPointer_Throws()
-    {
-        using Fixture fixture = new Fixture();
-
-        KafkaException failure = Assert.Throws<KafkaException>(
-            () => AclRowMarshal.ReadFilter(IntPtr.Zero, fixture.FilterAccessors));
+    [Theory]
+    [MemberData(nameof(ResourceTypes))]
+    public void CopyOutFilter_EveryResourceType_CrossesAsItself(ResourceType resourceType) =>
         Assert.Equal(
-            "The admin result produced no ACL filter for an index within its own count.",
-            failure.Message);
-    }
+            resourceType,
+            RoundTrip(Filter(resourceType, PatternType.Any, AclOperation.Any, AclPermissionType.Any))
+                .PatternFilter.ResourceType);
 
-    // ------------------------------------------------------------------------------------
-    // The inner (i, j) axis — binding and error read INDEPENDENTLY, as a VALUE (G4-1).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>M15/P13.2 G4-1.</b> The inner <c>get_binding</c> and <c>get_result_error</c> are
-    /// read <b>independently</b>: a matched ACL whose delete failed carries <b>both</b> its
-    /// binding and its error — Java's
-    /// <c>new FilterResult(aclBinding, aclError.exception(...))</c>
-    /// (<c>KafkaAdminClient.java:2705-2708</c>) — while an entry with no decodable binding
-    /// carries the error alone and a deleted ACL the binding alone. All four appear, in the
-    /// ABI's own order, inside a filter whose own <see cref="Task"/> <b>completed</b>.
-    /// </summary>
-    [Fact]
-    public async Task InnerEntries_CarryTheBindingAlongsideTheError_OnACompletedFilter()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter key = fixture.AddFilter("mixed");
-        fixture.AddMixedEntries(key);
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        AssertMixedEntries(await TestTimeout.Run(() => result.Values[key].Get(), s_deadline));
-
-        // All() throws the first inner error it meets — the failed entry's, whose binding is
-        // still reported beside it.
-        KafkaException all = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
-        Assert.Equal("could not delete", all.Message);
-        Assert.Equal(42, all.Code);
-    }
-
-    /// <summary>
-    /// An inner entry carrying <b>neither</b> a binding nor an error is a malformed row: it
-    /// faults its own filter with the exact malformed-row text, never reaches the binding
-    /// copy-out with a null pointer, and leaves the other filters alone.
-    /// </summary>
-    [Fact]
-    public async Task InnerEntry_WithNeitherBindingNorError_FaultsItsFilter_AsAMalformedRow()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter malformed = fixture.AddFilter("malformed");
-        fixture.AddBinding(malformed, Binding("before-the-gap"));
-        fixture.AddEmptyEntry(malformed);
-
-        AclBindingFilter ok = fixture.AddFilter("well-formed");
-        fixture.AddBinding(ok, Binding("survivor"));
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[malformed].Get(), s_deadline));
-        Assert.Equal(NoBindingWithinCount, failure.Message);
-
+    [Theory]
+    [MemberData(nameof(PatternTypes))]
+    public void CopyOutFilter_EveryPatternType_CrossesAsItself(PatternType patternType) =>
         Assert.Equal(
-            Binding("survivor"),
-            Assert.Single((await TestTimeout.Run(() => result.Values[ok].Get(), s_deadline)).Values).Binding);
-    }
+            patternType,
+            RoundTrip(Filter(ResourceType.Any, patternType, AclOperation.Any, AclPermissionType.Any))
+                .PatternFilter.PatternType);
 
-    /// <summary>
-    /// ⚠⚠ <b>G4-1, the per-key twin</b> — the reader production actually wires
-    /// (<c>AdminCallbacks.DeleteAclsFilterResultsPerKeyValue</c>), driven over one owned value
-    /// handle: the same four entries, the same independence, the same order.
-    /// </summary>
-    [Fact]
-    public void PerKeyReader_CarriesTheBindingAlongsideTheError()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter key = fixture.AddFilter("per-key-mixed");
-        fixture.AddMixedEntries(key);
-
-        AssertMixedEntries(fixture.ReadPerKey(key));
-    }
-
-    /// <summary>
-    /// The per-key reader rejects an entry with neither half with the exact malformed-row
-    /// text — thrown from the reader itself, which the per-key trampoline turns into that
-    /// key's fault.
-    /// </summary>
-    [Fact]
-    public void PerKeyReader_AnEntryWithNeitherBindingNorError_IsAMalformedRow()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter key = fixture.AddFilter("per-key-malformed");
-        fixture.AddBinding(key, Binding("before-the-gap"));
-        fixture.AddEmptyEntry(key);
-
-        KafkaException failure = Assert.Throws<KafkaException>(() => fixture.ReadPerKey(key));
-        Assert.Equal(NoBindingWithinCount, failure.Message);
-    }
-
-    /// <summary>
-    /// A filter that matched nothing resolves to an <b>empty</b> list, not a fault — Java's
-    /// <c>DeleteAclsResult.java:97-98</c>.
-    /// </summary>
-    [Fact]
-    public async Task ZeroMatches_IsAnEmptyList_NotAFault()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter key = fixture.AddFilter("no-match");
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        Assert.Empty((await TestTimeout.Run(() => result.Values[key].Get(), s_deadline)).Values);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // The two channels — the discriminating tests.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N2, THE test for this slice.</b> Filter-level success carrying an inner
-    /// error: <c>Values[filter]</c> <b>completes</b> and holds the error as a value, while
-    /// <c>All()</c> <b>faults</b> with that exact error.
-    /// </summary>
-    [Fact]
-    public async Task InnerError_CompletesItsFilter_ButFaultsAll()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter key = fixture.AddFilter("inner-only");
-        fixture.AddInnerError(key, 58, "ACL deletion failed");
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        // Channel 1: the filter's own Task completed, carrying the error as a VALUE.
-        DeleteAclsResult.FilterResults results =
-            await TestTimeout.Run(() => result.Values[key].Get(), s_deadline);
-        Assert.Equal("ACL deletion failed", Assert.Single(results.Values).Exception!.Message);
-
-        // Channel 2: All() throws the first inner error it meets.
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
-        Assert.Equal("ACL deletion failed", failure.Message);
-        Assert.Equal(58, failure.Code);
-    }
-
-    /// <summary>
-    /// The mirror: a <b>filter-level</b> error faults that filter's <see cref="Task"/>
-    /// <em>and</em> <c>All()</c>, and the filter contributes no bindings.
-    /// </summary>
-    [Fact]
-    public async Task FilterLevelError_FaultsBothChannels()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter failed = fixture.AddFilter("filter-failed");
-        fixture.FailFilter(failed, 31, "filter rejected");
-
-        AclBindingFilter ok = fixture.AddFilter("filter-ok");
-        fixture.AddBinding(ok, Binding("survivor"));
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        KafkaException perFilter = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values[failed].Get(), s_deadline));
-        Assert.Equal("filter rejected", perFilter.Message);
-        Assert.Equal(31, perFilter.Code);
-
-        // The other filter is unaffected and awaitable on its own.
+    [Theory]
+    [MemberData(nameof(Operations))]
+    public void CopyOutFilter_EveryOperation_CrossesAsItself(AclOperation operation) =>
         Assert.Equal(
-            Binding("survivor"),
-            Assert.Single((await TestTimeout.Run(() => result.Values[ok].Get(), s_deadline)).Values).Binding);
+            operation,
+            RoundTrip(Filter(ResourceType.Any, PatternType.Any, operation, AclPermissionType.Any))
+                .EntryFilter.Operation);
 
-        KafkaException all = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.All().Get(), s_deadline));
-        Assert.Equal("filter rejected", all.Message);
-    }
-
-    /// <summary>
-    /// ⚠ <b>T-N7.</b> <c>All()</c> over filters that matched nothing is a <b>successful
-    /// empty collection</b>, never a fault.
-    /// </summary>
-    [Fact]
-    public async Task All_OverANoMatchResult_IsASuccessfulEmptyCollection()
-    {
-        using Fixture fixture = new Fixture();
-
-        fixture.AddFilter("empty-a");
-        fixture.AddFilter("empty-b");
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        Assert.Empty(await TestTimeout.Run(() => result.All().Get(), s_deadline));
-    }
-
-    /// <summary>
-    /// <c>All()</c> accumulates every deleted binding, across filters, in filter order.
-    /// </summary>
-    [Fact]
-    public async Task All_AccumulatesEveryBinding_InFilterOrder()
-    {
-        using Fixture fixture = new Fixture();
-
-        AclBindingFilter first = fixture.AddFilter("acc-first");
-        fixture.AddBinding(first, Binding("one"));
-        fixture.AddBinding(first, Binding("two"));
-
-        AclBindingFilter second = fixture.AddFilter("acc-second");
-        fixture.AddBinding(second, Binding("three"));
-
-        AsyncDeleteAclsResult result = fixture.Walk();
-
+    [Theory]
+    [MemberData(nameof(PermissionTypes))]
+    public void CopyOutFilter_EveryPermissionType_CrossesAsItself(AclPermissionType permissionType) =>
         Assert.Equal(
-            new[] { Binding("one"), Binding("two"), Binding("three") },
-            await TestTimeout.Run(() => result.All().Get(), s_deadline));
-    }
+            permissionType,
+            RoundTrip(Filter(ResourceType.Any, PatternType.Any, AclOperation.Any, permissionType))
+                .EntryFilter.PermissionType);
 
-    /// <summary>
-    /// A top-level submit failure faults <b>every</b> per-filter awaitable, leaving none
-    /// hanging — the callback's own owned <c>error</c> channel.
-    /// </summary>
     [Fact]
-    public async Task TopLevelFailure_FaultsEveryFilter()
+    public void CopyOutBinding_RestoresEverySlot()
     {
-        AclBindingFilter alpha = Filter("top-alpha");
-        AclBindingFilter beta = Filter("top-beta");
+        AclBinding binding = new AclBinding(
+            new ResourcePattern(ResourceType.TransactionalId, "tx-ünï", PatternType.Literal),
+            new AccessControlEntry("User:ålice", "*", AclOperation.Write, AclPermissionType.Allow));
 
-        KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
-            new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
-                "deleteAcls",
-                new[] { alpha, beta },
-                EqualityComparer<AclBindingFilter>.Default,
-                AdminFlavour.Async);
+        AclBinding copied = RoundTrip(binding);
 
-        operation.FailAll(new KafkaException("submit failed"));
-        operation.FailUncompleted();
-
-        AsyncDeleteAclsResult result = new AsyncDeleteAclsResult(operation.Tasks);
-
-        Assert.Equal(
-            "submit failed",
-            (await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline))).Message);
-        Assert.Equal(
-            "submit failed",
-            (await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline))).Message);
+        Assert.Equal(ResourceType.TransactionalId, copied.Pattern.ResourceType);
+        Assert.Equal("tx-ünï", copied.Pattern.Name);
+        Assert.Equal(PatternType.Literal, copied.Pattern.PatternType);
+        Assert.Equal("User:ålice", copied.Entry.Principal);
+        Assert.Equal("*", copied.Entry.Host);
+        Assert.Equal(AclOperation.Write, copied.Entry.Operation);
+        Assert.Equal(AclPermissionType.Allow, copied.Entry.PermissionType);
+        Assert.Equal(binding, copied);
     }
 
-    /// <summary>
-    /// The result's keys are the <em>decoded</em> filters, so a freshly built, value-equal
-    /// filter finds its own awaitable (PLAN D39).
-    /// </summary>
     [Fact]
-    public async Task Values_AreKeyedByValue_NotByReference()
+    public void CopyOutBindings_KeepsTheListOrder_AndOutlivesTheList()
     {
-        using Fixture fixture = new Fixture();
+        AclBinding[] bindings = { Binding("charlie"), Binding("alpha"), Binding("bravo") };
 
-        fixture.AddFilter("keyed-by-value");
+        IReadOnlyCollection<AclBinding> copied = CopyOutList(bindings);
 
-        AsyncDeleteAclsResult result = fixture.Walk();
-
-        AclBindingFilter lookup = Filter("keyed-by-value");
-        Assert.NotSame(lookup, Assert.Single(result.Values).Key);
-        Assert.Empty((await TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline)).Values);
+        Assert.Equal(bindings, copied);
     }
 
-    // ------------------------------------------------------------------------------------
-    // Harness.
-    // ------------------------------------------------------------------------------------
-
-    // ------------------------------------------------------------------------------------
-    // describeAcls — sub-shape 3b: ONE awaiter over an ordered collection, no error channel.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// The sub-shape-3b walk builds an ordered collection out of real borrowed
-    /// <c>kafka_common_acl_AclBinding_t</c> handles and copies every element out <b>before</b> the
-    /// root dies.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The bindings are real native ones, taken from a <c>create_acls</c> root.</b> The
-    /// mock fails <c>describeAcls</c> as a whole (<c>MockAdminClient.java:811-813</c>), so its
-    /// own result root never materialises — the callback gets the owned error instead. What
-    /// this needs is a live <c>AclBinding_t</c> to decode, and <c>create_acls</c>' result echoes
-    /// the submitted bindings back, so the element reader here is production's own
-    /// <see cref="AclRowMarshal.BindingReader"/> over production's <see cref="AclRowMarshal.ReadBinding"/>
-    /// — only the indexed accessor is substituted. That <em>describeAcls</em> wires its own
-    /// <c>get_binding</c> is <c>AdminP4ReaderWiringTests</c>' job.
-    /// </remarks>
     [Fact]
-    public async Task DescribeAclsWalk_BuildsAnOrderedCollection_CopiedOutBeforeTheRootDies()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+    public void CopyOutBindings_AnEmptyList_IsAnEmptyCollection() => Assert.Empty(CopyOutList());
 
-        AclBinding[] submitted = { Binding("alpha"), Binding("beta"), Binding("gamma") };
-        IntPtr root = SubmitAndCaptureCreateAcls(admin, submitted);
-
-        SingleAdminOperation<IReadOnlyCollection<AclBinding>> operation =
-            new SingleAdminOperation<IReadOnlyCollection<AclBinding>>("describeAcls", AdminFlavour.Async);
-        try
-        {
-            KeyedResultMarshal.CompleteList(
-                root,
-                NativeMethods.CreateAclsResultCount,
-                operation,
-                AclRowMarshal.BindingReader(NativeMethods.CreateAclsResultGetBinding));
-        }
-        finally
-        {
-            NativeMethods.CreateAclsResultDestroy(root);
-        }
-
-        // The root is gone; everything below reads owned managed state.
-        IReadOnlyCollection<AclBinding> bindings =
-            await TestTimeout.Run(() => operation.Task, s_deadline);
-
-        // Order is the ABI's own (header, kafka_admin_DescribeAclsResult_get_binding) — neither
-        // shuffled nor re-sorted.
-        Assert.Equal(submitted, bindings);
-    }
-
-    /// <summary>
-    /// A whole-call failure faults the <b>single</b> awaiter — there is no per-key error
-    /// channel for it to land in, and no <c>All()</c> to aggregate.
-    /// </summary>
     [Fact]
-    public async Task DescribeAclsTopLevelFailure_FaultsTheOneTask()
+    public void CopyOutEntity_KeepsNullApartFromEmptyAndFromAName()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        ClientQuotaEntity fromNull = RoundTrip(Entity(("user", null)));
+        ClientQuotaEntity fromEmpty = RoundTrip(Entity(("user", string.Empty)));
+        ClientQuotaEntity fromReal = RoundTrip(Entity(("user", "x")));
 
-        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
-            Filter("top-level"),
-            options: null,
-            AdminFlavour.Async,
-            (handle, resourceType, resourceName, patternType, principal, host,
-             operation, permissionType, timeoutMs, callback, userData) =>
-                callback(IntPtr.Zero, NewOwnedError(7, "describe failed"), userData)));
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
-        Assert.Equal("describe failed", failure.Message);
-        Assert.Equal(7, failure.Code);
-    }
-
-    /// <summary>
-    /// Submits <c>create_acls</c> straight at the ABI and hands back its <b>owned</b> result
-    /// root, so the walk above has real borrowed bindings to decode.
-    /// </summary>
-    private static IntPtr SubmitAndCaptureCreateAcls(NativeAdminClient admin, AclBinding[] acls)
-    {
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(acls);
-
-        // ⚠ The SYNCHRONOUS entry point, since M15/P9 CP6 moved the async one onto per-key
-        // callbacks with no result root at all.
-        IntPtr error = NativeMethods.AdminClientCreateAcls(
-            admin.Handle.DangerousGetHandle(),
-            rows.ResourceTypes,
-            rows.ResourceNames,
-            rows.PatternTypes,
-            rows.Principals,
-            rows.Hosts,
-            rows.Operations,
-            rows.PermissionTypes,
-            rows.Count,
-            -1,
-            out IntPtr result);
-
-        KafkaException? submitFailure = KafkaException.FromHandle(error);
-        if (submitFailure is not null)
-        {
-            throw submitFailure;
-        }
-
-        Assert.NotEqual(IntPtr.Zero, result);
-        return result;
-    }
-
-    /// <summary>An <b>owned</b> error for a trampoline to consume, as native would hand it.</summary>
-    private static IntPtr NewOwnedError(int code, string message)
-    {
-        using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-        IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
-    }
-
-    // ------------------------------------------------------------------------------------
-    // describeClientQuotas — shape 3: ONE awaiter over a map with a nested 2-level value.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N5 on the read path.</b> Inside <c>entry_count</c> a null entity name is Java's
-    /// <b>null map value</b> — the built-in default entity — and is distinct from both
-    /// <c>""</c> and a real name. Collapsing any pair here makes two different entities
-    /// compare equal and silently merges their quotas.
-    /// </summary>
-    [Fact]
-    public void ReadEntity_KeepsNullApartFromEmptyAndFromAName()
-    {
-        using QuotaFixture fixture = new QuotaFixture();
-
-        IntPtr nullName = fixture.AddEntity(("user", null));
-        IntPtr emptyName = fixture.AddEntity(("user", string.Empty));
-        IntPtr realName = fixture.AddEntity(("user", "x"));
-
-        ClientQuotaEntity fromNull = ClientQuotaMarshal.ReadEntity(nullName, fixture.EntityAccessors);
-        ClientQuotaEntity fromEmpty = ClientQuotaMarshal.ReadEntity(emptyName, fixture.EntityAccessors);
-        ClientQuotaEntity fromReal = ClientQuotaMarshal.ReadEntity(realName, fixture.EntityAccessors);
-
-        // The entry is PRESENT in all three; only its value differs.
         Assert.Null(Assert.Single(fromNull.Entries).Value);
         Assert.Equal(string.Empty, Assert.Single(fromEmpty.Entries).Value);
         Assert.Equal("x", Assert.Single(fromReal.Entries).Value);
-
-        // …and the three are three distinct dictionary keys (PLAN D39).
-        Assert.Equal(
-            3,
-            new HashSet<ClientQuotaEntity> { fromNull, fromEmpty, fromReal }.Count);
+        Assert.Equal(3, new HashSet<ClientQuotaEntity> { fromNull, fromEmpty, fromReal }.Count);
     }
 
-    /// <summary>A multi-entry entity restores every <c>(type, name)</c> pair.</summary>
     [Fact]
-    public void ReadEntity_RestoresEveryEntry()
+    public void CopyOutEntity_RestoresEveryEntry()
     {
-        using QuotaFixture fixture = new QuotaFixture();
+        ClientQuotaEntity entity = Entity(("client-id", "svc-ü"), ("user", null), ("ip", "10.0.0.1"));
 
-        ClientQuotaEntity entity = ClientQuotaMarshal.ReadEntity(
-            fixture.AddEntity(("client-id", "svc"), ("user", null)),
-            fixture.EntityAccessors);
+        ClientQuotaEntity copied = RoundTrip(entity);
 
-        Assert.Equal(2, entity.Entries.Count);
-        Assert.Equal("svc", entity.Entries["client-id"]);
-        Assert.Null(entity.Entries["user"]);
+        Assert.Equal(3, copied.Entries.Count);
+        Assert.Equal("svc-ü", copied.Entries["client-id"]);
+        Assert.Null(copied.Entries["user"]);
+        Assert.Equal("10.0.0.1", copied.Entries["ip"]);
+        Assert.Equal(entity, copied);
     }
 
-    /// <summary>A null entity pointer inside the count is rejected, not silently skipped.</summary>
     [Fact]
-    public void ReadEntity_NullPointer_Throws()
-    {
-        using QuotaFixture fixture = new QuotaFixture();
+    public void CopyOutEntity_AnEmptyEntity_HasNoEntries() => Assert.Empty(RoundTrip(Entity()).Entries);
 
-        KafkaException rejected = Assert.Throws<KafkaException>(
-            () => ClientQuotaMarshal.ReadEntity(IntPtr.Zero, fixture.EntityAccessors));
-        Assert.Equal(
-            "The admin result produced no client-quota entity for an index within its own count.",
-            rejected.Message);
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>Presence comes from the returned <c>bool</c>, never from a sentinel.</b> A quota
-    /// of <c>0.0</c> and a negative one are both legal values and must read back as
-    /// <b>present</b> (header, <c>kafka_admin_DescribeClientQuotasResult_get_quota_value</c>).
-    /// </summary>
     [Fact]
-    public async Task QuotaWalk_ZeroAndNegativeValues_ArePresentNotMissing()
+    public void CopyOutEntities_ZeroAndNegativeValues_AreValues()
     {
-        using QuotaFixture fixture = new QuotaFixture();
-
-        ClientQuotaEntity key = fixture.AddRow(
-            new[] { ("user", (string?)"alice") },
+        using QuotaMapFixture fixture = new QuotaMapFixture();
+        ClientQuotaEntity key = fixture.Add(
+            Entity(("user", "alice")),
             ("producer_byte_rate", 0.0),
             ("consumer_byte_rate", -1.0),
             ("request_percentage", double.MaxValue));
 
-        IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
+        IReadOnlyDictionary<string, double> quotas = ClientQuotaMarshal.CopyOutEntities(fixture.Map)[key];
 
-        IReadOnlyDictionary<string, double> quotas = entities[key];
         Assert.Equal(3, quotas.Count);
         Assert.Equal(0.0, quotas["producer_byte_rate"]);
         Assert.Equal(-1.0, quotas["consumer_byte_rate"]);
         Assert.Equal(double.MaxValue, quotas["request_percentage"]);
     }
 
-    /// <summary>
-    /// An entity with no quota values resolves to an <b>empty</b> inner map, not a fault —
-    /// "a quota type the entity has no value for is simply absent" (header,
-    /// <c>kafka_admin_DescribeClientQuotasResult_get_quota_count</c>).
-    /// </summary>
     [Fact]
-    public async Task QuotaWalk_AnEntityWithNoQuotas_IsAnEmptyMap()
+    public void CopyOutEntities_AnEntityWithNoQuotas_IsAnEmptyMap()
     {
-        using QuotaFixture fixture = new QuotaFixture();
+        using QuotaMapFixture fixture = new QuotaMapFixture();
+        ClientQuotaEntity key = fixture.Add(Entity(("ip", "10.0.0.1")));
 
-        ClientQuotaEntity key = fixture.AddRow(new[] { ("ip", (string?)"10.0.0.1") });
-
-        IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
-
-        Assert.Empty(entities[key]);
+        Assert.Empty(ClientQuotaMarshal.CopyOutEntities(fixture.Map)[key]);
     }
 
-    /// <summary>
-    /// ⚠ <b>T-N6 for the quota family.</b> An entity built fresh, equal by value to one the
-    /// result returned, finds its own quota map — reference equality would miss silently.
-    /// </summary>
     [Fact]
-    public async Task QuotaWalk_EntitiesAreKeyedByValue_NotByReference()
+    public void CopyOutEntities_EntitiesAreKeyedByValue_NotByReference()
     {
-        using QuotaFixture fixture = new QuotaFixture();
-
-        ClientQuotaEntity returned = fixture.AddRow(
-            new[] { ("user", (string?)null), ("client-id", "svc") },
-            ("producer_byte_rate", 1024.0));
+        using QuotaMapFixture fixture = new QuotaMapFixture();
+        ClientQuotaEntity added = fixture.Add(Entity(("user", null), ("client-id", "svc")), ("producer_byte_rate", 1024.0));
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
+            ClientQuotaMarshal.CopyOutEntities(fixture.Map);
 
-        ClientQuotaEntity lookup = new ClientQuotaEntity(
-            new Dictionary<string, string?> { ["user"] = null, ["client-id"] = "svc" });
-
-        Assert.NotSame(lookup, returned);
+        ClientQuotaEntity lookup = Entity(("client-id", "svc"), ("user", null));
+        Assert.NotSame(lookup, added);
         Assert.True(entities.ContainsKey(lookup));
         Assert.Equal(1024.0, entities[lookup]["producer_byte_rate"]);
     }
 
-    /// <summary>
-    /// The whole map is copied out, one inner map per entity, with the entities kept apart.
-    /// </summary>
     [Fact]
-    public async Task QuotaWalk_BuildsOneInnerMapPerEntity()
+    public void CopyOutEntities_BuildsOneInnerMapPerEntity()
     {
-        using QuotaFixture fixture = new QuotaFixture();
-
-        ClientQuotaEntity alice = fixture.AddRow(
-            new[] { ("user", (string?)"alice") }, ("producer_byte_rate", 1.0));
-        ClientQuotaEntity theDefault = fixture.AddRow(
-            new[] { ("user", (string?)null) }, ("producer_byte_rate", 2.0));
+        using QuotaMapFixture fixture = new QuotaMapFixture();
+        ClientQuotaEntity alice = fixture.Add(Entity(("user", "alice")), ("producer_byte_rate", 1.0));
+        ClientQuotaEntity theDefault = fixture.Add(Entity(("user", null)), ("producer_byte_rate", 2.0));
 
         IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
-            await TestTimeout.Run(() => fixture.Walk().Entities().Get(), s_deadline);
+            ClientQuotaMarshal.CopyOutEntities(fixture.Map);
 
         Assert.Equal(2, entities.Count);
         Assert.Equal(1.0, entities[alice]["producer_byte_rate"]);
         Assert.Equal(2.0, entities[theDefault]["producer_byte_rate"]);
     }
 
-    /// <summary>
-    /// A whole-call failure faults the <b>single</b> awaiter — there is no per-entity error
-    /// channel and no <c>All()</c>.
-    /// </summary>
     [Fact]
-    public async Task QuotaTopLevelFailure_FaultsTheOneTask()
+    public void CopyOutEntities_ANullMap_IsEmpty() => Assert.Empty(ClientQuotaMarshal.CopyOutEntities(IntPtr.Zero));
+
+    [Fact]
+    public async Task DescribeClientQuotas_OnTheCoreMock_FailsTheOneFuture()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
-            ClientQuotaFilter.All(),
-            options: null,
-            AdminFlavour.Async,
-            (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
-                callback(IntPtr.Zero, NewOwnedError(11, "describe quotas failed"), userData)));
+        AsyncDescribeClientQuotasResult result =
+            AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(ClientQuotaFilter.All(), options: null));
 
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
-        Assert.Equal("describe quotas failed", failure.Message);
-        Assert.Equal(11, failure.Code);
+        Assert.Equal(35, failure.Code);
+        Assert.Equal("Not implement yet", failure.Message);
+    }
+
+    private static ClientQuotaEntity Entity(params (string Type, string? Name)[] entries)
+    {
+        Dictionary<string, string?> map = new Dictionary<string, string?>(StringComparer.Ordinal);
+        foreach ((string type, string? name) in entries)
+        {
+            map[type] = name;
+        }
+
+        return new ClientQuotaEntity(map);
+    }
+
+    private static ClientQuotaEntity RoundTrip(ClientQuotaEntity entity)
+    {
+        IntPtr native = ClientQuotaMarshal.NewEntity(entity);
+        try
+        {
+            return ClientQuotaMarshal.CopyOutEntity(native);
+        }
+        finally
+        {
+            ClientQuotaMarshal.DestroyEntity(native);
+        }
     }
 
     /// <summary>
-    /// A synthetic <c>describe_client_quotas</c> result table, plus the accessor sets that
-    /// read it. Owns every pinned string it hands the walk.
+    /// A <c>kafka_Map_t</c> of C entities to <c>kafka_Map_t</c>s of quota names to <c>double*</c>, the shape the
+    /// <c>describeClientQuotas</c> future delivers; it owns and frees everything it built.
     /// </summary>
-    private sealed class QuotaFixture : IDisposable
+    private sealed class QuotaMapFixture : IDisposable
     {
-        private const int EntityPointerBase = 0x9000;
+        private readonly List<IntPtr> _entities = new List<IntPtr>();
+        private readonly List<IntPtr> _innerMaps = new List<IntPtr>();
+        private readonly List<IntPtr> _values = new List<IntPtr>();
+        private readonly List<Utf8Marshal.PinnedUtf8String> _pins = new List<Utf8Marshal.PinnedUtf8String>();
 
-        private readonly List<Utf8Marshal.PinnedUtf8String> _pins =
-            new List<Utf8Marshal.PinnedUtf8String>();
-
-        private readonly List<List<(IntPtr Type, IntPtr Name)>> _entities =
-            new List<List<(IntPtr, IntPtr)>>();
-
-        private readonly List<QuotaRow> _rows = new List<QuotaRow>();
-
-        /// <summary>The three flat entity accessors over this fixture's entities.</summary>
-        internal ClientQuotaMarshal.EntityAccessors EntityAccessors =>
-            new ClientQuotaMarshal.EntityAccessors(
-                pointer => EntityAt(pointer).Count,
-                (pointer, index) => EntityAt(pointer)[index].Type,
-                (pointer, index) => EntityAt(pointer)[index].Name);
-
-        /// <summary>Registers a standalone entity and returns its stand-in pointer.</summary>
-        internal IntPtr AddEntity(params (string Type, string? Name)[] entries)
+        internal QuotaMapFixture()
         {
-            _entities.Add(entries.Select(entry => (Pin(entry.Type), Pin(entry.Name))).ToList());
-            return new IntPtr(EntityPointerBase + _entities.Count - 1);
+            Map = NewMap();
         }
 
-        /// <summary>
-        /// Registers one result row — an entity plus its quota map — and returns the managed
-        /// entity the walk is expected to produce for it.
-        /// </summary>
-        internal ClientQuotaEntity AddRow(
-            (string Type, string? Name)[] entries, params (string Key, double Value)[] quotas)
-        {
-            IntPtr entity = AddEntity(entries);
-            _rows.Add(
-                new QuotaRow(
-                    entity,
-                    quotas.Select(quota => (Pin(quota.Key), quota.Value)).ToList()));
+        internal IntPtr Map { get; }
 
-            return new ClientQuotaEntity(
-                entries.ToDictionary(entry => entry.Type, entry => entry.Name, StringComparer.Ordinal));
+        internal ClientQuotaEntity Add(ClientQuotaEntity entity, params (string Key, double Value)[] quotas)
+        {
+            IntPtr native = ClientQuotaMarshal.NewEntity(entity);
+            _entities.Add(native);
+            IntPtr inner = NewMap();
+            _innerMaps.Add(inner);
+            foreach ((string key, double value) in quotas)
+            {
+                Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(key);
+                _pins.Add(pinned);
+                IntPtr boxed = Marshal.AllocHGlobal(sizeof(double));
+                _values.Add(boxed);
+                Marshal.WriteInt64(boxed, BitConverter.DoubleToInt64Bits(value));
+                Put(inner, pinned.Pointer, boxed);
+            }
+
+            Put(Map, native, inner);
+            return entity;
         }
 
-        /// <summary>Runs production's shape-3 walk over this table and wraps the outcome.</summary>
-        internal AsyncDescribeClientQuotasResult Walk()
-        {
-            SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> operation =
-                new SingleAdminOperation<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
-                    "describeClientQuotas", AdminFlavour.Async);
-
-            ClientQuotaMarshal.EntityAccessors accessors = EntityAccessors;
-
-            KeyedResultMarshal.CompleteAggregate(
-                s_root,
-                root =>
-                {
-                    Assert.Equal(s_root, root);
-                    return _rows.Count;
-                },
-                operation,
-                (root, index) =>
-                {
-                    Assert.Equal(s_root, root);
-                    return ClientQuotaMarshal.ReadEntity(_rows[index].Entity, accessors);
-                },
-                ClientQuotaMarshal.QuotaMapReader(
-                    (root, index) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].Quotas.Count;
-                    },
-                    (root, index, quotaIndex) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].Quotas[quotaIndex].Key;
-                    },
-                    (IntPtr root, int index, int quotaIndex, out double value) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        if (index >= _rows.Count || quotaIndex >= _rows[index].Quotas.Count)
-                        {
-                            value = 0;
-                            return false;
-                        }
-
-                        value = _rows[index].Quotas[quotaIndex].Value;
-                        return true;
-                    }),
-                EqualityComparer<ClientQuotaEntity>.Default);
-
-            return AsyncDescribeClientQuotasResult.From(operation);
-        }
-
-        /// <summary>Releases every pin.</summary>
         public void Dispose()
         {
+            Destroy(Map);
+            foreach (IntPtr inner in _innerMaps)
+            {
+                Destroy(inner);
+            }
+
+            foreach (IntPtr entity in _entities)
+            {
+                ClientQuotaMarshal.DestroyEntity(entity);
+            }
+
+            foreach (IntPtr value in _values)
+            {
+                Marshal.FreeHGlobal(value);
+            }
+
             foreach (Utf8Marshal.PinnedUtf8String pin in _pins)
             {
                 pin.Dispose();
             }
-
-            _pins.Clear();
         }
 
-        private List<(IntPtr Type, IntPtr Name)> EntityAt(IntPtr pointer) =>
-            _entities[(int)pointer - EntityPointerBase];
-
-        private IntPtr Pin(string? value)
+        private static IntPtr NewMap()
         {
-            if (value is null)
-            {
-                return IntPtr.Zero;
-            }
-
-            Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(value);
-            _pins.Add(pinned);
-            return pinned.Pointer;
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = NativeMethods.MapNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return map;
         }
 
-        /// <summary>One result row: an entity stand-in plus its pinned quota entries.</summary>
-        private sealed class QuotaRow
+        private static void Put(IntPtr map, IntPtr key, IntPtr value)
         {
-            internal QuotaRow(IntPtr entity, List<(IntPtr Key, double Value)> quotas)
-            {
-                Entity = entity;
-                Quotas = quotas;
-            }
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MapPut(map, key, value, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
 
-            internal IntPtr Entity { get; }
-
-            internal List<(IntPtr Key, double Value)> Quotas { get; }
+        private static void Destroy(IntPtr map)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MapDestroy(map, ref outErr);
+            Assert.Equal(IntPtr.Zero, outErr);
         }
     }
 
-    private static AclBindingFilter Filter(string name) =>
+    private static TheoryData<T> Values<T>()
+        where T : struct, Enum
+    {
+        TheoryData<T> data = new TheoryData<T>();
+        foreach (T value in Enum.GetValues(typeof(T)).Cast<T>())
+        {
+            data.Add(value);
+        }
+
+        return data;
+    }
+
+    private static AclBindingFilter Filter(
+        ResourceType resourceType, PatternType patternType, AclOperation operation, AclPermissionType permissionType) =>
         new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntryFilter("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
+            new ResourcePatternFilter(resourceType, "name", patternType),
+            new AccessControlEntryFilter("User:alice", "*", operation, permissionType));
 
     private static AclBinding Binding(string name) =>
         new AclBinding(
             new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
             new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
 
-    /// <summary>
-    /// The four entries <see cref="Fixture.AddMixedEntries"/> registers, in order: a deleted
-    /// ACL, a failed delete carrying <b>both</b> halves, an error with no binding, and a
-    /// second deleted ACL.
-    /// </summary>
-    private static void AssertMixedEntries(DeleteAclsResult.FilterResults results)
+    private static AclBindingFilter RoundTrip(AclBindingFilter filter)
     {
-        Assert.Equal(4, results.Values.Count);
-
-        Assert.Equal(Binding("deleted-a"), results.Values[0].Binding);
-        Assert.Null(results.Values[0].Exception);
-
-        // ⚠ THE G4-1 row: the failed delete still names the ACL it failed on.
-        Assert.Equal(Binding("failed"), results.Values[1].Binding);
-        Assert.Equal("could not delete", results.Values[1].Exception!.Message);
-        Assert.Equal(42, results.Values[1].Exception!.Code);
-
-        // No binding, an error: Binding stays null and the copy-out is never handed the null.
-        Assert.Null(results.Values[2].Binding);
-        Assert.Equal("undecodable", results.Values[2].Exception!.Message);
-        Assert.Equal(58, results.Values[2].Exception!.Code);
-
-        // Order is the ABI's own, so an implementation collecting errors separately fails here.
-        Assert.Equal(Binding("deleted-b"), results.Values[3].Binding);
-        Assert.Null(results.Values[3].Exception);
+        IntPtr native = AclMarshal.NewFilter(filter);
+        try
+        {
+            return AclMarshal.CopyOutFilter(native);
+        }
+        finally
+        {
+            AclMarshal.DestroyFilter(native);
+        }
     }
 
-    /// <summary>
-    /// A synthetic <c>delete_acls</c> result table, plus the accessor sets that read it.
-    /// Owns every pinned string and every <c>KafkaError</c> handle it hands the walk.
-    /// </summary>
-    private sealed class Fixture : IDisposable
+    private static AclBinding RoundTrip(AclBinding binding)
     {
-        private const int FilterPointerBase = 0x7000;
-        private const int BindingPointerBase = 0x8000;
-
-        private readonly List<Utf8Marshal.PinnedUtf8String> _pins =
-            new List<Utf8Marshal.PinnedUtf8String>();
-
-        private readonly List<IntPtr> _errors = new List<IntPtr>();
-        private readonly List<Row> _rows = new List<Row>();
-        private readonly List<AclBinding> _bindings = new List<AclBinding>();
-
-        /// <summary>The seven flat filter accessors over this fixture's rows.</summary>
-        internal AclRowMarshal.FilterAccessors FilterAccessors =>
-            new AclRowMarshal.FilterAccessors(
-                pointer => (int)RowAt(pointer).ResourceType,
-                pointer => RowAt(pointer).Name,
-                pointer => (int)RowAt(pointer).PatternType,
-                pointer => RowAt(pointer).Principal,
-                pointer => RowAt(pointer).Host,
-                pointer => (int)RowAt(pointer).Operation,
-                pointer => (int)RowAt(pointer).PermissionType);
-
-        /// <summary>Registers a filter row whose decoded key is <see cref="Filter"/>.</summary>
-        internal AclBindingFilter AddFilter(string name)
+        IntPtr native = AclMarshal.NewBinding(binding);
+        try
         {
-            AddFilterPointer(
-                ResourceType.Topic, name, PatternType.Literal,
-                "User:alice", "*", AclOperation.Read, AclPermissionType.Allow);
-            return Filter(name);
+            return AclMarshal.CopyOutBinding(native);
         }
-
-        /// <summary>Registers a filter row column by column and returns its stand-in pointer.</summary>
-        internal IntPtr AddFilterPointer(
-            ResourceType resourceType,
-            string? name,
-            PatternType patternType,
-            string? principal,
-            string? host,
-            AclOperation operation,
-            AclPermissionType permissionType)
+        finally
         {
-            _rows.Add(
-                new Row(
-                    resourceType,
-                    Pin(name),
-                    patternType,
-                    Pin(principal),
-                    Pin(host),
-                    operation,
-                    permissionType));
-
-            return new IntPtr(FilterPointerBase + _rows.Count - 1);
+            AclMarshal.DestroyBinding(native);
         }
+    }
 
-        /// <summary>Faults the whole filter — the <c>get_error(i)</c> channel.</summary>
-        internal void FailFilter(AclBindingFilter key, int code, string message) =>
-            RowFor(key).FilterError = NewError(code, message);
-
-        /// <summary>Adds a deleted binding to a filter — the <c>get_binding(i, j)</c> slot.</summary>
-        internal void AddBinding(AclBindingFilter key, AclBinding binding)
+    private static IReadOnlyCollection<AclBinding> CopyOutList(params AclBinding[] bindings)
+    {
+        IntPtr[] natives = new IntPtr[bindings.Length];
+        IntPtr list = IntPtr.Zero;
+        IntPtr outErr = IntPtr.Zero;
+        try
         {
-            _bindings.Add(binding);
-            RowFor(key).Entries.Add(
-                new Entry(new IntPtr(BindingPointerBase + _bindings.Count - 1), IntPtr.Zero));
-        }
-
-        /// <summary>
-        /// Adds a failed deletion to a filter — the <c>get_result_error(i, j)</c> slot, which
-        /// is a <b>value</b>, not a fault.
-        /// </summary>
-        internal void AddInnerError(AclBindingFilter key, int code, string message) =>
-            RowFor(key).Entries.Add(new Entry(IntPtr.Zero, NewError(code, message)));
-
-        /// <summary>
-        /// Adds a matched ACL whose delete failed — <b>both</b> slots set, as Java's
-        /// <c>FilterResult(aclBinding, exception)</c> and the core store it (G4-1).
-        /// </summary>
-        internal void AddBindingWithInnerError(
-            AclBindingFilter key, AclBinding binding, int code, string message)
-        {
-            _bindings.Add(binding);
-            RowFor(key).Entries.Add(
-                new Entry(new IntPtr(BindingPointerBase + _bindings.Count - 1), NewError(code, message)));
-        }
-
-        /// <summary>Adds an entry with <b>neither</b> slot set — a malformed row.</summary>
-        internal void AddEmptyEntry(AclBindingFilter key) =>
-            RowFor(key).Entries.Add(new Entry(IntPtr.Zero, IntPtr.Zero));
-
-        /// <summary>The four entries <see cref="AssertMixedEntries"/> expects, in order.</summary>
-        internal void AddMixedEntries(AclBindingFilter key)
-        {
-            AddBinding(key, Binding("deleted-a"));
-            AddBindingWithInnerError(key, Binding("failed"), 42, "could not delete");
-            AddInnerError(key, 58, "undecodable");
-            AddBinding(key, Binding("deleted-b"));
-        }
-
-        /// <summary>
-        /// Runs production's <b>per-key</b> reader over one filter's entries, as the per-key
-        /// trampoline would over the owned value handle it is handed.
-        /// </summary>
-        internal DeleteAclsResult.FilterResults ReadPerKey(AclBindingFilter key)
-        {
-            Row row = RowFor(key);
-
-            Func<IntPtr, DeleteAclsResult.FilterResults> read =
-                DeleteAclsResultMarshal.FilterResultsPerKeyReader(
-                    value =>
-                    {
-                        Assert.Equal(s_value, value);
-                        return row.Entries.Count;
-                    },
-                    (value, index) =>
-                    {
-                        Assert.Equal(s_value, value);
-                        return row.Entries[index].Binding;
-                    },
-                    (value, index) =>
-                    {
-                        Assert.Equal(s_value, value);
-                        return row.Entries[index].Error;
-                    },
-                    ReadBinding);
-
-            return read(s_value);
-        }
-
-        /// <summary>Runs production's walk over this table and wraps the outcome.</summary>
-        internal AsyncDeleteAclsResult Walk()
-        {
-            List<AclBindingFilter> keys = Enumerable
-                .Range(0, _rows.Count)
-                .Select(index => AclRowMarshal.ReadFilter(
-                    new IntPtr(FilterPointerBase + index), FilterAccessors))
-                .ToList();
-
-            KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults> operation =
-                new KeyedAdminOperation<AclBindingFilter, DeleteAclsResult.FilterResults>(
-                    "deleteAcls", keys, EqualityComparer<AclBindingFilter>.Default, AdminFlavour.Async);
-
-            Func<IntPtr, int, DeleteAclsResult.FilterResults> readValue =
-                DeleteAclsResultMarshal.FilterResultsReader(
-                    (root, index) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].Entries.Count;
-                    },
-                    (root, index, resultIndex) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].Entries[resultIndex].Binding;
-                    },
-                    (root, index, resultIndex) =>
-                    {
-                        Assert.Equal(s_root, root);
-                        return _rows[index].Entries[resultIndex].Error;
-                    },
-                    ReadBinding);
-
-            SyntheticPerKeyWalk.Run(
-                operation,
-                _rows.Count,
-                index => AclRowMarshal.ReadFilter(
-                    new IntPtr(FilterPointerBase + index), FilterAccessors),
-                index => _rows[index].FilterError,
-                index => readValue(s_root, index));
-
-            // The trampoline's rescue, mirrored: an unnamed key would hang forever.
-            operation.FailUncompleted();
-            return new AsyncDeleteAclsResult(operation.Tasks);
-        }
-
-        /// <summary>
-        /// Releases every pin and destroys every error handle. ⚠ A walk that destroyed a
-        /// borrowed error would make this a double free, aborting the process.
-        /// </summary>
-        public void Dispose()
-        {
-            foreach (Utf8Marshal.PinnedUtf8String pin in _pins)
+            for (int i = 0; i < natives.Length; i++)
             {
-                pin.Dispose();
+                natives[i] = AclMarshal.NewBinding(bindings[i]);
             }
 
-            foreach (IntPtr error in _errors)
+            list = NativeMethods.ListNew(ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            foreach (IntPtr native in natives)
             {
-                NativeMethods.ErrorDestroy(error);
+                NativeMethods.ListAdd(list, native, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
-            _pins.Clear();
-            _errors.Clear();
+            return AclMarshal.CopyOutBindings(list);
         }
-
-        private IntPtr Pin(string? value)
+        finally
         {
-            if (value is null)
+            NativeMethods.ListDestroy(list, ref outErr);
+            Assert.Equal(IntPtr.Zero, outErr);
+            foreach (IntPtr native in natives)
             {
-                return IntPtr.Zero;
+                AclMarshal.DestroyBinding(native);
             }
-
-            Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(value);
-            _pins.Add(pinned);
-            return pinned.Pointer;
-        }
-
-        private IntPtr NewError(int code, string message)
-        {
-            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(message);
-            IntPtr error = NativeMethods.KafkaErrorNew(code, pinned.Pointer);
-            Assert.NotEqual(IntPtr.Zero, error);
-            _errors.Add(error);
-            return error;
-        }
-
-        private Row RowAt(IntPtr pointer) => _rows[(int)pointer - FilterPointerBase];
-
-        /// <summary>
-        /// The <c>readBinding</c> stand-in: resolves a stand-in binding pointer. ⚠ A null
-        /// pointer fails with an exception no assertion here tolerates, so a reader handing
-        /// the copy-out a null (production's would throw a <see cref="KafkaException"/>) cannot
-        /// pass as a malformed-row rejection.
-        /// </summary>
-        private AclBinding ReadBinding(IntPtr pointer) =>
-            pointer == IntPtr.Zero
-                ? throw new Xunit.Sdk.XunitException("readBinding was handed a null binding pointer")
-                : _bindings[(int)pointer - BindingPointerBase];
-
-        private Row RowFor(AclBindingFilter key)
-        {
-            for (int index = 0; index < _rows.Count; index++)
-            {
-                if (AclRowMarshal.ReadFilter(
-                        new IntPtr(FilterPointerBase + index), FilterAccessors).Equals(key))
-                {
-                    return _rows[index];
-                }
-            }
-
-            throw new Xunit.Sdk.XunitException("the fixture holds no row for that filter");
-        }
-
-        /// <summary>One outer row: the seven decoded columns, its fault, and its entries.</summary>
-        private sealed class Row
-        {
-            internal Row(
-                ResourceType resourceType,
-                IntPtr name,
-                PatternType patternType,
-                IntPtr principal,
-                IntPtr host,
-                AclOperation operation,
-                AclPermissionType permissionType)
-            {
-                ResourceType = resourceType;
-                Name = name;
-                PatternType = patternType;
-                Principal = principal;
-                Host = host;
-                Operation = operation;
-                PermissionType = permissionType;
-            }
-
-            internal ResourceType ResourceType { get; }
-
-            internal IntPtr Name { get; }
-
-            internal PatternType PatternType { get; }
-
-            internal IntPtr Principal { get; }
-
-            internal IntPtr Host { get; }
-
-            internal AclOperation Operation { get; }
-
-            internal AclPermissionType PermissionType { get; }
-
-            internal IntPtr FilterError { get; set; }
-
-            internal List<Entry> Entries { get; } = new List<Entry>();
-        }
-
-        /// <summary>
-        /// One inner entry: a binding pointer and a borrowed error handle, each of which may be
-        /// null — both set is a failed delete (G4-1), both null a malformed row.
-        /// </summary>
-        private sealed class Entry
-        {
-            internal Entry(IntPtr binding, IntPtr error)
-            {
-                Binding = binding;
-                Error = error;
-            }
-
-            internal IntPtr Binding { get; }
-
-            internal IntPtr Error { get; }
         }
     }
 }

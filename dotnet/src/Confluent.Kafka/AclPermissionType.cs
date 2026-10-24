@@ -15,9 +15,8 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// Whether an ACL grants or denies — the .NET realization of Java's
-/// <c>org.apache.kafka.common.acl.AclPermissionType</c>. Each member's value is the Kafka
-/// <b>wire</b> code (Java's <c>code()</c>), not a C#-assigned ordinal.
+/// Whether an ACL grants or denies — Java's <c>org.apache.kafka.common.acl.AclPermissionType</c>.
+/// Each member's value is the Kafka wire code (Java's <c>code()</c>), not an ordinal.
 /// </summary>
 public enum AclPermissionType
 {

@@ -22,16 +22,15 @@ namespace Confluent.Kafka;
 /// <c>org.apache.kafka.common.security.auth.KafkaPrincipal</c>.
 /// </summary>
 /// <remarks>
-/// Java's <c>tokenAuthenticated</c> field is mutable (<c>:92</c>); this type is immutable — a
-/// binding-layer tightening (<c>definition-of-done.md</c> §7). Java's
-/// <c>SecurityUtils.parseKafkaPrincipal</c> string parser is not bound.
+/// Java's <c>tokenAuthenticated</c> field is mutable; this type is immutable (a recorded
+/// deviation). Java's <c>SecurityUtils.parseKafkaPrincipal</c> string parser is not bound.
 /// </remarks>
 public sealed class KafkaPrincipal
 {
-    /// <summary>The <c>"User"</c> principal type — Java's <c>USER_TYPE</c> (<c>:44</c>).</summary>
+    /// <summary>The <c>"User"</c> principal type — Java's <c>USER_TYPE</c>.</summary>
     public const string UserType = "User";
 
-    /// <summary>Creates a principal that was not token-authenticated — Java's <c>:51</c>.</summary>
+    /// <summary>Creates a principal that was not token-authenticated — Java's two-argument constructor.</summary>
     /// <param name="principalType">The principal type, e.g. <see cref="UserType"/>.</param>
     /// <param name="name">The principal name.</param>
     /// <exception cref="ArgumentNullException">Either argument is null.</exception>
@@ -40,7 +39,7 @@ public sealed class KafkaPrincipal
     {
     }
 
-    /// <summary>Creates a principal — Java's <c>:55</c>.</summary>
+    /// <summary>Creates a principal — Java's three-argument constructor.</summary>
     /// <param name="principalType">The principal type, e.g. <see cref="UserType"/>.</param>
     /// <param name="name">The principal name.</param>
     /// <param name="tokenAuthenticated">Whether the principal was authenticated by a delegation token.</param>
@@ -55,24 +54,24 @@ public sealed class KafkaPrincipal
         TokenAuthenticated = tokenAuthenticated;
     }
 
-    /// <summary>The anonymous principal — Java's <c>ANONYMOUS</c> (<c>:45</c>).</summary>
+    /// <summary>The anonymous principal — Java's <c>ANONYMOUS</c>.</summary>
     public static KafkaPrincipal Anonymous { get; } = new KafkaPrincipal(UserType, "ANONYMOUS");
 
-    /// <summary>The principal type — Java's <c>getPrincipalType()</c> (<c>:88</c>).</summary>
+    /// <summary>The principal type — Java's <c>getPrincipalType()</c>.</summary>
     public string PrincipalType { get; }
 
-    /// <summary>The principal name — Java's <c>getName()</c> (<c>:84</c>).</summary>
+    /// <summary>The principal name — Java's <c>getName()</c>.</summary>
     public string Name { get; }
 
     /// <summary>
     /// Whether the principal was authenticated by a delegation token — Java's
-    /// <c>tokenAuthenticated()</c> (<c>:96</c>).
+    /// <c>tokenAuthenticated()</c>.
     /// </summary>
     public bool TokenAuthenticated { get; }
 
     /// <summary>
     /// Value equality over <see cref="PrincipalType"/> and <see cref="Name"/> only — Java's
-    /// <c>equals</c> (<c>:67</c>), which deliberately excludes <c>tokenAuthenticated</c>.
+    /// <c>equals</c>, which leaves out <c>tokenAuthenticated</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two name the same principal.</returns>
@@ -81,7 +80,7 @@ public sealed class KafkaPrincipal
         && string.Equals(PrincipalType, other.PrincipalType, StringComparison.Ordinal)
         && string.Equals(Name, other.Name, StringComparison.Ordinal);
 
-    /// <summary>The hash of the same two fields — Java's <c>hashCode</c> (<c>:77</c>).</summary>
+    /// <summary>The hash of the same two fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -92,7 +91,7 @@ public sealed class KafkaPrincipal
         }
     }
 
-    /// <summary><c>"{type}:{name}"</c> — Java's <c>toString()</c> (<c>:62</c>).</summary>
+    /// <summary><c>"{type}:{name}"</c> — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(CultureInfo.InvariantCulture, "{0}:{1}", PrincipalType, Name);

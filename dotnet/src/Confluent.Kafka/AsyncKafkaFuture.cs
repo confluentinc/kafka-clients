@@ -39,19 +39,9 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
 {
     private readonly KafkaFutureImpl<T>? _impl;
 
-    private readonly Task<T>? _delivery;
-
     internal AsyncKafkaFuture(KafkaFutureImpl<T> impl)
     {
         _impl = impl;
-        _delivery = null;
-    }
-
-    // Must not throw: the producer builds it after the record is appended.
-    internal AsyncKafkaFuture(Task<T> delivery)
-    {
-        _impl = null;
-        _delivery = delivery;
     }
 
     /// <summary>
@@ -62,8 +52,7 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// <summary>
     /// Java's <c>thenApply</c>: a future completed with <paramref name="function"/> applied to this future's value, or
     /// failed with this future's failure or the function's exception. The function runs on the thread that completes
-    /// this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
+    /// this future, or inside this call if this future already holds its outcome.
     /// </summary>
     public AsyncKafkaFuture<TR> ThenApply<TR>(KafkaFuture.BaseFunction<T, TR> function)
     {
@@ -72,15 +61,14 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
             throw new ArgumentNullException(nameof(function));
         }
 
-        return new AsyncKafkaFuture<TR>(Impl(nameof(ThenApply)).ThenApply<TR>(function.Invoke));
+        return new AsyncKafkaFuture<TR>(Impl.ThenApply<TR>(function.Invoke));
     }
 
     /// <summary>
     /// Java's <c>whenComplete</c>: a future completed as this one is, once <paramref name="action"/> has run with the
     /// value (<c>default</c> when this future failed) and the failure (<see langword="null"/> when it succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
-    /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
+    /// the thread that completes this future, or inside this call if this future already holds its outcome.
     /// </summary>
     public AsyncKafkaFuture<T> WhenComplete(KafkaFuture.BiConsumer<T?, Exception?> action)
     {
@@ -89,54 +77,50 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
             throw new ArgumentNullException(nameof(action));
         }
 
-        return new AsyncKafkaFuture<T>(Impl(nameof(WhenComplete)).WhenComplete(action.Invoke));
+        return new AsyncKafkaFuture<T>(Impl.WhenComplete(action.Invoke));
     }
 
     /// <summary>
     /// Java's <c>cancel</c>: cancels this future if it is not yet done, and the futures that depend on it, never the
     /// operation behind it, and answers whether it is cancelled, by this call or by an earlier cancellation of its own.
-    /// On a future returned by <c>IAsyncProducer.Send</c> or an <c>IAsyncAdmin</c> result it answers
-    /// <see langword="false"/> and changes nothing.
+    /// On a future returned by <c>IAsyncProducer.Send</c> it answers <see langword="false"/> and changes nothing.
     /// </summary>
-    public bool Cancel(bool mayInterruptIfRunning) => Impl().Cancel(mayInterruptIfRunning);
+    public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
 
     /// <summary>
     /// The result's task, the same one on every call, to await as Java's <c>future.get()</c>: it resolves with the
     /// value, faults with the operation's exception, or is canceled when the future is cancelled. Never blocks.
     /// </summary>
-    public Task<T> Get() =>
-        _impl is not null ? _impl.GetAsync() : _delivery ?? throw new InvalidOperationException(AsyncKafkaFuture.DefaultValueMessage);
+    public Task<T> Get() => Impl.GetAsync();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with
     /// <see cref="TimeoutException"/> when the future has not completed within <paramref name="timeout"/>. A zero or
     /// negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task<T> Get(TimeSpan timeout) =>
-        _impl is not null ? _impl.GetAsync(timeout) : KafkaFutureImpl<T>.WaitFor(Delivery, timeout);
+    public Task<T> Get(TimeSpan timeout) => Impl.GetAsync(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task<T> Get(CancellationToken cancellationToken) =>
-        _impl is not null ? _impl.GetAsync(cancellationToken) : KafkaFutureImpl<T>.WaitFor(Delivery, cancellationToken);
+    public Task<T> Get(CancellationToken cancellationToken) => Impl.GetAsync(cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture{T}.GetNow"/>
-    public T GetNow(T valueIfAbsent) => Impl().GetNow(valueIfAbsent);
+    public T GetNow(T valueIfAbsent) => Impl.GetNow(valueIfAbsent);
 
     /// <inheritdoc cref="KafkaFuture{T}.IsCancelled"/>
-    public bool IsCancelled => Impl().IsCancelled;
+    public bool IsCancelled => Impl.IsCancelled;
 
     /// <inheritdoc cref="KafkaFuture{T}.IsCompletedExceptionally"/>
-    public bool IsCompletedExceptionally => Impl().IsCompletedExceptionally;
+    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
 
     /// <inheritdoc cref="KafkaFuture{T}.IsDone"/>
-    public bool IsDone => _impl?.IsDone ?? Delivery.IsCompleted;
+    public bool IsDone => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>
-        _impl is null && _delivery is null ? base.ToString() ?? string.Empty : Impl().ToString();
+        _impl is null ? base.ToString() ?? string.Empty : _impl.ToString();
 
     /// <summary>
     /// This future without its value, as Java's <c>KafkaFuture&lt;?&gt;</c>: the same future, so it completes when this
@@ -155,52 +139,19 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     public static bool operator !=(AsyncKafkaFuture<T> left, AsyncKafkaFuture<T> right) => !left.Equals(right);
 
     /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture<T> other) =>
-        ReferenceEquals(_impl, other._impl) && ReferenceEquals(_delivery, other._delivery);
+    public bool Equals(AsyncKafkaFuture<T> other) => ReferenceEquals(_impl, other._impl);
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) =>
         obj is AsyncKafkaFuture<T> other ? Equals(other) : Erase().Equals(obj);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => ((object?)_impl ?? _delivery)?.GetHashCode() ?? 0;
+    public override int GetHashCode() => _impl?.GetHashCode() ?? 0;
 
-    internal AsyncKafkaFuture Erase() =>
-        _impl is not null ? new AsyncKafkaFuture(_impl) : _delivery is not null ? new AsyncKafkaFuture(_delivery) : default;
+    internal AsyncKafkaFuture Erase() => _impl is not null ? new AsyncKafkaFuture(_impl) : default;
 
-    private Task<T> Delivery => _delivery ?? throw new InvalidOperationException(AsyncKafkaFuture.DefaultValueMessage);
-
-    // A pending task would run a dependant on a thread-pool thread, where no combinator may run: a member that builds
-    // one throws NotSupportedException, and every other read takes a snapshot of the task that cannot be cancelled.
-    private KafkaFutureImpl<T> Impl(string? member = null)
-    {
-        if (_impl is not null)
-        {
-            return _impl;
-        }
-
-        Task<T> delivery = Delivery;
-        bool done = delivery.IsCompleted;
-        if (!done && member is not null)
-        {
-            throw new NotSupportedException(AsyncKafkaFuture.UnsupportedMessage(member));
-        }
-
-        var snapshot = new KafkaFutureImpl<T>(mayCancel: false);
-        if (done)
-        {
-            try
-            {
-                snapshot.Complete(delivery.GetAwaiter().GetResult());
-            }
-            catch (Exception error)
-            {
-                snapshot.CompleteWithError(error);
-            }
-        }
-
-        return snapshot;
-    }
+    internal KafkaFutureImpl<T> Impl =>
+        _impl ?? throw new InvalidOperationException(AsyncKafkaFuture.DefaultValueMessage);
 }
 
 /// <summary>
@@ -220,18 +171,9 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 
     private readonly KafkaFutureImpl? _impl;
 
-    private readonly Task? _task;
-
     internal AsyncKafkaFuture(KafkaFutureImpl impl)
     {
         _impl = impl;
-        _task = null;
-    }
-
-    internal AsyncKafkaFuture(Task task)
-    {
-        _impl = null;
-        _task = task;
     }
 
     /// <inheritdoc cref="KafkaFuture.CompletedFuture{TU}"/>
@@ -241,8 +183,6 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// <summary>
     /// Java's <c>allOf</c>: a future completed once every one of <paramref name="futures"/>, of any value types, has
     /// completed, failed with one of their failures when any of them failed; with no futures it is completed at once.
-    /// Throws <see cref="NotSupportedException"/> when one of them is pending and was returned by an
-    /// <c>IAsyncAdmin</c> result.
     /// </summary>
     public static AsyncKafkaFuture AllOf(params AsyncKafkaFuture[] futures)
     {
@@ -254,16 +194,14 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
         var impls = new KafkaFutureImpl[futures.Length];
         for (int i = 0; i < futures.Length; i++)
         {
-            impls[i] = futures[i].Impl(nameof(AllOf));
+            impls[i] = futures[i].Impl;
         }
 
         return new AsyncKafkaFuture(KafkaFutureImpl.AllOf(impls));
     }
 
     /// <summary>
-    /// Java's <c>allOf</c> for futures of one value type, such as an array of them. Throws
-    /// <see cref="NotSupportedException"/> when one of them is pending and was returned by an <c>IAsyncAdmin</c>
-    /// result.
+    /// Java's <c>allOf</c> for futures of one value type, such as an array of them.
     /// </summary>
     public static AsyncKafkaFuture AllOf<T>(params AsyncKafkaFuture<T>[] futures)
     {
@@ -290,8 +228,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// Java's <c>thenApply</c> on a future of no value: a future completed with what <paramref name="function"/>
     /// returns once this future has succeeded, or failed with this future's failure or the function's exception. The
     /// function runs on the thread that completes this future, or inside this call if this future already holds its
-    /// outcome. Throws <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c>
-    /// result.
+    /// outcome.
     /// </summary>
     public AsyncKafkaFuture<TR> ThenApply<TR>(Func<TR> function)
     {
@@ -300,15 +237,14 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
             throw new ArgumentNullException(nameof(function));
         }
 
-        return new AsyncKafkaFuture<TR>(Impl(nameof(ThenApply)).ThenApply(function));
+        return new AsyncKafkaFuture<TR>(Impl.ThenApply(function));
     }
 
     /// <summary>
     /// Java's <c>whenComplete</c> on a future of no value: a future completed as this one is, once
     /// <paramref name="action"/> has run with the failure (<see langword="null"/> when this future succeeded); when
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
-    /// the thread that completes this future, or inside this call if this future already holds its outcome. Throws
-    /// <see cref="NotSupportedException"/> on a pending future returned by an <c>IAsyncAdmin</c> result.
+    /// the thread that completes this future, or inside this call if this future already holds its outcome.
     /// </summary>
     public AsyncKafkaFuture WhenComplete(Action<Exception?> action)
     {
@@ -317,53 +253,51 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
             throw new ArgumentNullException(nameof(action));
         }
 
-        return new AsyncKafkaFuture(Impl(nameof(WhenComplete)).WhenComplete(action));
+        return new AsyncKafkaFuture(Impl.WhenComplete(action));
     }
 
     /// <summary>
     /// Java's <c>cancel</c>: cancels this future if it is not yet done, and the futures that depend on it, never the
     /// operation behind it, and answers whether it is cancelled, by this call or by an earlier cancellation of its own.
-    /// On a future that <c>IAsyncProducer.Send</c> or an <c>IAsyncAdmin</c> result returned, or one converted from it,
-    /// it answers <see langword="false"/> and changes nothing.
+    /// On a future that <c>IAsyncProducer.Send</c> returned, or one converted from it, it answers
+    /// <see langword="false"/> and changes nothing.
     /// </summary>
-    public bool Cancel(bool mayInterruptIfRunning) => Impl().Cancel(mayInterruptIfRunning);
+    public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
 
     /// <summary>
     /// The operation's task, the same one on every call, to await as Java's <c>future.get()</c>: it completes when the
     /// operation succeeds, faults with its exception, or is canceled when the future is cancelled. Never blocks.
     /// </summary>
-    public Task Get() => _impl is not null ? _impl.WaitAsync() : _task ?? throw new InvalidOperationException(DefaultValueMessage);
+    public Task Get() => Impl.WaitAsync();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with
     /// <see cref="TimeoutException"/> when the future has not completed within <paramref name="timeout"/>. A zero or
     /// negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/> waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task Get(TimeSpan timeout) =>
-        _impl is not null ? _impl.WaitAsync(timeout) : KafkaFutureImpl.WaitFor(Operation, timeout);
+    public Task Get(TimeSpan timeout) => Impl.WaitAsync(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task Get(CancellationToken cancellationToken) =>
-        _impl is not null ? _impl.WaitAsync(cancellationToken) : KafkaFutureImpl.WaitFor(Operation, cancellationToken);
+    public Task Get(CancellationToken cancellationToken) => Impl.WaitAsync(cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture.GetNow"/>
-    public void GetNow() => Impl().GetNow();
+    public void GetNow() => Impl.GetNow();
 
     /// <inheritdoc cref="KafkaFuture.IsCancelled"/>
-    public bool IsCancelled => Impl().IsCancelled;
+    public bool IsCancelled => Impl.IsCancelled;
 
     /// <inheritdoc cref="KafkaFuture.IsCompletedExceptionally"/>
-    public bool IsCompletedExceptionally => Impl().IsCompletedExceptionally;
+    public bool IsCompletedExceptionally => Impl.IsCompletedExceptionally;
 
     /// <inheritdoc cref="KafkaFuture.IsDone"/>
-    public bool IsDone => _impl?.IsDone ?? Operation.IsCompleted;
+    public bool IsDone => Impl.IsDone;
 
     /// <inheritdoc/>
     public override string ToString() =>
-        _impl is null && _task is null ? base.ToString() ?? string.Empty : Impl().ToString() ?? string.Empty;
+        _impl is null ? base.ToString() ?? string.Empty : _impl.ToString() ?? string.Empty;
 
     /// <summary>
     /// Determines whether two <see cref="AsyncKafkaFuture"/> values are equal — they are copies of the same future.
@@ -376,8 +310,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     public static bool operator !=(AsyncKafkaFuture left, AsyncKafkaFuture right) => !left.Equals(right);
 
     /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture other) =>
-        ReferenceEquals(_impl, other._impl) && ReferenceEquals(_task, other._task);
+    public bool Equals(AsyncKafkaFuture other) => ReferenceEquals(_impl, other._impl);
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) =>
@@ -387,41 +320,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
                 && type.GetGenericTypeDefinition() == typeof(AsyncKafkaFuture<>) && obj.Equals(this);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => ((object?)_impl ?? _task)?.GetHashCode() ?? 0;
+    public override int GetHashCode() => _impl?.GetHashCode() ?? 0;
 
-    internal static string UnsupportedMessage(string member) =>
-        "AsyncKafkaFuture." + member + " is not supported on a pending future returned by an IAsyncAdmin result.";
-
-    private Task Operation => _task ?? throw new InvalidOperationException(DefaultValueMessage);
-
-    private KafkaFutureImpl Impl(string? member = null)
-    {
-        if (_impl is not null)
-        {
-            return _impl;
-        }
-
-        Task task = Operation;
-        bool done = task.IsCompleted;
-        if (!done && member is not null)
-        {
-            throw new NotSupportedException(UnsupportedMessage(member));
-        }
-
-        var snapshot = new KafkaFutureImpl<object?>(mayCancel: false);
-        if (done)
-        {
-            try
-            {
-                task.GetAwaiter().GetResult();
-                snapshot.Complete(null);
-            }
-            catch (Exception error)
-            {
-                snapshot.CompleteWithError(error);
-            }
-        }
-
-        return snapshot;
-    }
+    internal KafkaFutureImpl Impl => _impl ?? throw new InvalidOperationException(DefaultValueMessage);
 }

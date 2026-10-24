@@ -45,7 +45,7 @@ producer.Send(record)  ──►  ValueTask<AsyncKafkaFuture<RecordMetadata>>   
    Rust   Producer::send(ProducerRecord, Callback) → KafkaFuture<RecordMetadata>   (the logic)
 ```
 
-**Status:** The C ABI exposes the **producer** and **consumer**. Every blocking op
+**Status:** The C ABI exposes the **producer**, **consumer** and **admin client**. Every blocking op
 has a blocking form and a `_cb` twin, whose completion is queued for the client's
 `__execute_callbacks` (M19/P1; the `851c8d95` ABI, ledger 65), except that the
 producer's `send_cb` and `send_with_callback_cb` complete inside the call when the producer takes
@@ -64,7 +64,9 @@ of `commitSync` is `commit_sync_cb`. The nine timed forms (`*_with_timeout` and
 (decision 22). The admin client is exposed
 as `IAdmin` (`KafkaAdminClient` / `MockAdminClient`, M15); since M15/P14 that is
 the sync flavour, beside the async `IAsyncAdmin` (`AsyncKafkaAdminClient` /
-`AsyncMockAdminClient`); producer transactions are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
+`AsyncMockAdminClient`). Every admin RPC returns its `*Result_t` at once, its futures complete
+through `kafka_common_KafkaFuture_get_cb`, and only `close` and `close_with_timeout` have `_cb`
+twins (M19/P1). Producer transactions are **not** exposed yet. Source of truth for the surface = `src/ffi/*.rs` +
 `cbindgen.toml` (the header is generated, not checked in).
 
 ---
@@ -489,7 +491,12 @@ The **admin client** shipped in M15 as `IAdmin` (`KafkaAdminClient` /
 `design/current/STATUS.md`. Since M15/P14 it ships in two flavours over one internal core:
 sync `IAdmin` (`KafkaAdminClient` / `MockAdminClient`; Results hold `KafkaFuture` /
 `KafkaFuture<T>`) and async `IAsyncAdmin` (`AsyncKafkaAdminClient` / `AsyncMockAdminClient`;
-`Async*Result` types hold `AsyncKafkaFuture` / `AsyncKafkaFuture<T>`).
+`Async*Result` types hold `AsyncKafkaFuture` / `AsyncKafkaFuture<T>`). Since M19/P1 that core is
+on the uniform C FFI: each future is a `KafkaFutureImpl` over an eager `get_cb`
+(`ffi-marshalling.md` §C1). `MockAdminClient` and `AsyncMockAdminClient` have Java's two
+constructors, `()` and `(brokers, controller)`, and Java's nested `Builder`, over
+`kafka_admin_MockAdminClient_Builder_*` (ledger 106). Their `Close` does nothing, as Java's mock
+(decision 21).
 
 **Serdes** — the (de)serialization foundation (M6/P1a), the Java
 `Serializer<T>` / `Deserializer<T>` / `Serde<T>` shape in C# over the bytes-only ABI
@@ -543,7 +550,7 @@ its C# realization, and where the enforcing rule lives.
 
 | Java | C# idiom | Rule / detail |
 |---|---|---|
-| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. | a `KafkaFutureImpl` (decision 4a) completed on the client's drain thread — producer ffi §A7, consumer ffi §B7; admin: one completion per key, ffi §B6 shape 4 (M15/P14) |
+| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. | a `KafkaFutureImpl` (decision 4a) completed on the client's drain thread — producer ffi §A7, consumer ffi §B7; admin: one per native future, completed by its eager `get_cb` delivery on the admin drain thread, ffi §C1 (decisions 5, 8) |
 | `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<AsyncKafkaFuture<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (it completes at the core's handover `cb`; no thread parked), the inner `AsyncKafkaFuture` is the `Future` (`await future.Get()` = Java's `future.get()`); on `IProducer` it is `KafkaFuture<RecordMetadata>` — `Send` is the block (the blocking `send_with_callback`, ≤ `max.block.ms`), `future.Get()` is the `Future` (M11/P4.2) | M11/P3.5, M11/P3.6, M11/P4.2, ffi §A1 |
 | **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`pause`/`resume`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7. `seek` and `currentLag` block in Java too: a `Task` on `IAsyncConsumer` over `seek_*_cb` / `current_lag_cb`, a blocking member on `IConsumer` (decision 22, ledger 103) |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close, then join the client's drain thread, wait for the in-flight uses, and destroy on the closing thread — §4 **Close/Dispose**; ffi §A7, §B2 |
@@ -589,7 +596,7 @@ where it is needed, in one concise code comment (§4 Comments).
 | Decision | Default | Why / when |
 |---|---|---|
 | **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
-| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; closes, joins the client's drain thread and destroys on the closing thread, §4 **Close/Dispose**, without blocking a thread) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` where Java keeps it (no `Async` suffix — mirrors Java). The consumer's `close(Duration)` is deprecated in Java and not translated: the consumer has `Close()` and `Close(CloseOptions)` over `close_with_options[_cb]` (decision 22). The producer has it (M19/P1, ledger 82): `void Close(TimeSpan)` on `IProducer` and `Task Close(TimeSpan, CancellationToken)` on `IAsyncProducer`, over `kafka_producer_Producer_close_with_timeout_cb`. The timeout bounds the drain of the queued sends and the close; the delivery reports are then awaited without a bound, as Java's `close(Duration)` joins its I/O thread. A negative timeout throws `ArgumentOutOfRangeException` with Java's message, "The timeout cannot be negative.", on `KafkaProducer` and `AsyncKafkaProducer`, before the closed check, as in Java; the mocks close as for zero, as Java's mock never reads the timeout. `TimeSpan.Zero` is valid. Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close(TimeSpan)` over the sync `kafka_admin_AdminClient_close`. | first client type |
+| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; closes, joins the client's drain thread and destroys on the closing thread, §4 **Close/Dispose**, without blocking a thread) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` where Java keeps it (no `Async` suffix — mirrors Java). The consumer's `close(Duration)` is deprecated in Java and not translated: the consumer has `Close()` and `Close(CloseOptions)` over `close_with_options[_cb]` (decision 22). The producer has it (M19/P1, ledger 82): `void Close(TimeSpan)` on `IProducer` and `Task Close(TimeSpan, CancellationToken)` on `IAsyncProducer`, over `kafka_producer_Producer_close_with_timeout_cb`. The timeout bounds the drain of the queued sends and the close; the delivery reports are then awaited without a bound, as Java's `close(Duration)` joins its I/O thread. A negative timeout throws `ArgumentOutOfRangeException` with Java's message, "The timeout cannot be negative.", on `KafkaProducer` and `AsyncKafkaProducer`, before the closed check, as in Java; the mocks close as for zero, as Java's mock never reads the timeout. `TimeSpan.Zero` is valid. Admin (M15/P14): `IAsyncAdmin : IAsyncDisposable, IDisposable` follows this default; the sync `IAdmin : IDisposable` only (as `IProducer` / `IConsumer`), with a blocking `void Close()` and `void Close(TimeSpan)`. `IAsyncAdmin` has `Task Close(CancellationToken)` and `Task Close(TimeSpan, CancellationToken)` (ledger 175). `Close()` and `Dispose` call `kafka_admin_Admin_close_cb`, and `Close(TimeSpan)` calls `kafka_admin_Admin_close_with_timeout_cb`. The sync flavour waits on a `Completion` (decision 4a), as Python's sync admin does. The async flavour completes its `Task` from the `cb`, and its token ends only the caller's wait. A negative timeout throws `ArgumentOutOfRangeException` with Java's message before the closed check (ledgers 82, 174). The mocks' `Close` does nothing and reads no timeout, as Java's mock (decision 21, ledger 174); `Dispose` still frees the native mock. | first client type |
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** the `Send` token never cancels the record. Already cancelled at the call: `Send` throws `OperationCanceledException` and nothing is sent. If it fires while a queued record waits, the first stage (the `ValueTask` that hands back the future) still waits for the hand-over, up to `max.block.ms`, then ends with `OperationCanceledException` carrying the token, whatever the outcome, as Python's `send` does. A record the producer took is still sent, and its delivery callback fires once; a record `Close` fails runs none. After the hand-over, and for a record taken or refused inside the call, the token does nothing. `Get(token)` ends only that wait, and `Cancel(bool)` on a send's future returns `false` (Java's `FutureRecordMetadata`). CKD's token cancels the one Task it returns. **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `dotnet/.claude/rules/bindings.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `dotnet/.claude/rules/bindings.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
@@ -953,7 +960,8 @@ behavior*, not Java's method name, which is why Java's `commitSync` is our `Comm
 4. wait for in-flight uses;
 5. destroy on the closing thread.
 
-A close from a callback is deferred to the drain thread, after its drain. A SafeHandle reached by
+The admin mocks' `Close` does nothing (decision 21); their `Dispose` runs these steps. A
+close from a callback is deferred to the drain thread, after its drain. A SafeHandle reached by
 finalization does not destroy: it leaks and writes one `Trace` warning (Java and Python have no
 client finalizer).
 
@@ -1001,7 +1009,8 @@ ledger 40.)
 
 The correctness contracts you must not break live in
 `.claude/rules/ffi-marshalling.md` (read on demand), organized as a **Shared**
-part + a **Producer** part + a **Consumer** part (each client reads end-to-end).
+part + a **Producer** part + a **Consumer** part (each client reads end-to-end) +
+an **Admin** part (what the admin client adds).
 Index:
 
 **Part 0 · Shared mechanics**
@@ -1022,6 +1031,9 @@ Index:
   §B3 String marshalling — receive path (length-delimited borrow) · §B4 Zero-copy
   — receive (borrow, copy-out) · §B5 Error model additions (wakeup, concurrent) ·
   §B6 Completion callbacks (the `_cb` completions, the listener and commit-callback registrations) · §B7 Async completion (the async consumer's drain thread)
+
+**Part C · Admin**
+- §C1 Drain thread, futures (eager `get_cb`, a SafeHandle per owned future) and teardown
 
 This file (CLAUDE.md) never restates those; it references them by section.
 

@@ -22,18 +22,17 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.FinalizedVersionRange</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ Member names differ from <see cref="SupportedVersionRange"/>'s (<c>MinVersionLevel</c> vs
-/// <c>MinVersion</c>); that asymmetry is Java's and is preserved.
+/// The member names differ from <see cref="SupportedVersionRange"/>'s (<c>MinVersionLevel</c>
+/// against <c>MinVersion</c>), as Java's do.
 /// </remarks>
 public sealed class FinalizedVersionRange
 {
-    /// <summary>Creates a finalized range — Java's <c>:38</c>.</summary>
+    /// <summary>Creates a finalized range — Java's constructor.</summary>
     /// <param name="minVersionLevel">The minimum finalized version level.</param>
     /// <param name="maxVersionLevel">The maximum finalized version level.</param>
     /// <exception cref="ArgumentException">
-    /// Either level is negative, or the maximum is below the minimum. ⚠ The bound is
-    /// <c>&gt;= 0</c>: Java's <b>code</b> (<c>:39</c>) enforces that, though its javadoc
-    /// (<c>:31</c>) says <c>&gt;= 1</c>.
+    /// Either level is negative, or the maximum is below the minimum. The bound is
+    /// <c>&gt;= 0</c>, as Java's code enforces, although its javadoc says <c>&gt;= 1</c>.
     /// </exception>
     public FinalizedVersionRange(short minVersionLevel, short maxVersionLevel)
     {
@@ -53,13 +52,13 @@ public sealed class FinalizedVersionRange
         MaxVersionLevel = maxVersionLevel;
     }
 
-    /// <summary>The minimum level — Java's <c>minVersionLevel()</c> (<c>:50</c>).</summary>
+    /// <summary>The minimum level — Java's <c>minVersionLevel()</c>.</summary>
     public short MinVersionLevel { get; }
 
-    /// <summary>The maximum level — Java's <c>maxVersionLevel()</c> (<c>:54</c>).</summary>
+    /// <summary>The maximum level — Java's <c>maxVersionLevel()</c>.</summary>
     public short MaxVersionLevel { get; }
 
-    /// <summary>Value equality over both levels — Java's <c>equals</c> (<c>:59</c>).</summary>
+    /// <summary>Value equality over both levels — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same range.</returns>
     public override bool Equals(object? obj) =>
@@ -67,7 +66,7 @@ public sealed class FinalizedVersionRange
         && MinVersionLevel == other.MinVersionLevel
         && MaxVersionLevel == other.MaxVersionLevel;
 
-    /// <summary>The hash of both levels — Java's <c>hashCode</c> (<c>:73</c>).</summary>
+    /// <summary>The hash of both levels — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -77,7 +76,7 @@ public sealed class FinalizedVersionRange
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:78</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(

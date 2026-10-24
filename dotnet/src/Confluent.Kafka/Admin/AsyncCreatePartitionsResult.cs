@@ -14,58 +14,38 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.CreatePartitions"/> — the .NET realization of Java's
-/// <c>CreatePartitionsResult</c>: one future <b>per topic</b>, handed back the moment
-/// the request is submitted.
+/// The result of <see cref="IAsyncAdmin.CreatePartitions"/> — Java's
+/// <c>org.apache.kafka.clients.admin.CreatePartitionsResult</c>: one future per topic.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Java publishes <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt; values()</c>
-/// (<c>CreatePartitionsResult.java:39</c>), so awaiting one of these tells you whether
-/// that topic's partitions were created and hands back nothing; a topic that fails faults
-/// only <em>its own</em> <see cref="AsyncKafkaFuture"/>.
-/// </para>
+/// A topic's future completes when its partitions were created; a topic that fails faults only
+/// its own future.
 /// </remarks>
 /// <seealso cref="CreatePartitionsResult"/>
 public sealed class AsyncCreatePartitionsResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
+    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Presents the bridge's <c>Task&lt;bool&gt;</c> sources as Java's
-    /// <c>KafkaFuture&lt;Void&gt;</c>: the <c>bool</c> is the void bridge's internal
-    /// success token (result shape 2 — the ABI has no <c>get_value</c> here, so a null
-    /// per-key error <em>is</em> the success value) and must not reach the public surface.
-    /// </summary>
-    /// <remarks>
-    /// Each entry wraps the <b>same</b> task as the bridge's — no second
-    /// task whose fault could go unobserved. It reuses the bridge's own comparer so the
-    /// view and the sources cannot disagree about key identity.
-    /// </remarks>
-    internal AsyncCreatePartitionsResult(
-        IReadOnlyDictionary<string, Task<bool>> values, IEqualityComparer<string> comparer)
+
+    private AsyncCreatePartitionsResult(
+        IReadOnlyDictionary<string, AsyncKafkaFuture> values,
+        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        SafeAdminResultHandle native)
     {
-        Dictionary<string, AsyncKafkaFuture> erased = new Dictionary<string, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, Task<bool>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _values = erased;
+        _values = values;
+        _nativeFutures = nativeFutures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncCreatePartitionsResult From(VoidKeyedAdminOperation<string> operation) =>
-        new AsyncCreatePartitionsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// One future per requested topic, keyed by topic name — Java's <c>values()</c>.
@@ -73,10 +53,25 @@ public sealed class AsyncCreatePartitionsResult
     public IReadOnlyDictionary<string, AsyncKafkaFuture> Values => _values;
 
     /// <summary>
-    /// Completes when <b>every</b> topic's partitions have been created, and faults with
-    /// the first failure if any topic failed — Java's <c>all()</c>
-    /// (<c>KafkaFuture.allOf</c>).
+    /// Completes when every topic's partitions have been created, and faults with the first
+    /// failure to complete if any topic failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(AsyncAdminFutures.WhenAll(_values.Values));
+    public AsyncKafkaFuture All() =>
+        new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+
+    internal static AsyncCreatePartitionsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, AsyncKafkaFuture> values =
+            new Dictionary<string, AsyncKafkaFuture>(native.Values.Count, StringComparer.Ordinal);
+        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        {
+            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            nativeFutures.Add(entry.Value);
+        }
+
+        return new AsyncCreatePartitionsResult(values, nativeFutures, native.Result);
+    }
 }

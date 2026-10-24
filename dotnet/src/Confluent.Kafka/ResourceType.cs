@@ -15,10 +15,9 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The type of resource an ACL applies to — the .NET realization of Java's
-/// <c>org.apache.kafka.common.resource.ResourceType</c>. Each member's value is the
-/// Kafka <b>wire</b> code (Java's <c>code()</c>), not a C#-assigned ordinal, because the
-/// C ABI transports it as a bare <c>int32_t</c>.
+/// The type of resource an ACL applies to — Java's
+/// <c>org.apache.kafka.common.resource.ResourceType</c>. Each member's value is the Kafka wire
+/// code (Java's <c>code()</c>), which crosses the C ABI as an <c>int32_t</c>.
 /// </summary>
 public enum ResourceType
 {

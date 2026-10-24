@@ -14,180 +14,70 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Internal;
-using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// What M15/P3 Stage 3's options and inputs actually become at the P/Invoke — the log-dir
-/// twin of <see cref="AdminConfigsSubmitArgumentTests"/>, discharging the standing
-/// obligation (PLAN §9.1 item 5 / decision D19) that every admin RPC's options are asserted
-/// at the submit seam.
+/// Reads the C options the three log-directory RPCs build back through the header's getters, and checks the
+/// preconditions their inputs meet before any native call.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The Rust <c>MockAdminClient</c> ignores <c>_options</c> for all three RPCs</b>
-/// (<c>fn describe_log_dirs(&amp;self, …, _options: DescribeLogDirsOptions)</c> and its two
-/// siblings), so no behavioural test can observe a timeout. It also cannot observe the
-/// <b>shape</b> of the four- and three-array inputs — the column alignment between topics,
-/// partitions, broker ids and log directories is decided entirely on the way in, and a
-/// transposition there would send a well-formed request about the wrong replicas.
-/// </para>
-/// <para>
-/// ⚠ <b>The silent-skip inputs are the sharpest cases here.</b> The header says an entry
-/// with a NULL topic or NULL log dir "is skipped" — with no error — so the caller would be
-/// left holding an awaitable for a replica the broker was never asked about. Both are
-/// rejected at the C# boundary (ffi §B5) and asserted below with their parameter names.
-/// </para>
-/// </remarks>
 public sealed class AdminLogDirsSubmitArgumentTests
 {
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    private const int KafkaStorageErrorCode = 56;
+
     private static readonly TopicPartitionReplica s_replica = new TopicPartitionReplica("logdir-topic", 3, 7);
 
-    private static readonly TopicPartitionReplica s_otherReplica =
-        new TopicPartitionReplica("other-topic", 11, 2);
-
-    /// <summary>One arbitrary move, so the timeout cases carry a non-empty request.</summary>
-    private static readonly (TopicPartitionReplica Replica, string LogDir) s_move = (s_replica, "/data");
-
-    /// <summary>
-    /// A <see langword="null"/> timeout must become a <b>negative</b> <c>timeout_ms</c>
-    /// ("unset"), never <c>0</c>; an explicit one is forwarded verbatim, and <c>0</c> stays
-    /// <c>0</c>.
-    /// </summary>
     [Fact]
-    public void DescribeLogDirs_TimeoutMapping()
+    public void NoSetterRan_TheCOptionsCarryTheCoresDefault()
     {
-        Assert.True(CaptureDescribeLogDirs(null, 0).TimeoutMs < 0);
-        Assert.True(CaptureDescribeLogDirs(new DescribeLogDirsOptions(), 0).TimeoutMs < 0);
-        Assert.Equal(0, CaptureDescribeLogDirs(new DescribeLogDirsOptions { TimeoutMs = 0 }, 0).TimeoutMs);
-        Assert.Equal(6_161, CaptureDescribeLogDirs(new DescribeLogDirsOptions { TimeoutMs = 6_161 }, 0).TimeoutMs);
+        Assert.Equal(-1, ReadBack((DescribeLogDirsOptions?)null));
+        Assert.Equal(-1, ReadBack(new DescribeLogDirsOptions()));
+        Assert.Empty(new DescribeLogDirsOptions().Setters.InOrder);
+
+        Assert.Equal(-1, ReadBack((AlterReplicaLogDirsOptions?)null));
+        Assert.Equal(-1, ReadBack(new AlterReplicaLogDirsOptions()));
+        Assert.Empty(new AlterReplicaLogDirsOptions().Setters.InOrder);
+
+        Assert.Equal(-1, ReadBack((DescribeReplicaLogDirsOptions?)null));
+        Assert.Equal(-1, ReadBack(new DescribeReplicaLogDirsOptions()));
+        Assert.Empty(new DescribeReplicaLogDirsOptions().Setters.InOrder);
     }
 
-    /// <inheritdoc cref="DescribeLogDirs_TimeoutMapping"/>
     [Fact]
-    public void AlterReplicaLogDirs_TimeoutMapping()
+    public void TheTimeoutSetter_ReachesTheCOptions_AndItsLastValueWins()
     {
-        Assert.True(CaptureAlter(null, s_move).TimeoutMs < 0);
-        Assert.True(CaptureAlter(new AlterReplicaLogDirsOptions(), s_move).TimeoutMs < 0);
-        Assert.Equal(0, CaptureAlter(new AlterReplicaLogDirsOptions { TimeoutMs = 0 }, s_move).TimeoutMs);
-        Assert.Equal(7_272, CaptureAlter(new AlterReplicaLogDirsOptions { TimeoutMs = 7_272 }, s_move).TimeoutMs);
+        Assert.Equal(0, ReadBack(new DescribeLogDirsOptions { TimeoutMs = -5 }));
+        DescribeLogDirsOptions describe = new DescribeLogDirsOptions { TimeoutMs = 10 };
+        describe.TimeoutMs = 20;
+        Assert.Equal(20, ReadBack(describe));
+        describe.TimeoutMs = null;
+        Assert.Equal(-1, ReadBack(describe));
+
+        Assert.Equal(0, ReadBack(new AlterReplicaLogDirsOptions { TimeoutMs = -5 }));
+        AlterReplicaLogDirsOptions alter = new AlterReplicaLogDirsOptions { TimeoutMs = 10 };
+        alter.TimeoutMs = 30;
+        Assert.Equal(30, ReadBack(alter));
+        alter.TimeoutMs = null;
+        Assert.Equal(-1, ReadBack(alter));
+
+        Assert.Equal(0, ReadBack(new DescribeReplicaLogDirsOptions { TimeoutMs = -5 }));
+        DescribeReplicaLogDirsOptions replicas = new DescribeReplicaLogDirsOptions { TimeoutMs = 0 };
+        replicas.TimeoutMs = 40;
+        Assert.Equal(40, ReadBack(replicas));
+        replicas.TimeoutMs = null;
+        Assert.Equal(-1, ReadBack(replicas));
     }
 
-    /// <inheritdoc cref="DescribeLogDirs_TimeoutMapping"/>
-    [Fact]
-    public void DescribeReplicaLogDirs_TimeoutMapping()
-    {
-        Assert.True(CaptureDescribeReplicas(null, s_replica).TimeoutMs < 0);
-        Assert.True(CaptureDescribeReplicas(new DescribeReplicaLogDirsOptions(), s_replica).TimeoutMs < 0);
-        Assert.Equal(0, CaptureDescribeReplicas(new DescribeReplicaLogDirsOptions { TimeoutMs = 0 }, s_replica).TimeoutMs);
-        Assert.Equal(
-            8_383,
-            CaptureDescribeReplicas(new DescribeReplicaLogDirsOptions { TimeoutMs = 8_383 }, s_replica).TimeoutMs);
-    }
-
-    /// <summary>
-    /// A negative timeout is sent as <c>0</c> (M15/P13.5 X2) — Java's
-    /// <c>calcDeadlineMs</c> clamp (<c>KafkaAdminClient.java:496-499</c>), not a throw. See
-    /// <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </summary>
-    [Fact]
-    public void X2_ANegativeTimeout_IsSentAsZero()
-    {
-        Assert.Equal(0, CaptureDescribeLogDirs(new DescribeLogDirsOptions { TimeoutMs = -1 }, 0).TimeoutMs);
-        Assert.Equal(0, CaptureAlter(new AlterReplicaLogDirsOptions { TimeoutMs = -1 }, s_move).TimeoutMs);
-        Assert.Equal(
-            0, CaptureDescribeReplicas(new DescribeReplicaLogDirsOptions { TimeoutMs = -1 }, s_replica).TimeoutMs);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The broker ids reach the submit as a <b>bare scalar</b> array</b> — the first
-    /// such input in M15, and the reason <c>describeLogDirs</c> needs no string pinning at
-    /// all.
-    /// </summary>
-    [Fact]
-    public void DescribeLogDirs_BrokersReachTheSubmitAsAScalarArray()
-    {
-        Captured captured = CaptureDescribeLogDirs(null, 0, 4, 2);
-
-        Assert.Equal(3, captured.Count);
-        Assert.Equal(new[] { 0, 4, 2 }, captured.Brokers);
-    }
-
-    /// <summary>A repeated broker is one entry, because Java's result is a map.</summary>
-    [Fact]
-    public void DescribeLogDirs_DeduplicatesBrokers_PreservingRequestOrder()
-    {
-        Captured captured = CaptureDescribeLogDirs(null, 5, 1, 5, 1, 9);
-
-        Assert.Equal(3, captured.Count);
-        Assert.Equal(new[] { 5, 1, 9 }, captured.Brokers);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The four <c>alterReplicaLogDirs</c> arrays are COLUMN-ALIGNED</b>: row
-    /// <c>i</c> must carry the same replica's topic, partition, broker id and destination.
-    /// Two replicas differing in every field make a transposition impossible to miss.
-    /// </summary>
-    [Fact]
-    public void AlterReplicaLogDirs_TheFourArraysAreColumnAligned()
-    {
-        Captured captured = CaptureAlter(
-            null,
-            (s_replica, "/data/one"),
-            (s_otherReplica, "/data/two"));
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { "logdir-topic", "other-topic" }, captured.Topics);
-        Assert.Equal(new[] { 3, 11 }, captured.Partitions);
-        Assert.Equal(new[] { 7, 2 }, captured.BrokerIds);
-        Assert.Equal(new[] { "/data/one", "/data/two" }, captured.LogDirs);
-    }
-
-    /// <summary>
-    /// The three <c>describeReplicaLogDirs</c> arrays are column-aligned in the same way,
-    /// with no fourth column — Java's input is a collection, not a map.
-    /// </summary>
-    [Fact]
-    public void DescribeReplicaLogDirs_TheThreeArraysAreColumnAligned()
-    {
-        Captured captured = CaptureDescribeReplicas(null, s_replica, s_otherReplica);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { "logdir-topic", "other-topic" }, captured.Topics);
-        Assert.Equal(new[] { 3, 11 }, captured.Partitions);
-        Assert.Equal(new[] { 7, 2 }, captured.BrokerIds);
-    }
-
-    /// <summary>A repeated replica is one entry, because Java's result is a map.</summary>
-    [Fact]
-    public void DescribeReplicaLogDirs_DeduplicatesReplicas_ByValueEquality()
-    {
-        Captured captured = CaptureDescribeReplicas(
-            null,
-            s_replica,
-            new TopicPartitionReplica("logdir-topic", 3, 7),
-            s_otherReplica);
-
-        // ⚠ The duplicate is a DIFFERENT instance with equal fields, so this also pins that
-        // the de-duplication runs through TopicPartitionReplica's value equality rather than
-        // reference identity.
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { "logdir-topic", "other-topic" }, captured.Topics);
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>A <see langword="null"/> log directory is rejected here, because the ABI
-    /// SILENTLY SKIPS that row.</b> Left to the ABI the caller would hold an awaitable for a
-    /// replica the broker was never asked about, faulting later with a message about a
-    /// missing result rather than about the argument that caused it.
-    /// </summary>
     [Fact]
     public void AlterReplicaLogDirs_ANullLogDirectory_IsRejectedBeforeTheCall()
     {
@@ -195,36 +85,49 @@ public sealed class AdminLogDirsSubmitArgumentTests
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException failure = Assert.Throws<ArgumentException>(
-            () => AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(
-                new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!,
-                options: null,
-                AdminFlavour.Async)));
+            () => admin.AlterReplicaLogDirs(
+                new Dictionary<TopicPartitionReplica, string?> { [s_replica] = null }!, options: null));
 
         Assert.Equal("replicaAssignment", failure.ParamName);
-
-        // The replica is named, so the caller can find the offending entry in a large map.
         Assert.Contains("logdir-topic-3-7", failure.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// ⚠ <b>The topic is guarded at the <see cref="TopicPartitionReplica"/> constructor,
-    /// not restated at the submit</b> — Java's own <c>requireNonNull</c> sits there
-    /// (<c>TopicPartitionReplica.java:34</c>), so the ABI's "an entry with a NULL topic is
-    /// skipped" cannot be reached through this surface at all.
-    /// </summary>
     [Fact]
-    public void ANullTopic_CannotReachEitherSubmit()
+    public async Task AlterReplicaLogDirs_TwoEqualReplicasUnderTheCallersComparer_SendTheFirst()
+    {
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        await TestTimeout.Run(
+            () => AsyncCreateTopicsResult.OfClient(
+                admin.CreateTopics(new[] { new NewTopic("first-wins-replicas", 1, 1) }, null)).All().Get(),
+            s_deadline);
+
+        TopicPartitionReplica first = new TopicPartitionReplica("first-wins-replicas", 0, 0);
+        TopicPartitionReplica second = new TopicPartitionReplica("first-wins-replicas", 0, 0);
+        Dictionary<TopicPartitionReplica, string> request =
+            new Dictionary<TopicPartitionReplica, string>(ReferenceComparer<TopicPartitionReplica>.Instance)
+            {
+                [first] = "/first",
+                [second] = "/second",
+            };
+        Assert.Equal(2, request.Count);
+
+        AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient(admin.AlterReplicaLogDirs(request, null));
+
+        Assert.Single(result.Values);
+        KafkaException failure = Assert.Throws<KafkaException>(() => result.Values[second].Get(s_deadline));
+        Assert.Equal(KafkaStorageErrorCode, failure.Code);
+        Assert.Equal("Log directory /first is offline", failure.Message);
+    }
+
+    [Fact]
+    public void ANullTopic_CannotReachEitherCall()
     {
         ArgumentNullException failure =
             Assert.Throws<ArgumentNullException>(() => new TopicPartitionReplica(null!, 0, 0));
         Assert.Equal("topic", failure.ParamName);
     }
 
-    /// <summary>
-    /// A null collection or map is an <see cref="ArgumentNullException"/> naming its
-    /// parameter, and a null element inside one is an <see cref="ArgumentException"/> — the
-    /// two are different mistakes and are reported differently.
-    /// </summary>
     [Fact]
     public void NullInputs_AreRejectedWithTheirParameterNames()
     {
@@ -233,241 +136,109 @@ public sealed class AdminLogDirsSubmitArgumentTests
 
         Assert.Equal(
             "brokers",
-            Assert.Throws<ArgumentNullException>(() => AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.DescribeLogDirs(null!, options: null)).ParamName);
         Assert.Equal(
             "replicaAssignment",
-            Assert.Throws<ArgumentNullException>(() => AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.AlterReplicaLogDirs(null!, options: null)).ParamName);
         Assert.Equal(
             "replicas",
-            Assert.Throws<ArgumentNullException>(
-                () => AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(null!, options: null, AdminFlavour.Async))).ParamName);
+            Assert.Throws<ArgumentNullException>(() => admin.DescribeReplicaLogDirs(null!, options: null)).ParamName);
 
         ArgumentException nullElement = Assert.Throws<ArgumentException>(
-            () => AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: null, AdminFlavour.Async)));
+            () => admin.DescribeReplicaLogDirs(new TopicPartitionReplica?[] { null }!, options: null));
         Assert.Equal("replicas", nullElement.ParamName);
     }
 
-    /// <summary>
-    /// An empty input submits an empty request rather than throwing — Java's
-    /// <c>describeLogDirs(emptyList())</c> is legal and yields an empty result.
-    /// </summary>
     [Fact]
-    public void EmptyInputs_SubmitAnEmptyRequest()
-    {
-        Assert.Equal(0, CaptureDescribeLogDirs(null, Array.Empty<int>()).Count);
-        Assert.Equal(0, CaptureDescribeReplicas(null, Array.Empty<TopicPartitionReplica>()).Count);
-    }
-
-    private static Captured CaptureDescribeLogDirs(DescribeLogDirsOptions? options, params int[] brokers)
+    public void EmptyInputs_YieldAnEmptyResult()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        Captured captured = new Captured();
-        AsyncDescribeLogDirsResult result = AsyncDescribeLogDirsResult.From(admin.DescribeLogDirs(brokers, options, AdminFlavour.Async, captured.RecordDescribeLogDirs));
+        var described = admin.DescribeLogDirs(Array.Empty<int>(), null);
+        Assert.Empty(described.Descriptions);
+        described.Result.Dispose();
 
-        // Shape 4a: one callback per broker id, which crosses as a plain int32_t.
-        foreach (int broker in result.Descriptions.Keys)
-        {
-            AdminCallbacks.DescribeLogDirs(broker, IntPtr.Zero, CapturedError(), captured.UserData);
-        }
+        var altered = admin.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string>(), null);
+        Assert.Empty(altered.Values);
+        altered.Result.Dispose();
 
-        AssertEveryAwaitableFaulted(result.Descriptions);
-        return captured;
+        var replicas = admin.DescribeReplicaLogDirs(Array.Empty<TopicPartitionReplica>(), null);
+        Assert.Empty(replicas.Values);
+        replicas.Result.Dispose();
     }
 
-    private static Captured CaptureAlter(
-        AlterReplicaLogDirsOptions? options,
-        params (TopicPartitionReplica Replica, string LogDir)[] moves)
+    private static int ReadBack(DescribeLogDirsOptions? options)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Dictionary<TopicPartitionReplica, string> assignment = new Dictionary<TopicPartitionReplica, string>();
-        foreach ((TopicPartitionReplica replica, string logDir) in moves)
+        IntPtr native = NativeAdminClient.NewDescribeLogDirsOptions(options);
+        try
         {
-            assignment[replica] = logDir;
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.DescribeLogDirsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return timeoutMs;
         }
-
-        Captured captured = new Captured();
-        AsyncAlterReplicaLogDirsResult result =
-            AsyncAlterReplicaLogDirsResult.From(admin.AlterReplicaLogDirs(assignment, options, AdminFlavour.Async, captured.RecordAlterReplicaLogDirs));
-
-        // Shape 4b: one per-key failure per DISTINCT replica the submit carried, keyed by
-        // its three scalars, with an owned error the trampoline frees.
-        foreach (TopicPartitionReplica replica in assignment.Keys)
+        finally
         {
-            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic);
-            AdminCallbacks.AlterReplicaLogDirs(
-                topic.Pointer, replica.Partition, replica.BrokerId, CapturedError(), captured.UserData);
-        }
-
-        AssertEveryAwaitableFaulted(result.Values);
-        return captured;
-    }
-
-    private static Captured CaptureDescribeReplicas(
-        DescribeReplicaLogDirsOptions? options, params TopicPartitionReplica[] replicas)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Captured captured = new Captured();
-        AsyncDescribeReplicaLogDirsResult result =
-            AsyncDescribeReplicaLogDirsResult.From(admin.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Async, captured.RecordDescribeReplicaLogDirs));
-
-        // Shape 4a: one per-key failure per DISTINCT replica the submit carried, with a
-        // NULL value slot and an owned error the trampoline frees.
-        foreach (TopicPartitionReplica replica in new HashSet<TopicPartitionReplica>(replicas))
-        {
-            using Utf8Marshal.PinnedUtf8String topic = Utf8Marshal.Pin(replica.Topic);
-            AdminCallbacks.DescribeReplicaLogDirs(
-                topic.Pointer,
-                replica.Partition,
-                replica.BrokerId,
-                IntPtr.Zero,
-                CapturedError(),
-                captured.UserData);
-        }
-
-        AssertEveryAwaitableFaulted(result.Values);
-        return captured;
-    }
-
-    /// <summary>
-    /// Observes every awaitable the injected submit left behind, so the operation's
-    /// <c>GCHandle</c> and span-the-op reference are released before the client is disposed
-    /// and no faulted task goes unobserved.
-    /// </summary>
-    private static void AssertEveryAwaitableFaulted<TKey>(IReadOnlyDictionary<TKey, AsyncKafkaFuture> futures)
-    {
-        foreach (KeyValuePair<TKey, AsyncKafkaFuture> entry in futures)
-        {
-            Assert.NotNull(entry.Value.Get().Exception);
+            NativeAdminClient.FreeDescribeLogDirsOptions(native);
         }
     }
 
-    /// <summary>
-    /// The value-carrying form of <see cref="AssertEveryAwaitableFaulted{TKey}"/>.
-    /// </summary>
-    private static void AssertEveryAwaitableFaulted<TKey, TValue>(
-        IReadOnlyDictionary<TKey, AsyncKafkaFuture<TValue>> futures)
+    private static int ReadBack(AlterReplicaLogDirsOptions? options)
     {
-        foreach (KeyValuePair<TKey, AsyncKafkaFuture<TValue>> entry in futures)
+        IntPtr native = NativeAdminClient.NewAlterReplicaLogDirsOptions(options);
+        try
         {
-            Assert.NotNull(entry.Value.Get().Exception);
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.AlterReplicaLogDirsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return timeoutMs;
+        }
+        finally
+        {
+            NativeAdminClient.FreeAlterReplicaLogDirsOptions(native);
         }
     }
 
-    /// <summary>
-    /// An <b>owned</b> error for the trampoline to consume, standing in for the one native
-    /// would hand the callback. The trampoline frees it via
-    /// <see cref="KafkaException.FromHandle"/>, so it must never be freed here.
-    /// </summary>
-    private static IntPtr CapturedError()
+    private static int ReadBack(DescribeReplicaLogDirsOptions? options)
     {
-        using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("captured");
-        IntPtr error = NativeMethods.KafkaErrorNew(1, message.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
+        IntPtr native = NativeAdminClient.NewDescribeReplicaLogDirsOptions(options);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            int timeoutMs = Native.DescribeReplicaLogDirsOptionsTimeoutMs(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return timeoutMs;
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeReplicaLogDirsOptions(native);
+        }
     }
 
-    /// <summary>
-    /// Records the arguments a submit would have handed native. Each recording method binds
-    /// directly to the production submit delegate, so a signature change breaks the test at
-    /// compile time rather than silently capturing the wrong slot.
-    /// </summary>
-    private sealed class Captured
+    /// <summary>Reference equality, so two equal replicas stay two keys.</summary>
+    private sealed class ReferenceComparer<T> : IEqualityComparer<T>
+        where T : class
     {
-        internal int TimeoutMs { get; private set; }
+        public static readonly ReferenceComparer<T> Instance = new ReferenceComparer<T>();
 
-        internal int Count { get; private set; }
+        public bool Equals(T? x, T? y) => ReferenceEquals(x, y);
 
-        internal int[] Brokers { get; private set; } = Array.Empty<int>();
+        public int GetHashCode(T obj) => RuntimeHelpers.GetHashCode(obj);
+    }
 
-        internal string?[] Topics { get; private set; } = Array.Empty<string>();
+    /// <summary>The C functions only these tests call.</summary>
+    private static class Native
+    {
+        private const string DllName = "confluent_kafka";
 
-        internal int[] Partitions { get; private set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeLogDirsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeLogDirsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal int[] BrokerIds { get; private set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_AlterReplicaLogDirsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int AlterReplicaLogDirsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal string?[] LogDirs { get; private set; } = Array.Empty<string>();
-
-        internal IntPtr UserData { get; private set; }
-
-        internal void RecordDescribeLogDirs(
-            IntPtr admin,
-            int[] brokers,
-            int count,
-            int timeoutMs,
-            AdminCallbacks.DescribeLogDirsCallback callback,
-            IntPtr userData)
-        {
-            Count = count;
-            Brokers = Take(brokers, count);
-            TimeoutMs = timeoutMs;
-            UserData = userData;
-        }
-
-        internal void RecordAlterReplicaLogDirs(
-            IntPtr admin,
-            IntPtr[] topics,
-            int[] partitions,
-            int[] brokerIds,
-            IntPtr[] logDirs,
-            int count,
-            int timeoutMs,
-            AdminCallbacks.AlterReplicaLogDirsCallback callback,
-            IntPtr userData)
-        {
-            Count = count;
-            Topics = ReadStrings(topics, count);
-            Partitions = Take(partitions, count);
-            BrokerIds = Take(brokerIds, count);
-            LogDirs = ReadStrings(logDirs, count);
-            TimeoutMs = timeoutMs;
-            UserData = userData;
-        }
-
-        internal void RecordDescribeReplicaLogDirs(
-            IntPtr admin,
-            IntPtr[] topics,
-            int[] partitions,
-            int[] brokerIds,
-            int count,
-            int timeoutMs,
-            AdminCallbacks.DescribeReplicaLogDirsCallback callback,
-            IntPtr userData)
-        {
-            Count = count;
-            Topics = ReadStrings(topics, count);
-            Partitions = Take(partitions, count);
-            BrokerIds = Take(brokerIds, count);
-            TimeoutMs = timeoutMs;
-            UserData = userData;
-        }
-
-        private static int[] Take(int[] source, int count)
-        {
-            int[] taken = new int[count];
-            Array.Copy(source, taken, count);
-            return taken;
-        }
-
-        /// <summary>
-        /// Reads the pinned UTF-8 strings back <b>while the submit is still on the
-        /// stack</b> — the pins are released in the submit's <c>finally</c>, so a later
-        /// read would be a use-after-free.
-        /// </summary>
-        private static string?[] ReadStrings(IntPtr[] source, int count)
-        {
-            string?[] values = new string?[count];
-            for (int index = 0; index < count; index++)
-            {
-                values[index] = Utf8Marshal.PtrToString(source[index]);
-            }
-
-            return values;
-        }
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeReplicaLogDirsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeReplicaLogDirsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
     }
 }

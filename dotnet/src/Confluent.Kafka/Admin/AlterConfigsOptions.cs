@@ -12,28 +12,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.IncrementalAlterConfigs"/> — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.AlterConfigsOptions</c>
-/// (<c>AlterConfigsOptions.java:25-53</c>).
+/// Java's <c>org.apache.kafka.clients.admin.AlterConfigsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java declares exactly one field of its own — <c>validateOnly</c> (<c>:27</c>),
-/// defaulting to <see langword="false"/> — beside the inherited timeout.
-/// </para>
 /// </remarks>
 public sealed class AlterConfigsOptions
 {
+    private int? _timeoutMs;
+
+    private bool _validateOnly;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Validate the request without applying it — Java's <c>validateOnly(boolean)</c> /
     /// <c>shouldValidateOnly()</c>. Defaults to <see langword="false"/>, as Java's does.
     /// </summary>
-    public bool ValidateOnly { get; set; }
+    public bool ValidateOnly
+    {
+        get => _validateOnly;
+        set
+        {
+            _validateOnly = value;
+            Setters.Ran(nameof(ValidateOnly));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

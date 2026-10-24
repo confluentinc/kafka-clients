@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 using Metadata = Confluent.Kafka.Admin.FeatureMetadata;
 
@@ -21,35 +21,31 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeFeatures"/> — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>.
+/// <c>org.apache.kafka.clients.admin.DescribeFeaturesResult</c>: one future over the whole feature
+/// metadata.
 /// </summary>
-/// <remarks>
-/// ⚠ <b>ONE future over a composite, not a fan-out.</b> Java stores a single
-/// <c>KafkaFuture&lt;FeatureMetadata&gt;</c> (<c>:28</c>) with one accessor (<c>:34</c>), even
-/// though the ABI exposes two independent tables plus an optional scalar. The
-/// <c>describeCluster</c> snapshot supplies the read-the-whole-root mechanism; it does not
-/// supply its four-way fan-out, because Java publishes four futures there and one here.
-/// </remarks>
 /// <seealso cref="DescribeFeaturesResult"/>
 public sealed class AsyncDescribeFeaturesResult
 {
-    private readonly Task<Metadata> _featureMetadata;
+    private readonly KafkaFutureImpl<Metadata> _featureMetadata;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncDescribeFeaturesResult(Task<Metadata> featureMetadata)
+    private AsyncDescribeFeaturesResult(KafkaFutureImpl<Metadata> featureMetadata, SafeAdminResultHandle native)
     {
         _featureMetadata = featureMetadata;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeFeaturesResult From(SingleAdminOperation<FeatureMetadata> operation) =>
-        new AsyncDescribeFeaturesResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// The cluster's feature metadata — Java's <c>featureMetadata()</c> (<c>:34</c>).
+    /// The cluster's feature metadata — Java's <c>featureMetadata()</c>.
     /// </summary>
     /// <returns>A future over the metadata.</returns>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<Metadata> FeatureMetadata() => new AsyncKafkaFuture<Metadata>(_featureMetadata);
+
+    internal static AsyncDescribeFeaturesResult OfClient(
+        (KafkaFutureImpl<Metadata> FeatureMetadata, SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeFeaturesResult(native.FeatureMetadata, native.Result);
 }

@@ -27,7 +27,7 @@ public sealed class UserScramCredentialsDescription
 {
     private readonly ScramCredentialInfo[] _credentialInfos;
 
-    /// <summary>Creates a description — Java's <c>:60</c>.</summary>
+    /// <summary>Creates a description — Java's constructor.</summary>
     /// <param name="name">The user name.</param>
     /// <param name="credentialInfos">The user's credential descriptions; copied.</param>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
@@ -43,15 +43,13 @@ public sealed class UserScramCredentialsDescription
         _credentialInfos = credentialInfos.ToArray();
     }
 
-    /// <summary>The user name — Java's <c>name()</c> (<c>:69</c>).</summary>
+    /// <summary>The user name — Java's <c>name()</c>.</summary>
     public string Name { get; }
 
-    /// <summary>
-    /// The user's credential descriptions — Java's <c>credentialInfos()</c> (<c>:77</c>).
-    /// </summary>
+    /// <summary>The user's credential descriptions — Java's <c>credentialInfos()</c>.</summary>
     public IReadOnlyList<ScramCredentialInfo> CredentialInfos => _credentialInfos;
 
-    /// <summary>Value equality over both fields — Java's <c>equals</c> (<c>:34</c>).</summary>
+    /// <summary>Value equality over both fields — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same user's credentials.</returns>
     public override bool Equals(object? obj) =>
@@ -59,7 +57,7 @@ public sealed class UserScramCredentialsDescription
         && string.Equals(Name, other.Name, StringComparison.Ordinal)
         && _credentialInfos.SequenceEqual(other._credentialInfos);
 
-    /// <summary>The hash of both fields — Java's <c>hashCode</c> (<c>:43</c>).</summary>
+    /// <summary>The hash of both fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -76,9 +74,8 @@ public sealed class UserScramCredentialsDescription
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:48</c>). It
-    /// embeds <see cref="ScramCredentialInfo.ToString"/>, so each mechanism prints with its
-    /// .NET name, as there.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>. Each mechanism prints
+    /// with its .NET name, as in <see cref="ScramCredentialInfo.ToString"/>.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>

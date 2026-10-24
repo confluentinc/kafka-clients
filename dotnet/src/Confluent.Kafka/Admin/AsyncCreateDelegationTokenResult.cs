@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
-
+using Confluent.Kafka.Internal.Interop;
 using Token = Confluent.Kafka.DelegationToken;
 
 namespace Confluent.Kafka.Admin;
@@ -22,26 +21,28 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.CreateDelegationToken"/> — Java's
 /// <c>org.apache.kafka.clients.admin.CreateDelegationTokenResult</c>: one future over the
-/// issued token (<c>:27</c>).
+/// issued token.
 /// </summary>
 /// <seealso cref="CreateDelegationTokenResult"/>
 public sealed class AsyncCreateDelegationTokenResult
 {
-    private readonly Task<Token> _token;
+    private readonly KafkaFutureImpl<Token> _token;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncCreateDelegationTokenResult(Task<Token> token)
+    private AsyncCreateDelegationTokenResult(KafkaFutureImpl<Token> token, SafeAdminResultHandle native)
     {
         _token = token;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncCreateDelegationTokenResult From(SingleAdminOperation<DelegationToken> operation) =>
-        new AsyncCreateDelegationTokenResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>The issued token — Java's <c>delegationToken()</c> (<c>:36</c>).</summary>
+    /// <summary>The issued token — Java's <c>delegationToken()</c>.</summary>
     /// <returns>A future over the token.</returns>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<Token> DelegationToken() => new AsyncKafkaFuture<Token>(_token);
+
+    internal static AsyncCreateDelegationTokenResult OfClient(
+        (KafkaFutureImpl<Token> Token, SafeAdminResultHandle Result) native) =>
+        new AsyncCreateDelegationTokenResult(native.Token, native.Result);
 }

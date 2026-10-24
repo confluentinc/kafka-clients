@@ -24,34 +24,17 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>declared</b> public signatures of the admin surface against the Java
-/// class they mirror. These are reflection assertions on purpose: a widened signature
-/// still compiles and still passes every behavioural test — the compiler happily accepts
-/// <c>Task&lt;TopicMetadataAndConfig&gt;</c> where <c>Task</c> was meant, and
-/// <c>int</c> where <c>short</c> was — so nothing else in the suite can turn red when
-/// the shape drifts.
+/// The declared public signatures of <c>CreateTopics</c>' result and of <see cref="ConfigEntry"/> against the Java
+/// classes they mirror.
 /// </summary>
 /// <remarks>
-/// <para>
-/// This exists because P1 is the shape checkpoint: every signature here is one P2…P8
-/// will copy, and every one of them is <b>breaking to change after publish</b>. All
-/// three were wrong in P1's first draft, each in the direction of publishing more than
-/// Java does.
-/// </para>
+/// These are reflection assertions: a widened signature still compiles and passes every behavioural test, as
+/// <c>Task&lt;TopicMetadataAndConfig&gt;</c> where <c>Task</c> was meant, or <c>int</c> where <c>short</c> was.
 /// </remarks>
 public sealed class PublicAdminShapeParityTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Java's <c>values()</c> returns <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>
-    /// (<c>CreateTopicsResult.java:43-48</c>) — the metadata is erased with
-    /// <c>thenApply(v -&gt; null)</c> and the private
-    /// <c>Map&lt;String, KafkaFuture&lt;TopicMetadataAndConfig&gt;&gt;</c> is never
-    /// published. Publishing it would widen Java's surface, which is the opposite of
-    /// restoring it. On the sync flavour (M15/P14 S4) the erased value is the void
-    /// <see cref="KafkaFuture"/>; the async twin's is pinned beside it.
-    /// </summary>
     [Fact]
     public void CreateTopicsResult_Values_ErasesTheMetadataLikeJava()
     {
@@ -64,16 +47,6 @@ public sealed class PublicAdminShapeParityTests
         Assert.Equal(typeof(IReadOnlyDictionary<string, AsyncKafkaFuture>), asyncValues.PropertyType);
     }
 
-    /// <summary>
-    /// Java's <b>result</b>-side replication factor is <c>int</c> everywhere:
-    /// <c>KafkaFuture&lt;Integer&gt; replicationFactor(String)</c>
-    /// (<c>CreateTopicsResult.java:104</c>), <c>int replicationFactor()</c>
-    /// (<c>:141</c>) and the <c>(Uuid, int, int, Config)</c> constructor (<c>:115</c>).
-    /// The C ABI agrees — <c>int32_t</c> — so a <c>short</c> here would force an
-    /// unchecked narrowing of a value the binding does not control. <c>short</c> belongs
-    /// to the <b>request</b> side only (<c>NewTopic.replicationFactor()</c>), and
-    /// <see cref="NewTopic"/> keeps it.
-    /// </summary>
     [Fact]
     public void ReplicationFactor_IsIntOnTheResultSide_AndShortOnTheRequestSide()
     {
@@ -98,30 +71,12 @@ public sealed class PublicAdminShapeParityTests
             new[] { typeof(Uuid), typeof(int), typeof(int), typeof(Config) })!;
         Assert.NotNull(metadataCtor);
 
-        // The request side is deliberately NOT widened: Java's NewTopic carries `short`.
+        // The request side is not widened: Java's NewTopic carries a short.
         Assert.Equal(
             typeof(short?),
             typeof(NewTopic).GetProperty(nameof(NewTopic.ReplicationFactor))!.PropertyType);
     }
 
-    /// <summary>
-    /// ⚠ Java's <c>ConfigEntry</c> has exactly two public constructors — the 2-argument
-    /// <c>(name, value)</c> (<c>ConfigEntry.java:44</c>) and the 8-argument one
-    /// (<c>:59</c>) — and <b>both are public here</b>, with Java's parameter types, names
-    /// and order (M15/P13.2, finding G2-4). Neither takes <c>isDefault</c>: it derives from
-    /// <c>source</c> (<c>:102-104</c>).
-    /// </summary>
-    /// <remarks>
-    /// <see cref="ConfigEntry.ConfigSynonym"/>'s constructor stays <see langword="internal"/>,
-    /// because Java's is package-private (<c>:243</c>). The internal flag-taking
-    /// <c>(name, value, isDefault, isSensitive, isReadOnly)</c> form the flattened
-    /// <c>createTopics</c> reader used is <b>gone</b> (M15/P13.3, D13): that reader now goes
-    /// through <c>kafka_admin_TopicMetadataAndConfig_config</c> and the 8-argument form, so
-    /// <see cref="ConfigEntry"/> has no non-public constructor left — a constructor Java does
-    /// not have (<c>definition-of-done.md</c> §7). This replaces a test that pinned the
-    /// 2-argument form as the only public one, from before the maintainer's decision to
-    /// publish the second.
-    /// </remarks>
     [Fact]
     public void ConfigEntry_PublishesBothConstructorsJavaHas()
     {
@@ -150,17 +105,6 @@ public sealed class PublicAdminShapeParityTests
         Assert.Empty(typeof(ConfigEntry.ConfigSynonym).GetConstructors());
     }
 
-    /// <summary>
-    /// The published 8-argument constructor's behaviour: <c>IsDefault</c> derives from the
-    /// source, the entry has value equality, and the two reference parameters it rejects are
-    /// rejected with their own names.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ A null <c>synonyms</c> is rejected where Java stores it — the recorded deviation
-    /// on the constructor. The message is the runtime's own for the parameter (it differs
-    /// between .NET Framework and .NET), so it is asserted against the runtime's rendering
-    /// rather than a literal.
-    /// </remarks>
     [Fact]
     public void ConfigEntry_TheEightArgumentConstructor_DerivesIsDefault_AndHasValueEquality()
     {
@@ -199,19 +143,6 @@ public sealed class PublicAdminShapeParityTests
         Assert.Equal(new ArgumentNullException("synonyms").Message, nullSynonyms.Message);
     }
 
-    /// <summary>
-    /// ⚠ A null synonym <b>element</b> is rejected by the published 8-argument constructor
-    /// (M15/P13.2, Critic 85 finding 85.2) — the same stricter-than-Java deviation as the
-    /// null list (D8), recorded on the constructor.
-    /// </summary>
-    /// <remarks>
-    /// Java stores the element, and its <c>equals</c> / <c>hashCode</c> / <c>toString</c>
-    /// tolerate it; here all three read every element, so an accepted null made each of them
-    /// throw <see cref="NullReferenceException"/>. Both a leading and a trailing null are
-    /// covered, since the check runs per element. The message is the constructor's own, so
-    /// it is asserted through the runtime's rendering of that message with the parameter
-    /// name (the suffix differs between .NET Framework and .NET).
-    /// </remarks>
     [Fact]
     public void ConfigEntry_TheEightArgumentConstructor_RejectsANullSynonymElement()
     {
@@ -233,16 +164,6 @@ public sealed class PublicAdminShapeParityTests
         }
     }
 
-    /// <summary>
-    /// The published 8-argument constructor <b>copies</b> the synonyms (M15/P13.2, Critic 85
-    /// finding 85.2), so the null-element check cannot be bypassed by mutating the caller's
-    /// list afterwards, and the entry's equality and hash cannot change under a key.
-    /// </summary>
-    /// <remarks>
-    /// Java stores the caller's list (<c>ConfigEntry.java:73</c>); the copy is part of the
-    /// recorded deviation. <see cref="ConfigEntry.Synonyms"/> is also not the backing array
-    /// itself, so it cannot be cast back to one and written through.
-    /// </remarks>
     [Fact]
     public void ConfigEntry_TheEightArgumentConstructor_CopiesTheSynonyms()
     {
@@ -301,17 +222,12 @@ public sealed class PublicAdminShapeParityTests
         }
     }
 
-    /// <summary>
-    /// The erasure is not merely a declaration: awaiting <c>Values[topic]</c> tells you
-    /// the topic was created and hands back nothing, and the metadata comes from the four
-    /// typed accessors — exactly the two-step a Java caller performs.
-    /// </summary>
     [Fact]
     public async Task Values_ReportsCreationOnly_MetadataComesFromTheTypedAccessors()
     {
         const string Topic = "shape-parity-topic";
 
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(2);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(2).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult result = admin.CreateTopics(new[] { new NewTopic(Topic, 3, 2) });

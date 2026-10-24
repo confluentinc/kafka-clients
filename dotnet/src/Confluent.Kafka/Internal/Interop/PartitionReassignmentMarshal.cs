@@ -14,74 +14,71 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Admin;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a <b>borrowed</b> <c>kafka_admin_PartitionReassignment_t</c> out into an owned
-/// managed <see cref="PartitionReassignment"/>, before the result root that owns it dies.
+/// Copies the borrowed partition reassignments a <c>listPartitionReassignments</c> future delivers into owned
+/// managed values.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The three lists are read through six FLATTENED accessors — there is no child
-/// handle per list.</b> <c>replica_count</c>/<c>replica(i)</c> and the adding/removing
-/// pairs, the same pattern M15/P3's replica-info tree uses. So nothing here is a handle
-/// that could outlive the root, and what remains is the ordinary copy-out rule: every read
-/// must happen before <c>ListPartitionReassignmentsResult_destroy</c> (ffi §B4).
-/// </para>
-/// <para>
-/// A null pointer yields <see langword="null"/>, mirroring the ABI's documented
-/// out-of-range return. The walker never passes one — <c>CompleteAggregate</c> reads
-/// strictly inside <c>count</c> — so it is defence, not a live branch.
-/// </para>
-/// </remarks>
 internal static class PartitionReassignmentMarshal
 {
-    /// <summary>Copies out one reassignment.</summary>
-    /// <param name="reassignment">The borrowed pointer, or <see cref="IntPtr.Zero"/>.</param>
-    /// <returns>An owned value, or <see langword="null"/> for a null pointer.</returns>
-    internal static PartitionReassignment? CopyOut(IntPtr reassignment)
+    private delegate IntPtr ReplicaList(IntPtr reassignment, ref IntPtr outErr);
+
+    internal static IReadOnlyDictionary<TopicPartition, PartitionReassignment> CopyOutReassignments(IntPtr reassignments)
     {
-        if (reassignment == IntPtr.Zero)
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.MapSize(reassignments, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        Dictionary<TopicPartition, PartitionReassignment> copied = new Dictionary<TopicPartition, PartitionReassignment>(count);
+        for (int i = 0; i < count; i++)
         {
-            return null;
+            IntPtr partition = NativeMethods.MapKey(reassignments, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr reassignment = NativeMethods.MapValue(reassignments, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            copied[TopicPartitionListMarshal.CopyOutElement(partition)] = CopyOut(reassignment);
         }
 
-        return new PartitionReassignment(
-            ReadList(
-                reassignment,
-                NativeMethods.PartitionReassignmentReplicaCount,
-                NativeMethods.PartitionReassignmentReplica),
-            ReadList(
-                reassignment,
-                NativeMethods.PartitionReassignmentAddingReplicaCount,
-                NativeMethods.PartitionReassignmentAddingReplica),
-            ReadList(
-                reassignment,
-                NativeMethods.PartitionReassignmentRemovingReplicaCount,
-                NativeMethods.PartitionReassignmentRemovingReplica));
+        return copied;
     }
 
-    /// <summary>
-    /// Reads one count/element accessor pair into an owned list.
-    /// </summary>
-    /// <remarks>
-    /// The accessors are taken as parameters so the three identical walks are one body —
-    /// the same reason M15/P4 Stage 1's reader factories exist, and it is what lets a test
-    /// drive this body once and cover all three lists.
-    /// </remarks>
-    private static List<int> ReadList(
-        IntPtr reassignment, Func<IntPtr, int> count, Func<IntPtr, int, int> element)
-    {
-        int total = count(reassignment);
-        List<int> brokers = new List<int>(Math.Max(total, 0));
-        for (int index = 0; index < total; index++)
-        {
-            brokers.Add(element(reassignment, index));
-        }
+    internal static PartitionReassignment CopyOut(IntPtr reassignment) =>
+        new PartitionReassignment(
+            ReadList(reassignment, NativeMethods.PartitionReassignmentReplicas),
+            ReadList(reassignment, NativeMethods.PartitionReassignmentAddingReplicas),
+            ReadList(reassignment, NativeMethods.PartitionReassignmentRemovingReplicas));
 
-        return brokers;
+    private static List<int> ReadList(IntPtr reassignment, ReplicaList accessor)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr list = accessor(reassignment, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            int count = NativeMethods.ListSize(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            List<int> brokers = new List<int>(count);
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr broker = NativeMethods.ListGet(list, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                brokers.Add(Marshal.ReadInt32(broker));
+            }
+
+            return brokers;
+        }
+        finally
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.ListDestroy(list, ref destroyErr);
+            if (destroyErr != IntPtr.Zero)
+            {
+                NativeMethods.ErrorDestroy(destroyErr);
+            }
+        }
     }
 }

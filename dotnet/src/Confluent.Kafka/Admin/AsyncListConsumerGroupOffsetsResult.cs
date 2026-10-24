@@ -16,107 +16,48 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Threading.Tasks;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of a <c>listConsumerGroupOffsets</c> call — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>
-/// (<c>ListConsumerGroupOffsetsResult.java:36</c>): one future <b>per group id</b>,
-/// each yielding that group's committed offsets keyed by partition.
+/// The result of <see cref="IAsyncAdmin.ListConsumerGroupOffsets(string, ListConsumerGroupOffsetsOptions?)"/> — Java's
+/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult</c>: one future per group id, whose value maps each
+/// partition to its committed offset, or to <see langword="null"/> when the partition has none.
 /// </summary>
-/// <remarks>
-/// <para>
-/// A group that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/>; a per-group failure
-/// is not a call failure. <see cref="All"/> is the aggregate over those per-group futures and
-/// succeeds only if every one of them did.
-/// </para>
-/// <para>
-/// ⚠ <b>This result publishes no per-key map</b>, unlike
-/// <see cref="AsyncDescribeConsumerGroupsResult"/> and <see cref="AsyncDescribeClassicGroupsResult"/>.
-/// Java's <c>futures</c> field is package-private with no getter (<c>:38</c>); the only ways
-/// in are the two <c>partitionsToOffsetAndMetadata</c> forms and <c>all()</c>. Those three
-/// are mirrored as three methods, and no map property is invented to sit beside them.
-/// </para>
-/// <para>
-/// ⚠ <b>The two <c>PartitionsToOffsetAndMetadata</c> forms are real overloads, not one
-/// method with a defaulted argument.</b> Collapsing them would erase the no-argument form's
-/// own contract: it is valid <em>only</em> when the result holds exactly one group, and
-/// throws otherwise (<c>:50-53</c>). An optional parameter cannot express "the argument may
-/// be omitted only when the receiver has a particular shape", so both forms ship.
-/// </para>
-/// <para>
-/// ⚠ <b>A partition present with a <see langword="null"/> value is not the same as a
-/// partition that is absent.</b> Java's javadoc is explicit (<c>:47</c>, <c>:59-60</c>):
-/// when the group has no committed offset for a listed partition, the partition still
-/// appears in the map and its value is <c>null</c>. The C ABI carries the distinction as a
-/// per-partition <c>has_offset</c> flag, so the value type is
-/// <c>OffsetAndMetadata?</c> rather than a partition silently dropped from the map — the
-/// same absent-is-not-empty discipline
-/// <see cref="ConsumerGroupDescription.AuthorizedOperations"/> and
-/// <see cref="ListConsumerGroupOffsetsSpec.TopicPartitions"/> follow.
-/// </para>
-/// </remarks>
 /// <seealso cref="ListConsumerGroupOffsetsResult"/>
 public sealed class AsyncListConsumerGroupOffsetsResult
 {
-    private readonly IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
+    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
+    private readonly SafeAdminResultHandle? _native;
 
-    /// <summary>
-    /// Wraps one future per group id — Java's <b>package-private</b>
-    /// <c>ListConsumerGroupOffsetsResult(Map&lt;CoordinatorKey, KafkaFuture&lt;...&gt;&gt;)</c>
-    /// (<c>:40</c>).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ Java's constructor is package-private and is mirrored as <see langword="internal"/>
-    /// rather than widened — unlike <see cref="AsyncDescribeClassicGroupsResult"/>, whose Java
-    /// constructor really is public. So the bridge is the only thing that can build one, and
-    /// the map is a bridge invariant rather than caller input: no null guard is written, the
-    /// same call <see cref="AsyncCreateTopicsResult"/> and <see cref="AsyncDescribeConfigsResult"/>
-    /// already make for their own internal constructors.
-    /// </para>
-    /// <para>
-    /// Java also unwraps <c>CoordinatorKey</c> to its <c>idValue</c> here (<c>:41-42</c>);
-    /// that type is an internal admin key with no .NET counterpart, so the map arrives
-    /// already keyed by group id.
-    /// </para>
-    /// </remarks>
-    /// <param name="futures">One future per requested group id.</param>
-    internal AsyncListConsumerGroupOffsetsResult(
-        IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
+    internal AsyncListConsumerGroupOffsetsResult(IReadOnlyDictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
     {
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
         _futures = futures;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncListConsumerGroupOffsetsResult From(
-        KeyedAdminOperation<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> operation) =>
-        new AsyncListConsumerGroupOffsetsResult(operation.Tasks);
+    private AsyncListConsumerGroupOffsetsResult(IReadOnlyDictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures, SafeAdminResultHandle native)
+    {
+        _futures = futures;
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
 
     /// <summary>
-    /// The single requested group's committed offsets keyed by partition — Java's no-argument
-    /// <c>partitionsToOffsetAndMetadata()</c> (<c>:49</c>).
+    /// The offsets of the one group requested — Java's <c>partitionsToOffsetAndMetadata()</c>.
     /// </summary>
-    /// <returns>A future yielding that group's committed offsets.</returns>
-    /// <exception cref="InvalidOperationException">
-    /// Offsets for more than one group — or for no group at all — were requested, so there is
-    /// no single group for this form to mean. Java throws <c>IllegalStateException</c> on the
-    /// same condition (<c>:50-53</c>).
-    /// </exception>
-    /// <remarks>
-    /// A partition the group has no committed offset for is present with a
-    /// <see langword="null"/> value rather than absent; see the note on the class.
-    /// </remarks>
+    /// <returns>That group's future.</returns>
+    /// <exception cref="InvalidOperationException">The request did not name exactly one group; Java's message.</exception>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata()
     {
-        // Java's guard is `futures.size() != 1`, so an EMPTY result throws here too — the
-        // message names only the multiple-group case, and the text is Java's verbatim.
         if (_futures.Count != 1)
         {
             throw new InvalidOperationException(
@@ -124,28 +65,16 @@ public sealed class AsyncListConsumerGroupOffsetsResult
                 "Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.");
         }
 
-        // Java's `futures.values().iterator().next()` (:54).
-        return new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(_futures.Values.First());
+        return _futures.Values.First();
     }
 
     /// <summary>
-    /// One group's committed offsets keyed by partition — Java's
-    /// <c>partitionsToOffsetAndMetadata(String)</c> (<c>:62</c>).
+    /// The offsets of one requested group — Java's <c>partitionsToOffsetAndMetadata(String)</c>.
     /// </summary>
-    /// <param name="groupId">A group id from the request this result came from.</param>
-    /// <returns>A future yielding that group's committed offsets.</returns>
+    /// <param name="groupId">A group id from the request.</param>
+    /// <returns>That group's future, the same one on every call.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="groupId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="groupId"/> was not part of this request. Java throws
-    /// <c>IllegalArgumentException</c> on the same condition (<c>:63-64</c>).
-    /// </exception>
-    /// <remarks>
-    /// Argument validation is synchronous — this method is deliberately not <c>async</c>, so
-    /// a caller mistake surfaces at the call site rather than only when the returned
-    /// <see cref="AsyncKafkaFuture"/> is awaited. That matches Java, which throws out of the method, and
-    /// is the .NET guidance for a <see cref="AsyncKafkaFuture"/>-returning method: a usage error is not
-    /// an operation outcome.
-    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="groupId"/> was not part of the request.</exception>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> PartitionsToOffsetAndMetadata(string groupId)
     {
         if (groupId is null)
@@ -153,49 +82,52 @@ public sealed class AsyncListConsumerGroupOffsetsResult
             throw new ArgumentNullException(nameof(groupId));
         }
 
-        if (!_futures.TryGetValue(
-                groupId, out Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>? future))
+        if (!_futures.TryGetValue(groupId, out AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future))
         {
             throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Offsets for consumer group '{0}' were not requested.",
-                    groupId),
+                string.Format(CultureInfo.InvariantCulture, "Offsets for consumer group '{0}' were not requested.", groupId),
                 nameof(groupId));
         }
 
-        return new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(future);
+        return future;
     }
 
     /// <summary>
-    /// Every group's committed offsets in one map, succeeding only if every group succeeded —
-    /// Java's <c>all()</c> (<c>:72</c>).
+    /// Every requested group's offsets, keyed by group id, once all of them succeeded — Java's <c>all()</c>. It fails
+    /// with the first failure to complete. Each call builds a new future.
     /// </summary>
-    /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
-    /// <remarks>
-    /// The aggregate is built with <see cref="StringComparer.Ordinal"/> — what the bridge keys
-    /// group ids by, and how Kafka compares them. Each call starts a fresh gather and hands
-    /// back a new <see cref="AsyncKafkaFuture"/>, which is why this is a method and not a property.
-    /// </remarks>
-    public AsyncKafkaFuture<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(Gather(_futures));
-
-    private static async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>
-        Gather(IReadOnlyDictionary<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures)
+    /// <returns>A future over every group's offsets.</returns>
+    public AsyncKafkaFuture<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> All()
     {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever key
-        // happens to be enumerated first.
-        await Task.WhenAll(futures.Values).ConfigureAwait(false);
-
-        Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets =
-            new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(
-                futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
+        IReadOnlyDictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures = _futures;
+        AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>[] values = new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>[futures.Count];
+        int next = 0;
+        foreach (AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future in futures.Values)
         {
-            offsets.Add(entry.Key, entry.Value.Result);
+            values[next++] = future;
         }
 
-        return offsets;
+        return AsyncKafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(() =>
+        {
+            Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets = new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
+            {
+                offsets.Add(entry.Key, entry.Value.GetNow(null!));
+            }
+
+            return offsets;
+        });
+    }
+
+    internal static AsyncListConsumerGroupOffsetsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures = new Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(native.Futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in native.Futures)
+        {
+            futures.Add(entry.Key, new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(entry.Value));
+        }
+
+        return new AsyncListConsumerGroupOffsetsResult(futures, native.Result);
     }
 }

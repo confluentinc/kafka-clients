@@ -88,34 +88,26 @@ internal abstract class KafkaFutureImpl
         return result;
     }
 
-    internal static Task WaitFor(Task task, TimeSpan timeout)
+    internal static KafkaFutureImpl<IReadOnlyDictionary<TKey, TValue>> GatherAll<TKey, TValue>(
+        IReadOnlyCollection<KeyValuePair<TKey, KafkaFutureImpl<TValue>>> futures, IEqualityComparer<TKey> comparer)
+        where TKey : notnull
     {
-        if (task.IsCompleted || timeout == Timeout.InfiniteTimeSpan)
+        List<KafkaFutureImpl> all = new List<KafkaFutureImpl>(futures.Count);
+        foreach (KeyValuePair<TKey, KafkaFutureImpl<TValue>> entry in futures)
         {
-            return task;
+            all.Add(entry.Value);
         }
 
-        if (timeout <= TimeSpan.Zero)
+        return AllOf(all).ThenApply<IReadOnlyDictionary<TKey, TValue>>(_ =>
         {
-            return Task.FromException(new TimeoutException());
-        }
+            Dictionary<TKey, TValue> values = new Dictionary<TKey, TValue>(futures.Count, comparer);
+            foreach (KeyValuePair<TKey, KafkaFutureImpl<TValue>> entry in futures)
+            {
+                values[entry.Key] = entry.Value.GetNow(default!);
+            }
 
-        return WithTimeout(task, timeout);
-    }
-
-    internal static Task WaitFor(Task task, CancellationToken cancellationToken)
-    {
-        if (task.IsCompleted || !cancellationToken.CanBeCanceled)
-        {
-            return task;
-        }
-
-        if (cancellationToken.IsCancellationRequested)
-        {
-            return Task.FromCanceled(cancellationToken);
-        }
-
-        return WithCancellation(task, cancellationToken);
+            return values;
+        });
     }
 
     internal abstract bool Cancel(bool mayInterruptIfRunning);
@@ -184,18 +176,6 @@ internal abstract class KafkaFutureImpl
             }
         }
     }
-
-    private static async Task WithTimeout(Task task, TimeSpan timeout)
-    {
-        await AwaitWithin(task, timeout).ConfigureAwait(false);
-        await task.ConfigureAwait(false);
-    }
-
-    private static async Task WithCancellation(Task task, CancellationToken cancellationToken)
-    {
-        await AwaitUntil(task, cancellationToken).ConfigureAwait(false);
-        await task.ConfigureAwait(false);
-    }
 }
 
 /// <summary>
@@ -254,6 +234,8 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     internal override bool IsDone => _state != Pending || (_source is not null && _source.IsDone);
 
+    internal bool IsSettled => _state != Pending;
+
     internal override bool IsCancelled
     {
         get
@@ -298,6 +280,8 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
     }
 
     internal bool CompleteWithError(Exception error) => Fail(StateFor(error), error, propagated: false);
+
+    internal bool Propagate(Exception error) => Fail(StateFor(error), error, propagated: true);
 
     internal override bool Cancel(bool mayInterruptIfRunning)
     {
@@ -537,8 +521,6 @@ internal sealed class KafkaFutureImpl<T> : KafkaFutureImpl
 
     private int StateFor(Exception error) =>
         error is OperationCanceledException && _mayCancel ? Cancelled : Failed;
-
-    private bool Propagate(Exception error) => Fail(StateFor(error), error, propagated: true);
 
     private bool Fail(int state, Exception error, bool propagated)
     {

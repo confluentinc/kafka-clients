@@ -24,26 +24,9 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <c>alterClientQuotas</c> end to end against <see cref="MockAdminClient"/>, no broker
-/// (M15/P6).
+/// <c>AlterClientQuotas</c> end to end against the mocks, which fail every entity with the mock's own answer, as Java's
+/// mock does: per-entity results keyed by entity value, <c>All()</c>, the preconditions, the result type and the options.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>There is no happy path here, and that is Java's behaviour rather than a gap.</b>
-/// Java's <c>MockAdminClient.alterClientQuotas</c> throws
-/// <c>UnsupportedOperationException("Not implement yet")</c> — Java's own typo, mirrored
-/// (<c>MockAdminClient.java:1249-1251</c>) — and the Rust mock surfaces it as one exceptional
-/// future <em>per entity</em> (<c>admin-client.md</c> §9). That still exercises the whole
-/// receive path: the walk reads a real <c>kafka_admin_AlterClientQuotasResult_t</c>, rebuilds
-/// each key from a real borrowed <c>kafka_common_quota_ClientQuotaEntity_t</c>, and reads each
-/// per-entity error through <see cref="KafkaException.FromBorrowedHandle"/>.
-/// </para>
-/// <para>
-/// ⚠⚠ Every lookup below goes through <see cref="ClientQuotaEntity"/>'s value equality, and
-/// several deliberately use a <em>freshly constructed</em> entity rather than the instance
-/// that was submitted (PLAN D39, T-N6).
-/// </para>
-/// </remarks>
 public sealed class PublicAdminAlterClientQuotasTests
 {
     private const string NotImplemented = "Not implement yet";
@@ -53,20 +36,10 @@ public sealed class PublicAdminAlterClientQuotasTests
     private static readonly ClientQuotaAlteration.Op[] s_noOps =
         Array.Empty<ClientQuotaAlteration.Op>();
 
-    /// <summary>
-    /// ⚠⚠ <b>M15/P13.2 G4-4, the empirical premise — through the REAL ABI.</b> An alteration
-    /// whose entity is empty is <b>sent</b>, and it is answered for itself alone:
-    /// <c>[valid, empty]</c> yields <b>two</b> per-key results, each carrying the mock's own
-    /// per-entity failure, rather than the whole call failing for both keys with the ABI's
-    /// "has no entity types". That text is what a NULL <c>entity_types[i]</c> produces
-    /// (<c>read_client_quota_alterations</c>); a non-null pointer with a count of 0 parses to
-    /// an empty entity, which is what the header's "an alteration with no entity types" does
-    /// NOT cover (PLAN §1.4, D3).
-    /// </summary>
     [Fact]
     public async Task AnEmptyEntity_IsSent_AndAnsweredForItselfAlone()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity empty = EmptyEntity();
@@ -82,25 +55,16 @@ public sealed class PublicAdminAlterClientQuotasTests
             KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
                 () => TestTimeout.Run(() => perEntity.Get(), s_deadline));
 
-            // ⚠ The mock's own per-entity wording, typo included (mock_admin_client.rs:1766) —
-            // NOT "quota alteration at index 1 has no entity types", the whole-call rejection.
+            // The core mock's own per-entity wording, typo included, not the whole-call rejection.
             Assert.Equal(NotImplemented, failure.Message);
             Assert.Equal(35, failure.Code);
         }
     }
 
-    /// <summary>
-    /// ⚠ <b>M15/P13.3 F7.</b> Two empty entities are one entity altered twice, and a repeated
-    /// entity is <b>sent</b>, not rejected — Java sends every alteration and its per-entity
-    /// future map collapses the repeat (<c>KafkaAdminClient.java:4314-4318</c>), which the
-    /// core has done since PR #201 round 70. So the request reaches the mock, and the one
-    /// entity has one awaitable carrying the mock's own answer. That the rows were sent and the
-    /// client released is <c>AdminAlterClientQuotasRepeatedEntityTests</c>' job.
-    /// </summary>
     [Fact]
     public async Task TwoEmptyEntities_AreOneEntity_SentAndAnsweredOnce()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -118,15 +82,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(35, failure.Code);
     }
 
-    /// <summary>
-    /// ⚠ <b>M15/P13.3 F7.</b> The same entity altered twice is accepted, as Java accepts it:
-    /// one awaitable for the entity, carrying the mock's own answer — not the
-    /// <see cref="ArgumentException"/> the binding used to throw before the native call.
-    /// </summary>
     [Fact]
     public async Task ARepeatedEntity_IsAccepted_AndHasOneAwaitable()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -139,19 +98,14 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(NotImplemented, failure.Message);
         Assert.Equal(35, failure.Code);
 
-        // All() is Java's allOf over the one per-entity future.
         KafkaException all = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, all.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>T-N6.</b> An entity built fresh, equal by value to the one submitted, finds its
-    /// own awaitable in <see cref="AlterClientQuotasResult.Values"/>.
-    /// </summary>
     [Fact]
     public async Task Values_AreKeyedByValue_NotByReference()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -166,15 +120,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>T-N5, read side.</b> The default entity (a null name), the entity named
-    /// <c>""</c> and the entity named <c>"x"</c> are <b>three distinct</b> keys, both on the
-    /// way out and on the way back.
-    /// </summary>
     [Fact]
     public async Task TheEntityNameTernary_ProducesThreeDistinctKeys()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -190,25 +139,17 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.True(result.Values.ContainsKey(Entity(string.Empty)));
         Assert.True(result.Values.ContainsKey(Entity("x")));
 
-        // null is not "", and neither is "x" — a collapsing model loses one of the three.
         Assert.NotEqual(Entity(null), Entity(string.Empty));
 
-        // ⚠ The MESSAGE is what makes this discriminating end to end: if the marshaller
-        // collapsed the null name into "", the three rows would become two duplicates and the
-        // ABI would reject the whole request instead of reaching the mock.
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// Each entity gets <b>its own</b> awaitable, and the key the result hands back round
-    /// trips through the ABI unchanged.
-    /// </summary>
     [Fact]
     public async Task EachEntity_GetsItsOwnTask_AndItsKeyRoundTrips()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity alpha = new ClientQuotaEntity(
@@ -244,14 +185,10 @@ public sealed class PublicAdminAlterClientQuotasTests
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
-    /// <summary>
-    /// One entity can be awaited without awaiting the others — the per-key granularity Java
-    /// publishes, and the discriminator against a single shared awaitable.
-    /// </summary>
     [Fact]
     public async Task OneKey_IsAwaitableWithoutTheOthers()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity first = Entity("solo-first");
@@ -266,11 +203,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary><c>All()</c> faults when any entity failed — Java's <c>KafkaFuture.allOf</c>.</summary>
     [Fact]
     public async Task All_FaultsWhenAnyEntityFails()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
@@ -281,14 +217,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(NotImplemented, failure.Message);
     }
 
-    /// <summary>
-    /// <c>All()</c> over an empty request completes — Java's <c>allOf</c> of nothing is a
-    /// completed future.
-    /// </summary>
     [Fact]
     public async Task All_OverAnEmptyRequest_Completes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result =
@@ -298,14 +230,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// ⚠ A non-ASCII entity name survives out and back — the UTF-8 round trip through both
-    /// the ragged projector and the entity reader (ffi §A3/§B3).
-    /// </summary>
     [Fact]
     public async Task NonAsciiName_RoundTripsThroughTheResultKey()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result =
@@ -318,16 +246,10 @@ public sealed class PublicAdminAlterClientQuotasTests
         await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// Preconditions are rejected before any native call (ffi §B5). Neither an empty entity
-    /// (M15/P13.2 G4-4 — see <see cref="AnEmptyEntity_IsSent_AndAnsweredForItselfAlone"/>) nor
-    /// the same entity altered twice (M15/P13.3 F7 — see
-    /// <see cref="ARepeatedEntity_IsAccepted_AndHasOneAwaitable"/>) is among them any more.
-    /// </summary>
     [Fact]
     public void Preconditions_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(
@@ -343,17 +265,12 @@ public sealed class PublicAdminAlterClientQuotasTests
             nullElement.Message,
             StringComparison.Ordinal);
 
-        // A negative timeout is no longer among them (M15/P13.5 X2): it is sent as 0, Java's
-        // calcDeadlineMs clamp, so it fails through the result rather than synchronously.
+        // A negative timeout is not a precondition: it is sent as 0, as Java clamps the deadline.
         Assert.Null(Record.Exception(
             () => admin.AlterClientQuotas(
                 new[] { Alteration("ok", 1d) }, new AlterClientQuotasOptions { TimeoutMs = -1 })));
     }
 
-    /// <summary>
-    /// A null <see cref="ClientQuotaAlteration"/> entity or op is rejected by the value type's
-    /// own constructor, which is why the submit does not re-check them.
-    /// </summary>
     [Fact]
     public void TheValueTypes_RejectTheRemainingAbiInputs()
     {
@@ -373,26 +290,16 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal("ops", nullOp.ParamName);
     }
 
-    /// <summary>
-    /// Using the client after it is closed throws <see cref="ObjectDisposedException"/> rather
-    /// than reaching a destroyed handle.
-    /// </summary>
     [Fact]
     public void AfterDispose_Throws()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Dispose(admin);
 
         Assert.Throws<ObjectDisposedException>(
             () => admin.AlterClientQuotas(new[] { Alteration("gone", 1d) }));
     }
 
-    /// <summary>
-    /// Java's constructor is <b>public</b> (<c>AlterClientQuotasResult.java:38</c>); the sync one here is
-    /// <b>internal</b> — a recorded Java-parity deviation, follow-up FU-5 (M15/P14 Q3) — over one
-    /// <see cref="KafkaFuture"/> per entity, and it still rejects a null map before anything can dereference it
-    /// (reached through <c>InternalsVisibleTo</c>).
-    /// </summary>
     [Fact]
     public void Constructor_IsInternalAndRejectsNull()
     {
@@ -409,10 +316,6 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal(new ArgumentNullException("futures").Message, error.Message);
     }
 
-    /// <summary>
-    /// <see cref="AlterClientQuotasOptions"/> ships Java's defaults: an unset timeout and
-    /// <c>validateOnly = false</c> (<c>AlterClientQuotasOptions.java:27</c>).
-    /// </summary>
     [Fact]
     public void Options_DefaultToJavasDefaults()
     {

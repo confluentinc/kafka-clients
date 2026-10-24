@@ -20,27 +20,18 @@ using System.Linq;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A description of one topic — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.TopicDescription</c>, and the per-key value of
-/// <see cref="DescribeTopicsResult"/>.
+/// A description of one topic, the per-key value of <see cref="DescribeTopicsResult"/> — Java's
+/// <c>org.apache.kafka.clients.admin.TopicDescription</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b><see cref="AuthorizedOperations"/> distinguishes <em>absent</em> from
-/// <em>empty</em>.</b> Java's accessor documents "or <b>null</b> if this is not known"
-/// (<c>TopicDescription.java:129</c>), which is the case where the broker was never asked
-/// (<c>DescribeTopicsOptions.IncludeAuthorizedOperations</c> left false) or did not
-/// answer — <em>not</em> the case where it answered "none are authorized". The C ABI
-/// carries the discriminant explicitly
-/// (<c>kafka_admin_TopicDescription_has_authorized_operations</c> beside the count)
-/// because a count of 0 covers both, so collapsing <see langword="null"/> into an empty
-/// collection would discard information the ABI deliberately preserved.
+/// <see cref="AuthorizedOperations"/> is <see langword="null"/> when the operations are not
+/// known (the broker was not asked, or did not answer), and empty when the broker answered that
+/// none is authorized, as Java's accessor.
 /// </para>
 /// <para>
-/// <b>Value equality is deliberately not implemented</b>, although Java's class overrides
-/// <c>equals</c>/<c>hashCode</c> — the same recorded choice as
-/// <see cref="TopicPartitionInfo"/>, and consistent with every other value type this
-/// binding has shipped except <see cref="Uuid"/> (which is a dictionary key and needs it).
+/// Value equality is not implemented, although Java's class overrides <c>equals</c> and
+/// <c>hashCode</c>: a recorded deviation, as on <see cref="TopicPartitionInfo"/>.
 /// </para>
 /// </remarks>
 public sealed class TopicDescription
@@ -49,9 +40,8 @@ public sealed class TopicDescription
     private readonly List<AclOperation>? _authorizedOperations;
 
     /// <summary>
-    /// Creates a description with a <b>reported-but-empty</b> authorized-operations set
-    /// and <see cref="Uuid.Zero"/> as the topic id — Java's three-argument constructor
-    /// (<c>TopicDescription.java:64</c>), which passes <c>Collections.emptySet()</c>.
+    /// Creates a description with an empty authorized-operations set and
+    /// <see cref="Uuid.Zero"/> as the topic id — Java's three-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
     /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
@@ -68,8 +58,7 @@ public sealed class TopicDescription
 
     /// <summary>
     /// Creates a description with <see cref="Uuid.Zero"/> as the topic id — Java's
-    /// four-argument constructor (<c>TopicDescription.java:77</c>), which passes
-    /// <c>Uuid.ZERO_UUID</c>.
+    /// four-argument constructor.
     /// </summary>
     /// <param name="name">The topic name.</param>
     /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
@@ -77,8 +66,7 @@ public sealed class TopicDescription
     /// One entry per partition; the index is the partition id.
     /// </param>
     /// <param name="authorizedOperations">
-    /// The authorized operations, or <see langword="null"/> if the broker reported none
-    /// at all. See the absent-versus-empty note in the type remarks.
+    /// The authorized operations, or <see langword="null"/> when they are not known.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="partitions"/> is null.
@@ -92,18 +80,14 @@ public sealed class TopicDescription
     {
     }
 
-    /// <summary>
-    /// Creates a description — Java's five-argument constructor
-    /// (<c>TopicDescription.java:92</c>).
-    /// </summary>
+    /// <summary>Creates a description — Java's five-argument constructor.</summary>
     /// <param name="name">The topic name.</param>
     /// <param name="isInternal">Whether the topic is internal to Kafka.</param>
     /// <param name="partitions">
     /// One entry per partition; the index is the partition id.
     /// </param>
     /// <param name="authorizedOperations">
-    /// The authorized operations, or <see langword="null"/> if the broker reported none
-    /// at all. See the absent-versus-empty note in the type remarks.
+    /// The authorized operations, or <see langword="null"/> when they are not known.
     /// </param>
     /// <param name="topicId">The topic id.</param>
     /// <exception cref="ArgumentNullException">
@@ -125,7 +109,6 @@ public sealed class TopicDescription
         IsInternal = isInternal;
         _partitions = new List<TopicPartitionInfo>(partitions);
 
-        // null stays null — see the absent-versus-empty note in the type remarks.
         _authorizedOperations =
             authorizedOperations is null ? null : new List<AclOperation>(authorizedOperations);
         TopicId = topicId;
@@ -151,28 +134,22 @@ public sealed class TopicDescription
 
     /// <summary>
     /// The operations the caller is authorized to perform on this topic, or
-    /// <see langword="null"/> if the broker reported none at all — Java's
-    /// <c>authorizedOperations()</c>. An <b>empty</b> collection means "reported, and
-    /// none are authorized"; see the absent-versus-empty note in the type remarks.
+    /// <see langword="null"/> when they are not known — Java's <c>authorizedOperations()</c>.
+    /// An empty collection means they were reported and none is authorized.
     /// </summary>
     /// <remarks>
-    /// Java returns a <c>Set</c>; <c>IReadOnlySet&lt;T&gt;</c> post-dates the
-    /// netstandard2.0 floor, so this is an <c>IReadOnlyCollection&lt;T&gt;</c> — the same
-    /// substitution the consumer surface already makes for <c>Assignment()</c> and
-    /// friends.
+    /// A collection, where Java returns a <c>Set</c>: <c>IReadOnlySet&lt;T&gt;</c> post-dates
+    /// netstandard2.0.
     /// </remarks>
     public IReadOnlyCollection<AclOperation>? AuthorizedOperations => _authorizedOperations;
 
-    /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c>.
-    /// </summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
             CultureInfo.InvariantCulture,
             "(name={0}, internal={1}, partitions={2}, authorizedOperations={3})",
             Name,
-            // Java renders a boolean lowercase; bool.ToString() would give True/False.
             IsInternal ? "true" : "false",
             string.Join(",", _partitions.Select(static partition => partition.ToString())),
             _authorizedOperations is null ? "null" : "[" + string.Join(", ", _authorizedOperations) + "]");

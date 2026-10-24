@@ -12,26 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.DescribeConfigs"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DescribeConfigsOptions</c>
-/// (<c>DescribeConfigsOptions.java:25-69</c>).
+/// <c>org.apache.kafka.clients.admin.DescribeConfigsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java declares exactly two fields of its own — <c>includeSynonyms</c> (<c>:27</c>) and
-/// <c>includeDocumentation</c> (<c>:28</c>), both defaulting to <see langword="false"/> —
-/// beside the inherited timeout, and <c>describe_configs_async</c> takes exactly those two
-/// booleans plus <c>timeout_ms</c>.
-/// </para>
 /// </remarks>
 public sealed class DescribeConfigsOptions
 {
+    private int? _timeoutMs;
+
+    private bool _includeSynonyms;
+
+    private bool _includeDocumentation;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
     /// Return each entry's synonyms, in precedence order — Java's
@@ -39,7 +48,15 @@ public sealed class DescribeConfigsOptions
     /// <see langword="false"/>, as Java's does, in which case
     /// <see cref="ConfigEntry.Synonyms"/> comes back empty.
     /// </summary>
-    public bool IncludeSynonyms { get; set; }
+    public bool IncludeSynonyms
+    {
+        get => _includeSynonyms;
+        set
+        {
+            _includeSynonyms = value;
+            Setters.Ran(nameof(IncludeSynonyms));
+        }
+    }
 
     /// <summary>
     /// Return each entry's documentation — Java's <c>includeDocumentation(boolean)</c> /
@@ -47,5 +64,15 @@ public sealed class DescribeConfigsOptions
     /// in which case <see cref="ConfigEntry.Documentation"/> comes back
     /// <see langword="null"/>.
     /// </summary>
-    public bool IncludeDocumentation { get; set; }
+    public bool IncludeDocumentation
+    {
+        get => _includeDocumentation;
+        set
+        {
+            _includeDocumentation = value;
+            Setters.Ran(nameof(IncludeDocumentation));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

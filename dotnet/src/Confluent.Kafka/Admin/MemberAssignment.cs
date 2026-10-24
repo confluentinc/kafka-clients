@@ -20,65 +20,33 @@ using System.Linq;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The partitions assigned to one group member — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.MemberAssignment</c>
-/// (<c>MemberAssignment.java:29, :37, :42, :52, :59, :64</c>).
+/// The partitions assigned to one group member — Java's
+/// <c>org.apache.kafka.clients.admin.MemberAssignment</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Java's <c>Set&lt;TopicPartition&gt;</c> is exposed as an
-/// <c>IReadOnlyCollection&lt;T&gt;</c>.</b> <c>IReadOnlySet&lt;T&gt;</c> post-dates the
-/// netstandard2.0 floor, so it is unavailable on the oldest target framework — the same
-/// substitution <see cref="TopicDescription.AuthorizedOperations"/> and the consumer
-/// surface already make. The <em>set</em> semantics are not lost: the constructor
-/// deduplicates, and <see cref="Equals(object)"/> / <see cref="GetHashCode"/> below are
-/// order-insensitive, exactly as a Java <c>Set</c> is.
-/// </para>
-/// <para>
-/// ⚠ <b>A null argument is accepted and becomes an empty assignment</b>, which is
-/// <em>not</em> the strict <see cref="ArgumentNullException"/> guard
-/// <see cref="TopicDescription"/> applies. The difference is Java's, not this binding's: Java
-/// coalesces here (<c>topicPartitions == null ? Collections.emptySet() : ...</c>, <c>:38</c>)
-/// where that class rejects, so mirroring the guard would reject a call Java accepts.
-/// </para>
-/// <para>
-/// ⚠ <b>The collection is copied defensively</b>, mirroring Java's <c>Set.copyOf</c>
-/// (<c>:38</c>): a caller that keeps mutating the collection it passed in cannot change an
-/// assignment that has already been constructed.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="ToString"/> renders in construction order, where Java's renders in
-/// <c>Set</c> iteration order.</b> Java joins <c>topicPartitions.stream()</c> (<c>:65</c>),
-/// whose order <c>Set</c> does not specify — so Java's own rendering of a given assignment
-/// is not reproducible run to run. Both spellings carry the same elements; fixing the
-/// order here is what makes the rendering assertable, and no Java-specified order is being
-/// overridden because Java specifies none.
-/// </para>
+/// Java's <c>Set</c> is an <c>IReadOnlyCollection</c>, as <c>IReadOnlySet</c> post-dates
+/// netstandard2.0; the constructor collapses duplicates, and <see cref="Equals(object)"/> and
+/// <see cref="GetHashCode"/> are order-insensitive, as a <c>Set</c>'s are.
 /// </remarks>
 public sealed class MemberAssignment
 {
-    // Deduplicated at construction and never mutated afterwards, so it is a set that also
-    // remembers the order it was given — see the ToString note in the type remarks.
     private readonly List<TopicPartition> _topicPartitions;
 
     /// <summary>
-    /// Creates an assignment over the given partitions — Java's only constructor
-    /// (<c>MemberAssignment.java:37</c>).
+    /// Creates an assignment over the given partitions — Java's constructor.
     /// </summary>
     /// <param name="topicPartitions">
-    /// The assigned partitions, or <see langword="null"/> for none. Duplicates are
-    /// collapsed and the collection is copied; see the type remarks.
+    /// The assigned partitions, or <see langword="null"/> for none, as in Java. Duplicates are
+    /// collapsed and the collection is copied, as Java's <c>Set.copyOf</c>.
     /// </param>
     public MemberAssignment(IEnumerable<TopicPartition>? topicPartitions)
     {
         if (topicPartitions is null)
         {
-            // Java: Collections.emptySet() (:38).
             _topicPartitions = new List<TopicPartition>();
             return;
         }
 
-        // Java: Set.copyOf(...) (:38) — a defensive copy that also collapses duplicates.
         var seen = new HashSet<TopicPartition>();
         _topicPartitions = new List<TopicPartition>();
         foreach (var topicPartition in topicPartitions)
@@ -91,21 +59,17 @@ public sealed class MemberAssignment
     }
 
     /// <summary>
-    /// The partitions assigned to the group member — Java's <c>topicPartitions()</c>
-    /// (<c>:59</c>). Never <see langword="null"/>; empty means "assigned nothing".
+    /// The partitions assigned to the group member — Java's <c>topicPartitions()</c>. Never
+    /// <see langword="null"/>; empty means "assigned nothing".
     /// </summary>
     public IReadOnlyCollection<TopicPartition> TopicPartitions => _topicPartitions;
 
     /// <summary>
-    /// Compares the assigned partitions as a set — Java's <c>equals</c> (<c>:42</c>),
-    /// which delegates to <c>Set.equals</c> and is therefore order-insensitive.
+    /// Compares the assigned partitions as a set — Java's <c>equals</c>, which delegates to
+    /// <c>Set.equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare against.</param>
     /// <returns>True when <paramref name="obj"/> assigns the same partitions.</returns>
-    /// <remarks>
-    /// Java's <c>getClass() != o.getClass()</c> check (<c>:44</c>) is met by the type being
-    /// <see langword="sealed"/>: no subclass can reach this comparison.
-    /// </remarks>
     public override bool Equals(object? obj)
     {
         if (ReferenceEquals(this, obj))
@@ -119,16 +83,10 @@ public sealed class MemberAssignment
     }
 
     /// <summary>
-    /// The sum of the assigned partitions' hashes — Java's <c>hashCode</c> (<c>:52</c>),
-    /// which returns <c>topicPartitions.hashCode()</c>, and <c>Set.hashCode()</c> is
-    /// specified as that sum.
+    /// The sum of the assigned partitions' hashes — Java's <c>hashCode</c>, which is
+    /// <c>Set.hashCode()</c>: order-insensitive, as <see cref="Equals(object)"/> is.
     /// </summary>
     /// <returns>The hash code.</returns>
-    /// <remarks>
-    /// The 17/31 fold this binding uses elsewhere is deliberately <b>not</b> applied: a
-    /// positional fold is order-sensitive, which would let two equal assignments hash
-    /// differently. The sum is order-insensitive, matching <see cref="Equals(object)"/>.
-    /// </remarks>
     public override int GetHashCode()
     {
         unchecked
@@ -143,12 +101,11 @@ public sealed class MemberAssignment
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:64</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     /// <remarks>
-    /// Java joins each partition's own <c>toString()</c> with <c>","</c> and wraps the
-    /// result in <c>(topicPartitions=...)</c>; an empty assignment therefore renders as
-    /// <c>(topicPartitions=)</c>. See the ordering note in the type remarks.
+    /// The partitions render in the order they were given, where Java's follow its <c>Set</c>'s
+    /// unspecified order: a recorded deviation that makes the rendering stable.
     /// </remarks>
     public override string ToString() =>
         string.Format(

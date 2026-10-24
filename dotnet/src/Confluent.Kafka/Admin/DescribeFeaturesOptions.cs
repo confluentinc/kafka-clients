@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
@@ -20,22 +23,37 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class DescribeFeaturesOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+    private int? _nodeId;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
 
     /// <summary>
-    /// The broker to query, or <see langword="null"/> to let the client choose — Java's
-    /// <c>nodeId()</c> (<c>:39</c>), an <c>OptionalInt</c> (<c>:25</c>).
+    /// The broker to query, or <see langword="null"/> while unset, when the client chooses — Java's
+    /// <c>nodeId()</c>, an <c>OptionalInt</c>, and <c>nodeId(int)</c>.
     /// </summary>
-    /// <remarks>
-    /// ⚠ Absence is carried by the ABI's <c>has_node_id</c> flag, never by a sentinel:
-    /// <c>0</c> is a legal broker id.
-    /// </remarks>
-    public int? NodeId { get; set; }
+    /// <exception cref="ArgumentNullException">
+    /// The value set is <see langword="null"/>: Java's setter takes an <c>int</c>, so a set node id cannot be
+    /// unset again.
+    /// </exception>
+    public int? NodeId
+    {
+        get => _nodeId;
+        set
+        {
+            _nodeId = value ?? throw new ArgumentNullException(nameof(value));
+            Setters.Ran(nameof(NodeId));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

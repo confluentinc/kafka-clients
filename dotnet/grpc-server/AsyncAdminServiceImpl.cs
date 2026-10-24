@@ -101,7 +101,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         try
         {
             admin = TranslateAdmin.SelectsMock(config)
-                ? new AsyncMockAdminClient(numBrokers)
+                ? AsyncMockAdminClient.Create().NumBrokers(numBrokers).Build()
                 : (IAsyncAdmin)new AsyncKafkaAdminClient(config);
         }
         catch (Exception ex)
@@ -2095,27 +2095,22 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
     }
 
     /// <summary>
-    /// One RAW <c>describeUserScramCredentials</c> row: the user, plus either its credentials or
-    /// the wire error code that <c>description(user)</c> faulted with.
+    /// One RAW <c>describeUserScramCredentials</c> row: the user's key, plus either its
+    /// description or the error that <c>description(user)</c> faulted with.
     /// </summary>
     private static async Task<Proto.DescribeUserScramCredentialsEntry> ScramCredentialsEntry(
         AsyncDescribeUserScramCredentialsResult result, string user)
     {
         Proto.DescribeUserScramCredentialsEntry entry =
-            new Proto.DescribeUserScramCredentialsEntry { User = user };
+            new Proto.DescribeUserScramCredentialsEntry { Key = TranslateAdmin.NameKey(user) };
         try
         {
-            UserScramCredentialsDescription description =
-                await result.Description(user).Get().ConfigureAwait(false);
-            foreach (ScramCredentialInfo info in description.CredentialInfos)
-            {
-                entry.CredentialInfos.Add(TranslateAdmin.ScramInfoToProto(info));
-            }
+            entry.Value = TranslateAdmin.ScramDescriptionToProto(
+                await result.Description(user).Get().ConfigureAwait(false));
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
-            entry.ErrorCode = ex.Code;
-            entry.ErrorMessage = ex.Message ?? string.Empty;
+            entry.Error = Translate.ToProto(ex);
         }
 
         return entry;

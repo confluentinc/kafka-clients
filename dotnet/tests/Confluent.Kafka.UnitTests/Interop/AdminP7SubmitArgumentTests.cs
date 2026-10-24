@@ -26,710 +26,763 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// What M15/P7's inputs become on the wire: the four explicit discriminants, the
-/// length-delimited MAC, and <c>alter_user_scram_credentials_async</c>'s ten parallel arrays —
-/// which have <b>no mock happy path</b> (both mocks throw Java's own "Not implemented yet"),
-/// so the rows are asserted here rather than end to end.
+/// What the feature, delegation-token and SCRAM options, the feature updates, the alterations and the requests become
+/// in the C handles the binding builds, and how a MAC crosses.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>Each of the four discriminants is asserted in BOTH directions.</b> A discriminant
-/// collapsed into a sentinel still submits successfully — <c>has_salts[i] = 0</c> means "let
-/// the core generate a salt" while <c>1</c> with a zero-length salt means "use this empty
-/// salt", and only the submitted pair tells them apart.
-/// </para>
-/// <para>
-/// ⚠ Every pointer is decoded <b>inside</b> the stand-in: production unpins in its
-/// <c>finally</c> (ffi §A4), so a read after the submit returns is a use-after-unpin.
-/// </para>
-/// </remarks>
 public sealed class AdminP7SubmitArgumentTests
 {
-    // ------------------------------------------------------------------------------------
-    // Discriminant 1 — has_salts (T-N3).
-    // ------------------------------------------------------------------------------------
+    private const int AlterationUpsertion = 0;
 
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this slice.</b> A <see langword="null"/> salt clears
-    /// <c>has_salts[i]</c> (the core generates one); an <b>empty</b> salt sets it. Both
-    /// directions, because either collapse submits cleanly.
-    /// </summary>
-    [Fact]
-    public void Salt_NullAndEmpty_AreADiscriminantApart()
-    {
-        Assert.Equal(new byte[] { 0 }, CaptureAlter(Upsert("u", salt: null)).HasSalts);
-        Assert.Equal(new byte[] { 1 }, CaptureAlter(Upsert("u", salt: Array.Empty<byte>())).HasSalts);
-        Assert.Equal(new byte[] { 1 }, CaptureAlter(Upsert("u", salt: new byte[] { 7, 8 })).HasSalts);
-    }
+    private const int AlterationDeletion = 1;
 
-    /// <summary>
-    /// A null salt still sends a length of <c>0</c> and a null pointer — the core reads the
-    /// discriminant, not the pair, but a stale length would be read as a salt.
-    /// </summary>
-    [Fact]
-    public void NullSalt_SendsNoBytes()
-    {
-        Captured captured = CaptureAlter(Upsert("u", salt: null));
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-        Assert.Equal(new[] { 0 }, captured.SaltLens);
-        Assert.Equal(IntPtr.Zero, captured.SaltPointers[0]);
-    }
-
-    /// <summary>The salt's bytes and length reach the submit verbatim.</summary>
-    [Fact]
-    public void Salt_BytesAndLength_AreForwardedVerbatim()
-    {
-        Captured captured = CaptureAlter(Upsert("u", salt: new byte[] { 0x01, 0x00, 0xFF }));
-
-        Assert.Equal(new[] { 3 }, captured.SaltLens);
-        Assert.Equal(new byte[] { 0x01, 0x00, 0xFF }, captured.Salts[0]);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // is_deletions, and the ten arrays.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// An upsertion clears <c>is_deletions[i]</c> and a deletion sets it, per row — a batch
-    /// mixing both keeps each row's own flag.
-    /// </summary>
-    [Fact]
-    public void IsDeletions_IsPerRow()
-    {
-        Captured captured = CaptureAlter(
-            Upsert("upserted"),
-            new UserScramCredentialDeletion("deleted", ScramMechanism.ScramSha512));
-
-        Assert.Equal(new byte[] { 0, 1 }, captured.IsDeletions);
-        Assert.Equal(new[] { "upserted", "deleted" }, captured.Users);
-        Assert.Equal(
-            new[] { (int)ScramMechanism.ScramSha256, (int)ScramMechanism.ScramSha512 },
-            captured.Mechanisms);
-    }
-
-    /// <summary>
-    /// A deletion carries no password, salt or iteration count, so its four value columns are
-    /// the neutral pair — a deletion that leaked the previous row's password would be caught
-    /// here.
-    /// </summary>
-    [Fact]
-    public void Deletion_CarriesNoSecret()
-    {
-        Captured captured = CaptureAlter(
-            Upsert("upserted", password: new byte[] { 9, 9, 9 }),
-            new UserScramCredentialDeletion("deleted", ScramMechanism.ScramSha256));
-
-        Assert.Equal(IntPtr.Zero, captured.PasswordPointers[1]);
-        Assert.Equal(0, captured.PasswordLens[1]);
-        Assert.Equal(IntPtr.Zero, captured.SaltPointers[1]);
-        Assert.Equal((byte)0, captured.HasSalts[1]);
-    }
-
-    /// <summary>The upsertion's password bytes and iteration count are forwarded verbatim.</summary>
-    [Fact]
-    public void Upsertion_PasswordAndIterations_AreForwardedVerbatim()
-    {
-        Captured captured = CaptureAlter(
-            new UserScramCredentialUpsertion(
-                "u",
-                new ScramCredentialInfo(ScramMechanism.ScramSha512, 8192),
-                new byte[] { 0x61, 0x00, 0x62 },
-                salt: null));
-
-        Assert.Equal(new[] { 8192 }, captured.Iterations);
-        Assert.Equal(new[] { 3 }, captured.PasswordLens);
-        Assert.Equal(new byte[] { 0x61, 0x00, 0x62 }, captured.Passwords[0]);
-    }
-
-    /// <summary>
-    /// ⚠ An <b>empty</b> request still sends a non-null <c>is_deletions</c>: the core rejects a
-    /// NULL one, so the projector pins a one-byte stand-in with a count of <c>0</c>.
-    /// </summary>
-    [Fact]
-    public void EmptyRequest_StillSendsANonNullIsDeletions()
-    {
-        using AlterUserScramCredentialsMarshal.Rows rows =
-            AlterUserScramCredentialsMarshal.Pin(Array.Empty<UserScramCredentialAlteration>());
-
-        Assert.Equal(0, rows.Count);
-        Assert.NotEqual(IntPtr.Zero, rows.IsDeletions);
-        Assert.NotEqual(IntPtr.Zero, rows.HasSalts);
-    }
-
-    /// <summary>
-    /// ⚠ Duplicate users are <b>passed through</b> as rows (header,
-    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials</c>) while the awaitable key set
-    /// collapses — Java keys one future per user.
-    /// </summary>
-    [Fact]
-    public void DuplicateUsers_SendTwoRows_ButOneAwaitable()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Captured captured = new Captured();
-        AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
-            new UserScramCredentialAlteration[] { Upsert("dup"), Upsert("dup") },
-            options: null,
-            AdminFlavour.Async,
-            (handle, users, isDeletions, mechanisms, iterations, passwords, passwordLens,
-             salts, saltLens, hasSalts, count, timeoutMs, callback, userData) =>
-            {
-                captured.Count = count;
-                captured.Users = Decode(users);
-                captured.UserData = userData;
-            }));
-
-        // M15/P9 CP6: one callback per DISTINCT user, which is the one thing the row count
-        // is not — two rows, one key, one callback.
-        CompleteDistinctUsers(captured);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { "dup", "dup" }, captured.Users);
-        Assert.Single(result.Values);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Discriminant 2 — has_owners_filter (T-N5).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ A <see langword="null"/> owners filter ("describe every token") and an
-    /// <b>empty</b> one ("describe tokens owned by nobody") are a discriminant apart, not a
-    /// count apart — both send <c>owner_count == 0</c>.
-    /// </summary>
-    [Fact]
-    public void Owners_NullAndEmpty_AreADiscriminantApart()
-    {
-        CapturedDescribeTokens unset = CaptureDescribeTokens(new DescribeDelegationTokenOptions());
-        CapturedDescribeTokens empty = CaptureDescribeTokens(
-            new DescribeDelegationTokenOptions { Owners = Array.Empty<KafkaPrincipal>() });
-
-        Assert.False(unset.HasOwnersFilter);
-        Assert.True(empty.HasOwnersFilter);
-        Assert.Equal(0, unset.OwnerCount);
-        Assert.Equal(0, empty.OwnerCount);
-    }
-
-    /// <summary>A populated owners filter sets the flag and forwards both columns in order.</summary>
-    [Fact]
-    public void Owners_AreForwardedAsTwoParallelColumns()
-    {
-        CapturedDescribeTokens captured = CaptureDescribeTokens(
-            new DescribeDelegationTokenOptions
-            {
-                Owners = new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") },
-            });
-
-        Assert.True(captured.HasOwnersFilter);
-        Assert.Equal(2, captured.OwnerCount);
-        Assert.Equal(new[] { "User", "Group" }, captured.OwnerPrincipalTypes);
-        Assert.Equal(new[] { "alice", "ops" }, captured.OwnerNames);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Discriminant 3 — has_node_id (T-N5).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ An unset node id and node <c>0</c> are a discriminant apart — <c>0</c> is a real
-    /// broker id, so a sentinel would silently retarget the describe.
-    /// </summary>
-    [Fact]
-    public void NodeId_UnsetAndZero_AreADiscriminantApart()
-    {
-        (bool HasNodeId, int NodeId) unset = CaptureDescribeFeatures(new DescribeFeaturesOptions());
-        (bool HasNodeId, int NodeId) zero =
-            CaptureDescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 });
-
-        Assert.False(unset.HasNodeId);
-        Assert.True(zero.HasNodeId);
-        Assert.Equal(0, zero.NodeId);
-    }
-
-    /// <summary>An explicit node id is forwarded verbatim.</summary>
-    [Fact]
-    public void NodeId_IsForwardedVerbatim() =>
-        Assert.Equal(7, CaptureDescribeFeatures(new DescribeFeaturesOptions { NodeId = 7 }).NodeId);
-
-    // ------------------------------------------------------------------------------------
-    // The MAC — length-delimited, never NUL-scanned (T-N2, submit half).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ A MAC carrying an <b>interior zero byte</b> reaches <c>renew</c> whole: its full
-    /// length, and every byte past the zero. A NUL-scan truncates at index 2 here and the
-    /// broker rejects the shortened MAC rather than the binding failing locally.
-    /// </summary>
-    [Fact]
-    public void RenewHmac_SurvivesAnInteriorZeroByte()
-    {
-        byte[] hmac = { 0x9A, 0x4F, 0x00, 0x00, 0xC3, 0x01 };
-
-        (int Length, byte[] Bytes, long Period) captured = CaptureRenew(hmac, periodMs: 3_600_000L);
-
-        Assert.Equal(hmac.Length, captured.Length);
-        Assert.Equal(hmac, captured.Bytes);
-        Assert.Equal(3_600_000L, captured.Period);
-    }
-
-    /// <summary>The same, through <c>expire</c> — the byte-identical twin submit.</summary>
-    [Fact]
-    public void ExpireHmac_SurvivesAnInteriorZeroByte()
-    {
-        byte[] hmac = { 0x00, 0x11, 0x00, 0x22 };
-
-        (int Length, byte[] Bytes, long Period) captured = CaptureExpire(hmac, periodMs: -1L);
-
-        Assert.Equal(hmac.Length, captured.Length);
-        Assert.Equal(hmac, captured.Bytes);
-        Assert.Equal(-1L, captured.Period);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // createDelegationToken — the optional owner, and the renewer columns.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// An unset owner sends two null pointers (the core uses the caller's own principal); a
-    /// set one sends both strings.
-    /// </summary>
-    [Fact]
-    public void Owner_UnsetSendsNullPointers_SetSendsBoth()
-    {
-        CapturedCreateToken unset = CaptureCreateToken(new CreateDelegationTokenOptions());
-        Assert.Equal(IntPtr.Zero, unset.OwnerPrincipalTypePointer);
-        Assert.Equal(IntPtr.Zero, unset.OwnerNamePointer);
-
-        CapturedCreateToken set = CaptureCreateToken(
-            new CreateDelegationTokenOptions { Owner = new KafkaPrincipal("User", "owner") });
-        Assert.Equal("User", set.OwnerPrincipalType);
-        Assert.Equal("owner", set.OwnerName);
-    }
-
-    /// <summary>The renewer columns keep request order, and the lifetime is forwarded verbatim.</summary>
-    [Fact]
-    public void Renewers_KeepRequestOrder()
-    {
-        CapturedCreateToken captured = CaptureCreateToken(
-            new CreateDelegationTokenOptions
-            {
-                Renewers = new[]
-                {
-                    new KafkaPrincipal("User", "first"),
-                    new KafkaPrincipal("User", "second"),
-                },
-                MaxLifetimeMs = 86_400_000L,
-            });
-
-        Assert.Equal(2, captured.RenewerCount);
-        Assert.Equal(new[] { "first", "second" }, captured.RenewerNames);
-        Assert.Equal(86_400_000L, captured.MaxLifetimeMs);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // updateFeatures — short, not int (T-N6's submit half).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠ The version levels cross as <c>short</c>. A value above <see cref="short.MaxValue"/>
-    /// cannot even be built (<see cref="FeatureUpdate"/> takes a <c>short</c>), so the column's
-    /// element type is what the assertion pins.
-    /// </summary>
-    [Fact]
-    public void UpdateFeatures_SendsShortVersionLevels()
-    {
-        CapturedUpdateFeatures captured = CaptureUpdateFeatures(
-            new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
-            {
-                ["metadata.version"] = new FeatureUpdate(short.MaxValue, FeatureUpdate.UpgradeType.Upgrade),
-            },
-            new UpdateFeaturesOptions());
-
-        Assert.IsType<short[]>(captured.MaxVersionLevels);
-        Assert.Equal(new short[] { short.MaxValue }, captured.MaxVersionLevels);
-    }
-
-    /// <summary>Each update's upgrade type travels as its own Java ordinal, per feature.</summary>
-    [Fact]
-    public void UpdateFeatures_SendsPerFeatureUpgradeTypes()
-    {
-        CapturedUpdateFeatures captured = CaptureUpdateFeatures(
-            new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
-            {
-                ["a"] = new FeatureUpdate(3, FeatureUpdate.UpgradeType.Upgrade),
-                ["b"] = new FeatureUpdate(0, FeatureUpdate.UpgradeType.UnsafeDowngrade),
-            },
-            new UpdateFeaturesOptions());
-
-        Dictionary<string, int> byFeature = captured.Features
-            .Select((feature, index) => (feature, type: captured.UpgradeTypes[index]))
-            .ToDictionary(pair => pair.feature!, pair => pair.type, StringComparer.Ordinal);
-
-        Assert.Equal((int)FeatureUpdate.UpgradeType.Upgrade, byFeature["a"]);
-        Assert.Equal((int)FeatureUpdate.UpgradeType.UnsafeDowngrade, byFeature["b"]);
-    }
-
-    /// <summary><c>ValidateOnly</c> reaches the submit in both states.</summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void UpdateFeatures_ForwardsValidateOnly(bool validateOnly) =>
-        Assert.Equal(
-            validateOnly,
-            CaptureUpdateFeatures(
-                new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)
-                {
-                    ["f"] = new FeatureUpdate(1, FeatureUpdate.UpgradeType.Upgrade),
-                },
-                new UpdateFeaturesOptions { ValidateOnly = validateOnly }).ValidateOnly);
+    [InlineData(ScramMechanism.ScramSha256)]
+    [InlineData(ScramMechanism.ScramSha512)]
+    public void Upsertion_CarriesTheUserTheCredentialInfoAndThePasswordVerbatim(ScramMechanism mechanism) =>
+        ReadUpsertion(
+            new UserScramCredentialUpsertion(
+                "ålice", new ScramCredentialInfo(mechanism, 8192), new byte[] { 0x61, 0x00, 0x62 }, salt: null),
+            native =>
+            {
+                Assert.Equal("ålice", Utf8Marshal.PtrToString(ReadPointer(native, Native.UpsertionUser)));
+                IntPtr info = ReadPointer(native, Native.UpsertionCredentialInfo);
+                Assert.Equal((sbyte)mechanism, MechanismType(ReadPointer(info, NativeMethods.ScramCredentialInfoMechanism)));
+                Assert.Equal(8192, ReadInt32(info, NativeMethods.ScramCredentialInfoIterations));
+                Assert.Equal(new byte[] { 0x61, 0x00, 0x62 }, ReadBytes(native, Native.UpsertionPassword));
+            });
 
-    // ------------------------------------------------------------------------------------
-    // describeUserScramCredentials — the "every user" request.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// A null or empty user list sends <c>count == 0</c>, which the ABI reads as "describe
-    /// every user" (header, <c>kafka_admin_AdminClient_describe_user_scram_credentials</c>); a
-    /// populated one sends the names in order.
-    /// </summary>
     [Fact]
-    public void DescribeUsers_NullAndEmpty_BothRequestEveryUser()
-    {
-        Assert.Equal(0, CaptureDescribeUsers(null).Count);
-        Assert.Equal(0, CaptureDescribeUsers(Array.Empty<string>()).Count);
+    public void Upsertion_ANullSalt_IsGeneratedByTheCore() =>
+        ReadUpsertion(Upsert("u", salt: null), native => Assert.NotEmpty(ReadBytes(native, Native.UpsertionSalt)));
 
-        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) captured =
-            CaptureDescribeUsers(new[] { "alice", "bob" });
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { "alice", "bob" }, captured.Users);
+    [Fact]
+    public void Upsertion_AnEmptySalt_IsKeptEmpty() =>
+        ReadUpsertion(
+            Upsert("u", salt: Array.Empty<byte>()), native => Assert.Empty(ReadBytes(native, Native.UpsertionSalt)));
+
+    [Fact]
+    public void Upsertion_ASalt_IsForwardedVerbatim() =>
+        ReadUpsertion(
+            Upsert("u", salt: new byte[] { 0x01, 0x00, 0xFF }),
+            native => Assert.Equal(new byte[] { 0x01, 0x00, 0xFF }, ReadBytes(native, Native.UpsertionSalt)));
+
+    [Fact]
+    public void Upsertion_AnEmptyPassword_IsKeptEmpty() =>
+        ReadUpsertion(
+            Upsert("u", password: Array.Empty<byte>(), salt: new byte[] { 7 }),
+            native => Assert.Empty(ReadBytes(native, Native.UpsertionPassword)));
+
+    [Theory]
+    [InlineData(ScramMechanism.ScramSha256)]
+    [InlineData(ScramMechanism.ScramSha512)]
+    public void Deletion_CarriesTheUserAndTheMechanism(ScramMechanism mechanism)
+    {
+        IntPtr native = UserScramCredentialMarshal.NewDeletion(new UserScramCredentialDeletion("ålice", mechanism));
+        try
+        {
+            Assert.Equal("ålice", Utf8Marshal.PtrToString(ReadPointer(native, Native.DeletionUser)));
+            Assert.Equal((sbyte)mechanism, MechanismType(ReadPointer(native, Native.DeletionMechanism)));
+        }
+        finally
+        {
+            UserScramCredentialMarshal.DestroyDeletion(native);
+        }
     }
 
-    /// <summary>
-    /// ⚠ <b>A repeated user is passed through verbatim, in request order</b> (M15/P13.2
-    /// G4-2) — Java copies the list as given into the request
-    /// (<c>KafkaAdminClient.java:4354-4363</c>) and the broker answers the repeat itself
-    /// (<c>ScramImage.java:126-128</c>). A de-duplicating binding sends one name where Java
-    /// sends two, and reorders an interleaved repeat.
-    /// </summary>
+    [Fact]
+    public void Alteration_IsTheSubclassItWasBuiltFrom_WithItsUser()
+    {
+        AssertAlteration(Upsert("upserted"), AlterationUpsertion, "upserted");
+        AssertAlteration(
+            new UserScramCredentialDeletion("deleted", ScramMechanism.ScramSha512), AlterationDeletion, "deleted");
+    }
+
+    [Fact]
+    public void AlterUserScramCredentials_ARepeatedUser_IsOneKey_AndTheMockFailsEveryKey()
+    {
+        using MockAdminClient admin = MockAdminClient.Create().Build();
+
+        AlterUserScramCredentialsResult result = admin.AlterUserScramCredentials(
+            new UserScramCredentialAlteration[]
+            {
+                Upsert("dup"),
+                Upsert("dup"),
+                new UserScramCredentialDeletion("other", ScramMechanism.ScramSha256),
+            });
+
+        Assert.Equal(new[] { "dup", "other" }, result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        foreach (KafkaFuture future in result.Values.Values)
+        {
+            AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
+        }
+
+        AssertNotImplemented(Record.Exception(() => result.All().Get(s_deadline)));
+    }
+
+    [Fact]
+    public void AlterUserScramCredentials_ANullElement_ThrowsBeforeTheCall()
+    {
+        using MockAdminClient admin = MockAdminClient.Create().Build();
+
+        ArgumentException thrown = Assert.Throws<ArgumentException>(
+            () => admin.AlterUserScramCredentials(new UserScramCredentialAlteration[] { Upsert("u"), null! }));
+
+        Assert.Equal("alterations", thrown.ParamName);
+        Assert.Equal(
+            new ArgumentException(
+                "The SCRAM credential alterations must not contain a null element.", "alterations").Message,
+            thrown.Message);
+    }
+
+    [Fact]
+    public void DescribeUsers_NullRequestsEveryUser_AndEmptyIsAnEmptyRequest()
+    {
+        Assert.Null(NativeAdminClient.RequestedScramUsers(null));
+        Assert.Empty(NativeAdminClient.RequestedScramUsers(Array.Empty<string>())!);
+        Assert.Equal(new[] { "alice", "bob" }, NativeAdminClient.RequestedScramUsers(new[] { "alice", "bob" }));
+    }
+
     [Fact]
     public void DescribeUsers_ARepeatedUser_IsPassedThroughInOrder()
     {
-        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) twice =
-            CaptureDescribeUsers(new[] { "alice", "alice" });
-        Assert.Equal(2, twice.Count);
-        Assert.Equal(new[] { "alice", "alice" }, twice.Users);
-
-        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) interleaved =
-            CaptureDescribeUsers(new[] { "bob", "alice", "bob" });
-        Assert.Equal(3, interleaved.Count);
-        Assert.Equal(new[] { "bob", "alice", "bob" }, interleaved.Users);
-    }
-
-    /// <summary>
-    /// ⚠ <b>A null user is skipped, not rejected</b> (M15/P13.5 G4-3) — Java's request builder
-    /// adds only the non-null names (<c>KafkaAdminClient.java:4357-4360</c>). So
-    /// <c>["alice", null]</c> sends <c>"alice"</c> alone, and <c>[null]</c> sends an empty
-    /// request, which the ABI and the broker read as "describe every user"
-    /// (<c>ScramImage.java:86-87</c>). Neither throws: <see cref="CaptureDescribeUsers"/> runs
-    /// the production submit path, so a surviving rejection fails this test with the throw.
-    /// </summary>
-    [Fact]
-    public void G4_3_DescribeUsers_ANullElement_IsSkipped()
-    {
-        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) mixed =
-            CaptureDescribeUsers(new[] { "alice", null! });
-        Assert.Equal(1, mixed.Count);
-        Assert.Equal(new[] { "alice" }, mixed.Users);
-
-        (int Count, IReadOnlyList<string?> Users, int TimeoutMs) onlyNull =
-            CaptureDescribeUsers(new string[] { null! });
-        Assert.Equal(0, onlyNull.Count);
-        Assert.Empty(onlyNull.Users);
-    }
-
-    // ------------------------------------------------------------------------------------
-    // Timeouts — the shared mapping, sampled on one RPC per submit shape.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// A null timeout maps to a <b>negative</b> <c>timeout_ms</c> ("use the client default"),
-    /// never <c>0</c> ("time out immediately"); an explicit one is forwarded verbatim.
-    /// </summary>
-    [Fact]
-    public void NullTimeout_MapsToANegative_NotZero()
-    {
-        Assert.True(CaptureDescribeUsers(null, options: null).TimeoutMs < 0);
-        Assert.True(CaptureDescribeUsers(null, new DescribeUserScramCredentialsOptions()).TimeoutMs < 0);
+        Assert.Equal(new[] { "alice", "alice" }, NativeAdminClient.RequestedScramUsers(new[] { "alice", "alice" }));
         Assert.Equal(
-            0,
-            CaptureDescribeUsers(null, new DescribeUserScramCredentialsOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            9_876,
-            CaptureDescribeUsers(null, new DescribeUserScramCredentialsOptions { TimeoutMs = 9_876 })
-                .TimeoutMs);
+            new[] { "bob", "alice", "bob" }, NativeAdminClient.RequestedScramUsers(new[] { "bob", "alice", "bob" }));
     }
 
-    // ------------------------------------------------------------------------------------
-    // Capture helpers.
-    // ------------------------------------------------------------------------------------
+    [Fact]
+    public void DescribeUsers_ANullElement_IsSkipped()
+    {
+        Assert.Equal(new[] { "alice" }, NativeAdminClient.RequestedScramUsers(new[] { "alice", null! }));
+        Assert.Empty(NativeAdminClient.RequestedScramUsers(new string[] { null! })!);
 
-    private static UserScramCredentialUpsertion Upsert(
-        string user, byte[]? password = null, byte[]? salt = null) =>
+        using MockAdminClient admin = MockAdminClient.Create().Build();
+        DescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(new[] { "alice", null! });
+        AssertNotImplemented(Record.Exception(() => result.All().Get(s_deadline)));
+    }
+
+    [Fact]
+    public void DescribeUsers_AnInvalidUser_ThrowsBeforeTheCall()
+    {
+        using MockAdminClient admin = MockAdminClient.Create().Build();
+
+        ArgumentException thrown = Assert.Throws<ArgumentException>(
+            () => admin.DescribeUserScramCredentials(new[] { "al\0ice" }));
+
+        Assert.Equal("users", thrown.ParamName);
+        Assert.Equal(new ArgumentException(AdminStrings.InvalidStringMessage, "users").Message, thrown.Message);
+    }
+
+    [Fact]
+    public void ScramOptions_NoSetterRan_TheCOptionsCarryTheDefaultTimeout()
+    {
+        Assert.Equal(-1, DescribeTimeoutMs(null));
+        Assert.Equal(-1, DescribeTimeoutMs(new DescribeUserScramCredentialsOptions()));
+        Assert.Empty(new DescribeUserScramCredentialsOptions().Setters.InOrder);
+        Assert.Equal(-1, AlterTimeoutMs(null));
+        Assert.Equal(-1, AlterTimeoutMs(new AlterUserScramCredentialsOptions()));
+        Assert.Empty(new AlterUserScramCredentialsOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void ScramOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal(expected, DescribeTimeoutMs(new DescribeUserScramCredentialsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, AlterTimeoutMs(new AlterUserScramCredentialsOptions { TimeoutMs = timeoutMs }));
+    }
+
+    [Fact]
+    public void ScramOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        DescribeUserScramCredentialsOptions describe = new DescribeUserScramCredentialsOptions { TimeoutMs = 10 };
+        describe.TimeoutMs = 20;
+        Assert.Equal(20, DescribeTimeoutMs(describe));
+        Assert.Equal(new[] { nameof(DescribeUserScramCredentialsOptions.TimeoutMs) }, describe.Setters.InOrder);
+
+        AlterUserScramCredentialsOptions alter = new AlterUserScramCredentialsOptions { TimeoutMs = 10 };
+        alter.TimeoutMs = null;
+        Assert.Equal(-1, AlterTimeoutMs(alter));
+        Assert.Equal(new[] { nameof(AlterUserScramCredentialsOptions.TimeoutMs) }, alter.Setters.InOrder);
+    }
+
+    [Fact]
+    public void TokenOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
+    {
+        foreach (CreateDelegationTokenOptions? create in new[] { null, new CreateDelegationTokenOptions() })
+        {
+            Assert.Empty(ReadCreate(create, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
+            Assert.Equal(IntPtr.Zero, ReadCreate(create, native => ReadPointer(native, Native.CreateDelegationTokenOptionsOwner)));
+            Assert.Equal(-1L, ReadCreate(create, native => ReadInt64(native, Native.CreateDelegationTokenOptionsMaxLifetimeMs)));
+            Assert.Equal(-1, ReadCreate(create, native => ReadInt32(native, Native.CreateDelegationTokenOptionsTimeoutMs)));
+        }
+
+        foreach (RenewDelegationTokenOptions? renew in new[] { null, new RenewDelegationTokenOptions() })
+        {
+            Assert.Equal(-1L, ReadRenew(renew, native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
+            Assert.Equal(-1, ReadRenew(renew, native => ReadInt32(native, Native.RenewDelegationTokenOptionsTimeoutMs)));
+        }
+
+        foreach (ExpireDelegationTokenOptions? expire in new[] { null, new ExpireDelegationTokenOptions() })
+        {
+            Assert.Equal(-1L, ReadExpire(expire, native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
+            Assert.Equal(-1, ReadExpire(expire, native => ReadInt32(native, Native.ExpireDelegationTokenOptionsTimeoutMs)));
+        }
+
+        foreach (DescribeDelegationTokenOptions? describe in new[] { null, new DescribeDelegationTokenOptions() })
+        {
+            Assert.Null(DescribeOwners(describe));
+            Assert.Equal(-1, ReadDescribe(describe, native => ReadInt32(native, Native.DescribeDelegationTokenOptionsTimeoutMs)));
+        }
+
+        Assert.Empty(new CreateDelegationTokenOptions().Setters.InOrder);
+        Assert.Empty(new RenewDelegationTokenOptions().Setters.InOrder);
+        Assert.Empty(new ExpireDelegationTokenOptions().Setters.InOrder);
+        Assert.Empty(new DescribeDelegationTokenOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void TokenOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal(
+            expected,
+            ReadCreate(
+                new CreateDelegationTokenOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.CreateDelegationTokenOptionsTimeoutMs)));
+        Assert.Equal(
+            expected,
+            ReadRenew(
+                new RenewDelegationTokenOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.RenewDelegationTokenOptionsTimeoutMs)));
+        Assert.Equal(
+            expected,
+            ReadExpire(
+                new ExpireDelegationTokenOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.ExpireDelegationTokenOptionsTimeoutMs)));
+        Assert.Equal(
+            expected,
+            ReadDescribe(
+                new DescribeDelegationTokenOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.DescribeDelegationTokenOptionsTimeoutMs)));
+    }
+
+    [Fact]
+    public void CreateOptions_EachSetter_ReachesTheCOptions()
+    {
+        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions
+        {
+            Renewers = new[] { new KafkaPrincipal("User", "first"), new KafkaPrincipal("Group", "second") },
+            Owner = new KafkaPrincipal("User", "owner"),
+            MaxLifetimeMs = 86_400_000L,
+        };
+
+        Assert.Equal(
+            new[] { new KafkaPrincipal("User", "first"), new KafkaPrincipal("Group", "second") },
+            ReadCreate(options, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
+        Assert.Equal(
+            new KafkaPrincipal("User", "owner"),
+            ReadCreate(options, native => DelegationTokenMarshal.CopyOutPrincipal(ReadPointer(native, Native.CreateDelegationTokenOptionsOwner))));
+        Assert.Equal(86_400_000L, ReadCreate(options, native => ReadInt64(native, Native.CreateDelegationTokenOptionsMaxLifetimeMs)));
+    }
+
+    [Fact]
+    public void CreateOptions_ANullOwner_LeavesTheOwnerUnset()
+    {
+        CreateDelegationTokenOptions options = new CreateDelegationTokenOptions { Owner = new KafkaPrincipal("User", "owner") };
+        options.Owner = null;
+
+        Assert.Equal(IntPtr.Zero, ReadCreate(options, native => ReadPointer(native, Native.CreateDelegationTokenOptionsOwner)));
+        Assert.Equal(new[] { nameof(CreateDelegationTokenOptions.Owner) }, options.Setters.InOrder);
+    }
+
+    [Fact]
+    public void RenewAndExpireOptions_ThePeriodReachesTheCOptions()
+    {
+        Assert.Equal(
+            3_600_000L,
+            ReadRenew(
+                new RenewDelegationTokenOptions { RenewTimePeriodMs = 3_600_000L },
+                native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
+        Assert.Equal(
+            5_000L,
+            ReadExpire(
+                new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 5_000L },
+                native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
+    }
+
+    [Fact]
+    public void DescribeOptions_Owners_NullAndEmptyStayApart_AndKeepRequestOrder()
+    {
+        Assert.Null(DescribeOwners(new DescribeDelegationTokenOptions { Owners = null }));
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<KafkaPrincipal>>(
+            DescribeOwners(new DescribeDelegationTokenOptions { Owners = Array.Empty<KafkaPrincipal>() })));
+        Assert.Equal(
+            new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") },
+            DescribeOwners(new DescribeDelegationTokenOptions
+            {
+                Owners = new[] { new KafkaPrincipal("User", "alice"), new KafkaPrincipal("Group", "ops") },
+            }));
+    }
+
+    [Fact]
+    public void TokenOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        CreateDelegationTokenOptions create = new CreateDelegationTokenOptions
+        {
+            Renewers = new[] { new KafkaPrincipal("User", "first") },
+            Owner = new KafkaPrincipal("User", "first-owner"),
+        };
+        create.Renewers = new[] { new KafkaPrincipal("User", "second") };
+        create.Owner = new KafkaPrincipal("User", "second-owner");
+        Assert.Equal(
+            new[] { new KafkaPrincipal("User", "second") },
+            ReadCreate(create, native => Principals(ReadPointer(native, Native.CreateDelegationTokenOptionsRenewers))));
+        Assert.Equal(
+            new KafkaPrincipal("User", "second-owner"),
+            ReadCreate(create, native => DelegationTokenMarshal.CopyOutPrincipal(ReadPointer(native, Native.CreateDelegationTokenOptionsOwner))));
+        Assert.Equal(
+            new[] { nameof(CreateDelegationTokenOptions.Renewers), nameof(CreateDelegationTokenOptions.Owner) },
+            create.Setters.InOrder);
+
+        RenewDelegationTokenOptions renew = new RenewDelegationTokenOptions { RenewTimePeriodMs = 10 };
+        renew.RenewTimePeriodMs = 20;
+        Assert.Equal(20L, ReadRenew(renew, native => ReadInt64(native, Native.RenewDelegationTokenOptionsRenewTimePeriodMs)));
+
+        ExpireDelegationTokenOptions expire = new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 10 };
+        expire.ExpiryTimePeriodMs = 20;
+        Assert.Equal(20L, ReadExpire(expire, native => ReadInt64(native, Native.ExpireDelegationTokenOptionsExpiryTimePeriodMs)));
+
+        DescribeDelegationTokenOptions describe = new DescribeDelegationTokenOptions
+        {
+            Owners = new[] { new KafkaPrincipal("User", "alice") },
+        };
+        describe.Owners = null;
+        Assert.Null(DescribeOwners(describe));
+        Assert.Equal(new[] { nameof(DescribeDelegationTokenOptions.Owners) }, describe.Setters.InOrder);
+    }
+
+    [Fact]
+    public void WithHmac_PassesTheWholeMac_AnInteriorZeroIncluded()
+    {
+        byte[] hmac = { 0x9A, 0x4F, 0x00, 0x00, 0xC3, 0x01 };
+
+        byte[] crossed = DelegationTokenMarshal.WithHmac(hmac, bytes => CopyRow(bytes.Data, bytes.Length));
+
+        Assert.Equal(hmac, crossed);
+    }
+
+    [Fact]
+    public void WithHmac_NullIsANullPointer_EmptyIsANonNullPointerOfLengthZero()
+    {
+        KafkaBytes absent = DelegationTokenMarshal.WithHmac(null, bytes => bytes);
+        Assert.Equal(IntPtr.Zero, absent.Data);
+        Assert.Equal(0, absent.Length);
+
+        (bool NonNull, int Length) empty = DelegationTokenMarshal.WithHmac(
+            Array.Empty<byte>(), bytes => (bytes.Data != IntPtr.Zero, bytes.Length));
+        Assert.True(empty.NonNull);
+        Assert.Equal(0, empty.Length);
+    }
+
+    [Fact]
+    public void FeatureOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
+    {
+        Assert.Equal(-1, ReadDescribeFeatures(null, native => ReadInt32(native, Native.DescribeFeaturesOptionsTimeoutMs)));
+        Assert.Equal(-1, NodeIdOf(null));
+        Assert.Equal(-1, NodeIdOf(new DescribeFeaturesOptions()));
+        Assert.Empty(new DescribeFeaturesOptions().Setters.InOrder);
+        Assert.Equal(-1, ReadUpdateFeatures(null, native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
+        Assert.Equal(0, ValidateOnlyOf(null));
+        Assert.Equal(0, ValidateOnlyOf(new UpdateFeaturesOptions()));
+        Assert.Empty(new UpdateFeaturesOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void FeatureOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal(
+            expected,
+            ReadDescribeFeatures(
+                new DescribeFeaturesOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.DescribeFeaturesOptionsTimeoutMs)));
+        Assert.Equal(
+            expected,
+            ReadUpdateFeatures(
+                new UpdateFeaturesOptions { TimeoutMs = timeoutMs },
+                native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
+    }
+
+    [Fact]
+    public void NodeId_UnsetAndZero_StayApart_AndASetIdIsForwardedVerbatim()
+    {
+        Assert.Equal(-1, NodeIdOf(new DescribeFeaturesOptions()));
+        Assert.Equal(0, NodeIdOf(new DescribeFeaturesOptions { NodeId = 0 }));
+        Assert.Equal(7, NodeIdOf(new DescribeFeaturesOptions { NodeId = 7 }));
+    }
+
+    [Fact]
+    public void NodeId_Null_ThrowsAndLeavesTheFieldAsItWas()
+    {
+        DescribeFeaturesOptions options = new DescribeFeaturesOptions();
+        Assert.Equal("value", Assert.Throws<ArgumentNullException>(() => options.NodeId = null).ParamName);
+        Assert.Null(options.NodeId);
+        Assert.Empty(options.Setters.InOrder);
+        Assert.Equal(-1, NodeIdOf(options));
+
+        options.NodeId = 3;
+        Assert.Throws<ArgumentNullException>(() => options.NodeId = null);
+        Assert.Equal(3, options.NodeId);
+        Assert.Equal(new[] { nameof(DescribeFeaturesOptions.NodeId) }, options.Setters.InOrder);
+        Assert.Equal(3, NodeIdOf(options));
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public void UpdateFeaturesOptions_ValidateOnly_ReachesTheCOptions(bool validateOnly, int expected) =>
+        Assert.Equal(expected, ValidateOnlyOf(new UpdateFeaturesOptions { ValidateOnly = validateOnly }));
+
+    [Fact]
+    public void FeatureOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        DescribeFeaturesOptions describe = new DescribeFeaturesOptions { NodeId = 1, TimeoutMs = 10 };
+        describe.NodeId = 2;
+        Assert.Equal(2, NodeIdOf(describe));
+        Assert.Equal(
+            new[] { nameof(DescribeFeaturesOptions.TimeoutMs), nameof(DescribeFeaturesOptions.NodeId) },
+            describe.Setters.InOrder);
+
+        UpdateFeaturesOptions update = new UpdateFeaturesOptions { ValidateOnly = true, TimeoutMs = 10 };
+        update.ValidateOnly = false;
+        update.TimeoutMs = null;
+        Assert.Equal(0, ValidateOnlyOf(update));
+        Assert.Equal(-1, ReadUpdateFeatures(update, native => ReadInt32(native, Native.UpdateFeaturesOptionsTimeoutMs)));
+        Assert.Equal(
+            new[] { nameof(UpdateFeaturesOptions.ValidateOnly), nameof(UpdateFeaturesOptions.TimeoutMs) },
+            update.Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData((short)3, FeatureUpdate.UpgradeType.Upgrade, 1)]
+    [InlineData((short)2, FeatureUpdate.UpgradeType.SafeDowngrade, 2)]
+    [InlineData((short)0, FeatureUpdate.UpgradeType.UnsafeDowngrade, 3)]
+    [InlineData(short.MaxValue, FeatureUpdate.UpgradeType.Upgrade, 1)]
+    [InlineData((short)1, FeatureUpdate.UpgradeType.Unknown, 0)]
+    public void FeatureUpdate_CrossesItsLevelAndItsUpgradeTypeCode(
+        short maxVersionLevel, FeatureUpdate.UpgradeType upgradeType, int expectedCode) =>
+        Assert.Equal(
+            (maxVersionLevel, (sbyte)expectedCode),
+            ReadFeatureUpdate(new FeatureUpdate(maxVersionLevel, upgradeType)));
+
+    [Fact]
+    public void FeatureUpdate_AnUndefinedUpgradeType_CrossesAsUnknown() =>
+        Assert.Equal(
+            ((short)1, (sbyte)0),
+            ReadFeatureUpdate(new FeatureUpdate(1, (FeatureUpdate.UpgradeType)9)));
+
+    [Fact]
+    public void UnregisterControllerOptions_NoSetterRan_TheCOptionsCarryJavasDefaults()
+    {
+        Assert.Equal(-1, UnregisterControllerTimeoutOf(null));
+        Assert.Equal(-1, UnregisterControllerTimeoutOf(new UnregisterControllerOptions()));
+        Assert.Empty(new UnregisterControllerOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    [InlineData(int.MinValue, 0)]
+    public void UnregisterControllerOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(
+        int? timeoutMs, int expected) =>
+        Assert.Equal(expected, UnregisterControllerTimeoutOf(new UnregisterControllerOptions { TimeoutMs = timeoutMs }));
+
+    [Fact]
+    public void UnregisterControllerOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        UnregisterControllerOptions options = new UnregisterControllerOptions { TimeoutMs = 10 };
+        options.TimeoutMs = 20;
+        Assert.Equal(20, UnregisterControllerTimeoutOf(options));
+
+        options.TimeoutMs = null;
+        Assert.Equal(-1, UnregisterControllerTimeoutOf(options));
+        Assert.Equal(new[] { nameof(UnregisterControllerOptions.TimeoutMs) }, options.Setters.InOrder);
+    }
+
+    private static UserScramCredentialUpsertion Upsert(string user, byte[]? password = null, byte[]? salt = null) =>
         new UserScramCredentialUpsertion(
             user,
             new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096),
             password ?? new byte[] { 1, 2, 3 },
             salt);
 
-    private static Captured CaptureAlter(params UserScramCredentialAlteration[] alterations)
+    private static void ReadUpsertion(UserScramCredentialUpsertion upsertion, Action<IntPtr> read)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Captured captured = new Captured();
-        AsyncAlterUserScramCredentialsResult.From(admin.AlterUserScramCredentials(
-            alterations,
-            options: null,
-            AdminFlavour.Async,
-            (handle, users, isDeletions, mechanisms, iterations, passwords, passwordLens,
-             salts, saltLens, hasSalts, count, timeoutMs, callback, userData) =>
-            {
-                captured.Count = count;
-                captured.Users = Decode(users);
-                captured.Mechanisms = mechanisms;
-                captured.Iterations = iterations;
-                captured.PasswordLens = passwordLens;
-                captured.SaltLens = saltLens;
-                captured.PasswordPointers = passwords;
-                captured.SaltPointers = salts;
-                captured.Passwords = CopyRows(passwords, passwordLens);
-                captured.Salts = CopyRows(salts, saltLens);
-                captured.IsDeletions = CopyFlags(isDeletions, count);
-                captured.HasSalts = CopyFlags(hasSalts, count);
-                captured.UserData = userData;
-            }));
-
-        CompleteDistinctUsers(captured);
-        return captured;
+        IntPtr native = UserScramCredentialMarshal.NewUpsertion(upsertion);
+        try
+        {
+            read(native);
+        }
+        finally
+        {
+            UserScramCredentialMarshal.DestroyUpsertion(native);
+        }
     }
 
-    /// <summary>
-    /// Releases an <c>alterUserScramCredentials</c> operation by firing the production
-    /// trampoline once per <b>distinct</b> user the submit carried — the ABI's own key
-    /// count, which deliberately differs from the row count (header,
-    /// <c>kafka_admin_AdminClient_alter_user_scram_credentials_async</c>).
-    /// </summary>
-    private static void CompleteDistinctUsers(Captured captured)
+    private static void AssertAlteration(UserScramCredentialAlteration alteration, int expectedKind, string expectedUser)
     {
-        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string? user in captured.Users)
+        IntPtr native = UserScramCredentialMarshal.NewAlteration(alteration);
+        try
         {
-            if (user is null || !seen.Add(user))
+            Assert.Equal(expectedKind, ReadInt32(native, Native.AlterationEnum));
+            Assert.Equal(expectedUser, Utf8Marshal.PtrToString(ReadPointer(native, Native.AlterationUser)));
+        }
+        finally
+        {
+            UserScramCredentialMarshal.DestroyAlteration(native);
+        }
+    }
+
+    private static void AssertNotImplemented(Exception? outcome)
+    {
+        KafkaException failure = Assert.IsType<KafkaException>(outcome);
+        Assert.Equal(35, failure.Code);
+        Assert.Equal("Not implemented yet", failure.Message);
+    }
+
+    private static int DescribeTimeoutMs(DescribeUserScramCredentialsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeUserScramCredentialsOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.DescribeUserScramCredentialsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeUserScramCredentialsOptions(native);
+        }
+    }
+
+    private static int AlterTimeoutMs(AlterUserScramCredentialsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewAlterUserScramCredentialsOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.AlterUserScramCredentialsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeAlterUserScramCredentialsOptions(native);
+        }
+    }
+
+    private static sbyte MechanismType(IntPtr mechanism)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        sbyte type = NativeMethods.ScramMechanismType(mechanism, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return type;
+    }
+
+    private static IntPtr ReadPointer(IntPtr self, Native.PointerGetter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static int ReadInt32(IntPtr self, Native.Int32Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static byte[] ReadBytes(IntPtr self, Native.BytesGetter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        KafkaBytes bytes = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return CopyRow(bytes.Data, bytes.Length);
+    }
+
+    private static T ReadCreate<T>(CreateDelegationTokenOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewCreateDelegationTokenOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeCreateDelegationTokenOptions(native);
+        }
+    }
+
+    private static T ReadRenew<T>(RenewDelegationTokenOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewRenewDelegationTokenOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeRenewDelegationTokenOptions(native);
+        }
+    }
+
+    private static T ReadExpire<T>(ExpireDelegationTokenOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewExpireDelegationTokenOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeExpireDelegationTokenOptions(native);
+        }
+    }
+
+    private static T ReadDescribe<T>(DescribeDelegationTokenOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeDelegationTokenOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeDelegationTokenOptions(native);
+        }
+    }
+
+    private static IReadOnlyList<KafkaPrincipal>? DescribeOwners(DescribeDelegationTokenOptions? options) =>
+        ReadDescribe(options, native =>
+        {
+            IntPtr owners = ReadPointer(native, Native.DescribeDelegationTokenOptionsOwners);
+            return owners == IntPtr.Zero ? null : Principals(owners);
+        });
+
+    private static IReadOnlyList<KafkaPrincipal> Principals(IntPtr list)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        try
+        {
+            int count = NativeMethods.ListSize(list, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            List<KafkaPrincipal> principals = new List<KafkaPrincipal>(count);
+            for (int i = 0; i < count; i++)
             {
-                continue;
+                IntPtr principal = NativeMethods.ListGet(list, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                principals.Add(DelegationTokenMarshal.CopyOutPrincipal(principal));
             }
 
-            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(user);
-            AdminCallbacks.AlterUserScramCredentials(pinned.Pointer, CapturedError(), captured.UserData);
+            return principals;
         }
-    }
-
-    private static (int Count, IReadOnlyList<string?> Users, int TimeoutMs) CaptureDescribeUsers(
-        IReadOnlyCollection<string>? users, DescribeUserScramCredentialsOptions? options = null)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        int count = 0;
-        int timeout = 0;
-        IReadOnlyList<string?> names = Array.Empty<string?>();
-        IntPtr userData = IntPtr.Zero;
-
-        AsyncDescribeUserScramCredentialsResult.From(admin.DescribeUserScramCredentials(
-            users,
-            options,
-            AdminFlavour.Async,
-            (handle, pinned, pinnedCount, timeoutMs, callback, data) =>
-            {
-                count = pinnedCount;
-                timeout = timeoutMs;
-                names = Decode(pinned);
-                userData = data;
-            }));
-
-        AdminCallbacks.DescribeUserScramCredentials(IntPtr.Zero, CapturedError(), userData);
-        return (count, names, timeout);
-    }
-
-    private static CapturedCreateToken CaptureCreateToken(CreateDelegationTokenOptions options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        CapturedCreateToken captured = new CapturedCreateToken();
-        AsyncCreateDelegationTokenResult.From(admin.CreateDelegationToken(
-            options,
-            AdminFlavour.Async,
-            (handle, renewerTypes, renewerNames, renewerCount, ownerType, ownerName,
-             maxLifetimeMs, timeoutMs, callback, userData) =>
-            {
-                captured.RenewerCount = renewerCount;
-                captured.RenewerPrincipalTypes = Decode(renewerTypes);
-                captured.RenewerNames = Decode(renewerNames);
-                captured.OwnerPrincipalTypePointer = ownerType;
-                captured.OwnerNamePointer = ownerName;
-                captured.OwnerPrincipalType = Utf8Marshal.PtrToString(ownerType);
-                captured.OwnerName = Utf8Marshal.PtrToString(ownerName);
-                captured.MaxLifetimeMs = maxLifetimeMs;
-                captured.UserData = userData;
-            }));
-
-        AdminCallbacks.CreateDelegationToken(IntPtr.Zero, CapturedError(), captured.UserData);
-        return captured;
-    }
-
-    private static (int Length, byte[] Bytes, long Period) CaptureRenew(byte[] hmac, long periodMs)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        int length = -1;
-        byte[] bytes = Array.Empty<byte>();
-        long period = 0;
-        IntPtr userData = IntPtr.Zero;
-
-        AsyncRenewDelegationTokenResult.From(admin.RenewDelegationToken(
-            hmac,
-            new RenewDelegationTokenOptions { RenewTimePeriodMs = periodMs },
-            AdminFlavour.Async,
-            (handle, pointer, hmacLength, renewMs, timeoutMs, callback, data) =>
-            {
-                length = hmacLength;
-                bytes = CopyRow(pointer, hmacLength);
-                period = renewMs;
-                userData = data;
-            }));
-
-        AdminCallbacks.RenewDelegationToken(IntPtr.Zero, CapturedError(), userData);
-        return (length, bytes, period);
-    }
-
-    private static (int Length, byte[] Bytes, long Period) CaptureExpire(byte[] hmac, long periodMs)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        int length = -1;
-        byte[] bytes = Array.Empty<byte>();
-        long period = 0;
-        IntPtr userData = IntPtr.Zero;
-
-        AsyncExpireDelegationTokenResult.From(admin.ExpireDelegationToken(
-            hmac,
-            new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = periodMs },
-            AdminFlavour.Async,
-            (handle, pointer, hmacLength, expiryMs, timeoutMs, callback, data) =>
-            {
-                length = hmacLength;
-                bytes = CopyRow(pointer, hmacLength);
-                period = expiryMs;
-                userData = data;
-            }));
-
-        AdminCallbacks.ExpireDelegationToken(IntPtr.Zero, CapturedError(), userData);
-        return (length, bytes, period);
-    }
-
-    private static CapturedDescribeTokens CaptureDescribeTokens(DescribeDelegationTokenOptions options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        CapturedDescribeTokens captured = new CapturedDescribeTokens();
-        AsyncDescribeDelegationTokenResult.From(admin.DescribeDelegationToken(
-            options,
-            AdminFlavour.Async,
-            (handle, hasOwnersFilter, ownerTypes, ownerNames, ownerCount, timeoutMs, callback, userData) =>
-            {
-                captured.HasOwnersFilter = hasOwnersFilter;
-                captured.OwnerCount = ownerCount;
-                captured.OwnerPrincipalTypes = Decode(ownerTypes);
-                captured.OwnerNames = Decode(ownerNames);
-                captured.UserData = userData;
-            }));
-
-        AdminCallbacks.DescribeDelegationToken(IntPtr.Zero, CapturedError(), captured.UserData);
-        return captured;
-    }
-
-    private static (bool HasNodeId, int NodeId) CaptureDescribeFeatures(DescribeFeaturesOptions options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        bool hasNodeId = false;
-        int node = -1;
-        IntPtr userData = IntPtr.Zero;
-
-        AsyncDescribeFeaturesResult.From(admin.DescribeFeatures(
-            options,
-            AdminFlavour.Async,
-            (handle, has, nodeId, timeoutMs, callback, data) =>
-            {
-                hasNodeId = has;
-                node = nodeId;
-                userData = data;
-            }));
-
-        AdminCallbacks.DescribeFeatures(IntPtr.Zero, CapturedError(), userData);
-        return (hasNodeId, node);
-    }
-
-    private static CapturedUpdateFeatures CaptureUpdateFeatures(
-        IReadOnlyDictionary<string, FeatureUpdate> updates, UpdateFeaturesOptions options)
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        CapturedUpdateFeatures captured = new CapturedUpdateFeatures();
-        AsyncUpdateFeaturesResult.From(admin.UpdateFeatures(
-            updates,
-            options,
-            AdminFlavour.Async,
-            (handle, features, maxVersionLevels, upgradeTypes, count, timeoutMs, validateOnly,
-             callback, userData) =>
-            {
-                captured.Count = count;
-                captured.Features = Decode(features);
-                captured.MaxVersionLevels = maxVersionLevels;
-                captured.UpgradeTypes = upgradeTypes;
-                captured.ValidateOnly = validateOnly;
-                captured.UserData = userData;
-
-                // Accepted: NULL is "submitted", so the callbacks below are owed.
-                return IntPtr.Zero;
-            }));
-
-        // M15/P9 CP6: one callback per feature name — the map's keys are already distinct.
-        foreach (string? feature in captured.Features)
+        finally
         {
-            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(feature!);
-            AdminCallbacks.UpdateFeatures(pinned.Pointer, CapturedError(), captured.UserData);
+            NativeMethods.ListDestroy(list, ref outErr);
+            Assert.Equal(IntPtr.Zero, outErr);
         }
-
-        return captured;
     }
 
-    /// <summary>
-    /// Decodes one pointer array <b>by its own length</b>, so a mismatch against the count is
-    /// an assertion failure rather than an index-out-of-range inside the stand-in.
-    /// </summary>
-    private static IReadOnlyList<string?> Decode(IntPtr[] values) =>
-        values.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
+    private static long ReadInt64(IntPtr self, Native.Int64Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        long value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
 
-    private static byte[][] CopyRows(IntPtr[] pointers, int[] lengths) =>
-        pointers.Select((pointer, index) => CopyRow(pointer, lengths[index])).ToArray();
+    private static T ReadDescribeFeatures<T>(DescribeFeaturesOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeFeaturesOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeFeaturesOptions(native);
+        }
+    }
+
+    private static T ReadUpdateFeatures<T>(UpdateFeaturesOptions? options, Func<IntPtr, T> read)
+    {
+        IntPtr native = NativeAdminClient.NewUpdateFeaturesOptions(options);
+        try
+        {
+            return read(native);
+        }
+        finally
+        {
+            NativeAdminClient.FreeUpdateFeaturesOptions(native);
+        }
+    }
+
+    private static int NodeIdOf(DescribeFeaturesOptions? options) =>
+        ReadDescribeFeatures(options, native => ReadInt32(native, Native.DescribeFeaturesOptionsNodeId));
+
+    private static sbyte ValidateOnlyOf(UpdateFeaturesOptions? options) =>
+        ReadUpdateFeatures(options, native =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            sbyte value = Native.UpdateFeaturesOptionsValidateOnly(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return value;
+        });
+
+    private static int UnregisterControllerTimeoutOf(UnregisterControllerOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewUnregisterControllerOptions(options);
+        try
+        {
+            return ReadInt32(native, Native.UnregisterControllerOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeUnregisterControllerOptions(native);
+        }
+    }
+
+    private static (short MaxVersionLevel, sbyte Code) ReadFeatureUpdate(FeatureUpdate update)
+    {
+        IntPtr native = NativeAdminClient.NewFeatureUpdate(update);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            short level = Native.FeatureUpdateMaxVersionLevel(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr upgradeType = Native.FeatureUpdateUpgradeType(native, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            sbyte code = Native.UpgradeTypeCode(upgradeType, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return (level, code);
+        }
+        finally
+        {
+            NativeAdminClient.DestroyFeatureUpdate(native);
+        }
+    }
 
     private static byte[] CopyRow(IntPtr pointer, int length)
     {
@@ -743,96 +796,101 @@ public sealed class AdminP7SubmitArgumentTests
         return bytes;
     }
 
-    /// <summary>Reads one pinned <c>const bool *</c> column back out as its 0/1 bytes.</summary>
-    private static byte[] CopyFlags(IntPtr column, int count) => CopyRow(column, count);
-
-    /// <summary>
-    /// An <b>owned</b> error for the trampoline to consume, standing in for the one native
-    /// would hand the callback. The trampoline frees it, so it must never be freed here.
-    /// </summary>
-    private static IntPtr CapturedError()
+    /// <summary>The C getters only these tests call.</summary>
+    private static class Native
     {
-        using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("captured");
-        IntPtr error = NativeMethods.KafkaErrorNew(1, message.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
-    }
+        private const string DllName = "confluent_kafka";
 
-    private sealed class Captured
-    {
-        internal int Count { get; set; }
+        internal delegate IntPtr PointerGetter(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> Users { get; set; } = Array.Empty<string?>();
+        internal delegate int Int32Getter(IntPtr self, ref IntPtr outErr);
 
-        internal int[] Mechanisms { get; set; } = Array.Empty<int>();
+        internal delegate KafkaBytes BytesGetter(IntPtr self, ref IntPtr outErr);
 
-        internal int[] Iterations { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_user_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr UpsertionUser(IntPtr self, ref IntPtr outErr);
 
-        internal int[] PasswordLens { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_credential_info_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr UpsertionCredentialInfo(IntPtr self, ref IntPtr outErr);
 
-        internal int[] SaltLens { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_salt_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern KafkaBytes UpsertionSalt(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] PasswordPointers { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialUpsertion_password_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern KafkaBytes UpsertionPassword(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] SaltPointers { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialDeletion_user_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr DeletionUser(IntPtr self, ref IntPtr outErr);
 
-        internal byte[][] Passwords { get; set; } = Array.Empty<byte[]>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialDeletion_mechanism_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr DeletionMechanism(IntPtr self, ref IntPtr outErr);
 
-        internal byte[][] Salts { get; set; } = Array.Empty<byte[]>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialAlteration__enum_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int AlterationEnum(IntPtr self, ref IntPtr outErr);
 
-        internal byte[] IsDeletions { get; set; } = Array.Empty<byte>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_UserScramCredentialAlteration_user_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr AlterationUser(IntPtr self, ref IntPtr outErr);
 
-        internal byte[] HasSalts { get; set; } = Array.Empty<byte>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeUserScramCredentialsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeUserScramCredentialsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr UserData { get; set; }
-    }
+        [DllImport(DllName, EntryPoint = "kafka_admin_AlterUserScramCredentialsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int AlterUserScramCredentialsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-    private sealed class CapturedCreateToken
-    {
-        internal int RenewerCount { get; set; }
+        internal delegate long Int64Getter(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> RenewerPrincipalTypes { get; set; } = Array.Empty<string?>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenOptions_renewers_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr CreateDelegationTokenOptionsRenewers(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> RenewerNames { get; set; } = Array.Empty<string?>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenOptions_owner_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr CreateDelegationTokenOptionsOwner(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr OwnerPrincipalTypePointer { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenOptions_max_lifetime_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern long CreateDelegationTokenOptionsMaxLifetimeMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr OwnerNamePointer { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateDelegationTokenOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int CreateDelegationTokenOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal string? OwnerPrincipalType { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_RenewDelegationTokenOptions_renew_time_period_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern long RenewDelegationTokenOptionsRenewTimePeriodMs(IntPtr self, ref IntPtr outErr);
 
-        internal string? OwnerName { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_RenewDelegationTokenOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int RenewDelegationTokenOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal long MaxLifetimeMs { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_ExpireDelegationTokenOptions_expiry_time_period_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern long ExpireDelegationTokenOptionsExpiryTimePeriodMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr UserData { get; set; }
-    }
+        [DllImport(DllName, EntryPoint = "kafka_admin_ExpireDelegationTokenOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int ExpireDelegationTokenOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-    private sealed class CapturedDescribeTokens
-    {
-        internal bool HasOwnersFilter { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeDelegationTokenOptions_owners_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr DescribeDelegationTokenOptionsOwners(IntPtr self, ref IntPtr outErr);
 
-        internal int OwnerCount { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeDelegationTokenOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeDelegationTokenOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> OwnerPrincipalTypes { get; set; } = Array.Empty<string?>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeFeaturesOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> OwnerNames { get; set; } = Array.Empty<string?>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeFeaturesOptions_node_id_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeFeaturesOptionsNodeId(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr UserData { get; set; }
-    }
+        [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int UpdateFeaturesOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-    private sealed class CapturedUpdateFeatures
-    {
-        internal int Count { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_UpdateFeaturesOptions_validate_only_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte UpdateFeaturesOptionsValidateOnly(IntPtr self, ref IntPtr outErr);
 
-        internal IReadOnlyList<string?> Features { get; set; } = Array.Empty<string?>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_FeatureUpdate_max_version_level_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern short FeatureUpdateMaxVersionLevel(IntPtr self, ref IntPtr outErr);
 
-        internal short[] MaxVersionLevels { get; set; } = Array.Empty<short>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_FeatureUpdate_upgrade_type_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr FeatureUpdateUpgradeType(IntPtr self, ref IntPtr outErr);
 
-        internal int[] UpgradeTypes { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_FeatureUpdate_UpgradeType_code_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte UpgradeTypeCode(IntPtr self, ref IntPtr outErr);
 
-        internal bool ValidateOnly { get; set; }
-
-        internal IntPtr UserData { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_admin_UnregisterControllerOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int UnregisterControllerOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
     }
 }

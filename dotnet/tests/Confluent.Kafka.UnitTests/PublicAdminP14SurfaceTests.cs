@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -26,8 +27,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the <b>public shape</b> of M15/P14's two admin flavours — the sync <see cref="IAdmin"/> and the async
-/// <see cref="IAsyncAdmin"/>, their four clients and their 44 + 44 <c>*Result</c> types — against each other.
+/// The public shape of the two admin flavours, the sync <see cref="IAdmin"/> and the async <see cref="IAsyncAdmin"/>,
+/// their four clients and their 45 + 45 <c>*Result</c> types, against each other.
 /// </summary>
 /// <remarks>
 /// The flavours must offer the same RPCs and the same Result members, differing only in the future type at the
@@ -46,20 +47,17 @@ public sealed class PublicAdminP14SurfaceTests
 
     private static readonly Assembly s_assembly = typeof(IAdmin).Assembly;
 
-    /// <summary>The members the async flavour exposes a <see cref="Task"/> on by design.</summary>
     private static readonly HashSet<string> s_taskExempt = new HashSet<string>(StringComparer.Ordinal)
     {
         nameof(IAsyncAdmin.Close),
         nameof(IAsyncDisposable.DisposeAsync),
     };
 
-    /// <summary>The future types the async flavour must never expose: a <see cref="Task"/> or a sync future.</summary>
     private static readonly Type[] s_forbiddenOnAsync =
     {
         typeof(Task), typeof(Task<>), typeof(ValueTask), typeof(ValueTask<>), typeof(KafkaFuture), typeof(KafkaFuture<>),
     };
 
-    /// <summary>The future types the sync flavour must never expose: a <see cref="Task"/> or an async future.</summary>
     private static readonly Type[] s_forbiddenOnSync =
     {
         typeof(Task), typeof(Task<>), typeof(ValueTask), typeof(ValueTask<>), typeof(AsyncKafkaFuture), typeof(AsyncKafkaFuture<>),
@@ -67,24 +65,33 @@ public sealed class PublicAdminP14SurfaceTests
 
     private static readonly string[] s_mockOnly =
     {
+        nameof(AsyncMockAdminClient.Controller),
+        nameof(AsyncMockAdminClient.AddTopic),
+        nameof(AsyncMockAdminClient.MarkTopicForDeletion),
         nameof(AsyncMockAdminClient.TimeoutNextRequest),
         nameof(AsyncMockAdminClient.UpdateBeginningOffsets),
         nameof(AsyncMockAdminClient.UpdateEndOffsets),
         nameof(AsyncMockAdminClient.UpdateConsumerGroupOffsets),
-        nameof(AsyncMockAdminClient.SetFeatureLevels),
+        nameof(AsyncMockAdminClient.SetFetchesRemainingUntilVisible),
     };
 
-    /// <summary>
-    /// <see cref="IAsyncAdmin"/> declares the same 48 RPCs as <see cref="IAdmin"/> — names, overloads, parameter
-    /// names, types and defaults — and each returns the <c>Async</c> twin of the Result its sync twin returns.
-    /// </summary>
+    private static readonly Dictionary<Type, Type> s_publicConstructorParameter = new Dictionary<Type, Type>
+    {
+        [typeof(DescribeConsumerGroupsResult)] = typeof(IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>>),
+        [typeof(AsyncDescribeConsumerGroupsResult)] =
+            typeof(IReadOnlyDictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>),
+        [typeof(DescribeClassicGroupsResult)] = typeof(IReadOnlyDictionary<string, KafkaFuture<ClassicGroupDescription>>),
+        [typeof(AsyncDescribeClassicGroupsResult)] =
+            typeof(IReadOnlyDictionary<string, AsyncKafkaFuture<ClassicGroupDescription>>),
+    };
+
     [Fact]
     public void AsyncAdmin_DeclaresIAdminsRpcs_EachReturningTheAsyncTwinOfItsResult()
     {
         List<MethodInfo> sync = Rpcs(typeof(IAdmin));
         List<MethodInfo> async = Rpcs(typeof(IAsyncAdmin));
 
-        Assert.Equal(48, sync.Count);
+        Assert.Equal(49, sync.Count);
         Assert.Equal(
             sync.Select(RpcSignature).OrderBy(static s => s, StringComparer.Ordinal),
             async.Select(RpcSignature).OrderBy(static s => s, StringComparer.Ordinal));
@@ -98,21 +105,21 @@ public sealed class PublicAdminP14SurfaceTests
         }
     }
 
-    /// <summary>
-    /// <c>Close(TimeSpan)</c> — Java's <c>close(Duration)</c>, which blocks — is <c>void</c> on the sync flavour and a
-    /// <see cref="Task"/> on the async one, and each is the only member besides the 48 RPCs. Disposal comes from the
-    /// interfaces each extends, which are exactly <see cref="IDisposable"/> for <see cref="IAdmin"/> and
-    /// <see cref="IAsyncDisposable"/> plus <see cref="IDisposable"/> for <see cref="IAsyncAdmin"/>.
-    /// </summary>
     [Fact]
     public void Close_IsVoidOnTheSyncFlavourAndATaskOnTheAsync_AndEachInterfaceExtendsExactlyItsDisposables()
     {
+        Assert.Equal(typeof(void), typeof(IAdmin).GetMethod(nameof(IAdmin.Close), Type.EmptyTypes)!.ReturnType);
         Assert.Equal(typeof(void), typeof(IAdmin).GetMethod(nameof(IAdmin.Close), new[] { typeof(TimeSpan) })!.ReturnType);
         Assert.Equal(
-            typeof(Task), typeof(IAsyncAdmin).GetMethod(nameof(IAsyncAdmin.Close), new[] { typeof(TimeSpan) })!.ReturnType);
+            typeof(Task),
+            typeof(IAsyncAdmin).GetMethod(nameof(IAsyncAdmin.Close), new[] { typeof(CancellationToken) })!.ReturnType);
+        Assert.Equal(
+            typeof(Task),
+            typeof(IAsyncAdmin).GetMethod(
+                nameof(IAsyncAdmin.Close), new[] { typeof(TimeSpan), typeof(CancellationToken) })!.ReturnType);
 
-        Assert.Equal(49, typeof(IAdmin).GetMethods(PublicDeclared).Length);
-        Assert.Equal(49, typeof(IAsyncAdmin).GetMethods(PublicDeclared).Length);
+        Assert.Equal(51, typeof(IAdmin).GetMethods(PublicDeclared).Length);
+        Assert.Equal(51, typeof(IAsyncAdmin).GetMethods(PublicDeclared).Length);
 
         Assert.Equal(new[] { typeof(IDisposable).FullName }, InterfaceNames(typeof(IAdmin)));
         Assert.Equal(
@@ -120,16 +127,12 @@ public sealed class PublicAdminP14SurfaceTests
             InterfaceNames(typeof(IAsyncAdmin)));
     }
 
-    /// <summary>
-    /// There are exactly 44 <c>Async*Result</c> types, each paired with a sync twin, and each pair has the same
-    /// public members with the same parameters — the types differing only in the flavour of their futures.
-    /// </summary>
     [Fact]
-    public void AsyncResults_AreExactly44_EachWithItsSyncTwinsMembers()
+    public void AsyncResults_AreExactly45_EachWithItsSyncTwinsMembers()
     {
         List<Type> asyncResults = AsyncResults();
 
-        Assert.Equal(44, asyncResults.Count);
+        Assert.Equal(45, asyncResults.Count);
 
         foreach (Type asyncResult in asyncResults)
         {
@@ -141,11 +144,6 @@ public sealed class PublicAdminP14SurfaceTests
         }
     }
 
-    /// <summary>
-    /// No public member of the async flavour exposes a <see cref="Task"/>, a <see cref="ValueTask"/> or a sync
-    /// <see cref="KafkaFuture"/> at any generic depth: its RPCs, its two clients and every <c>Async*Result</c> hand
-    /// out <see cref="AsyncKafkaFuture"/>s only. <c>Close</c> and <c>DisposeAsync</c> are the stated exceptions.
-    /// </summary>
     [Fact]
     public void AsyncFlavour_ExposesNoTaskNorSyncFuture_AtAnyDepth()
     {
@@ -175,13 +173,6 @@ public sealed class PublicAdminP14SurfaceTests
         Assert.Empty(offenders);
     }
 
-    /// <summary>
-    /// No public member of the sync flavour exposes a <see cref="Task"/>, a <see cref="ValueTask"/> or an
-    /// <see cref="AsyncKafkaFuture"/> at any generic depth, with no exemption: every member <see cref="IAdmin"/>
-    /// declares (<c>Close</c> included), every public method and constructor of its two clients, and every sync
-    /// <c>*Result</c> — found by reflection, so a Result added later is covered without editing a list, and pinned
-    /// at 44 with the same names as the async twins, so the sweep cannot pass by finding nothing.
-    /// </summary>
     [Fact]
     public void SyncFlavour_ExposesNoTaskNorAsyncFuture_AtAnyDepth()
     {
@@ -209,7 +200,7 @@ public sealed class PublicAdminP14SurfaceTests
         }
 
         List<Type> syncResults = SyncResults();
-        Assert.Equal(44, syncResults.Count);
+        Assert.Equal(45, syncResults.Count);
         Assert.Equal(
             AsyncResults().Select(static t => t.Name.Substring("Async".Length)),
             syncResults.Select(static t => t.Name));
@@ -222,14 +213,8 @@ public sealed class PublicAdminP14SurfaceTests
         Assert.Empty(offenders);
     }
 
-    /// <summary>
-    /// The four clients are sealed and implement exactly their own flavour's interfaces — the sync two
-    /// <see cref="IAdmin"/> and <see cref="IDisposable"/> (so no <see cref="IAsyncDisposable"/>, not even explicitly),
-    /// the async two <see cref="IAsyncAdmin"/>, <see cref="IAsyncDisposable"/> and <see cref="IDisposable"/> — and no
-    /// <c>*Result</c> of either flavour has a public constructor (Q3 (b), follow-up FU-5).
-    /// </summary>
     [Fact]
-    public void Clients_AreSealed_ImplementOnlyTheirFlavour_AndNoResultHasAPublicConstructor()
+    public void Clients_AreSealed_ImplementOnlyTheirFlavour_AndOnlyJavasPublicResultConstructorsArePublic()
     {
         foreach (Type client in new[]
                  {
@@ -258,15 +243,24 @@ public sealed class PublicAdminP14SurfaceTests
             Assert.False(typeof(IAdmin).IsAssignableFrom(client), $"{client.Name} is an IAdmin");
         }
 
-        foreach (Type result in AsyncResults().Concat(SyncResults()))
+        List<Type> results = AsyncResults().Concat(SyncResults()).ToList();
+        Assert.All(s_publicConstructorParameter.Keys, result => Assert.Contains(result, results));
+
+        foreach (Type result in results)
         {
-            Assert.Empty(result.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+            ConstructorInfo[] constructors = result.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+            if (s_publicConstructorParameter.TryGetValue(result, out Type? parameter))
+            {
+                ConstructorInfo constructor = Assert.Single(constructors);
+                Assert.Equal(new[] { parameter }, constructor.GetParameters().Select(static p => p.ParameterType));
+            }
+            else
+            {
+                Assert.Empty(constructors);
+            }
         }
     }
 
-    /// <summary>
-    /// The five mock-only seeding methods exist on both mocks with the same signature, synchronous on both.
-    /// </summary>
     [Fact]
     public void MockOnlyMethods_ExistOnBothMocks_WithTheSameSignature()
     {
@@ -325,12 +319,6 @@ public sealed class PublicAdminP14SurfaceTests
         return members;
     }
 
-    /// <summary>
-    /// A type's name with every future type — <see cref="Task"/>, <see cref="KafkaFuture"/>,
-    /// <see cref="AsyncKafkaFuture"/>, and their generic forms — folded into one token, <see cref="Nullable{T}"/>
-    /// unwrapped (an async future is a struct, so a nullable one is <c>AsyncKafkaFuture&lt;T&gt;?</c>), and an
-    /// <c>Async*Result</c> named as its sync twin.
-    /// </summary>
     private static string Normalize(Type type)
     {
         if (type.IsByRef)
@@ -402,9 +390,7 @@ public sealed class PublicAdminP14SurfaceTests
             Check(field.FieldType, result.Name + "." + field.Name, forbidden, offenders);
         }
 
-        // A public nested type is part of the Result's surface (Java nests some value types in their Result, e.g.
-        // DescribeReplicaLogDirsResult.ReplicaLogDirInfo), so its members are walked by the same rules rather than
-        // left unchecked.
+        // A public nested type is part of the Result's surface, as Java nests some value types in their Result.
         foreach (Type nested in result.GetNestedTypes(BindingFlags.Public))
         {
             CheckResult(nested, forbidden, offenders);

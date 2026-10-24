@@ -18,31 +18,22 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The base of the two SASL/SCRAM credential alterations — Java's abstract
-/// <c>org.apache.kafka.clients.admin.UserScramCredentialAlteration</c> (<c>:27</c>). It is the
+/// <c>org.apache.kafka.clients.admin.UserScramCredentialAlteration</c>. It is the
 /// element type <see cref="IAdmin.AlterUserScramCredentials"/> accepts.
 /// </summary>
 /// <remarks>
 /// A closed two-case hierarchy: <see cref="UserScramCredentialUpsertion"/> and
-/// <see cref="UserScramCredentialDeletion"/>.
-/// ⚠ <b>Narrower than Java:</b> the constructor is <c>private protected</c>, where Java's is
-/// <c>protected</c>, so code outside this library cannot add a third case. Java lets a caller
-/// subclass it but only ever sends those two cases (<c>KafkaAdminClient.java:4391-4512</c>),
-/// so any other subclass just fails that user's future; here it could not be sent at all,
-/// and closing the hierarchy keeps it from being written.
+/// <see cref="UserScramCredentialDeletion"/>. The constructor is <c>private protected</c>, where
+/// Java's is <c>protected</c>, a recorded deviation: Java sends only those two cases, so a third
+/// could never be sent.
 /// </remarks>
 public abstract class UserScramCredentialAlteration
 {
-    /// <summary>
-    /// Creates an alteration for one user — Java's protected <c>:34</c>, here
-    /// <c>private protected</c> (see the class remarks).
-    /// </summary>
-    /// <param name="user">The user. Must not be null.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="user"/> is null.</exception>
     private protected UserScramCredentialAlteration(string user)
     {
         User = user ?? throw new ArgumentNullException(nameof(user));
     }
 
-    /// <summary>The user — Java's <c>user()</c> (<c>:42</c>).</summary>
+    /// <summary>The user — Java's <c>user()</c>.</summary>
     public string User { get; }
 }

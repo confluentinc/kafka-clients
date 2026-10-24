@@ -12,21 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.AlterUserScramCredentials"/> — Java's
-/// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions</c>. Java declares no
-/// member beyond the inherited timeout (<c>:25</c>).
+/// <c>org.apache.kafka.clients.admin.AlterUserScramCredentialsOptions</c>.
 /// </summary>
+/// <remarks>
+/// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
+/// </remarks>
 public sealed class AlterUserScramCredentialsOptions
 {
-    /// <summary>
-    /// The per-request timeout in milliseconds, or <see langword="null"/> to leave it unset —
-    /// Java's <c>AbstractOptions.timeoutMs()</c>.
-    /// </summary>
-    /// <remarks>
-    /// For a negative value, see <see cref="CreateTopicsOptions.TimeoutMs"/>.
-    /// </remarks>
-    public int? TimeoutMs { get; set; }
+    private int? _timeoutMs;
+
+    /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

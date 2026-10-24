@@ -21,56 +21,11 @@ using System.Text;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A single configuration entry — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ConfigEntry</c>.
+/// A single configuration entry — Java's <c>org.apache.kafka.clients.admin.ConfigEntry</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>M15/P1 shipped a flattened subset; M15/P3 Stage 2 completed the accessors.</b> The
-/// <c>createTopics</c> result used to expose its topic configuration only through a
-/// flattened accessor family (<c>config_name</c> / <c>config_value</c> /
-/// <c>config_is_default</c> / <c>config_is_sensitive</c> / <c>config_is_read_only</c>),
-/// which is why P1 could carry only those five. <c>describeConfigs</c>'
-/// <c>kafka_admin_ConfigEntry_t</c> exposes the rest, so <see cref="Source"/>,
-/// <see cref="Type"/>, <see cref="Documentation"/> and <see cref="Synonyms"/> landed,
-/// matching Java's <c>source()</c> (<c>:95</c>), <c>type()</c> (<c>:133</c>),
-/// <c>documentation()</c> (<c>:140</c>) and <c>synonyms()</c> (<c>:126</c>). Since
-/// M15/P13.3 (D13) the <c>createTopics</c> result is read through the same full entries
-/// (<c>kafka_admin_TopicMetadataAndConfig_config</c>), so its <see cref="Source"/> is the
-/// core's too.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="IsDefault"/> is where that growth was not merely additive — and P1's
-/// recorded plan for it has now been carried out.</b> In Java <c>isDefault()</c> is
-/// <em>derived</em> — <c>return source == ConfigSource.DEFAULT_CONFIG</c>
-/// (<c>ConfigEntry.java:102-104</c>) — and neither public Java constructor takes it. Over
-/// P1's flattened ABI there was no source to derive from, so the flag was stored and the
-/// flag-taking constructor was made <see langword="internal"/> to stop a caller building
-/// an entry whose <see cref="IsDefault"/> and <see cref="Source"/> disagree, a state Java
-/// cannot represent. P1 recorded that "when <c>Source</c> lands it becomes the source of
-/// truth and <see cref="IsDefault"/> derives from it, exactly as in Java" — that is what
-/// happens here. The internal flag-taking constructor that survived for the flattened
-/// <c>createTopics</c> path was deleted in M15/P13.3 (D13), with that path: it had no Java
-/// counterpart (<c>definition-of-done.md</c> §7), and every entry now carries the core's
-/// <see cref="ConfigSource"/>.
-/// </para>
-/// <para>
-/// <b>Both of Java's public constructors are public here.</b> Java's 8-argument
-/// <c>ConfigEntry(name, value, source, isSensitive, isReadOnly, synonyms, type,
-/// documentation)</c> (<c>ConfigEntry.java:59</c>) was published in M15/P13.2 by
-/// maintainer decision (2026-09-29, finding G2-4), alongside the 2-argument form. It lets
-/// a caller build a complete entry — for a test double or a fabricated result — exactly as
-/// in Java. <see cref="ConfigSynonym"/>'s constructor stays <see langword="internal"/>,
-/// because Java's is package-private (<c>ConfigEntry.java:243</c>): a caller passes an
-/// empty synonym list, as a Java caller outside the package must.
-/// </para>
-/// <para>
-/// <b>Value equality mirrors Java's</b> (<c>:144</c>, <c>:163</c>) and is <em>not</em>
-/// decoration: <see cref="AlterConfigOp"/>'s equality compares its entry with Java's
-/// <c>Objects.equals</c>, so without these overrides two operations Java calls equal
-/// would differ here by reference. ⚠ Java's <c>equals</c> deliberately does <b>not</b>
-/// include <c>isDefault</c> — it is derived from <see cref="Source"/>, which is compared.
-/// </para>
+/// <see cref="ConfigSynonym"/>'s constructor is not public, as Java's is package-private, so a
+/// caller passes an empty synonym list, as a Java caller outside the package must.
 /// </remarks>
 public sealed class ConfigEntry
 {
@@ -78,9 +33,8 @@ public sealed class ConfigEntry
 
     /// <summary>
     /// Initializes a configuration entry with a name and value — Java's public
-    /// <c>ConfigEntry(String name, String value)</c> (<c>:44</c>), which likewise defaults
-    /// the source and type to <c>UNKNOWN</c>, the synonyms to empty and the documentation
-    /// to null.
+    /// <c>ConfigEntry(String name, String value)</c>, which likewise defaults the source and type
+    /// to <c>UNKNOWN</c>, the synonyms to empty and the documentation to null.
     /// </summary>
     /// <param name="name">The configuration key.</param>
     /// <param name="value">The configuration value, or <see langword="null"/> (Java's <c>value()</c> is nullable).</param>
@@ -102,29 +56,16 @@ public sealed class ConfigEntry
     /// Initializes a complete entry — Java's public 8-argument
     /// <c>ConfigEntry(String name, String value, ConfigSource source, boolean isSensitive,
     /// boolean isReadOnly, List&lt;ConfigSynonym&gt; synonyms, ConfigType type,
-    /// String documentation)</c> (<c>:59</c>), published in M15/P13.2 by maintainer
-    /// decision (2026-09-29).
+    /// String documentation)</c>.
     /// </summary>
     /// <remarks>
     /// <see cref="IsDefault"/> is not a parameter, as in Java: it derives from
-    /// <paramref name="source"/> (<see cref="ConfigSource.DefaultConfig"/> → true).
-    /// ⚠ <b>Recorded deviation — a null <paramref name="synonyms"/> is rejected</b>, where
-    /// Java stores it and its <c>synonyms()</c> then returns null. <see cref="Synonyms"/> is
-    /// non-nullable here, so accepting a null would either break that annotation or require
-    /// silently turning it into an empty list, which changes equality relative to Java's
-    /// <c>Objects.equals(null, [])</c>. Pass an empty list for "no synonyms".
-    /// ⚠ <b>Same recorded deviation — a null synonym <em>element</em> is rejected too</b>
-    /// (Critic 85, finding 85.2), where Java stores it and its <c>equals</c>,
-    /// <c>hashCode</c> and <c>toString</c> tolerate it through <c>List</c>'s own. Here
-    /// <see cref="Equals(object?)"/>, <see cref="GetHashCode"/> and <see cref="ToString"/>
-    /// read every element, so accepting a null would make them throw, which .NET's
-    /// guidelines for <see cref="object.Equals(object?)"/> and
-    /// <see cref="object.GetHashCode"/> rule out. This is the precedent
-    /// <see cref="Config.Config(IEnumerable{ConfigEntry})"/> follows for a null entry.
-    /// ⚠ The list is <b>copied</b>, unlike Java, which stores the caller's list
-    /// (<c>ConfigEntry.java:73</c>): a stored reference would let the caller add a null
-    /// after this check, and change the entry's equality and hash after it was used as a
-    /// key.
+    /// <paramref name="source"/> (<see cref="ConfigSource.DefaultConfig"/> → true). Recorded
+    /// deviations: a null <paramref name="synonyms"/> or a null synonym element is rejected, where
+    /// Java stores it, because <see cref="Synonyms"/> is non-nullable and
+    /// <see cref="Equals(object?)"/>, <see cref="GetHashCode"/> and <see cref="ToString"/> read every
+    /// element; and the list is copied, where Java stores the caller's list, so the entry's equality
+    /// and hash cannot change after it is built.
     /// </remarks>
     /// <param name="name">The configuration key.</param>
     /// <param name="value">The configuration value, or <see langword="null"/>.</param>
@@ -164,18 +105,16 @@ public sealed class ConfigEntry
     public string Name { get; }
 
     /// <summary>
-    /// The configuration value (Java's <c>value()</c>), or <see langword="null"/> —
-    /// Java's accessor is nullable and the ABI reports a null value as a null pointer.
+    /// The configuration value (Java's <c>value()</c>), or <see langword="null"/>.
     /// </summary>
     public string? Value { get; }
 
-    /// <summary>Where this value came from (Java's <c>source()</c>, <c>:95</c>).</summary>
+    /// <summary>Where this value came from (Java's <c>source()</c>).</summary>
     public ConfigSource Source { get; }
 
     /// <summary>
-    /// Whether the value is the broker default (Java's <c>isDefault()</c>) — <b>derived</b>
-    /// from <see cref="Source"/> exactly as Java derives it (<c>:102-104</c>), never
-    /// stored.
+    /// Whether the value is the broker default (Java's <c>isDefault()</c>), derived from
+    /// <see cref="Source"/> as Java derives it.
     /// </summary>
     public bool IsDefault => Source == ConfigSource.DefaultConfig;
 
@@ -189,28 +128,24 @@ public sealed class ConfigEntry
     public bool IsReadOnly { get; }
 
     /// <summary>
-    /// Every value that may be used for this config, with its source, <b>in order of
-    /// precedence</b> — Java's <c>synonyms()</c> (<c>:126</c>). Empty when synonyms were
-    /// not requested through <see cref="DescribeConfigsOptions.IncludeSynonyms"/>.
+    /// Every value that may be used for this config, with its source, in order of precedence —
+    /// Java's <c>synonyms()</c>. Empty when synonyms were not requested through
+    /// <see cref="DescribeConfigsOptions.IncludeSynonyms"/>.
     /// </summary>
-    /// <remarks>
-    /// ⚠ The order is the contract — it is why Java returns a <c>List</c> rather than a
-    /// <c>Set</c>, and why the ABI states that synonyms "keep Java's precedence order and
-    /// are not sorted". Nothing on this path sorts or de-duplicates them.
-    /// </remarks>
     public IReadOnlyList<ConfigSynonym> Synonyms => _synonyms;
 
-    /// <summary>The value's data type (Java's <c>type()</c>, <c>:133</c>).</summary>
+    /// <summary>The value's data type (Java's <c>type()</c>).</summary>
     public ConfigType Type { get; }
 
     /// <summary>
     /// The documentation for this config, or <see langword="null"/> when the broker did
-    /// not report it (Java's <c>documentation()</c>, <c>:140</c>).
+    /// not report it (Java's <c>documentation()</c>).
     /// </summary>
     public string? Documentation { get; }
 
     /// <summary>
-    /// Value equality over every field Java compares — Java's <c>equals</c> (<c>:144</c>).
+    /// Value equality over every field Java compares — Java's <c>equals</c>, which leaves out
+    /// <see cref="IsDefault"/>, derived from the compared <see cref="Source"/>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two entries carry the same configuration.</returns>
@@ -232,8 +167,8 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// The hash of every field <see cref="Equals(object?)"/> compares — Java's
-    /// <c>hashCode</c> (<c>:163</c>), same fields and same <c>31 *</c> chain.
+    /// The hash of every field <see cref="Equals(object?)"/> compares — Java's <c>hashCode</c>, same
+    /// fields and same <c>31 *</c> chain.
     /// </summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
@@ -258,18 +193,15 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// A diagnostic rendering matching Java's <c>toString()</c>
-    /// (<c>ConfigEntry.java:183-194</c>), which <b>redacts a sensitive value</b> rather than
-    /// printing it.
+    /// A diagnostic rendering matching Java's <c>toString()</c>, which redacts a sensitive value
+    /// rather than printing it.
     /// </summary>
     /// <returns>The rendering.</returns>
     /// <remarks>
-    /// The rendering follows Java's string concatenation: <see cref="Source"/> and
-    /// <see cref="Type"/> print as <b>Java's constant names</b> (<c>DEFAULT_CONFIG</c>,
-    /// <c>STRING</c>), the two booleans lowercase, and a <see langword="null"/> value or
-    /// documentation as <c>null</c>. A source or type that is not a defined member — the
-    /// public constructor stores what it is given — has no Java name and prints as its
-    /// numeric value.
+    /// <see cref="Source"/> and <see cref="Type"/> print as Java's constant names
+    /// (<c>DEFAULT_CONFIG</c>, <c>STRING</c>), the two booleans lowercase, and a
+    /// <see langword="null"/> value or documentation as <c>null</c>. A source or type that is not a
+    /// defined member prints as its numeric value.
     /// </remarks>
     public override string ToString()
     {
@@ -293,7 +225,6 @@ public sealed class ConfigEntry
             Name,
             IsSensitive ? "Redacted" : (Value ?? "null"),
             JavaName(Source),
-            // Java renders a boolean lowercase; bool.ToString() would give True/False.
             IsSensitive ? "true" : "false",
             IsReadOnly ? "true" : "false",
             synonyms,
@@ -301,10 +232,6 @@ public sealed class ConfigEntry
             Documentation ?? "null");
     }
 
-    /// <summary>
-    /// Java's <c>ConfigEntry.ConfigSource</c> constant name for each member
-    /// (<c>ConfigEntry.java:215-225</c>); an undefined value prints as its number.
-    /// </summary>
     private static string JavaName(ConfigSource source) => source switch
     {
         ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
@@ -319,10 +246,6 @@ public sealed class ConfigEntry
         _ => ((int)source).ToString(CultureInfo.InvariantCulture),
     };
 
-    /// <summary>
-    /// Java's <c>ConfigEntry.ConfigType</c> constant name for each member
-    /// (<c>ConfigEntry.java:199-210</c>); an undefined value prints as its number.
-    /// </summary>
     private static string JavaName(ConfigType type) => type switch
     {
         ConfigType.Unknown => "UNKNOWN",
@@ -338,15 +261,6 @@ public sealed class ConfigEntry
         _ => ((int)type).ToString(CultureInfo.InvariantCulture),
     };
 
-    /// <summary>
-    /// Validates and copies the constructor's <c>synonyms</c> — see the 8-argument
-    /// constructor's remarks for why both are stricter than Java.
-    /// </summary>
-    /// <remarks>
-    /// The copy is wrapped read-only, so <see cref="Synonyms"/> cannot be cast back to a
-    /// mutable array to write a null into it. An empty list becomes the shared empty array
-    /// (nothing to write into), so the constructors that pass no synonyms allocate nothing.
-    /// </remarks>
     private static IReadOnlyList<ConfigSynonym> CopySynonyms(IReadOnlyList<ConfigSynonym> synonyms)
     {
         if (synonyms is null)
@@ -390,22 +304,10 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// The data type of a configuration entry — the .NET realization of Java's nested
-    /// <c>ConfigEntry.ConfigType</c> (<c>ConfigEntry.java:199-210</c>).
+    /// The data type of a configuration entry — Java's nested <c>ConfigEntry.ConfigType</c>.
     /// </summary>
     /// <remarks>
-    /// ⚠ <b>This enum crosses the ABI as Java's constant NAME, not as a numeric id</b> —
-    /// the header says so outright: "<c>ConfigEntry.ConfigType</c> has no numeric id in
-    /// Java, so the name is the contract". That is the opposite convention from
-    /// <see cref="ConfigResourceType"/>, <see cref="AlterConfigOpType"/> and
-    /// <see cref="AclOperation"/>, which all cross as <c>int32_t</c> wire codes. The member
-    /// values here are therefore ordinary C# ordinals with no wire meaning; the decode is
-    /// by name, in <c>ConfigMarshal</c>.
-    /// <para>
-    /// <b>Stays nested, matching Java (M15/P3 decision D16).</b> Unlike
-    /// <c>ConfigResource.Type</c>, which had to be flattened because <c>Type</c> collides
-    /// with <see cref="System.Type"/>, this name nests cleanly.
-    /// </para>
+    /// Java's enum has no numeric id, so the member values are C# ordinals with no wire meaning.
     /// </remarks>
     public enum ConfigType
     {
@@ -441,8 +343,8 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// Where a configuration entry's value came from — the .NET realization of Java's
-    /// nested <c>ConfigEntry.ConfigSource</c> (<c>ConfigEntry.java:215-225</c>).
+    /// Where a configuration entry's value came from — Java's nested
+    /// <c>ConfigEntry.ConfigSource</c>.
     /// </summary>
     /// <remarks>
     /// <inheritdoc cref="ConfigType" path="/remarks"/>
@@ -481,26 +383,11 @@ public sealed class ConfigEntry
     }
 
     /// <summary>
-    /// One alternative value that may be used for a configuration, with its source — the
-    /// .NET realization of Java's nested <c>ConfigEntry.ConfigSynonym</c>
-    /// (<c>ConfigEntry.java:230</c>).
+    /// One alternative value that may be used for a configuration, with its source — Java's nested
+    /// <c>ConfigEntry.ConfigSynonym</c>.
     /// </summary>
-    /// <remarks>
-    /// ⚠ <b>There is no <c>ConfigSynonym_t</c> in the ABI.</b> Synonyms are read through
-    /// three parallel indexed accessors on the parent entry
-    /// (<c>synonym_name</c> / <c>synonym_value</c> / <c>synonym_source</c>), bounded by
-    /// <c>synonym_count</c>, so this is a plain managed value assembled from them.
-    /// </remarks>
     public sealed class ConfigSynonym
     {
-        /// <summary>
-        /// Initializes a synonym — Java's package-private
-        /// <c>ConfigSynonym(String, String, ConfigSource)</c> (<c>:243</c>), so likewise
-        /// not public here.
-        /// </summary>
-        /// <param name="name">The configuration name, which may differ from the parent entry's.</param>
-        /// <param name="value">The value, or <see langword="null"/> when the configuration is sensitive.</param>
-        /// <param name="source">Where this value came from.</param>
         internal ConfigSynonym(string name, string? value, ConfigSource source)
         {
             Name = name;
@@ -508,19 +395,19 @@ public sealed class ConfigEntry
             Source = source;
         }
 
-        /// <summary>The configuration name (Java's <c>name()</c>, <c>:252</c>).</summary>
+        /// <summary>The configuration name (Java's <c>name()</c>).</summary>
         public string Name { get; }
 
         /// <summary>
-        /// The value, or <see langword="null"/> when the configuration is sensitive —
-        /// Java's <c>value()</c> (<c>:259</c>), whose javadoc says so.
+        /// The value, or <see langword="null"/> when the configuration is sensitive — Java's
+        /// <c>value()</c>.
         /// </summary>
         public string? Value { get; }
 
-        /// <summary>Where this value came from (Java's <c>source()</c>, <c>:266</c>).</summary>
+        /// <summary>Where this value came from (Java's <c>source()</c>).</summary>
         public ConfigSource Source { get; }
 
-        /// <summary>Value equality — Java's <c>equals</c> (<c>:270</c>).</summary>
+        /// <summary>Value equality — Java's <c>equals</c>.</summary>
         /// <param name="obj">The object to compare with.</param>
         /// <returns>Whether the two synonyms are the same.</returns>
         public override bool Equals(object? obj) =>
@@ -529,7 +416,7 @@ public sealed class ConfigEntry
             && string.Equals(Value, other.Value, StringComparison.Ordinal)
             && Source == other.Source;
 
-        /// <summary>The hash of the three fields — Java's <c>hashCode</c> (<c>:279</c>).</summary>
+        /// <summary>The hash of the three fields — Java's <c>hashCode</c>.</summary>
         /// <returns>The hash code.</returns>
         public override int GetHashCode()
         {
@@ -544,10 +431,9 @@ public sealed class ConfigEntry
         }
 
         /// <summary>
-        /// A diagnostic rendering matching Java's <c>toString()</c>
-        /// (<c>ConfigEntry.java:285-290</c>): the source prints as Java's constant name
-        /// (<c>STATIC_BROKER_CONFIG</c>) and a <see langword="null"/> value as <c>null</c>,
-        /// as <see cref="ConfigEntry.ToString"/> does; an undefined source prints as its
+        /// A diagnostic rendering matching Java's <c>toString()</c>: the source prints as Java's
+        /// constant name (<c>STATIC_BROKER_CONFIG</c>) and a <see langword="null"/> value as
+        /// <c>null</c>, as <see cref="ConfigEntry.ToString"/> does; an undefined source prints as its
         /// number.
         /// </summary>
         /// <returns>The rendering.</returns>

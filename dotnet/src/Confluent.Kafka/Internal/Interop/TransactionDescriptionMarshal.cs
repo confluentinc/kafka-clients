@@ -13,180 +13,72 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 
 using Confluent.Kafka.Admin;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Reads one row of the <c>describeTransactions</c> table — six inline scalars and the
-/// nested <c>(i, j)</c> walk over that transaction's topic partitions.
+/// Copies the transaction description a describe-transactions future delivers into a managed value, and maps a
+/// transaction-state singleton to its <see cref="TransactionState"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The inner walk is bounded by <c>get_topic_partition_count(i)</c>, never by the
-/// outer <c>count</c>.</b> The two are unrelated, and the inner count is <c>0</c> for a row
-/// the call failed to describe (header,
-/// <c>kafka_admin_DescribeTransactionsResult_get_topic_partition_count</c>).
-/// </para>
-/// <para>
-/// ⚠ <c>transaction_start_time_ms</c> is Java's <c>OptionalLong</c> and the ABI spells the
-/// discriminant as the <b>return value</b> (header,
-/// <c>kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms</c>): when it returns
-/// false the out-param is left untouched, so the value must not be read on that branch.
-/// </para>
-/// <para>
-/// The accessor set is a <b>parameter</b> for the <see cref="UserScramCredentialMarshal"/>
-/// reason: both mocks mirror Java's own <c>UnsupportedOperationException</c> for this RPC, so
-/// the ABI offers no way to construct a populated result to drive the walk on.
-/// </para>
-/// </remarks>
 internal static class TransactionDescriptionMarshal
 {
-    /// <summary>The production <c>kafka_admin_DescribeTransactionsResult_*</c> set.</summary>
-    internal static readonly Accessors NativeAccessors = new Accessors(
-        NativeMethods.DescribeTransactionsResultGetCoordinatorId,
-        NativeMethods.DescribeTransactionsResultGetState,
-        NativeMethods.DescribeTransactionsResultGetProducerId,
-        NativeMethods.DescribeTransactionsResultGetProducerEpoch,
-        NativeMethods.DescribeTransactionsResultGetTransactionTimeoutMs,
-        NativeMethods.DescribeTransactionsResultGetTransactionStartTimeMs,
-        NativeMethods.DescribeTransactionsResultGetTopicPartitionCount,
-        NativeMethods.DescribeTransactionsResultGetTopicPartitionTopic,
-        NativeMethods.DescribeTransactionsResultGetTopicPartitionPartition);
-
-    /// <summary>Reads row <paramref name="index"/> through the production accessors.</summary>
-    /// <param name="result">The owned result root.</param>
-    /// <param name="index">The row index, inside the result's own count.</param>
-    /// <returns>The copied-out description.</returns>
-    internal static TransactionDescription ReadDescription(IntPtr result, int index) =>
-        ReadDescription(result, index, NativeAccessors);
-
-    /// <summary>Reads row <paramref name="index"/> through an injected accessor set.</summary>
-    /// <param name="result">The result root, or a stand-in under an injected set.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="accessors">The nine accessors to decode it with.</param>
-    /// <returns>The copied-out description.</returns>
-    /// <exception cref="KafkaException">
-    /// A partition inside the row's own count carried no topic name.
-    /// </exception>
-    internal static TransactionDescription ReadDescription(
-        IntPtr result, int index, Accessors accessors)
+    internal static TransactionDescription CopyOut(IntPtr description)
     {
-        // ⚠ Its own count — never the outer one. See the type remarks.
-        int partitionCount = accessors.GetTopicPartitionCount(result, index);
-        List<TopicPartition> partitions = new List<TopicPartition>(Math.Max(partitionCount, 0));
-        for (int partition = 0; partition < partitionCount; partition++)
+        if (description == IntPtr.Zero)
         {
-            string topic = Utf8Marshal.PtrToString(
-                    accessors.GetTopicPartitionTopic(result, index, partition))
-                ?? throw new KafkaException(
-                    "The describeTransactions result produced no topic name for a partition "
-                    + "within its own count.");
-
-            partitions.Add(
-                new TopicPartition(
-                    topic, accessors.GetTopicPartitionPartition(result, index, partition)));
+            throw new KafkaException("The admin result produced no transaction description.");
         }
 
-        // ⚠ The out-param is only meaningful when the accessor returns true.
-        long? startTimeMs =
-            accessors.TryGetTransactionStartTimeMs(result, index, out long startTime)
-                ? startTime
-                : (long?)null;
-
+        IntPtr outErr = IntPtr.Zero;
+        int coordinatorId = NativeMethods.TransactionDescriptionCoordinatorId(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr state = NativeMethods.TransactionDescriptionState(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        TransactionState mappedState = StateFrom(state);
+        long producerId = NativeMethods.TransactionDescriptionProducerId(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int producerEpoch = NativeMethods.TransactionDescriptionProducerEpoch(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long transactionTimeoutMs = NativeMethods.TransactionDescriptionTransactionTimeoutMs(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long transactionStartTimeMs = NativeMethods.TransactionDescriptionTransactionStartTimeMs(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr topicPartitions = NativeMethods.TransactionDescriptionTopicPartitions(description, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
         return new TransactionDescription(
-            accessors.GetCoordinatorId(result, index),
-            TransactionMarshal.ReadState(accessors.GetState(result, index)),
-            accessors.GetProducerId(result, index),
-            accessors.GetProducerEpoch(result, index),
-            accessors.GetTransactionTimeoutMs(result, index),
-            startTimeMs,
-            partitions);
+            coordinatorId,
+            mappedState,
+            producerId,
+            producerEpoch,
+            transactionTimeoutMs,
+            transactionStartTimeMs < 0 ? null : transactionStartTimeMs,
+            topicPartitions == IntPtr.Zero
+                ? Array.Empty<TopicPartition>()
+                : TopicPartitionListMarshal.CopyOutAndDestroy(topicPartitions));
     }
 
-    /// <summary>Java's <c>OptionalLong</c> at the ABI: false means empty, and leaves the out-param.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="value">The value, written only when this returns true.</param>
-    /// <returns>Whether the row carries a value.</returns>
-    internal delegate bool OptionalInt64Accessor(IntPtr result, int index, out long value);
-
-    /// <summary>Reads a borrowed string indexed by <c>(row, partition)</c>.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="partitionIndex">The partition index within that row.</param>
-    /// <returns>The borrowed pointer, or <c>IntPtr.Zero</c> when either index is out of range.</returns>
-    internal delegate IntPtr NestedStringAccessor(IntPtr result, int index, int partitionIndex);
-
-    /// <summary>Reads an <c>int32_t</c> indexed by <c>(row, partition)</c>.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="partitionIndex">The partition index within that row.</param>
-    /// <returns>The value, or <c>-1</c> when either index is out of range.</returns>
-    internal delegate int NestedInt32Accessor(IntPtr result, int index, int partitionIndex);
-
-    /// <summary>The nine per-row accessors, as one set.</summary>
-    internal sealed class Accessors
+    internal static TransactionState StateFrom(IntPtr state)
     {
-        /// <summary>Creates a set, in the ABI's own accessor order.</summary>
-        /// <param name="getCoordinatorId">The row's coordinator broker id.</param>
-        /// <param name="getState">The row's state, borrowed, as Java's <c>toString()</c> spelling.</param>
-        /// <param name="getProducerId">The row's producer id.</param>
-        /// <param name="getProducerEpoch">The row's producer epoch.</param>
-        /// <param name="getTransactionTimeoutMs">The row's configured transaction timeout.</param>
-        /// <param name="tryGetTransactionStartTimeMs">The row's optional start time.</param>
-        /// <param name="getTopicPartitionCount">The row's partition count — the inner bound.</param>
-        /// <param name="getTopicPartitionTopic">One partition's topic name, borrowed.</param>
-        /// <param name="getTopicPartitionPartition">One partition's id.</param>
-        internal Accessors(
-            Func<IntPtr, int, int> getCoordinatorId,
-            KeyedResultMarshal.IndexedAccessor getState,
-            Func<IntPtr, int, long> getProducerId,
-            Func<IntPtr, int, int> getProducerEpoch,
-            Func<IntPtr, int, long> getTransactionTimeoutMs,
-            OptionalInt64Accessor tryGetTransactionStartTimeMs,
-            Func<IntPtr, int, int> getTopicPartitionCount,
-            NestedStringAccessor getTopicPartitionTopic,
-            NestedInt32Accessor getTopicPartitionPartition)
+        if (state == IntPtr.Zero)
         {
-            GetCoordinatorId = getCoordinatorId;
-            GetState = getState;
-            GetProducerId = getProducerId;
-            GetProducerEpoch = getProducerEpoch;
-            GetTransactionTimeoutMs = getTransactionTimeoutMs;
-            TryGetTransactionStartTimeMs = tryGetTransactionStartTimeMs;
-            GetTopicPartitionCount = getTopicPartitionCount;
-            GetTopicPartitionTopic = getTopicPartitionTopic;
-            GetTopicPartitionPartition = getTopicPartitionPartition;
+            throw new KafkaException("The admin result produced no transaction state.");
         }
 
-        /// <summary><c>get_coordinator_id(i)</c>.</summary>
-        internal Func<IntPtr, int, int> GetCoordinatorId { get; }
-
-        /// <summary><c>get_state(i)</c> — borrowed.</summary>
-        internal KeyedResultMarshal.IndexedAccessor GetState { get; }
-
-        /// <summary><c>get_producer_id(i)</c>.</summary>
-        internal Func<IntPtr, int, long> GetProducerId { get; }
-
-        /// <summary><c>get_producer_epoch(i)</c>.</summary>
-        internal Func<IntPtr, int, int> GetProducerEpoch { get; }
-
-        /// <summary><c>get_transaction_timeout_ms(i)</c>.</summary>
-        internal Func<IntPtr, int, long> GetTransactionTimeoutMs { get; }
-
-        /// <summary><c>get_transaction_start_time_ms(i, &amp;out)</c>.</summary>
-        internal OptionalInt64Accessor TryGetTransactionStartTimeMs { get; }
-
-        /// <summary><c>get_topic_partition_count(i)</c> — the inner walk's bound.</summary>
-        internal Func<IntPtr, int, int> GetTopicPartitionCount { get; }
-
-        /// <summary><c>get_topic_partition_topic(i, j)</c> — borrowed.</summary>
-        internal NestedStringAccessor GetTopicPartitionTopic { get; }
-
-        /// <summary><c>get_topic_partition_partition(i, j)</c>.</summary>
-        internal NestedInt32Accessor GetTopicPartitionPartition { get; }
+        IntPtr outErr = IntPtr.Zero;
+        int id = NativeMethods.TransactionStateEnum(state, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return id switch
+        {
+            0 => TransactionState.Ongoing,
+            1 => TransactionState.PrepareAbort,
+            2 => TransactionState.PrepareCommit,
+            3 => TransactionState.CompleteAbort,
+            4 => TransactionState.CompleteCommit,
+            5 => TransactionState.Empty,
+            6 => TransactionState.PrepareEpochFence,
+            _ => TransactionState.Unknown,
+        };
     }
 }

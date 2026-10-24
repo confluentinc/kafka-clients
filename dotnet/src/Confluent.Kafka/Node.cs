@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Globalization;
 
 namespace Confluent.Kafka;
@@ -20,15 +21,26 @@ namespace Confluent.Kafka;
 /// <remarks>Unlike Java's <c>Node</c>, it has no value equality.</remarks>
 public sealed class Node
 {
-    internal Node(int id, string host, int port, string? rack)
+    /// <summary>Creates a node without a rack, Java's <c>Node(int, String, int)</c>.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="host"/> is null.</exception>
+    public Node(int id, string host, int port)
+        : this(id, host, port, rack: null, isFenced: false)
+    {
+    }
+
+    /// <summary>Creates a node, Java's <c>Node(int, String, int, String)</c>.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="host"/> is null.</exception>
+    public Node(int id, string host, int port, string? rack)
         : this(id, host, port, rack, isFenced: false)
     {
     }
 
-    internal Node(int id, string host, int port, string? rack, bool isFenced)
+    /// <summary>Creates a node, Java's <c>Node(int, String, int, String, boolean)</c>.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="host"/> is null.</exception>
+    public Node(int id, string host, int port, string? rack, bool isFenced)
     {
         Id = id;
-        Host = host;
+        Host = host ?? throw new ArgumentNullException(nameof(host));
         Port = port;
         Rack = rack;
         IsFenced = isFenced;

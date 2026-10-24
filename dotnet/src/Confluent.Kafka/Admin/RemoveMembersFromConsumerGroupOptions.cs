@@ -15,39 +15,34 @@
 using System;
 using System.Collections.Generic;
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.RemoveMembersFromConsumerGroup"/> — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions</c>
-/// (<c>RemoveMembersFromConsumerGroupOptions.java:28</c>). It carries the members to be
-/// removed from the consumer group.
+/// Java's <c>org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions</c>,
+/// carrying the members to remove from the consumer group.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java has <b>two</b> constructors, both translated: the members-taking one
-/// (<c>:33-38</c>), which rejects an empty collection, and the no-arg one (<c>:40-42</c>),
-/// which is "remove every member of the group" — <see cref="RemoveAll"/> is
-/// <see langword="true"/> exactly when <see cref="Members"/> is empty, mirroring Java's
-/// <c>removeAll()</c> (<c>:59-61</c>), which is likewise derived from
-/// <c>members.isEmpty()</c> rather than stored separately.
-/// </para>
 /// </remarks>
 public sealed class RemoveMembersFromConsumerGroupOptions
 {
     private readonly HashSet<MemberToRemove> _members;
+    private string? _reason;
+    private int? _timeoutMs;
 
     /// <summary>
     /// Removes the given members — Java's
-    /// <c>RemoveMembersFromConsumerGroupOptions(Collection&lt;MemberToRemove&gt; members)</c>
-    /// (<c>:33-38</c>). Duplicates (by <see cref="MemberToRemove.GroupInstanceId"/>) collapse,
-    /// mirroring Java's <c>Set</c> collapse (<c>:37</c>).
+    /// <c>RemoveMembersFromConsumerGroupOptions(Collection&lt;MemberToRemove&gt; members)</c>.
+    /// Duplicates (by <see cref="MemberToRemove.GroupInstanceId"/>) collapse, as in Java's
+    /// <c>Set</c>.
     /// </summary>
     /// <param name="members">The members to remove. Must not be empty.</param>
     /// <exception cref="ArgumentNullException"><paramref name="members"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="members"/> is empty — Java's exact message (<c>:35</c>).
+    /// <paramref name="members"/> is empty, with Java's message.
     /// </exception>
     public RemoveMembersFromConsumerGroupOptions(IReadOnlyCollection<MemberToRemove> members)
     {
@@ -66,7 +61,7 @@ public sealed class RemoveMembersFromConsumerGroupOptions
 
     /// <summary>
     /// Removes every member of the group — Java's no-argument
-    /// <c>RemoveMembersFromConsumerGroupOptions()</c> (<c>:40-42</c>).
+    /// <c>RemoveMembersFromConsumerGroupOptions()</c>.
     /// </summary>
     public RemoveMembersFromConsumerGroupOptions()
     {
@@ -75,23 +70,39 @@ public sealed class RemoveMembersFromConsumerGroupOptions
 
     /// <summary>
     /// An optional reason recorded with the removal — Java's <c>reason(String)</c> /
-    /// <c>reason()</c> (<c>:44-49</c>, <c>:55-57</c>), collapsed into one property per this
-    /// binding's idiom.
+    /// <c>reason()</c>.
     /// </summary>
-    public string? Reason { get; set; }
+    public string? Reason
+    {
+        get => _reason;
+        set
+        {
+            _reason = value;
+            Setters.Ran(nameof(Reason));
+        }
+    }
 
     /// <summary>
-    /// The members to remove — Java's <c>members()</c> (<c>:51-53</c>).
+    /// The members to remove — Java's <c>members()</c>.
     /// </summary>
     public IReadOnlyCollection<MemberToRemove> Members => _members;
 
     /// <summary>
-    /// <see langword="true"/> when every member of the group should be removed — Java's
-    /// <c>removeAll()</c> (<c>:59-61</c>), derived from <see cref="Members"/> being empty
-    /// rather than stored as its own field.
+    /// <see langword="true"/> when every member of the group should be removed, that is when
+    /// <see cref="Members"/> is empty — Java's <c>removeAll()</c>.
     /// </summary>
     public bool RemoveAll => _members.Count == 0;
 
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

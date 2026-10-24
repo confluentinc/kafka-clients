@@ -15,53 +15,40 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of a <c>describeTransactions</c> call — Java's
-/// <c>org.apache.kafka.clients.admin.DescribeTransactionsResult</c> (<c>:27</c>): one
+/// <c>org.apache.kafka.clients.admin.DescribeTransactionsResult</c>: one
 /// future per transactional id.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ Java publishes <b>no</b> per-id map, only the <see cref="Description"/> lookup and
-/// <see cref="All"/> (<c>:43</c>, <c>:62</c>), so neither is added here.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until its id (or, for
-/// <see cref="All"/>, every id) has completed, and needs no thread-pool thread: the futures here are composed on the
-/// waiting thread, never over a <c>Task</c>.
-/// </para>
+/// Java publishes no per-id map, only the <see cref="Description"/> lookup and <see cref="All"/>.
 /// </remarks>
 /// <seealso cref="AsyncDescribeTransactionsResult"/>
 public sealed class DescribeTransactionsResult
 {
     private readonly IReadOnlyDictionary<string, KafkaFuture<TransactionDescription>> _futures;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>Wraps one future per transactional id.</summary>
-    /// <param name="futures">One future per requested id.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is null.</exception>
-    internal DescribeTransactionsResult(IReadOnlyDictionary<string, KafkaFuture<TransactionDescription>> futures)
+    private DescribeTransactionsResult(IReadOnlyDictionary<string, KafkaFuture<TransactionDescription>> futures, SafeAdminResultHandle native)
     {
-        _futures = futures ?? throw new ArgumentNullException(nameof(futures));
+        _futures = futures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latches: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static DescribeTransactionsResult From(KeyedAdminOperation<string, TransactionDescription> operation) =>
-        new DescribeTransactionsResult(SyncAdminFutures.Wrap(operation.SyncSources));
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>One id's description — Java's <c>description(String)</c> (<c>:43</c>).</summary>
+    /// <summary>One id's description — Java's <c>description(String)</c>.</summary>
     /// <param name="transactionalId">A transactional id from the request.</param>
-    /// <returns>That id's future, over its own latch: an equal future on every call.</returns>
+    /// <returns>That id's future; every call returns an equal future.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// The id was not in the request — Java's <c>IllegalArgumentException</c> (<c>:47</c>),
-    /// thrown <b>synchronously</b> because it is a usage error, not a future's outcome.
+    /// The id was not in the request (Java's <c>IllegalArgumentException</c>), thrown at the call.
     /// </exception>
     public KafkaFuture<TransactionDescription> Description(string transactionalId)
     {
@@ -82,25 +69,42 @@ public sealed class DescribeTransactionsResult
 
     /// <summary>
     /// Every id's description in one map, succeeding only if every id did — Java's
-    /// <c>all()</c> (<c>:62</c>).
+    /// <c>all()</c>.
     /// </summary>
-    /// <returns>A future yielding the whole map, or failing with the first failure in key order.</returns>
-    /// <remarks>
-    /// <para>
-    /// Every id is waited for first, so a failure fails the aggregate with the first failure in key order exactly as
-    /// Java's <c>allOf(...).thenApply(...)</c> chain does, rather than whichever id a reader happens to reach first.
-    /// The map is keyed ordinally, as the bridge's own keys are. Each call builds a new aggregate.
-    /// </para>
-    /// <para>
-    /// ⚠ <b>Recorded divergence.</b> Java's two sibling describe results wrap the aggregate's
-    /// own gather failure differently — this one in a plain <c>RuntimeException</c>
-    /// (<c>:71</c>), <see cref="DescribeProducersResult.All"/> in a <c>KafkaException</c>
-    /// (<c>DescribeProducersResult.java:54</c>). Neither is reproduced: both Java paths are
-    /// reachable only through the checked <c>InterruptedException</c>/<c>ExecutionException</c>
-    /// that <c>allOf</c> has already ruled out, and C# has no checked exception to re-wrap. The
-    /// per-id failure itself propagates unchanged, which is what a caller observes in Java too.
-    /// </para>
-    /// </remarks>
-    public KafkaFuture<IReadOnlyDictionary<string, TransactionDescription>> All() =>
-        SyncAdminFutures.GatherAll(_futures, StringComparer.Ordinal);
+    /// <returns>A future yielding the whole map, or failing with the first failure to complete.</returns>
+    public KafkaFuture<IReadOnlyDictionary<string, TransactionDescription>> All()
+    {
+        IReadOnlyDictionary<string, KafkaFuture<TransactionDescription>> futures = _futures;
+        KafkaFuture<TransactionDescription>[] values = new KafkaFuture<TransactionDescription>[futures.Count];
+        int next = 0;
+        foreach (KafkaFuture<TransactionDescription> future in futures.Values)
+        {
+            values[next++] = future;
+        }
+
+        return KafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<string, TransactionDescription>>(() =>
+        {
+            Dictionary<string, TransactionDescription> descriptions =
+                new Dictionary<string, TransactionDescription>(futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFuture<TransactionDescription>> entry in futures)
+            {
+                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+            }
+
+            return descriptions;
+        });
+    }
+
+    internal static DescribeTransactionsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription>> Descriptions, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, KafkaFuture<TransactionDescription>> futures =
+            new Dictionary<string, KafkaFuture<TransactionDescription>>(native.Descriptions.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<TransactionDescription>> entry in native.Descriptions)
+        {
+            futures.Add(entry.Key, new KafkaFuture<TransactionDescription>(entry.Value));
+        }
+
+        return new DescribeTransactionsResult(futures, native.Result);
+    }
 }

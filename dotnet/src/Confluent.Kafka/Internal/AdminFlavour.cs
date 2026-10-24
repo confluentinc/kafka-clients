@@ -12,23 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Admin;
+
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// Which public admin surface an admin operation completes for (M15/P14 PLAN §3.1): the sync one, whose futures are
-/// <see cref="KafkaFuture"/> / <see cref="KafkaFuture{T}"/> over <see cref="SyncCompletion{T}"/> latches, or the
-/// async one, whose futures are <c>Task</c>s over <see cref="TaskAdminCompletion{T}"/>.
+/// Which public admin surface a native admin client serves, the sync one or the async one; it names the client's drain
+/// thread.
 /// </summary>
-/// <remarks>
-/// The flavour is chosen once, when the operation is built, and decides only which per-key completion it creates
-/// (<see cref="IAdminCompletion{T}"/>). The submit, the rooting, the countdown and the callbacks are the same code for
-/// both.
-/// </remarks>
 internal enum AdminFlavour
 {
-    /// <summary>Per-key <see cref="SyncCompletion{T}"/> latches, read through a blocking <c>Get()</c>.</summary>
     Sync,
 
-    /// <summary>Per-key <see cref="TaskAdminCompletion{T}"/> sources, read through their <c>Task</c>s.</summary>
     Async,
 }

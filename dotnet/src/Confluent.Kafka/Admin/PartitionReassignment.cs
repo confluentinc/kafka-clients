@@ -19,34 +19,18 @@ using System.Collections.ObjectModel;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A partition's ongoing reassignment — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.PartitionReassignment</c>
-/// (<c>PartitionReassignment.java:32, :41, :49, :57</c>), returned by
-/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>.
+/// A partition's ongoing reassignment, returned by
+/// <see cref="IAdmin.ListPartitionReassignments(IReadOnlyCollection{TopicPartition}?, ListPartitionReassignmentsOptions?)"/>
+/// — Java's <c>org.apache.kafka.clients.admin.PartitionReassignment</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Not to be confused with <see cref="NewPartitionReassignment"/>.</b> That one is an
-/// <em>input</em> carrying only the target replicas; this is the broker's <em>report</em>
-/// of a reassignment in flight, carrying three lists.
-/// <see cref="AddingReplicas"/> and <see cref="RemovingReplicas"/> are each documented by
-/// Java as a subset of <see cref="Replicas"/>.
+/// Not to be confused with <see cref="NewPartitionReassignment"/>, the input carrying only the
+/// target replicas: this is the broker's report of a reassignment in flight.
 /// </para>
 /// <para>
-/// <b>All three lists are copied on construction and exposed read-only</b>, as Java wraps
-/// each in <c>Collections.unmodifiableList</c> (<c>:33-35</c>): a caller mutating the list
-/// it passed cannot change a constructed value, and casting a returned list back to a
-/// mutable one fails the way Java's <c>UnsupportedOperationException</c> does.
-/// </para>
-/// <para>
-/// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read that
-/// does no P/Invoke and cannot throw, and no same-named static factory forces the method
-/// form.
-/// </para>
-/// <para>
-/// The ABI reads the three lists through <b>six flattened accessors</b> —
-/// <c>replica_count</c>/<c>replica(i)</c> and the adding/removing pairs — with no child
-/// handle per list, the same pattern as <see cref="ReplicaInfo"/>.
+/// The three lists are copied on construction and exposed read-only, as Java wraps each in
+/// <c>Collections.unmodifiableList</c>.
 /// </para>
 /// </remarks>
 public sealed class PartitionReassignment
@@ -55,22 +39,14 @@ public sealed class PartitionReassignment
     private readonly ReadOnlyCollection<int> _addingReplicas;
     private readonly ReadOnlyCollection<int> _removingReplicas;
 
-    /// <summary>
-    /// Creates a reassignment report — Java's
-    /// <c>PartitionReassignment(List&lt;Integer&gt;, List&lt;Integer&gt;, List&lt;Integer&gt;)</c>
-    /// (<c>:32</c>).
-    /// </summary>
+    /// <summary>Creates a reassignment report — Java's constructor.</summary>
     /// <param name="replicas">The brokers this partition currently resides on.</param>
     /// <param name="addingReplicas">The brokers being added, a subset of <paramref name="replicas"/>.</param>
     /// <param name="removingReplicas">The brokers being removed, a subset of <paramref name="replicas"/>.</param>
-    /// <exception cref="ArgumentNullException">Any argument is null.</exception>
-    /// <remarks>
-    /// ⚠ Java's constructor throws <c>NullPointerException</c> from
-    /// <c>Collections.unmodifiableList(null)</c> for a null list; the .NET idiom for that
-    /// is <see cref="ArgumentNullException"/>, which names the offending parameter.
-    /// <b>Empty is not null here</b> — an empty adding/removing list is the ordinary case
-    /// for a partition whose reassignment is only moving replicas one way.
-    /// </remarks>
+    /// <exception cref="ArgumentNullException">
+    /// Any argument is null, where Java throws <c>NullPointerException</c>. An empty list is
+    /// the ordinary case for a reassignment moving replicas one way.
+    /// </exception>
     public PartitionReassignment(
         IReadOnlyList<int> replicas, IReadOnlyList<int> addingReplicas, IReadOnlyList<int> removingReplicas)
     {
@@ -94,31 +70,24 @@ public sealed class PartitionReassignment
         _removingReplicas = new List<int>(removingReplicas).AsReadOnly();
     }
 
-    /// <summary>
-    /// The brokers this partition currently resides on — Java's <c>replicas()</c>
-    /// (<c>:41</c>).
-    /// </summary>
+    /// <summary>The brokers this partition currently resides on — Java's <c>replicas()</c>.</summary>
     public IReadOnlyList<int> Replicas => _replicas;
 
     /// <summary>
     /// The brokers being added as part of the reassignment, a subset of
-    /// <see cref="Replicas"/> — Java's <c>addingReplicas()</c> (<c>:49</c>).
+    /// <see cref="Replicas"/> — Java's <c>addingReplicas()</c>.
     /// </summary>
     public IReadOnlyList<int> AddingReplicas => _addingReplicas;
 
     /// <summary>
     /// The brokers being removed as part of the reassignment, a subset of
-    /// <see cref="Replicas"/> — Java's <c>removingReplicas()</c> (<c>:57</c>).
+    /// <see cref="Replicas"/> — Java's <c>removingReplicas()</c>.
     /// </summary>
     public IReadOnlyList<int> RemovingReplicas => _removingReplicas;
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:62-68</c>).</summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
-    /// <remarks>
-    /// Java interpolates a <c>List&lt;Integer&gt;</c>, whose <c>toString</c> is
-    /// <c>[1, 2, 3]</c>; that bracket-and-comma form is reproduced here rather than C#'s
-    /// default, which would print the type name.
-    /// </remarks>
+    /// <remarks>Each list renders as Java's <c>List.toString</c> does, <c>[1, 2, 3]</c>.</remarks>
     public override string ToString() =>
         "PartitionReassignment(replicas=" + Render(_replicas)
         + ", addingReplicas=" + Render(_addingReplicas)

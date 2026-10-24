@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -23,41 +24,21 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The end-to-end behaviour of M15/P5's RPC 4.8 (<c>deleteConsumerGroups</c>) against
-/// <see cref="MockAdminClient"/> — no broker.
+/// <c>DeleteConsumerGroups</c> against the mocks, which fail every group with the mock's own answer, as Java's mock
+/// does; a mixed outcome is built on the result directly, as the mock has no success path.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The mock has no success path, and that is FAITHFUL, not a gap.</b> Java's
-/// <c>MockAdminClient.deleteConsumerGroups</c> throws
-/// <c>UnsupportedOperationException("Not implemented yet")</c>
-/// (<c>MockAdminClient.java:773-775</c>), and the Rust core surfaces that as a resolved map
-/// where <b>every requested group id independently</b> carries the identical "unsupported"
-/// error — result shape 2 (a <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>), the same
-/// per-key void bridge as <c>DeleteTopics</c> / <c>CreatePartitions</c>.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminDeleteConsumerGroupsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The code Kafka assigns to <c>UNSUPPORTED_VERSION</c>.</summary>
     private const int UnsupportedVersionCode = 35;
 
-    /// <summary>
-    /// The exact message Java's <c>MockAdminClient</c> throws and the Rust mock translates
-    /// verbatim.
-    /// </summary>
     private const string NotImplemented = "Not implemented yet";
 
-    /// <summary>
-    /// Every requested group id gets its own awaitable in <see cref="DeleteConsumerGroupsResult.DeletedGroups"/>,
-    /// and each one independently faults with the mock's documented refusal.
-    /// </summary>
     [Fact]
     public async Task DeleteConsumerGroups_SurfacesTheMocksDocumentedRefusal_PerGroup()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b" });
@@ -78,43 +59,51 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
-    /// <summary>A closed client rejects the call before reaching the core.</summary>
+    [Fact]
+    public async Task DeleteConsumerGroups_ARepeatedGroupId_HasOneFuture()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b", "p5-group-a" });
+
+        Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
+        KafkaException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        Assert.Equal(NotImplemented, fromAll.Message);
+    }
+
     [Fact]
     public async Task DeleteConsumerGroups_ThrowsAfterDispose()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await TestTimeout.DisposeAsync(admin);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DeleteConsumerGroups(new[] { "p5-disposed" }));
     }
 
-    /// <summary>Null group ids are rejected before any native call — ffi §B5.</summary>
     [Fact]
     public void DeleteConsumerGroups_NullGroupIds_ThrowsArgumentNullException()
     {
-        MockAdminClient admin = new MockAdminClient(1);
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DeleteConsumerGroups(null!));
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>A per-group failure faults ONLY that group's own <see cref="Task"/></b> — Java's
-    /// <c>Map&lt;String, KafkaFuture&lt;Void&gt;&gt;</c>, exercised directly against
-    /// <see cref="AsyncDeleteConsumerGroupsResult"/>'s constructor rather than the mock.
-    /// </summary>
     [Fact]
     public async Task DeletedGroups_EachEntryIsIndependentlyFaultable()
     {
         KafkaException error = new KafkaException(11, "group failure", isRetriable: false);
 
-        Dictionary<string, Task<bool>> sources = new Dictionary<string, Task<bool>>(StringComparer.Ordinal)
+        Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["good"] = Task.FromResult(true),
-            ["bad"] = Task.FromException<bool>(error),
+            ["good"] = new AsyncKafkaFuture(TestFutures.Done()),
+            ["bad"] = new AsyncKafkaFuture(TestFutures.Failed(error)),
         };
 
-        AsyncDeleteConsumerGroupsResult result = new AsyncDeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
+        AsyncDeleteConsumerGroupsResult result = new AsyncDeleteConsumerGroupsResult(sources);
 
         await TestTimeout.Run(() => result.DeletedGroups["good"].Get(), s_deadline);
 
@@ -123,30 +112,25 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         Assert.Same(error, thrown);
     }
 
-    /// <summary>
-    /// <see cref="DeleteConsumerGroupsResult.All"/> faults with the first failure when any
-    /// group failed — Java's <c>KafkaFuture.allOf</c>.
-    /// </summary>
     [Fact]
     public async Task All_FaultsWithTheFirstFailure_WhenAnyGroupFailed()
     {
         KafkaException error = new KafkaException(11, "group failure", isRetriable: false);
 
-        Dictionary<string, Task<bool>> sources = new Dictionary<string, Task<bool>>(StringComparer.Ordinal)
+        Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["good"] = Task.FromResult(true),
-            ["bad"] = Task.FromException<bool>(error),
+            ["good"] = new AsyncKafkaFuture(TestFutures.Done()),
+            ["bad"] = new AsyncKafkaFuture(TestFutures.Failed(error)),
         };
 
-        AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources, StringComparer.Ordinal);
+        AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources);
 
         KafkaException thrown = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => mixed.All().Get()), s_deadline);
         Assert.Same(error, thrown);
 
         AsyncDeleteConsumerGroupsResult clean = new AsyncDeleteConsumerGroupsResult(
-            new Dictionary<string, Task<bool>>(StringComparer.Ordinal) { ["good"] = Task.FromResult(true) },
-            StringComparer.Ordinal);
+            new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal) { ["good"] = new AsyncKafkaFuture(TestFutures.Done()) });
         await TestTimeout.Run(() => clean.All().Get(), s_deadline);
     }
 }

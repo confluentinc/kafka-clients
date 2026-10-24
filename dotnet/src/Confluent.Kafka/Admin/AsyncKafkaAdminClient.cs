@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
@@ -25,10 +26,6 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.KafkaAdminClient</c> whose per-key futures are awaited, created from a
 /// configuration map (Java's <c>Admin.create(Properties)</c>).
 /// </summary>
-/// <remarks>
-/// Every RPC returns immediately with one <see cref="AsyncKafkaFuture{T}"/> per key; only
-/// <see cref="Close(TimeSpan)"/> is awaited for the operation itself. See <see cref="IAsyncAdmin"/>.
-/// </remarks>
 /// <seealso cref="KafkaAdminClient"/>
 public sealed class AsyncKafkaAdminClient : IAsyncAdmin
 {
@@ -45,299 +42,290 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
     public AsyncKafkaAdminClient(IReadOnlyDictionary<string, string> config)
     {
-        _native = NativeAdminClient.Create(config);
+        _native = NativeAdminClient.Create(config, AdminFlavour.Async);
     }
 
     /// <inheritdoc/>
     public AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options = null) =>
-        AsyncCreateTopicsResult.From(_native.CreateTopics(newTopics, options, AdminFlavour.Async));
+        AsyncCreateTopicsResult.OfClient(_native.CreateTopics(newTopics, options));
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions? options = null) =>
-        AsyncDeleteTopicsResult.From(_native.DeleteTopics(topics, options, AdminFlavour.Async));
+        AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options));
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(
         IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
-        AsyncDeleteTopicsResult.From(_native.DeleteTopics(
+        AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(
             TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
-            options,
-            AdminFlavour.Async));
+            options));
 
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions? options = null) =>
-        AsyncDescribeTopicsResult.From(_native.DescribeTopics(topics, options, AdminFlavour.Async));
+        AsyncDescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options));
 
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(
         IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options = null) =>
-        AsyncDescribeTopicsResult.From(_native.DescribeTopics(
-            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
-            options,
-            AdminFlavour.Async));
+        AsyncDescribeTopicsResult.OfClient(_native.DescribeTopics(
+            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
+            options));
 
     /// <inheritdoc/>
-    public AsyncListTopicsResult ListTopics(ListTopicsOptions? options = null) =>
-        AsyncListTopicsResult.From(_native.ListTopics(options, AdminFlavour.Async));
+    public AsyncListTopicsResult ListTopics(ListTopicsOptions? options = null)
+    {
+        var (namesToListings, result) = _native.ListTopics(options);
+        return new AsyncListTopicsResult(new AsyncKafkaFuture<IReadOnlyDictionary<string, TopicListing>>(namesToListings), result);
+    }
 
     /// <inheritdoc/>
     public AsyncCreatePartitionsResult CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options = null) =>
-        AsyncCreatePartitionsResult.From(_native.CreatePartitions(newPartitions, options, AdminFlavour.Async));
+        AsyncCreatePartitionsResult.OfClient(_native.CreatePartitions(newPartitions, options));
 
     /// <inheritdoc/>
     public AsyncDeleteRecordsResult DeleteRecords(
         IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete,
         DeleteRecordsOptions? options = null) =>
-        AsyncDeleteRecordsResult.From(_native.DeleteRecords(recordsToDelete, options, AdminFlavour.Async));
+        AsyncDeleteRecordsResult.OfClient(_native.DeleteRecords(recordsToDelete, options));
 
     /// <inheritdoc/>
     public AsyncDescribeClusterResult DescribeCluster(DescribeClusterOptions? options = null) =>
-        AsyncDescribeClusterResult.From(_native.DescribeCluster(options, AdminFlavour.Async));
+        AsyncDescribeClusterResult.OfClient(_native.DescribeCluster(options));
 
     /// <inheritdoc/>
     public AsyncListConfigResourcesResult ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes = null,
         ListConfigResourcesOptions? options = null) =>
-        AsyncListConfigResourcesResult.From(
-            _native.ListConfigResources(configResourceTypes, options, AdminFlavour.Async));
+        AsyncListConfigResourcesResult.OfClient(_native.ListConfigResources(configResourceTypes, options));
 
     /// <inheritdoc/>
     public AsyncDescribeConfigsResult DescribeConfigs(
         IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options = null) =>
-        AsyncDescribeConfigsResult.From(_native.DescribeConfigs(resources, options, AdminFlavour.Async));
+        AsyncDescribeConfigsResult.OfClient(_native.DescribeConfigs(resources, options));
 
     /// <inheritdoc/>
     public AsyncAlterConfigsResult IncrementalAlterConfigs(
         IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs,
         AlterConfigsOptions? options = null) =>
-        AsyncAlterConfigsResult.From(_native.IncrementalAlterConfigs(configs, options, AdminFlavour.Async));
+        AsyncAlterConfigsResult.OfClient(_native.IncrementalAlterConfigs(configs, options));
 
 
     /// <inheritdoc/>
     public AsyncDescribeLogDirsResult DescribeLogDirs(
         IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options = null) =>
-        AsyncDescribeLogDirsResult.From(_native.DescribeLogDirs(brokers, options, AdminFlavour.Async));
+        AsyncDescribeLogDirsResult.OfClient(_native.DescribeLogDirs(brokers, options));
 
     /// <inheritdoc/>
     public AsyncAlterReplicaLogDirsResult AlterReplicaLogDirs(
         IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment,
         AlterReplicaLogDirsOptions? options = null) =>
-        AsyncAlterReplicaLogDirsResult.From(
-            _native.AlterReplicaLogDirs(replicaAssignment, options, AdminFlavour.Async));
+        AsyncAlterReplicaLogDirsResult.OfClient(
+            _native.AlterReplicaLogDirs(replicaAssignment, options));
 
     /// <inheritdoc/>
     public AsyncDescribeReplicaLogDirsResult DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas,
         DescribeReplicaLogDirsOptions? options = null) =>
-        AsyncDescribeReplicaLogDirsResult.From(_native.DescribeReplicaLogDirs(replicas, options, AdminFlavour.Async));
+        AsyncDescribeReplicaLogDirsResult.OfClient(_native.DescribeReplicaLogDirs(replicas, options));
 
     /// <inheritdoc/>
     public AsyncElectLeadersResult ElectLeaders(
         ElectionType electionType,
         IReadOnlyCollection<TopicPartition>? partitions,
         ElectLeadersOptions? options = null) =>
-        AsyncElectLeadersResult.From(_native.ElectLeaders(electionType, partitions, options, AdminFlavour.Async));
+        AsyncElectLeadersResult.OfClient(_native.ElectLeaders(electionType, partitions, options));
 
     /// <inheritdoc/>
     public AsyncAlterPartitionReassignmentsResult AlterPartitionReassignments(
         IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
         AlterPartitionReassignmentsOptions? options = null) =>
-        AsyncAlterPartitionReassignmentsResult.From(
-            _native.AlterPartitionReassignments(reassignments, options, AdminFlavour.Async));
+        AsyncAlterPartitionReassignmentsResult.OfClient(
+            _native.AlterPartitionReassignments(reassignments, options));
 
     /// <inheritdoc/>
     public AsyncAlterConsumerGroupOffsetsResult AlterConsumerGroupOffsets(
         string groupId,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         AlterConsumerGroupOffsetsOptions? options = null) =>
-        AsyncAlterConsumerGroupOffsetsResult.From(
-            _native.AlterConsumerGroupOffsets(groupId, offsets, options, AdminFlavour.Async));
+        AsyncAlterConsumerGroupOffsetsResult.OfClient(
+            _native.AlterConsumerGroupOffsets(groupId, offsets, options));
 
     /// <inheritdoc/>
     public AsyncDeleteConsumerGroupOffsetsResult DeleteConsumerGroupOffsets(
         string groupId,
         IReadOnlyCollection<TopicPartition> partitions,
         DeleteConsumerGroupOffsetsOptions? options = null) =>
-        AsyncDeleteConsumerGroupOffsetsResult.From(
-            _native.DeleteConsumerGroupOffsets(groupId, partitions, options, AdminFlavour.Async));
+        AsyncDeleteConsumerGroupOffsetsResult.OfClient(
+            _native.DeleteConsumerGroupOffsets(groupId, partitions, options));
 
     /// <inheritdoc/>
     public AsyncListPartitionReassignmentsResult ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions = null,
         ListPartitionReassignmentsOptions? options = null) =>
-        AsyncListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(partitions, options, AdminFlavour.Async));
+        AsyncListPartitionReassignmentsResult.OfClient(
+            _native.ListPartitionReassignments(partitions, options));
 
     /// <inheritdoc/>
     public AsyncListPartitionReassignmentsResult ListPartitionReassignments(
         ListPartitionReassignmentsOptions options) =>
-        AsyncListPartitionReassignmentsResult.From(
-            _native.ListPartitionReassignments(null, options, AdminFlavour.Async));
+        AsyncListPartitionReassignmentsResult.OfClient(
+            _native.ListPartitionReassignments(null, options));
 
     /// <inheritdoc/>
     public AsyncListOffsetsResult ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets,
         ListOffsetsOptions? options = null) =>
-        AsyncListOffsetsResult.From(_native.ListOffsets(topicPartitionOffsets, options, AdminFlavour.Async));
+        AsyncListOffsetsResult.OfClient(_native.ListOffsets(topicPartitionOffsets, options));
 
     /// <inheritdoc/>
     public AsyncListGroupsResult ListGroups(ListGroupsOptions? options = null) =>
-        AsyncListGroupsResult.From(_native.ListGroups(options, AdminFlavour.Async));
+        AsyncListGroupsResult.OfClient(_native.ListGroups(options));
 
     /// <inheritdoc/>
     public AsyncDescribeConsumerGroupsResult DescribeConsumerGroups(
         IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options = null) =>
-        AsyncDescribeConsumerGroupsResult.From(_native.DescribeConsumerGroups(groupIds, options, AdminFlavour.Async));
+        AsyncDescribeConsumerGroupsResult.OfClient(_native.DescribeConsumerGroups(groupIds, options));
 
     /// <inheritdoc/>
     public AsyncDescribeClassicGroupsResult DescribeClassicGroups(
         IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options = null) =>
-        AsyncDescribeClassicGroupsResult.From(_native.DescribeClassicGroups(groupIds, options, AdminFlavour.Async));
+        AsyncDescribeClassicGroupsResult.OfClient(_native.DescribeClassicGroups(groupIds, options));
 
     /// <inheritdoc/>
     public AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
-        string groupId, ListConsumerGroupOffsetsOptions? options = null)
-    {
-        if (groupId is null)
-        {
-            throw new ArgumentNullException(nameof(groupId));
-        }
-
-        // Here, so that a rejected id blames this overload's own parameter rather than the
-        // batched form's `groupSpecs` (M15/P13.3 (c)).
-        AdminStrings.Validate(groupId, nameof(groupId));
-
-        // Java's default overload (Admin.java:912-918): delegate to the batched form
-        // with a fresh spec, whose null TopicPartitions means "every committed
-        // partition", and let the batched form ignore any partitions on the options.
-        return ListConsumerGroupOffsets(
-            new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
-            {
-                [groupId] = new ListConsumerGroupOffsetsSpec(),
-            },
-            options);
-    }
+        string groupId, ListConsumerGroupOffsetsOptions? options = null) =>
+        AsyncListConsumerGroupOffsetsResult.OfClient(_native.ListConsumerGroupOffsets(groupId, options));
 
     /// <inheritdoc/>
     public AsyncListConsumerGroupOffsetsResult ListConsumerGroupOffsets(
         IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs,
         ListConsumerGroupOffsetsOptions? options = null) =>
-        AsyncListConsumerGroupOffsetsResult.From(
-            _native.ListConsumerGroupOffsets(groupSpecs, options, AdminFlavour.Async));
+        AsyncListConsumerGroupOffsetsResult.OfClient(
+            _native.ListConsumerGroupOffsets(groupSpecs, options));
 
     /// <inheritdoc/>
     public AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
-        AsyncDeleteConsumerGroupsResult.From(_native.DeleteConsumerGroups(groupIds, options, AdminFlavour.Async));
+        AsyncDeleteConsumerGroupsResult.OfClient(
+            _native.DeleteConsumerGroups(groupIds, options));
 
     /// <inheritdoc/>
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
-        AsyncRemoveMembersFromConsumerGroupResult.From(
-            _native.RemoveMembersFromConsumerGroup(groupId, options, AdminFlavour.Async));
+        AsyncRemoveMembersFromConsumerGroupResult.OfClient(
+            _native.RemoveMembersFromConsumerGroup(groupId, options));
 
     /// <inheritdoc/>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
-        AsyncCreateAclsResult.From(_native.CreateAcls(acls, options, AdminFlavour.Async));
+        AsyncCreateAclsResult.OfClient(_native.CreateAcls(acls, options));
 
     /// <inheritdoc/>
     public AsyncDeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
-        AsyncDeleteAclsResult.From(_native.DeleteAcls(filters, options, AdminFlavour.Async));
+        AsyncDeleteAclsResult.OfClient(_native.DeleteAcls(filters, options));
 
     /// <inheritdoc/>
     public AsyncDescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null) =>
-        AsyncDescribeAclsResult.From(_native.DescribeAcls(filter, options, AdminFlavour.Async));
+        AsyncDescribeAclsResult.OfClient(_native.DescribeAcls(filter, options));
 
     /// <inheritdoc/>
     public AsyncDescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
-        AsyncDescribeClientQuotasResult.From(_native.DescribeClientQuotas(filter, options, AdminFlavour.Async));
+        AsyncDescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options));
 
     /// <inheritdoc/>
     public AsyncAlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
-        AsyncAlterClientQuotasResult.From(_native.AlterClientQuotas(entries, options, AdminFlavour.Async));
+        AsyncAlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options));
 
     /// <inheritdoc/>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
         DescribeUserScramCredentialsOptions? options = null) =>
-        AsyncDescribeUserScramCredentialsResult.From(
-            _native.DescribeUserScramCredentials(users, options, AdminFlavour.Async));
+        AsyncDescribeUserScramCredentialsResult.OfClient(
+            _native.DescribeUserScramCredentials(users, options));
 
     /// <inheritdoc/>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions? options = null) =>
-        AsyncAlterUserScramCredentialsResult.From(
-            _native.AlterUserScramCredentials(alterations, options, AdminFlavour.Async));
+        AsyncAlterUserScramCredentialsResult.OfClient(
+            _native.AlterUserScramCredentials(alterations, options));
 
     /// <inheritdoc/>
     public AsyncCreateDelegationTokenResult CreateDelegationToken(
         CreateDelegationTokenOptions? options = null) =>
-        AsyncCreateDelegationTokenResult.From(_native.CreateDelegationToken(options, AdminFlavour.Async));
+        AsyncCreateDelegationTokenResult.OfClient(_native.CreateDelegationToken(options));
 
     /// <inheritdoc/>
     public AsyncRenewDelegationTokenResult RenewDelegationToken(
         byte[] hmac, RenewDelegationTokenOptions? options = null) =>
-        AsyncRenewDelegationTokenResult.From(_native.RenewDelegationToken(hmac, options, AdminFlavour.Async));
+        AsyncRenewDelegationTokenResult.OfClient(_native.RenewDelegationToken(hmac, options));
 
     /// <inheritdoc/>
     public AsyncExpireDelegationTokenResult ExpireDelegationToken(
         byte[] hmac, ExpireDelegationTokenOptions? options = null) =>
-        AsyncExpireDelegationTokenResult.From(_native.ExpireDelegationToken(hmac, options, AdminFlavour.Async));
+        AsyncExpireDelegationTokenResult.OfClient(_native.ExpireDelegationToken(hmac, options));
 
     /// <inheritdoc/>
     public AsyncDescribeDelegationTokenResult DescribeDelegationToken(
         DescribeDelegationTokenOptions? options = null) =>
-        AsyncDescribeDelegationTokenResult.From(_native.DescribeDelegationToken(options, AdminFlavour.Async));
+        AsyncDescribeDelegationTokenResult.OfClient(_native.DescribeDelegationToken(options));
 
     /// <inheritdoc/>
     public AsyncDescribeFeaturesResult DescribeFeatures(DescribeFeaturesOptions? options = null) =>
-        AsyncDescribeFeaturesResult.From(_native.DescribeFeatures(options, AdminFlavour.Async));
+        AsyncDescribeFeaturesResult.OfClient(_native.DescribeFeatures(options));
 
     /// <inheritdoc/>
     public AsyncUpdateFeaturesResult UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates,
         UpdateFeaturesOptions? options = null) =>
-        AsyncUpdateFeaturesResult.From(_native.UpdateFeatures(featureUpdates, options, AdminFlavour.Async));
+        AsyncUpdateFeaturesResult.OfClient(_native.UpdateFeatures(featureUpdates, options));
+
+    /// <inheritdoc/>
+    public AsyncUnregisterControllerResult UnregisterController(
+        int controllerId, UnregisterControllerOptions? options = null) =>
+        AsyncUnregisterControllerResult.OfClient(_native.UnregisterController(controllerId, options));
 
     /// <inheritdoc/>
     public AsyncFenceProducersResult FenceProducers(
         IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options = null) =>
-        AsyncFenceProducersResult.From(_native.FenceProducers(transactionalIds, options, AdminFlavour.Async));
+        AsyncFenceProducersResult.OfClient(_native.FenceProducers(transactionalIds, options));
 
     /// <inheritdoc/>
     public AsyncDescribeTransactionsResult DescribeTransactions(
         IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options = null) =>
-        AsyncDescribeTransactionsResult.From(
-            _native.DescribeTransactions(transactionalIds, options, AdminFlavour.Async));
+        AsyncDescribeTransactionsResult.OfClient(
+            _native.DescribeTransactions(transactionalIds, options));
 
     /// <inheritdoc/>
     public AsyncDescribeProducersResult DescribeProducers(
         IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options = null) =>
-        AsyncDescribeProducersResult.From(_native.DescribeProducers(partitions, options, AdminFlavour.Async));
+        AsyncDescribeProducersResult.OfClient(_native.DescribeProducers(partitions, options));
 
     /// <inheritdoc/>
     public AsyncListTransactionsResult ListTransactions(ListTransactionsOptions? options = null) =>
-        AsyncListTransactionsResult.From(_native.ListTransactionsOperation(options, AdminFlavour.Async));
+        AsyncListTransactionsResult.OfClient(_native.ListTransactions(options));
 
     /// <inheritdoc/>
     public AsyncAbortTransactionResult AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options = null) =>
-        AsyncAbortTransactionResult.From(_native.AbortTransaction(spec, options, AdminFlavour.Async));
+        AsyncAbortTransactionResult.OfClient(_native.AbortTransaction(spec, options));
 
     /// <inheritdoc/>
     public AsyncTerminateTransactionResult ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options = null) =>
-        AsyncTerminateTransactionResult.From(
-            _native.ForceTerminateTransaction(transactionalId, options, AdminFlavour.Async));
+        AsyncTerminateTransactionResult.OfClient(
+            _native.ForceTerminateTransaction(transactionalId, options));
 
     /// <inheritdoc/>
-    public Task Close(TimeSpan timeout) => _native.Close(timeout);
+    public Task Close(CancellationToken cancellationToken = default) => _native.Close(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Close(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.Close(timeout, cancellationToken);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

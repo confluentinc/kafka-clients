@@ -13,96 +13,61 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeConfigs"/> — the .NET realization of Java's
-/// <c>DescribeConfigsResult</c>: one future <b>per resource</b>, handed back the moment
-/// the request is submitted (<c>DescribeConfigsResult.java:43, :50</c>).
+/// The result of <see cref="IAsyncAdmin.DescribeConfigs"/> — Java's
+/// <c>org.apache.kafka.clients.admin.DescribeConfigsResult</c>: one future per resource.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠ <b><see cref="All"/> here carries the whole map</b>
-/// (Java's <c>KafkaFuture&lt;Map&lt;ConfigResource, Config&gt;&gt;</c>), whereas
-/// <see cref="AsyncAlterConfigsResult.All"/> is a bare <see cref="AsyncKafkaFuture"/> (Java's
-/// <c>KafkaFuture&lt;Void&gt;</c>). The two results are otherwise the same shape, so the
-/// difference is easy to swap by accident.
-/// </para>
-/// <para>
-/// A resource that fails faults only <em>its own</em> <see cref="AsyncKafkaFuture"/> — the header says
-/// so: "a per-resource failure is not a call failure". The per-resource error is
-/// <b>owned</b>: it arrives with that resource's own callback and is freed once it has
-/// been copied into the <see cref="KafkaException"/>.
-/// </para>
+/// A resource that fails faults only its own future. <see cref="All"/> carries the whole map, as
+/// Java's does, where <see cref="AsyncAlterConfigsResult.All"/> carries nothing.
 /// </remarks>
 /// <seealso cref="DescribeConfigsResult"/>
 public sealed class AsyncDescribeConfigsResult
 {
-    private readonly IReadOnlyDictionary<ConfigResource, Task<Config>> _values;
     private readonly IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> _futures;
     private readonly IEqualityComparer<ConfigResource> _comparer;
+    private readonly IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> _nativeValues;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the per-resource futures — Java's <c>protected</c>
-    /// <c>DescribeConfigsResult(Map&lt;ConfigResource, KafkaFuture&lt;Config&gt;&gt;)</c>
-    /// (<c>:35</c>).
-    /// </summary>
-    /// <remarks>
-    /// ⚠ <b>The comparer is threaded through deliberately, resolving the inconsistency the
-    /// plan flagged.</b> Two shipped patterns exist — <c>DescribeTopicsResult</c> takes the
-    /// bridge's comparer, <c>DeleteRecordsResult</c> does not — and the stricter one is
-    /// chosen here for a concrete reason: <see cref="ConfigResource"/> is a reference type
-    /// with custom value equality, so an aggregate built with a different comparer than the
-    /// per-key map could disagree about whether a key is present. Passing the bridge's own
-    /// comparer makes that unrepresentable rather than merely unlikely.
-    /// </remarks>
-    internal AsyncDescribeConfigsResult(
-        IReadOnlyDictionary<ConfigResource, Task<Config>> values, IEqualityComparer<ConfigResource> comparer)
+
+    private AsyncDescribeConfigsResult(
+        IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> nativeValues, SafeAdminResultHandle native)
     {
-        _values = values;
-        _futures = AsyncAdminFutures.Wrap(values);
+        IEqualityComparer<ConfigResource> comparer = EqualityComparer<ConfigResource>.Default;
+        Dictionary<ConfigResource, AsyncKafkaFuture<Config>> futures =
+            new Dictionary<ConfigResource, AsyncKafkaFuture<Config>>(nativeValues.Count, comparer);
+        foreach (KeyValuePair<ConfigResource, KafkaFutureImpl<Config>> entry in nativeValues)
+        {
+            futures.Add(entry.Key, new AsyncKafkaFuture<Config>(entry.Value));
+        }
+
+        _futures = futures;
         _comparer = comparer;
+        _nativeValues = nativeValues;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeConfigsResult From(KeyedAdminOperation<ConfigResource, Config> operation) =>
-        new AsyncDescribeConfigsResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// One future per requested resource, keyed by resource — Java's <c>values()</c>
-    /// (<c>:43</c>).
+    /// One future per requested resource, keyed by resource — Java's <c>values()</c>.
     /// </summary>
     public IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> Values => _futures;
 
     /// <summary>
     /// Every resource's configuration in one map, succeeding only if every resource
-    /// succeeded — Java's <c>all()</c> (<c>:50</c>).
+    /// succeeded — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<ConfigResource, Config>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>(Gather(_values, _comparer));
+        new AsyncKafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>(KafkaFutureImpl.GatherAll(_nativeValues, _comparer));
 
-    private static async Task<IReadOnlyDictionary<ConfigResource, Config>> Gather(
-        IReadOnlyDictionary<ConfigResource, Task<Config>> values, IEqualityComparer<ConfigResource> comparer)
-    {
-        // WhenAll first, so a failure faults this task with the first failure exactly as
-        // Java's `allOf(...).thenApply(...)` chain does, rather than surfacing whichever
-        // key happens to be enumerated first.
-        await Task.WhenAll(values.Values).ConfigureAwait(false);
-
-        Dictionary<ConfigResource, Config> configs =
-            new Dictionary<ConfigResource, Config>(values.Count, comparer);
-        foreach (KeyValuePair<ConfigResource, Task<Config>> entry in values)
-        {
-            configs.Add(entry.Key, entry.Value.Result);
-        }
-
-        return configs;
-    }
+    internal static AsyncDescribeConfigsResult OfClient(
+        (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeConfigsResult(native.Values, native.Result);
 }

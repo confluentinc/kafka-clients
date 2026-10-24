@@ -20,36 +20,16 @@ using System.Linq;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// Leadership and replica information for one topic partition — the .NET realization of
-/// Java's <c>org.apache.kafka.common.TopicPartitionInfo</c>. Reached through
+/// Leadership and replica information for one topic partition — Java's
+/// <c>org.apache.kafka.common.TopicPartitionInfo</c>, reached through
 /// <see cref="Admin.TopicDescription.Partitions"/>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Namespace.</b> Java's package is <c>org.apache.kafka.common</c>, so this lives at
-/// the root <c>Confluent.Kafka</c> namespace rather than under
-/// <c>Confluent.Kafka.Admin</c> — the same rule that placed <see cref="TopicCollection"/>
-/// and <see cref="Uuid"/> there, and the reason the parent roadmap's file-layout sketch
-/// (which listed it under <c>Admin/</c>) is not followed here.
-/// </para>
-/// <para>
-/// ⚠ <b><see cref="Elr"/> and <see cref="LastKnownElr"/> distinguish <em>absent</em> from
-/// <em>empty</em>, and the distinction is real.</b> Java's four-argument constructor
-/// leaves both <c>null</c> — "the broker did not report an eligible-leader-replica set at
-/// all" (a pre-KIP-966 broker, <c>TopicPartitionInfo.java:63-70</c>) — which is a
-/// different fact from "reported, and it is empty". The C ABI carries the discriminant
-/// explicitly (<c>has_elr</c> / <c>has_last_known_elr</c> alongside the counts) precisely
-/// because a count of 0 cannot express it, so collapsing either to an empty collection
-/// would destroy information the ABI went out of its way to preserve.
-/// </para>
-/// <para>
-/// <b>Value equality is deliberately not implemented</b>, although Java's class overrides
-/// <c>equals</c>/<c>hashCode</c>. That follows the shipped <see cref="Node"/> /
-/// <see cref="PartitionInfo"/> precedent in this binding: these types are produced by the
-/// binding and consumed by the caller, never used as dictionary keys, and adding value
-/// equality later is non-breaking whereas removing it is not. (<see cref="Uuid"/> is the
-/// exception, because it <em>is</em> a key.)
-/// </para>
+/// <see cref="Elr"/> and <see cref="LastKnownElr"/> are <see langword="null"/> when the broker
+/// reported no eligible-leader-replica set, which differs from an empty set. A partition reported
+/// with only one of the two sets reads both as absent, as Python's binding does. Value equality
+/// is deliberately not implemented, although Java's class overrides <c>equals</c>, as for
+/// <see cref="Node"/> and <see cref="PartitionInfo"/>.
 /// </remarks>
 public sealed class TopicPartitionInfo
 {
@@ -60,7 +40,7 @@ public sealed class TopicPartitionInfo
 
     /// <summary>
     /// Creates an instance with no eligible-leader-replica information — Java's
-    /// four-argument constructor (<c>TopicPartitionInfo.java:63</c>), which leaves
+    /// four-argument constructor, which leaves
     /// <see cref="Elr"/> and <see cref="LastKnownElr"/> <see langword="null"/>.
     /// </summary>
     /// <param name="partition">The partition id.</param>
@@ -77,13 +57,13 @@ public sealed class TopicPartitionInfo
         Node? leader,
         IEnumerable<Node> replicas,
         IEnumerable<Node> inSyncReplicas)
-        : this(partition, leader, replicas, inSyncReplicas, elr: null, lastKnownElr: null)
+        : this(Copy(replicas, nameof(replicas)), Copy(inSyncReplicas, nameof(inSyncReplicas)), null, null, partition, leader)
     {
     }
 
     /// <summary>
-    /// Creates an instance with eligible-leader-replica information — Java's
-    /// six-argument constructor (<c>TopicPartitionInfo.java:47</c>).
+    /// Creates an instance with eligible-leader-replica information — Java's six-argument
+    /// constructor.
     /// </summary>
     /// <param name="partition">The partition id.</param>
     /// <param name="leader">The partition leader, or <see langword="null"/> if there is none.</param>
@@ -92,44 +72,49 @@ public sealed class TopicPartitionInfo
     /// </param>
     /// <param name="inSyncReplicas">The in-sync replicas — Java's <c>isr</c>.</param>
     /// <param name="elr">
-    /// The eligible leader replicas, or <see langword="null"/> if the broker reported
-    /// none at all (Java's <c>elr() == null</c>). An <em>empty</em> collection means
-    /// "reported, and empty" — a different fact.
+    /// The eligible leader replicas; an <em>empty</em> collection means "reported, and empty". Use the
+    /// four-argument constructor for a partition whose broker reported no such set.
     /// </param>
-    /// <param name="lastKnownElr">
-    /// The last known eligible leader replicas, with the same
-    /// <see langword="null"/>-versus-empty meaning as <paramref name="elr"/>.
-    /// </param>
+    /// <param name="lastKnownElr">The last known eligible leader replicas, as <paramref name="elr"/>.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="replicas"/> or <paramref name="inSyncReplicas"/> is null.
+    /// <paramref name="replicas"/>, <paramref name="inSyncReplicas"/>, <paramref name="elr"/> or
+    /// <paramref name="lastKnownElr"/> is null.
     /// </exception>
     public TopicPartitionInfo(
         int partition,
         Node? leader,
         IEnumerable<Node> replicas,
         IEnumerable<Node> inSyncReplicas,
-        IEnumerable<Node>? elr,
-        IEnumerable<Node>? lastKnownElr)
+        IEnumerable<Node> elr,
+        IEnumerable<Node> lastKnownElr)
+        : this(
+            Copy(replicas, nameof(replicas)),
+            Copy(inSyncReplicas, nameof(inSyncReplicas)),
+            Copy(elr, nameof(elr)),
+            Copy(lastKnownElr, nameof(lastKnownElr)),
+            partition,
+            leader)
     {
-        if (replicas is null)
-        {
-            throw new ArgumentNullException(nameof(replicas));
-        }
+    }
 
-        if (inSyncReplicas is null)
-        {
-            throw new ArgumentNullException(nameof(inSyncReplicas));
-        }
-
+    private TopicPartitionInfo(
+        List<Node> replicas,
+        List<Node> inSyncReplicas,
+        List<Node>? elr,
+        List<Node>? lastKnownElr,
+        int partition,
+        Node? leader)
+    {
         Partition = partition;
         Leader = leader;
-        _replicas = new List<Node>(replicas);
-        _inSyncReplicas = new List<Node>(inSyncReplicas);
-
-        // null stays null — see the absent-versus-empty note in the class remarks.
-        _elr = elr is null ? null : new List<Node>(elr);
-        _lastKnownElr = lastKnownElr is null ? null : new List<Node>(lastKnownElr);
+        _replicas = replicas;
+        _inSyncReplicas = inSyncReplicas;
+        _elr = elr;
+        _lastKnownElr = lastKnownElr;
     }
+
+    private static List<Node> Copy(IEnumerable<Node> nodes, string parameterName) =>
+        nodes is null ? throw new ArgumentNullException(parameterName) : new List<Node>(nodes);
 
     /// <summary>The partition id — Java's <c>partition()</c>.</summary>
     public int Partition { get; }
@@ -149,11 +134,7 @@ public sealed class TopicPartitionInfo
     /// <summary>
     /// The in-sync replicas; the order is unspecified — Java's <c>isr()</c>.
     /// </summary>
-    /// <remarks>
-    /// Named <c>InSyncReplicas</c> rather than <c>Isr</c>, matching the shipped
-    /// <see cref="PartitionInfo.InSyncReplicas"/> (Java's <c>inSyncReplicas()</c> on that
-    /// class) so the two partition-metadata types spell the same concept the same way.
-    /// </remarks>
+    /// <remarks>Named as <see cref="PartitionInfo.InSyncReplicas"/>, rather than <c>Isr</c>.</remarks>
     public IReadOnlyList<Node> InSyncReplicas => _inSyncReplicas;
 
     /// <summary>

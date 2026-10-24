@@ -17,35 +17,33 @@ using System;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A SASL/SCRAM mechanism — Java's <c>org.apache.kafka.clients.admin.ScramMechanism</c>
-/// (KIP-554).
+/// A SASL/SCRAM mechanism — Java's <c>org.apache.kafka.clients.admin.ScramMechanism</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ This is the <b>admin</b> enum, distinct from
-/// <c>common.security.scram.internals.ScramMechanism</c>, which has no <c>UNKNOWN</c>. The
-/// type codes are wire values and must not change (Java <c>:27-30</c>).
+/// The admin enum, distinct from Java's internal <c>ScramMechanism</c>, which has no
+/// <c>UNKNOWN</c>. The type codes are wire values and must not change.
 /// </remarks>
 public enum ScramMechanism : byte
 {
-    /// <summary>An unrecognized mechanism — Java's <c>UNKNOWN</c> (<c>:33</c>).</summary>
+    /// <summary>An unrecognized mechanism — Java's <c>UNKNOWN</c>.</summary>
     Unknown = 0,
 
-    /// <summary><c>SCRAM-SHA-256</c> — Java's <c>SCRAM_SHA_256</c> (<c>:34</c>).</summary>
+    /// <summary><c>SCRAM-SHA-256</c> — Java's <c>SCRAM_SHA_256</c>.</summary>
     ScramSha256 = 1,
 
-    /// <summary><c>SCRAM-SHA-512</c> — Java's <c>SCRAM_SHA_512</c> (<c>:35</c>).</summary>
+    /// <summary><c>SCRAM-SHA-512</c> — Java's <c>SCRAM_SHA_512</c>.</summary>
     ScramSha512 = 2,
 }
 
 /// <summary>
 /// The members Java declares on the <see cref="ScramMechanism"/> enum itself, which a C# enum
-/// cannot carry — host-language scaffolding, not new Kafka surface.
+/// cannot carry.
 /// </summary>
 public static class ScramMechanisms
 {
     /// <summary>
-    /// The SASL mechanism name — Java's <c>mechanismName()</c> (<c>:73</c>), which is the enum
-    /// constant with <c>'_'</c> replaced by <c>'-'</c> (<c>:90</c>).
+    /// The SASL mechanism name — Java's <c>mechanismName()</c>: the enum constant with
+    /// <c>'_'</c> replaced by <c>'-'</c>.
     /// </summary>
     /// <param name="mechanism">The mechanism.</param>
     /// <returns>The mechanism name, or <c>"UNKNOWN"</c>.</returns>
@@ -58,7 +56,7 @@ public static class ScramMechanisms
         };
 
     /// <summary>
-    /// The mechanism for a type code — Java's <c>fromType(byte)</c> (<c>:44</c>). Falls back to
+    /// The mechanism for a type code — Java's <c>fromType(byte)</c>. Falls back to
     /// <see cref="ScramMechanism.Unknown"/>; never throws.
     /// </summary>
     /// <param name="type">The type code.</param>
@@ -72,8 +70,8 @@ public static class ScramMechanisms
         };
 
     /// <summary>
-    /// The mechanism for a SASL mechanism name — Java's <c>fromMechanismName(String)</c>
-    /// (<c>:60</c>). Falls back to <see cref="ScramMechanism.Unknown"/>; never throws.
+    /// The mechanism for a SASL mechanism name — Java's <c>fromMechanismName(String)</c>. Falls
+    /// back to <see cref="ScramMechanism.Unknown"/>; never throws.
     /// </summary>
     /// <param name="mechanismName">The mechanism name.</param>
     /// <returns>The mechanism.</returns>

@@ -24,24 +24,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the shape and the behaviour of <see cref="ClassicGroupDescription"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ClassicGroupDescription</c>.
+/// <see cref="ClassicGroupDescription"/> against Java's <c>org.apache.kafka.clients.admin.ClassicGroupDescription</c>:
+/// its two constructors, the coalesced arguments, the <c>IsSimpleConsumerGroup</c> projection, equality and
+/// <c>ToString</c>; where it differs from <see cref="ConsumerGroupDescription"/>, the tests reflect over both types.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>This is a pure value type</b> — everything here is managed and broker-free, as it is
-/// for its siblings <see cref="ConsumerGroupDescription"/> and
-/// <see cref="MemberDescription"/>.
-/// </para>
-/// <para>
-/// ⚠ <b>Two of the three things this class draws against
-/// <see cref="ConsumerGroupDescription"/> are invisible to a behavioural test</b> — that
-/// both constructors ship here where only one does there, and that the state member is
-/// stored and current here where the sibling has only <c>GroupState</c> (Java's deprecated
-/// <c>state()</c> projection is not translated there). Those halves are
-/// therefore reflection assertions against the sibling, not prose.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminClassicGroupDescriptionTests
 {
     private static readonly MemberDescription s_memberOne =
@@ -52,14 +38,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
 
     private static readonly Node s_coordinatorNode = new Node(7, "broker-1", 9092, "r-1");
 
-    /// <summary>
-    /// ⚠ <b>Both of Java's constructors ship, where only one of
-    /// <see cref="ConsumerGroupDescription"/>'s four does.</b> The standing ruling omits
-    /// <em>deprecated</em> forwarders, and this Java file deprecates nothing — neither the
-    /// class nor either constructor — so the six-argument form is current API and is
-    /// translated. Asserted against the sibling, because the contrast is a fact about
-    /// metadata that no behavioural test can reach.
-    /// </summary>
     [Fact]
     public void Constructors_AreJavasTwo_BecauseNeitherIsDeprecated()
     {
@@ -102,18 +80,9 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             static constructor => Assert.Null(constructor.GetCustomAttribute<ObsoleteAttribute>()));
         Assert.Null(typeof(ClassicGroupDescription).GetCustomAttribute<ObsoleteAttribute>());
 
-        // The sibling ships one of Java's four, precisely because the other three are deprecated.
         Assert.Single(typeof(ConsumerGroupDescription).GetConstructors());
     }
 
-    /// <summary>
-    /// ⚠ <b>The six-argument constructor yields <em>empty</em> authorized operations, not
-    /// absent ones.</b> Java forwards <c>Set.of()</c>
-    /// (<c>ClassicGroupDescription.java:48</c>), so the object it builds equals the
-    /// seven-argument one given an empty collection and differs from the one given
-    /// <see langword="null"/>. Forwarding null instead would be invisible in the signature
-    /// and would silently convert "reported, none authorized" into "never asked".
-    /// </summary>
     [Fact]
     public void SixArgumentConstructor_ForwardsAnEmptySet_NotAbsence()
     {
@@ -131,10 +100,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Contains("authorizedOperations=[])", forwarded.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Every other member of the six-argument form is passed straight through, so the only
-    /// difference between the two constructors is the one above.
-    /// </summary>
     [Fact]
     public void SixArgumentConstructor_PassesItsOwnSixThrough()
     {
@@ -149,11 +114,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Null(forwarded.Coordinator);
     }
 
-    /// <summary>
-    /// The collections keep Java's element types and the two nullable members are reference
-    /// types — the absent-versus-present distinctions the behaviour tests below rely on have
-    /// to exist in the metadata first.
-    /// </summary>
     [Fact]
     public void Properties_AreJavasShapes()
     {
@@ -183,11 +143,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
     }
 
-    /// <summary>
-    /// Java coalesces exactly two arguments (the id and the protocol data) and defaults the
-    /// members to an empty list; the other four are stored as given, which is what keeps
-    /// absence observable.
-    /// </summary>
     [Fact]
     public void Constructor_CoalescesTheTwoJavaCoalescesAndNoOthers()
     {
@@ -203,12 +158,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Null(description.AuthorizedOperations);
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="ClassicGroupDescription.Protocol"/> is the one string Java does not
-    /// coalesce</b> (<c>:59</c>, between two lines that do). An absent protocol is therefore
-    /// a value distinct from the empty one — they are unequal, they hash apart, and they
-    /// render apart.
-    /// </summary>
     [Fact]
     public void Protocol_IsNotCoalesced_UnlikeItsTwoStringNeighbours()
     {
@@ -225,7 +174,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Contains("protocol='',", empty.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>The members are copied, so a later mutation of the argument is not observed.</summary>
     [Fact]
     public void Constructor_CopiesTheMembers()
     {
@@ -238,13 +186,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Equal(new[] { s_memberOne }, description.Members);
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="ClassicGroupDescription.IsSimpleConsumerGroup"/> is a projection of
-    /// <see cref="ClassicGroupDescription.Protocol"/>, not a stored member</b> — the opposite
-    /// of <see cref="ConsumerGroupDescription.IsSimpleConsumerGroup"/>, which Java stores and
-    /// takes as a constructor argument. Setting the protocol is the only thing that makes it
-    /// read back, so the two cannot disagree.
-    /// </summary>
     [Fact]
     public void IsSimpleConsumerGroup_IsAProjectionOfProtocol_NotAnIndependentMember()
     {
@@ -254,19 +195,11 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.False(WithProtocol("consumer").IsSimpleConsumerGroup);
         Assert.False(WithProtocol("connect").IsSimpleConsumerGroup);
 
-        // The sibling stores it, so there it can be set independently of every other member.
         Assert.True(new ConsumerGroupDescription(
             "g-1", true, null, "range", GroupType.Classic, GroupState.Empty, null, null, null, null)
             .IsSimpleConsumerGroup);
     }
 
-    /// <summary>
-    /// ⚠ <b>Java has no null guard on the protocol it dereferences</b>
-    /// (<c>:113</c> <c>protocol.isEmpty()</c>), so an absent protocol faults rather than
-    /// answering. Adding a guard would invent an answer Java does not give, and the answer it
-    /// would have to invent — <c>true</c> — is the wrong one for a group whose protocol type
-    /// was never reported.
-    /// </summary>
     [Fact]
     public void IsSimpleConsumerGroup_FaultsOnAnAbsentProtocol_AsJavaDoes()
     {
@@ -275,14 +208,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Throws<NullReferenceException>(() => _ = description.IsSimpleConsumerGroup);
     }
 
-    /// <summary>
-    /// ⚠ <b><see cref="ClassicGroupDescription.State"/> is a stored member and there is no
-    /// <c>GroupState</c> beside it</b>, where <see cref="ConsumerGroupDescription"/> carries
-    /// <c>GroupState</c> and no <c>State</c> (Java's deprecated <c>state()</c> projection is
-    /// not translated there). Being stored, it
-    /// round-trips every value — including one no member defines, which a parse-based
-    /// projection would have normalized to <c>Unknown</c>.
-    /// </summary>
     [Fact]
     public void State_IsStoredAndCurrent_NotAProjection()
     {
@@ -316,13 +241,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Contains("state=Unknown,", undefined.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// ⚠ <b>Absent is not empty.</b> The ABI reports whether the broker sent an
-    /// authorized-operations set at all, so Java's <c>null</c> (not reported) and its empty
-    /// set (reported, nothing authorized) are two distinct values. A test that only checked
-    /// emptiness could not tell them apart — <c>Assert.Empty</c> passes on neither, and
-    /// counting passes on both.
-    /// </summary>
     [Fact]
     public void AuthorizedOperations_DistinguishesAbsentFromEmpty()
     {
@@ -341,10 +259,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Contains("authorizedOperations=[])", empty.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Java's parameter is a <c>Set</c>: duplicates collapse. First-seen order is kept so the
-    /// rendering is stable.
-    /// </summary>
     [Fact]
     public void AuthorizedOperations_CollapseDuplicatesAndKeepFirstSeenOrder()
     {
@@ -355,12 +269,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Equal(new[] { AclOperation.Read, AclOperation.Write }, description.AuthorizedOperations!);
     }
 
-    /// <summary>
-    /// The coordinator is nullable, and a present one is compared field-by-field — this
-    /// binding's <see cref="Node"/> carries no value equality of its own, so each of the five
-    /// members Java's <c>Node.equals</c> compares (<c>Node.java:143-154</c>) has to
-    /// discriminate here, <see cref="Node.IsFenced"/> included (M15/P13.3, D12).
-    /// </summary>
     [Fact]
     public void Coordinator_CoversAbsentAndPresent()
     {
@@ -381,11 +289,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.False(Canonical().Equals(WithCoordinator(new Node(7, "broker-1", 9092, "r-1", isFenced: true))));
     }
 
-    /// <summary>
-    /// Equality covers the seven constructor members. <c>IsSimpleConsumerGroup</c> is absent
-    /// from it, as it is from Java's <c>equals</c> — it carries no information
-    /// <c>Protocol</c> does not.
-    /// </summary>
     [Fact]
     public void Equality_CoversAllSevenMembers()
     {
@@ -395,7 +298,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.True(description.Equals(description));
         Assert.Equal(Canonical().GetHashCode(), description.GetHashCode());
 
-        // Each member discriminates on its own.
         Assert.False(description.Equals(Describe(
             "other", "consumer", "range", new[] { s_memberOne, s_memberTwo },
             ClassicGroupState.Stable, s_coordinatorNode, Operations())));
@@ -422,11 +324,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.False(description.Equals("g-1"));
     }
 
-    /// <summary>
-    /// The two collections hash and compare the way Java's own do: the members are a
-    /// <c>List</c> (positional), the authorized operations a <c>Set</c> (order-insensitive).
-    /// Treating either like the other would be wrong in one direction or the other.
-    /// </summary>
     [Fact]
     public void Equality_ComparesMembersPositionallyAndOperationsAsASet()
     {
@@ -447,13 +344,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         Assert.Equal(description.GetHashCode(), operationsReversed.GetHashCode());
     }
 
-    /// <summary>
-    /// ⚠ <b>Java quotes the protocol and nothing else, and joins only the members.</b> The
-    /// protocol is wrapped in single quotes (<c>:147</c>) while <c>protocolData</c> one line
-    /// below is bare; the members join each element's own <c>toString()</c> with <c>","</c>
-    /// and no space (<c>:149</c>), so an empty group renders as a bare <c>members=</c>; and an
-    /// absent protocol, coordinator or operations set concatenates the bare text <c>null</c>.
-    /// </summary>
     [Fact]
     public void ToString_MirrorsJavasRendering()
     {
@@ -477,10 +367,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
                 null, null, null, null, ClassicGroupState.Unknown, null, null).ToString());
     }
 
-    /// <summary>
-    /// The quoting is positional, not a property of the value: the same text renders quoted
-    /// as the protocol and bare as the protocol data.
-    /// </summary>
     [Fact]
     public void ToString_QuotesTheProtocolAndNotTheProtocolData()
     {
@@ -493,10 +379,6 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             description.ToString());
     }
 
-    /// <summary>
-    /// Several members join with <c>","</c> and no space, unlike the comma-space the
-    /// surrounding fields use.
-    /// </summary>
     [Fact]
     public void ToString_JoinsTheMembersWithoutASpace()
     {

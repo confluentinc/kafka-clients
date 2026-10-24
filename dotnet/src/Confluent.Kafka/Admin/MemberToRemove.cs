@@ -17,39 +17,22 @@ using System;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A struct containing information about the member to be removed — the .NET realization of
-/// Java's <c>org.apache.kafka.clients.admin.MemberToRemove</c> (<c>MemberToRemove.java:27</c>).
+/// A struct containing information about the member to be removed — Java's
+/// <c>org.apache.kafka.clients.admin.MemberToRemove</c>.
 /// </summary>
 /// <remarks>
-/// <para>
-/// Equality is by <see cref="GroupInstanceId"/> alone, ordinal — Java's <c>equals</c>/
-/// <c>hashCode</c> (<c>:34-47</c>) compare only the <c>groupInstanceId</c> field. This is
-/// what lets <see cref="RemoveMembersFromConsumerGroupOptions"/> de-duplicate a
-/// <see cref="System.Collections.Generic.HashSet{T}"/> of these the same way Java's
-/// constructor collapses its <c>Collection</c> into a <c>Set</c> (<c>:37</c>), and what lets
-/// <see cref="RemoveMembersFromConsumerGroupResult.MemberResult"/> look a member up by value.
-/// </para>
-/// <para>
-/// ⚠ Java's <c>toString()</c> is not overridden — the default <c>Object.toString()</c>
-/// (class name + identity hash) appears in Java's own exception messages
-/// (<c>RemoveMembersFromConsumerGroupResult.java:83-87</c>), which makes those messages
-/// non-deterministic even in Java. This binding substitutes <see cref="GroupInstanceId"/>
-/// directly where Java would have interpolated <c>member.toString()</c> — a strictly more
-/// useful message, and a deviation that does not chase a moving target.
-/// </para>
+/// Equality is by <see cref="GroupInstanceId"/> alone, ordinal, as Java's.
 /// </remarks>
 public sealed class MemberToRemove : IEquatable<MemberToRemove>
 {
     /// <summary>
     /// Creates a member to remove, identified by its <c>group.instance.id</c> — Java's
-    /// <c>MemberToRemove(String groupInstanceId)</c> (<c>:30-32</c>).
+    /// constructor.
     /// </summary>
     /// <param name="groupInstanceId">The static member's <c>group.instance.id</c>.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="groupInstanceId"/> is null — stricter than Java, whose constructor
-    /// accepts it (<c>MemberToRemove.java:30-33</c>) and sends the member with a null
-    /// <c>group.instance.id</c>; the binding's rule for null keys (see the
-    /// <see cref="IAdmin"/> remarks).
+    /// <paramref name="groupInstanceId"/> is null: stricter than Java, whose constructor accepts
+    /// it, a recorded deviation.
     /// </exception>
     public MemberToRemove(string groupInstanceId)
     {
@@ -62,8 +45,7 @@ public sealed class MemberToRemove : IEquatable<MemberToRemove>
     }
 
     /// <summary>
-    /// The static member's <c>group.instance.id</c> — Java's <c>groupInstanceId()</c>
-    /// (<c>:55-57</c>).
+    /// The static member's <c>group.instance.id</c> — Java's <c>groupInstanceId()</c>.
     /// </summary>
     public string GroupInstanceId { get; }
 

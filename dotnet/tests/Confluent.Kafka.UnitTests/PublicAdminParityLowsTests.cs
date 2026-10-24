@@ -18,28 +18,21 @@ using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
+using Confluent.Kafka.Internal;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins the small Java-parity items from the <c>f2f397e5</c> AdminClient audit: the three
-/// <c>*Result</c> constructors Java declares public (G4-10) — kept <c>internal</c> here on both
-/// flavours as a recorded deviation (M15/P14 Q3 (b), follow-up FU-5) — the result collections
-/// Java returns as unmodifiable views (G3-11), and the closed SCRAM alteration hierarchy (G4-13).
+/// Three small Java-parity points: the three <c>*Result</c> constructors Java declares public, kept internal here on
+/// both flavours as a recorded deviation; the result collections Java returns as unmodifiable views; and the closed
+/// SCRAM alteration hierarchy.
 /// </summary>
 public sealed class PublicAdminParityLowsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// G4-10: Java's <c>DescribeClientQuotasResult(KafkaFuture)</c> is public
-    /// (<c>DescribeClientQuotasResult.java:39</c>), so a Java caller can fabricate one. Ours is
-    /// <c>internal</c> on both flavours — a recorded parity deviation (M15/P14 Q3 (b), follow-up
-    /// FU-5) — so this pins that it is internal, and that it behaves as Java's when reached
-    /// through <c>InternalsVisibleTo</c>.
-    /// </summary>
     [Fact]
     public async Task G4_10_DescribeClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
     {
@@ -57,13 +50,13 @@ public sealed class PublicAdminParityLowsTests
             {
                 [entity] = new Dictionary<string, double>(StringComparer.Ordinal) { ["producer_byte_rate"] = 1024 },
             };
-        Task<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities =
-            Task.FromResult(quotas);
+        KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities =
+            KafkaFutureImpl.CompletedFuture(quotas);
 
         AsyncDescribeClientQuotasResult result = new AsyncDescribeClientQuotasResult(
             new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities));
 
-        Assert.Same(entities, result.Entities().Get());
+        Assert.Same(entities.GetAsync(), result.Entities().Get());
         Assert.Same(quotas, await TestTimeout.Run(() => result.Entities().Get(), s_deadline));
 
         ArgumentNullException thrown =
@@ -71,13 +64,6 @@ public sealed class PublicAdminParityLowsTests
         Assert.Equal("entities", thrown.ParamName);
     }
 
-    /// <summary>
-    /// G4-10: Java's <c>AlterClientQuotasResult(Map)</c> is public
-    /// (<c>AlterClientQuotasResult.java:38</c>). Ours is <c>internal</c> on both flavours — a
-    /// recorded parity deviation (M15/P14 Q3 (b), follow-up FU-5). Reached through
-    /// <c>InternalsVisibleTo</c>, the map is held by reference, as Java holds it, and
-    /// <c>All()</c> faults with an entity's failure.
-    /// </summary>
     [Fact]
     public async Task G4_10_AlterClientQuotasResult_ConstructorIsInternal_ARecordedDeviation()
     {
@@ -93,7 +79,7 @@ public sealed class PublicAdminParityLowsTests
         KafkaException failure = new KafkaException("bob failed");
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> futures = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>
         {
-            [alice] = new AsyncKafkaFuture(Task.CompletedTask),
+            [alice] = new AsyncKafkaFuture(TestFutures.Done()),
         };
 
         AsyncAlterClientQuotasResult result = new AsyncAlterClientQuotasResult(futures);
@@ -101,7 +87,7 @@ public sealed class PublicAdminParityLowsTests
         Assert.Same(futures, result.Values);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        futures[bob] = new AsyncKafkaFuture(Task.FromException(failure));
+        futures[bob] = new AsyncKafkaFuture(TestFutures.Failed(failure));
         KafkaException thrown =
             await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Same(failure, thrown);
@@ -111,12 +97,6 @@ public sealed class PublicAdminParityLowsTests
             Assert.Throws<ArgumentNullException>(() => new AsyncAlterClientQuotasResult(null!)).ParamName);
     }
 
-    /// <summary>
-    /// G4-10: Java's <c>AlterUserScramCredentialsResult(Map)</c> is public
-    /// (<c>AlterUserScramCredentialsResult.java:38</c>). Ours is <c>internal</c> on both
-    /// flavours — a recorded parity deviation (M15/P14 Q3 (b), follow-up FU-5) — and behaves as
-    /// Java's when reached through <c>InternalsVisibleTo</c>.
-    /// </summary>
     [Fact]
     public async Task G4_10_AlterUserScramCredentialsResult_ConstructorIsInternal_ARecordedDeviation()
     {
@@ -128,8 +108,8 @@ public sealed class PublicAdminParityLowsTests
         KafkaException failure = new KafkaException("bob failed");
         Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["alice"] = new AsyncKafkaFuture(Task.CompletedTask),
-            ["bob"] = new AsyncKafkaFuture(Task.FromException(failure)),
+            ["alice"] = new AsyncKafkaFuture(TestFutures.Done()),
+            ["bob"] = new AsyncKafkaFuture(TestFutures.Failed(failure)),
         };
 
         AsyncAlterUserScramCredentialsResult result = new AsyncAlterUserScramCredentialsResult(futures);
@@ -144,11 +124,6 @@ public sealed class PublicAdminParityLowsTests
             Assert.Throws<ArgumentNullException>(() => new AsyncAlterUserScramCredentialsResult(null!)).ParamName);
     }
 
-    /// <summary>
-    /// G3-11: Java wraps each list in <c>Collections.unmodifiableList</c>
-    /// (<c>PartitionReassignment.java:33-35</c>), so casting a returned list back to a mutable
-    /// one and changing it must fail, as Java's <c>UnsupportedOperationException</c> does.
-    /// </summary>
     [Fact]
     public void G3_11_PartitionReassignment_ListsAreReadOnly()
     {
@@ -173,11 +148,6 @@ public sealed class PublicAdminParityLowsTests
         Assert.Equal(new[] { 1 }, reassignment.RemovingReplicas);
     }
 
-    /// <summary>
-    /// G3-11: Java returns <c>Collections.unmodifiableMap</c> over the stored map
-    /// (<c>LogDirDescription.java:69-70</c>) — a read-only <b>view</b>: it cannot be changed
-    /// through the description, but a change the caller makes to its own map shows through.
-    /// </summary>
     [Fact]
     public void G3_11_LogDirDescription_ReplicaInfosIsAReadOnlyView()
     {
@@ -201,11 +171,6 @@ public sealed class PublicAdminParityLowsTests
         Assert.Equal(2, description.ReplicaInfos.Count);
     }
 
-    /// <summary>
-    /// G4-13: the base constructor is <c>private protected</c>, so only this library's
-    /// upsertion and deletion can derive from it. A caller's own subclass could never be
-    /// sent, and Java likewise sends only those two cases.
-    /// </summary>
     [Fact]
     public void G4_13_UserScramCredentialAlteration_IsClosedToOtherAssemblies()
     {
@@ -218,10 +183,6 @@ public sealed class PublicAdminParityLowsTests
         Assert.True(typeof(UserScramCredentialDeletion).IsSealed);
     }
 
-    /// <summary>
-    /// The Result has no public constructor, and the twin of Java's public one — the constructor taking exactly
-    /// <paramref name="parameterType"/> — exists and is <c>internal</c>.
-    /// </summary>
     private static void AssertJavaTwinConstructorIsInternal(Type result, Type parameterType)
     {
         Assert.Empty(result.GetConstructors(BindingFlags.Instance | BindingFlags.Public));

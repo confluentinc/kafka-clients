@@ -24,33 +24,16 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Pins <see cref="ListConsumerGroupOffsetsSpec"/> against Java's
-/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec</c>.
+/// <see cref="ListConsumerGroupOffsetsSpec"/> against Java's
+/// <c>org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec</c>: the unset selection (every partition the group
+/// committed) stays apart from an empty one in the property, equality, the hash and the rendering.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>The unset selection is the point of this type.</b> Java's uninitialized field
-/// (<c>:30</c>) means "every partition the group has committed offsets for" (<c>:34</c>,
-/// <c>:46</c>), which an explicitly empty collection does <em>not</em>. The C ABI carries
-/// the distinction as a per-group <c>all_partitions</c> boolean, so the tests below assert
-/// the two states stay apart in the property, in equality, in the hash and in the
-/// rendering — a later submit slice that collapsed them would otherwise go green.
-/// </para>
-/// <para>
-/// <b>This is a pure value type</b> — the ABI wiring, the result type and the client method
-/// arrive in later slices — so everything here is managed and broker-free.
-/// </para>
-/// </remarks>
 public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
 {
     private static readonly TopicPartition s_ordersZero = new TopicPartition("orders", 0);
     private static readonly TopicPartition s_ordersOne = new TopicPartition("orders", 1);
     private static readonly TopicPartition s_payments = new TopicPartition("payments", 0);
 
-    /// <summary>
-    /// A freshly constructed spec matches Java's uninitialized field (<c>:30</c>): the
-    /// selection is unset, meaning every partition the group has committed offsets for.
-    /// </summary>
     [Fact]
     public void Default_IsTheUnsetSelection_NotAnEmptyOne()
     {
@@ -59,11 +42,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.Null(spec.TopicPartitions);
     }
 
-    /// <summary>
-    /// The public property set is exactly Java's one accessor pair collapsed into one
-    /// property — no member dropped, none invented, and no factory or constructor Java does
-    /// not have.
-    /// </summary>
     [Fact]
     public void PublicShape_IsJavasOneAccessorAsASettableNullableProperty()
     {
@@ -74,17 +52,14 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
                 .Select(property => property.Name)
                 .OrderBy(name => name, StringComparer.Ordinal));
 
-        // Java declares no static members on this class.
         Assert.Empty(
             typeof(ListConsumerGroupOffsetsSpec)
                 .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 
-        // Java declares no constructor either, so the only one is the implicit default.
         ConstructorInfo constructor = Assert.Single(typeof(ListConsumerGroupOffsetsSpec).GetConstructors());
         Assert.Empty(constructor.GetParameters());
 
-        // Java's fluent setter is a setter, so the property is settable; its type must stay
-        // nullable, because null is the "all partitions" request.
+        // The property stays nullable: null is the request for every partition.
         PropertyInfo topicPartitions = typeof(ListConsumerGroupOffsetsSpec).GetProperty(
             nameof(ListConsumerGroupOffsetsSpec.TopicPartitions))!;
         Assert.Equal(typeof(IReadOnlyCollection<TopicPartition>), topicPartitions.PropertyType);
@@ -92,11 +67,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.NotNull(topicPartitions.GetMethod);
     }
 
-    /// <summary>
-    /// Java's setter stores what it is handed and its getter reports it back — including
-    /// back to <see langword="null"/>, which a write-once field would fail and which is the
-    /// only way to ask for every partition again after narrowing the selection.
-    /// </summary>
     [Fact]
     public void TopicPartitions_RoundTripsIncludingBackToNull()
     {
@@ -115,11 +85,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.Null(spec.TopicPartitions);
     }
 
-    /// <summary>
-    /// The selection keeps duplicates and keeps the order it was given, because Java's
-    /// field is a <c>Collection</c> (<c>:30</c>) and not a <c>Set</c> — a spec that
-    /// deduplicated would be answering a different question than the caller asked.
-    /// </summary>
     [Fact]
     public void TopicPartitions_KeepsDuplicatesAndOrder_BecauseJavaHoldsACollectionNotASet()
     {
@@ -131,15 +96,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.Equal(new[] { s_ordersOne, s_ordersZero, s_ordersOne }, spec.TopicPartitions);
     }
 
-    /// <summary>
-    /// Assigning copies, so a caller that keeps mutating the collection it passed in cannot
-    /// change a spec that has already been built — including its equality and its
-    /// rendering, which a later submit slice and a caller's own map lookups both depend on.
-    /// </summary>
-    /// <remarks>
-    /// This is the one deliberate deviation from Java, which stores the reference
-    /// (<c>:40</c>); see the type's remarks for why a read-only view is not enough here.
-    /// </remarks>
     [Fact]
     public void TopicPartitions_IsCopiedOnAssignment_NotAliased()
     {
@@ -156,11 +112,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.Equal("ListConsumerGroupOffsetsSpec(topicPartitions=[orders-0])", spec.ToString());
     }
 
-    /// <summary>
-    /// Equality is element-by-element and order-sensitive, matching the <c>List</c>
-    /// behaviour Java's <c>Objects.equals</c> (<c>:61</c>) delegates to for the collection
-    /// type the setter's javadoc names (<c>:36</c>).
-    /// </summary>
     [Fact]
     public void Equals_ComparesElementsInOrder()
     {
@@ -176,10 +127,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.False(spec.Equals(Spec(s_ordersZero, s_payments)));
     }
 
-    /// <summary>
-    /// Equality rejects null and unrelated types, as Java's <c>instanceof</c> guard
-    /// (<c>:57</c>) does.
-    /// </summary>
     [Fact]
     public void Equals_RejectsNullAndForeignTypes()
     {
@@ -190,11 +137,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.False(spec.Equals(new DescribeClassicGroupsOptions()));
     }
 
-    /// <summary>
-    /// The unset selection equals only another unset selection — never an empty one. This
-    /// is the assertion that keeps Java's "all partitions" (<c>:34</c>) from collapsing into
-    /// "no partitions" once the submit slice starts reading the property.
-    /// </summary>
     [Fact]
     public void UnsetSelection_IsNeverEqualToAnEmptyOne()
     {
@@ -209,11 +151,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.NotEqual(unset.GetHashCode(), empty.GetHashCode());
     }
 
-    /// <summary>
-    /// The hash is an order-sensitive fold, so it agrees with
-    /// <see cref="ListConsumerGroupOffsetsSpec.Equals(object)"/>: reordering the selection
-    /// is a different spec and hashes differently.
-    /// </summary>
     [Fact]
     public void GetHashCode_IsOrderSensitive_LikeEquals()
     {
@@ -221,11 +158,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
         Assert.Equal(Spec(s_ordersZero).GetHashCode(), Spec(s_ordersZero).GetHashCode());
     }
 
-    /// <summary>
-    /// The rendering matches Java's <c>toString()</c> (<c>:70</c>), whose bare
-    /// concatenation prints an unset collection as <c>null</c> and a set one in
-    /// <c>AbstractCollection</c> form.
-    /// </summary>
     [Fact]
     public void ToString_RendersLikeJava_AndShowsUnsetApartFromEmpty()
     {
@@ -240,11 +172,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsSpecTests
             Spec(s_ordersZero, s_payments).ToString());
     }
 
-    /// <summary>
-    /// Java carries no <c>@Deprecated</c> on this class or its accessors, so nothing here
-    /// carries <see cref="ObsoleteAttribute"/> — asserted rather than left implicit, because
-    /// an attribute nothing asserts is one a later slice can add or drop unnoticed.
-    /// </summary>
     [Fact]
     public void NothingIsDeprecated_BecauseJavaDeprecatesNothingHere()
     {

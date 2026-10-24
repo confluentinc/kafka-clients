@@ -18,19 +18,20 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A client quota entity — a mapping of entity types to their names, the .NET realization of
-/// Java's <c>org.apache.kafka.common.quota.ClientQuotaEntity</c> (<c>:26</c>).
+/// A client quota entity, a mapping of entity types to their names — Java's
+/// <c>org.apache.kafka.common.quota.ClientQuotaEntity</c>.
 /// </summary>
 public sealed class ClientQuotaEntity
 {
     private readonly Dictionary<string, string?> _entries;
 
     /// <summary>
-    /// Creates a quota entity — Java's <c>ClientQuotaEntity(Map)</c> (<c>:49</c>). A <c>null</c>
-    /// entry value names the built-in default entity for its type, which is neither omitting the
-    /// type nor the name <c>""</c>.
+    /// Creates a quota entity — Java's constructor. A <c>null</c> entry value names the built-in
+    /// default entity for its type, which is neither omitting the type nor the name <c>""</c>.
     /// </summary>
-    /// <param name="entries">Entity type to entity name; a null name means the default entity.</param>
+    /// <param name="entries">
+    /// Entity type to entity name; a null name means the default entity. The map is copied.
+    /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     public ClientQuotaEntity(IReadOnlyDictionary<string, string?> entries)
     {
@@ -39,8 +40,6 @@ public sealed class ClientQuotaEntity
             throw new ArgumentNullException(nameof(entries));
         }
 
-        // Copied, not aliased: this type is a dictionary KEY on the quota results (PLAN D39), so a
-        // caller mutating the map it passed would silently break every lookup.
         _entries = new Dictionary<string, string?>(entries.Count, StringComparer.Ordinal);
         foreach (KeyValuePair<string, string?> entry in entries)
         {
@@ -48,24 +47,24 @@ public sealed class ClientQuotaEntity
         }
     }
 
-    /// <summary>The <c>user</c> entity type — Java's <c>USER</c> (<c>:33</c>).</summary>
+    /// <summary>The <c>user</c> entity type — Java's <c>USER</c>.</summary>
     public const string User = "user";
 
-    /// <summary>The <c>client-id</c> entity type — Java's <c>CLIENT_ID</c> (<c>:34</c>).</summary>
+    /// <summary>The <c>client-id</c> entity type — Java's <c>CLIENT_ID</c>.</summary>
     public const string ClientId = "client-id";
 
-    /// <summary>The <c>ip</c> entity type — Java's <c>IP</c> (<c>:35</c>).</summary>
+    /// <summary>The <c>ip</c> entity type — Java's <c>IP</c>.</summary>
     public const string Ip = "ip";
 
     /// <summary>
-    /// Entity type to entity name — Java's <c>entries()</c> (<c>:56</c>). A null value names the
-    /// built-in default entity for that type.
+    /// Entity type to entity name — Java's <c>entries()</c>. A null value names the built-in
+    /// default entity for that type.
     /// </summary>
     public IReadOnlyDictionary<string, string?> Entries => _entries;
 
     /// <summary>
     /// Whether <paramref name="entityType"/> is one of the three known types — Java's
-    /// <c>isValidEntityType</c> (<c>:37</c>); null is not valid.
+    /// <c>isValidEntityType</c>; null is not valid.
     /// </summary>
     /// <param name="entityType">The entity type to check.</param>
     /// <returns>Whether the type is known.</returns>
@@ -75,8 +74,7 @@ public sealed class ClientQuotaEntity
         || string.Equals(entityType, Ip, StringComparison.Ordinal);
 
     /// <summary>
-    /// Value equality over the entries — Java's <c>equals</c> (<c>:61</c>), which delegates to
-    /// <c>Map.equals</c>: entry-wise and order-independent.
+    /// Value equality over the entries, entry-wise and order-independent — Java's <c>equals</c>.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same entity.</returns>
@@ -99,10 +97,7 @@ public sealed class ClientQuotaEntity
         return true;
     }
 
-    /// <summary>
-    /// The hash of the entries — Java's <c>hashCode</c> (<c>:69</c>), the <c>31 *</c> fold of
-    /// <c>Objects.hash</c> over <c>Map.hashCode</c>'s order-independent sum of key^value hashes.
-    /// </summary>
+    /// <summary>The order-independent hash of the entries — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -119,7 +114,7 @@ public sealed class ClientQuotaEntity
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:74</c>).</summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
     {

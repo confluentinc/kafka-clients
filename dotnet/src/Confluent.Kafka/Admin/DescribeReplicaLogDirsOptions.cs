@@ -12,24 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.DescribeReplicaLogDirs"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions</c> (<c>DescribeReplicaLogDirsOptions.java:25</c>).
+/// <c>org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java's <c>DescribeReplicaLogDirsOptions</c> declares <b>no members of its own</b> — it is an
-/// empty subclass of <c>AbstractOptions</c>, so <see cref="TimeoutMs"/> is the whole
-/// surface, exactly as for <see cref="DeleteRecordsOptions"/>. The type still exists
-/// because Java's does, and because a later Kafka release adding a field must not become a
-/// signature change here.
-/// </para>
 /// </remarks>
 public sealed class DescribeReplicaLogDirsOptions
 {
+    private int? _timeoutMs;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

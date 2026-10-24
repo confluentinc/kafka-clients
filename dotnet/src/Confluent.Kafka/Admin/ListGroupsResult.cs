@@ -11,166 +11,60 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.ExceptionServices;
+
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of a <c>listGroups</c> call — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ListGroupsResult</c> (<c>ListGroupsResult.java:31</c>):
-/// <b>three</b> future views of <b>one</b> listing, handed back the moment the request is
-/// submitted.
+/// The result of <see cref="IAdmin.ListGroups"/>, Java's <c>ListGroupsResult</c>: three views of
+/// one listing. <see cref="All"/> fails if any broker answered with an error, <see cref="Valid"/>
+/// yields the listings regardless, and <see cref="Errors"/> yields the errors.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b><see cref="All"/> is not <see cref="Valid"/>.</b> A <c>listGroups</c> call can partially
-/// succeed — some brokers answer with listings while others answer with an error — and Java
-/// splits that one mixed outcome three ways (<c>:43-58</c>): <see cref="All"/> yields every
-/// listing but <b>fails</b> if any error occurred, <see cref="Valid"/> yields the listings
-/// regardless, and <see cref="Errors"/> yields the errors. Reaching for <see cref="All"/> where
-/// <see cref="Valid"/> was meant turns a partial success into a thrown exception; the other way
-/// round silently hides one.
-/// </para>
-/// <para>
-/// ⚠ <b>The listings and the errors are independent, and nothing here pairs them.</b> They are
-/// two lists with <em>separate</em> lengths — not parallel arrays, and with no positional
-/// correspondence at all: three errors can accompany one listing, or none. Each surfaces as its
-/// own <see cref="IReadOnlyCollection{T}"/> of its own element type, carrying its own
-/// <c>Count</c>. No count is ever exposed apart from the collection it belongs to, so neither
-/// this class nor a caller can index one list by the other's length.
-/// </para>
-/// <para>
-/// <b>Java's <c>Collection&lt;Throwable&gt;</c> becomes
-/// <c>IReadOnlyCollection&lt;KafkaException&gt;</c>.</b> Every per-group error crossing the ABI
-/// is a native error handle, which this binding surfaces as the one flat
-/// <see cref="KafkaException"/> — there is no exception hierarchy left to widen for. The
-/// narrower element type is also exactly what <see cref="All"/> throws, so the two accessors
-/// cannot disagree.
-/// </para>
-/// <para>
-/// ⚠ <b>"Never fails with an error" is about per-group errors, not about the call.</b> Java's
-/// javadoc says <see cref="Valid"/> and <see cref="Errors"/> never fail (<c>:76</c>,
-/// <c>:92</c>), and in Java that holds because a per-group error is an <em>element</em> of the
-/// one source future's value rather than a failure of it. It says nothing about the enclosing
-/// call failing: Java completes those two futures only from inside <c>thenApply</c>
-/// (<c>:40</c>), which does not run when the source future fails — so a failed call would leave
-/// all three permanently incomplete. A future that never completes is a hang, not a contract, so
-/// when the call itself fails this binding fails all three instead. For per-group errors the
-/// behaviour is exactly as Java documents it.
-/// </para>
-/// <para>
-/// <b>Every accessor is a method although each yields a value</b>, matching
-/// <see cref="ListTopicsResult.NamesToListings"/> and <see cref="ListConfigResourcesResult.All"/>
-/// — each builds a fresh <see cref="KafkaFuture{T}"/> over the shared source rather than reading a
-/// field, which is not what a property promises.
-/// </para>
-/// <para>
-/// <b>Every <c>Get()</c> blocks the calling thread</b> on a managed latch until the listing has completed, and needs
-/// no thread-pool thread: the futures here are projections of the one latch, composed on the waiting thread, never
-/// over a <c>Task</c>.
-/// </para>
-/// </remarks>
-/// <seealso cref="AsyncListGroupsResult"/>
 public sealed class ListGroupsResult
 {
-    private readonly KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> _future;
+    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
+    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
+    private readonly KafkaFutureImpl<IReadOnlyCollection<KafkaException>> _errors;
+    private readonly SafeAdminResultHandle _native;
 
-    /// <summary>
-    /// Wraps the one future the call completes — Java's package-private
-    /// <c>ListGroupsResult(KafkaFuture&lt;Collection&lt;Object&gt;&gt;)</c> (<c>:36</c>).
-    /// </summary>
-    /// <param name="future">
-    /// The future the call completes with the two lists: the groups that were listed, and the
-    /// errors that occurred.
-    /// </param>
-    /// <remarks>
-    /// ⚠ <b>Two typed lists, where Java takes one <c>Collection&lt;Object&gt;</c>.</b> Java mixes
-    /// listings and <c>Throwable</c>s into a single heterogeneous collection and sorts them apart
-    /// at run time with <c>instanceof</c> (<c>:43-49</c>) — a shape C# could only reproduce as
-    /// <c>object</c> plus the same unchecked casts, and one the ABI does not force, since the
-    /// native result already hands the two over separately. Splitting them in the signature moves
-    /// Java's run-time partition to compile time and leaves the three accessors doing nothing but
-    /// selecting.
-    /// </remarks>
-    internal ListGroupsResult(
-        KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> future)
+    private ListGroupsResult(
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+        KafkaFutureImpl<IReadOnlyCollection<KafkaException>> errors,
+        SafeAdminResultHandle native)
     {
-        _future = future;
+        _all = all;
+        _valid = valid;
+        _errors = errors;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Sync"/> operation's latch: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static ListGroupsResult From(
-        SingleAdminOperation<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)> operation) =>
-        new ListGroupsResult(
-            new KafkaFuture<(IReadOnlyCollection<GroupListing> Valid, IReadOnlyCollection<KafkaException> Errors)>(
-                operation.SyncSource));
+    internal SafeAdminResultHandle Native => _native;
+
+    internal static ListGroupsResult OfClient(
+        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+            KafkaFutureImpl<IReadOnlyCollection<KafkaException>> Errors,
+            SafeAdminResultHandle Result) native) =>
+        new ListGroupsResult(native.All, native.Valid, native.Errors, native.Result);
 
     /// <summary>
-    /// Every group listing, or the first error that occurred — Java's <c>all()</c> (<c>:69</c>).
+    /// Every listing; fails with the first error if any broker answered with one.
     /// </summary>
-    /// <returns>
-    /// A future yielding all of the listings, or failing with the <b>first</b> error when any
-    /// occurred (<c>:52-53</c>).
-    /// </returns>
-    /// <remarks>
-    /// ⚠ <b>All-or-nothing: one error and no listing is yielded at all</b>, not even the ones
-    /// that were fetched successfully, and the later errors are not reported either. Use
-    /// <see cref="Valid"/> for the partial results and <see cref="Errors"/> for everything that
-    /// went wrong.
-    /// <para>
-    /// A fresh future per call. Within one such future the check runs once, on the first <c>Get()</c>'s thread, and
-    /// every later <c>Get()</c> rethrows the same <see cref="KafkaException"/> instance. A call-level failure fails it
-    /// with the call's own error, as it fails <see cref="Valid"/> and <see cref="Errors"/>.
-    /// </para>
-    /// </remarks>
-    public KafkaFuture<IReadOnlyCollection<GroupListing>> All() =>
-        SyncAdminFutures.Project(_future, static listing =>
-        {
-            if (listing.Errors.Count > 0)
-            {
-                // Java hands the exception object itself to completeExceptionally (:53). Capturing
-                // and rethrowing preserves that object rather than re-originating it here, so a
-                // second All() cannot rewrite the stack trace the first one already reported.
-                ExceptionDispatchInfo.Capture(listing.Errors.First()).Throw();
-            }
-
-            return listing.Valid;
-        });
+    public KafkaFuture<IReadOnlyCollection<GroupListing>> All() => new KafkaFuture<IReadOnlyCollection<GroupListing>>(_all);
 
     /// <summary>
-    /// Just the listings that were fetched, errors ignored — Java's <c>valid()</c> (<c>:82</c>).
+    /// The listings of the brokers that answered without an error.
     /// </summary>
-    /// <returns>
-    /// A future yielding the listings that succeeded, empty when none did. It does not fail for a
-    /// per-group error.
-    /// </returns>
-    /// <remarks>
-    /// These are Java's "partial results" (<c>:78-80</c>): when this yields a short list, pair it
-    /// with <see cref="Errors"/> to find out what is missing — nothing about this collection
-    /// alone distinguishes "there are only two groups" from "eight more could not be fetched".
-    /// </remarks>
     public KafkaFuture<IReadOnlyCollection<GroupListing>> Valid() =>
-        SyncAdminFutures.Project(_future, static listing => listing.Valid);
+        new KafkaFuture<IReadOnlyCollection<GroupListing>>(_valid);
 
     /// <summary>
-    /// Just the errors that occurred — Java's <c>errors()</c> (<c>:95</c>).
+    /// The errors the brokers answered with.
     /// </summary>
-    /// <returns>
-    /// A future yielding the errors, empty when none occurred. It does not fail for a per-group
-    /// error — an error is an element here, not a failure.
-    /// </returns>
-    /// <remarks>
-    /// A non-empty result means listings are very likely missing from <see cref="Valid"/>
-    /// (<c>:89-90</c>). Only the first of these is ever thrown by <see cref="All"/>, so this is
-    /// the only view that reports all of them.
-    /// </remarks>
     public KafkaFuture<IReadOnlyCollection<KafkaException>> Errors() =>
-        SyncAdminFutures.Project(_future, static listing => listing.Errors);
+        new KafkaFuture<IReadOnlyCollection<KafkaException>>(_errors);
 }

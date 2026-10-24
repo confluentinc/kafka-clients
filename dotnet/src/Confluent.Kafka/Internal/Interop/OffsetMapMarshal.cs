@@ -63,6 +63,34 @@ internal static class OffsetMapMarshal
         return result;
     }
 
+    internal static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> CopyOutNullable(IntPtr map)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.MapSize(map, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        if (count <= 0)
+        {
+            return EmptyReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>.Instance;
+        }
+
+        Dictionary<TopicPartition, OffsetAndMetadata?> result = new Dictionary<TopicPartition, OffsetAndMetadata?>(count);
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr key = NativeMethods.MapKey(map, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr value = NativeMethods.MapValue(map, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            if (key == IntPtr.Zero)
+            {
+                continue;
+            }
+
+            result[OffsetMapMarshalShared.CopyKey(key)] = value == IntPtr.Zero ? null : CopyOutValue(value);
+        }
+
+        return result;
+    }
+
     internal static OffsetAndMetadata CopyOutValue(IntPtr offsetAndMetadata)
     {
         IntPtr outErr = IntPtr.Zero;

@@ -15,39 +15,17 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The kind of resource a <see cref="ConfigResource"/> names — the .NET realization of
-/// Java's nested <c>org.apache.kafka.common.config.ConfigResource.Type</c>
-/// (<c>ConfigResource.java:35-60</c>).
+/// The kind of resource a <see cref="ConfigResource"/> names — Java's nested
+/// <c>org.apache.kafka.common.config.ConfigResource.Type</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>Every member's numeric value is Java's <c>Type.id()</c></b>
-/// (<c>ConfigResource.java:36-41</c>), <b>not</b> a C#-assigned ordinal. The ids cross the
-/// C ABI as bare <c>int32_t</c> in <b>both</b> directions — out of
-/// <c>kafka_admin_ListConfigResourcesResult_get_type</c> ("the
-/// <c>ConfigResource.Type.id()</c> of the resource at <c>index</c>"), and into
-/// <c>kafka_admin_AdminClient_list_config_resources</c> ("<c>resource_types</c> hold
-/// <c>ConfigResource.Type.id()</c> codes") — so an auto-assigned value would mislabel
-/// every resource in each direction. The codes are asserted member-by-member in the unit
-/// tests, as <see cref="AclOperation"/>'s wire codes are.
+/// Each member's value is Java's <c>Type.id()</c>, which crosses the C ABI in both
+/// directions, not an ordinal.
 /// </para>
 /// <para>
-/// <b>Flattened out of Java's nesting, and named accordingly (M15/P3 decision D16).</b>
-/// Java nests this as <c>ConfigResource.Type</c>; C# cannot keep that name nested without
-/// colliding with <see cref="System.Type"/> at every unqualified use site, so it is
-/// flattened to <c>ConfigResourceType</c> beside <see cref="ConfigResource"/>. Sibling
-/// enums that <em>can</em> nest cleanly stay nested, matching Java.
-/// </para>
-/// <para>
-/// <b>Namespace.</b> Java's package is <c>org.apache.kafka.common.config</c> — under
-/// <c>common</c>, not <c>clients.admin</c> — so it lives at the root
-/// <c>Confluent.Kafka</c> namespace beside <see cref="ConfigResource"/>, following the
-/// same rule that puts <see cref="Uuid"/>, <see cref="Node"/>,
-/// <see cref="AclOperation"/> and <see cref="TopicCollection"/> there. ⚠ This diverges
-/// from <c>confluent-kafka-dotnet</c>, which places its <c>ConfigResource</c> under
-/// <c>Confluent.Kafka.Admin</c>; the divergence is deliberate, since this binding targets
-/// the <b>Java</b> shape rather than the ecosystem client's
-/// (<c>dotnet/.claude/rules/bindings.md</c> §2).
+/// A recorded deviation: the type is flattened out of Java's nesting, since a nested
+/// <c>Type</c> would collide with <see cref="System.Type"/> at every unqualified use.
 /// </para>
 /// </remarks>
 public enum ConfigResourceType

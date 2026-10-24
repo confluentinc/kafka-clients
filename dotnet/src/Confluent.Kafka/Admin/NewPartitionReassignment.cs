@@ -20,59 +20,34 @@ namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The target replica set for one partition in a call to
-/// <see cref="IAdmin.AlterPartitionReassignments"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.NewPartitionReassignment</c>
-/// (<c>NewPartitionReassignment.java:32, :38</c>).
+/// <see cref="IAdmin.AlterPartitionReassignments"/> — Java's
+/// <c>org.apache.kafka.clients.admin.NewPartitionReassignment</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// ⚠ <b>An empty replica list is rejected, exactly as Java rejects it</b>
-/// (<c>:33-35</c>: "Cannot create a new partition reassignment without any replicas").
-/// That is what keeps <em>cancelling</em> a reassignment distinct from asking for a
-/// present-but-empty one: <see cref="IAdmin.AlterPartitionReassignments"/> spells
-/// cancellation as a <see langword="null"/> entry — Java's <c>Optional.empty()</c> — and
-/// the ABI carries it in a dedicated <c>cancel</c> flag array rather than as an empty
-/// replica list. The ABI header states the intent verbatim: "A separate flag rather than
-/// a NULL replica pointer, so cancelling stays distinct from 'present but empty', which
-/// Java rejects."
+/// An empty replica list is rejected, as Java rejects it, so a cancellation is a
+/// <see langword="null"/> entry in <see cref="IAdmin.AlterPartitionReassignments"/> (Java's
+/// <c>Optional.empty()</c>), never an empty list.
 /// </para>
 /// <para>
-/// <b>The replica list is copied on construction and handed out read-only</b>, as Java's
-/// <c>List.copyOf</c> does (<c>:35</c>): a caller mutating its own list afterwards cannot
-/// change a submitted request, and <see cref="TargetReplicas"/> cannot be cast back to a
-/// mutable list and emptied behind the constructor's non-empty check.
-/// </para>
-/// <para>
-/// <b>Recorded sub-divergence (<c>definition-of-done.md</c> §7): the null and the empty
-/// list raise different .NET exception types where Java raises one.</b> Java throws
-/// <c>IllegalArgumentException</c> for both (<c>:33-35</c> tests
-/// <c>targetReplicas == null || targetReplicas.isEmpty()</c>). CLAUDE.md §3's idiom map
-/// sends <c>IllegalArgumentException</c> to "the <see cref="ArgumentException"/>
-/// family", and <see cref="ArgumentNullException"/> is the member of that family .NET
-/// callers expect for a null argument — so a <c>catch (ArgumentException)</c> still
-/// catches both, matching Java's single catch clause. Java's message is carried
-/// unchanged on both paths.
-/// </para>
-/// <para>
-/// Java declares no <c>toString</c>, <c>equals</c> or <c>hashCode</c> on this class, so
-/// none is added here (<c>definition-of-done.md</c> §7).
+/// A null list throws <see cref="ArgumentNullException"/> and an empty one
+/// <see cref="ArgumentException"/>, both with Java's message, where Java throws one
+/// <c>IllegalArgumentException</c>: a recorded deviation, which a
+/// <c>catch (ArgumentException)</c> still covers.
 /// </para>
 /// </remarks>
 public sealed class NewPartitionReassignment
 {
-    /// <summary>Java's own message, carried unchanged (<c>:34</c>).</summary>
     private const string NoReplicasMessage = "Cannot create a new partition reassignment without any replicas";
 
     private readonly ReadOnlyCollection<int> _targetReplicas;
 
     /// <summary>
-    /// Creates a reassignment onto <paramref name="targetReplicas"/> — Java's
-    /// <c>NewPartitionReassignment(List&lt;Integer&gt;)</c> (<c>:32</c>).
+    /// Creates a reassignment onto <paramref name="targetReplicas"/> — Java's constructor.
     /// </summary>
     /// <param name="targetReplicas">
     /// The broker ids the partition's replicas are to move to, preferred leader first.
-    /// Must not be empty — see the type remarks for why an empty list is not a way to
-    /// cancel.
+    /// Must not be empty. The list is copied.
     /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="targetReplicas"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="targetReplicas"/> is empty.</exception>
@@ -88,20 +63,12 @@ public sealed class NewPartitionReassignment
             throw new ArgumentException(NoReplicasMessage, nameof(targetReplicas));
         }
 
-        // Java's List.copyOf: a copy (the caller's list stays the caller's) that is also
-        // unmodifiable, so the getter's view cannot be cast back to a List<int> and cleared.
         _targetReplicas = new List<int>(targetReplicas).AsReadOnly();
     }
 
     /// <summary>
     /// The broker ids the partition's replicas are to move to — Java's
-    /// <c>targetReplicas()</c> (<c>:38</c>). Never empty, and read-only: Java's list is the
-    /// unmodifiable <c>List.copyOf</c> result (<c>:35</c>).
+    /// <c>targetReplicas()</c>. Never empty, and read-only, as Java's <c>List.copyOf</c> result.
     /// </summary>
-    /// <remarks>
-    /// A property rather than a method (decision D18): it is a pure managed field read
-    /// that does no P/Invoke and cannot throw, and no same-named static factory forces
-    /// the method form here.
-    /// </remarks>
     public IReadOnlyList<int> TargetReplicas => _targetReplicas;
 }

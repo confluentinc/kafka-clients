@@ -24,16 +24,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="NewTopic"/>'s value semantics — Java's <c>equals</c> / <c>hashCode</c> /
-/// <c>toString</c> (<c>NewTopic.java:149-174</c>). Pure managed; nothing native.
+/// <see cref="NewTopic"/>'s value semantics: Java's <c>equals</c>, <c>hashCode</c> and <c>toString</c>, with nothing
+/// native.
 /// </summary>
 public sealed class PublicAdminNewTopicValueTests
 {
-    /// <summary>
-    /// Two topics built the same way are equal and hash-equal, for every constructor form
-    /// — with and without a configuration — and equality is reflexive and never matches
-    /// <see langword="null"/> or a foreign type.
-    /// </summary>
     [Fact]
     public void Equal_ForEachConstructorForm()
     {
@@ -61,19 +56,12 @@ public sealed class PublicAdminNewTopicValueTests
             Assert.False(left.Equals("t"));
         }
 
-        // The two count constructors are one form: (string, int, short) forwards.
         NewTopic viaNonNullable = new NewTopic("t", 3, (short)1);
         NewTopic viaNullable = new NewTopic("t", (int?)3, (short?)1);
         Assert.Equal(viaNonNullable, viaNullable);
         Assert.Equal(viaNonNullable.GetHashCode(), viaNullable.GetHashCode());
     }
 
-    /// <summary>
-    /// Every field takes part: a difference in any one of the five makes the topics
-    /// unequal. <c>-1</c> is <b>not</b> <see langword="null"/> — Java's
-    /// <c>Optional.of(-1)</c> is not <c>Optional.empty()</c> — and the name compares
-    /// ordinally, case included.
-    /// </summary>
     [Fact]
     public void Unequal_WhenAnyFieldDiffers()
     {
@@ -99,15 +87,13 @@ public sealed class PublicAdminNewTopicValueTests
             Assert.False(different.Equals(baseline), different.ToString());
         }
 
-        // -1 against null, for each count on its own.
         Assert.NotEqual(new NewTopic("t", (int?)-1, (short?)1), new NewTopic("t", (int?)null, (short?)1));
         Assert.NotEqual(new NewTopic("t", (int?)1, (short?)-1), new NewTopic("t", (int?)1, (short?)null));
         Assert.NotEqual(new NewTopic("t", -1, (short)-1), new NewTopic("t", (int?)null, (short?)null));
 
-        // A null configuration is not an empty one — Java's Objects.equals(null, emptyMap).
+        // A null configuration is not an empty one, as Java's Objects.equals has it.
         Assert.NotEqual(new NewTopic("t", 1, (short)1), new NewTopic("t", 1, (short)1) { Configs = Configs() });
 
-        // The replica assignment: a different partition, broker, broker order or length.
         NewTopic assigned = new NewTopic("t", Assignments((0, new[] { 1, 2 })));
         foreach (NewTopic different in new[]
         {
@@ -124,11 +110,6 @@ public sealed class PublicAdminNewTopicValueTests
         }
     }
 
-    /// <summary>
-    /// Java's <c>Map.equals</c> / <c>hashCode</c> do not depend on iteration order, so
-    /// neither does <see cref="NewTopic"/>'s: the same entries inserted in a different
-    /// order — or held by a different dictionary type — are equal and hash-equal.
-    /// </summary>
     [Fact]
     public void EqualityAndHash_IgnoreInsertionOrder()
     {
@@ -162,12 +143,6 @@ public sealed class PublicAdminNewTopicValueTests
         Assert.Equal(forward.GetHashCode(), sorted.GetHashCode());
     }
 
-    /// <summary>
-    /// The configuration compares <b>ordinally</b> whatever comparer the user's dictionary
-    /// carries — so equality stays symmetric and hash-consistent. A case-insensitive
-    /// dictionary equals an ordinal one with the same spelling, and differs from one
-    /// whose key differs only in case.
-    /// </summary>
     [Fact]
     public void ConfigsEquality_IsOrdinal_WhateverTheDictionaryComparer()
     {
@@ -188,18 +163,12 @@ public sealed class PublicAdminNewTopicValueTests
         Assert.True(ignoreCase.Equals(ordinal));
         Assert.Equal(ordinal.GetHashCode(), ignoreCase.GetHashCode());
 
-        // Both directions agree — a keyed lookup through the case-insensitive side would
-        // have said "equal" one way and "unequal" the other.
         Assert.False(ordinal.Equals(ignoreCaseUpper));
         Assert.False(ignoreCaseUpper.Equals(ordinal));
         Assert.False(ignoreCase.Equals(ignoreCaseUpper));
         Assert.False(ignoreCaseUpper.Equals(ignoreCase));
     }
 
-    /// <summary>
-    /// <see cref="NewTopic.Configs"/> is settable, so equality and the hash code follow it —
-    /// as Java's <c>configs(Map)</c> does. Documented on the property.
-    /// </summary>
     [Fact]
     public void EqualityAndHash_FollowConfigsReassignment()
     {
@@ -222,12 +191,6 @@ public sealed class PublicAdminNewTopicValueTests
         Assert.NotEqual(left, right);
     }
 
-    /// <summary>
-    /// M15/P13.3 D16 — a <see langword="null"/> config <b>value</b> is Java's null map value,
-    /// which <c>configs(Map)</c> accepts: equality, the hash code and <c>ToString</c> all
-    /// handle it without throwing, and it is neither equal to the empty string nor to an
-    /// absent key.
-    /// </summary>
     [Fact]
     public void NullConfigValue_IsHandledByEqualityHashAndToString()
     {
@@ -244,7 +207,6 @@ public sealed class PublicAdminNewTopicValueTests
         Assert.True(right.Equals(left));
         Assert.Equal(left.GetHashCode(), right.GetHashCode());
 
-        // Null is a value of its own: not "", and not a missing key.
         NewTopic empty = new NewTopic("t", 1, (short)1) { Configs = Configs(("retention.ms", "")) };
         NewTopic absent = new NewTopic("t", 1, (short)1) { Configs = new Dictionary<string, string>() };
         Assert.False(left.Equals(empty));
@@ -258,11 +220,6 @@ public sealed class PublicAdminNewTopicValueTests
             left.ToString());
     }
 
-    /// <summary>
-    /// Java's exact <c>toString</c> (<c>NewTopic.java:149-157</c>): <c>default</c> for an
-    /// unset count, <c>-1</c> printed as itself, and the maps in <c>AbstractMap</c> /
-    /// <c>AbstractCollection</c> form — single-entry maps, so the order is fixed.
-    /// </summary>
     [Fact]
     public void ToString_IsJavasFormat()
     {
@@ -287,10 +244,6 @@ public sealed class PublicAdminNewTopicValueTests
             new NewTopic("t", Assignments()) { Configs = Configs() }.ToString());
     }
 
-    /// <summary>
-    /// The rendering does not follow the current culture: a culture whose negative sign
-    /// is not <c>'-'</c> still prints Java's <c>-1</c>, for the counts and the broker ids.
-    /// </summary>
     [Fact]
     public void ToString_IsCultureInvariant()
     {
@@ -315,10 +268,6 @@ public sealed class PublicAdminNewTopicValueTests
         }
     }
 
-    /// <summary>
-    /// The three overrides are declared on <see cref="NewTopic"/> itself — not inherited
-    /// from <see cref="object"/>, whose reference equality Java's type does not have.
-    /// </summary>
     [Fact]
     public void Overrides_AreDeclaredOnNewTopic()
     {

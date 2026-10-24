@@ -22,16 +22,15 @@ namespace Confluent.Kafka.Admin;
 /// <c>org.apache.kafka.clients.admin.SupportedVersionRange</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ Member names differ from <see cref="FinalizedVersionRange"/>'s — Java's asymmetry,
-/// preserved.
+/// The member names differ from <see cref="FinalizedVersionRange"/>'s, as Java's do.
 /// </remarks>
 public sealed class SupportedVersionRange
 {
-    /// <summary>Creates a supported range — Java's <c>:38</c>.</summary>
+    /// <summary>Creates a supported range — Java's constructor.</summary>
     /// <param name="minVersion">The minimum supported version.</param>
     /// <param name="maxVersion">The maximum supported version.</param>
     /// <exception cref="ArgumentException">
-    /// Either version is negative, or the maximum is below the minimum (<c>:39</c>).
+    /// Either version is negative, or the maximum is below the minimum.
     /// </exception>
     public SupportedVersionRange(short minVersion, short maxVersion)
     {
@@ -49,13 +48,13 @@ public sealed class SupportedVersionRange
         MaxVersion = maxVersion;
     }
 
-    /// <summary>The minimum version — Java's <c>minVersion()</c> (<c>:50</c>).</summary>
+    /// <summary>The minimum version — Java's <c>minVersion()</c>.</summary>
     public short MinVersion { get; }
 
-    /// <summary>The maximum version — Java's <c>maxVersion()</c> (<c>:54</c>).</summary>
+    /// <summary>The maximum version — Java's <c>maxVersion()</c>.</summary>
     public short MaxVersion { get; }
 
-    /// <summary>Value equality over both versions — Java's <c>equals</c> (<c>:59</c>).</summary>
+    /// <summary>Value equality over both versions — Java's <c>equals</c>.</summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same range.</returns>
     public override bool Equals(object? obj) =>
@@ -63,7 +62,7 @@ public sealed class SupportedVersionRange
         && MinVersion == other.MinVersion
         && MaxVersion == other.MaxVersion;
 
-    /// <summary>The hash of both versions — Java's <c>hashCode</c> (<c>:73</c>).</summary>
+    /// <summary>The hash of both versions — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -73,7 +72,7 @@ public sealed class SupportedVersionRange
         }
     }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:78</c>).</summary>
+    /// <summary>A diagnostic rendering matching Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(

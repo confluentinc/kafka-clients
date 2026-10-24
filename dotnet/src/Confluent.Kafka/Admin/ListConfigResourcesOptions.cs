@@ -12,25 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using Confluent.Kafka.Internal;
+
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// Options for <see cref="IAdmin.ListConfigResources"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ListConfigResourcesOptions</c>
-/// (<c>ListConfigResourcesOptions.java:22</c>).
+/// <c>org.apache.kafka.clients.admin.ListConfigResourcesOptions</c>.
 /// </summary>
 /// <remarks>
 /// <inheritdoc cref="CreateTopicsOptions" path="/remarks/para[1]"/>
-/// <para>
-/// Java's <c>ListConfigResourcesOptions</c> declares <b>no members of its own</b> — it is
-/// an empty subclass of <c>AbstractOptions</c>, so <see cref="TimeoutMs"/> is the whole
-/// surface, exactly as for <see cref="DeleteRecordsOptions"/>. Note the resource-type
-/// filter is <b>not</b> an option: Java passes it as the RPC's first parameter
-/// (<c>Admin.java:1802</c>), and so does <see cref="IAdmin.ListConfigResources"/>.
-/// </para>
 /// </remarks>
 public sealed class ListConfigResourcesOptions
 {
+    private int? _timeoutMs;
+
     /// <inheritdoc cref="CreateTopicsOptions.TimeoutMs"/>
-    public int? TimeoutMs { get; set; }
+    public int? TimeoutMs
+    {
+        get => _timeoutMs;
+        set
+        {
+            _timeoutMs = value;
+            Setters.Ran(nameof(TimeoutMs));
+        }
+    }
+
+    internal OptionSetters Setters { get; } = new OptionSetters();
 }

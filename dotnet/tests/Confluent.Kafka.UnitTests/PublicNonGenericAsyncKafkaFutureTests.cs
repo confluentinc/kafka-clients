@@ -26,9 +26,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Tests the public non-generic <see cref="AsyncKafkaFuture"/>, Java's <c>KafkaFuture&lt;Void&gt;</c>, over a
-/// <see cref="KafkaFutureImpl"/> or a <see cref="Task"/>: the default-value guard, the same-instance contract of
-/// <c>Get()</c>, identity equality, the erasure from <see cref="AsyncKafkaFuture{T}"/>, the static factories, and the
-/// member set.
+/// <see cref="KafkaFutureImpl"/>: the default-value guard, the same-instance contract of <c>Get()</c>, identity
+/// equality, the erasure from <see cref="AsyncKafkaFuture{T}"/>, the static factories, and the member set.
 /// </summary>
 public sealed class PublicNonGenericAsyncKafkaFutureTests
 {
@@ -50,36 +49,36 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
     [InlineData("completed")]
     [InlineData("faulted")]
     [InlineData("canceled")]
-    public void Get_ReturnsTheWrappedTask_TheSameInstanceOnEveryCall(string state)
+    public void Get_ReturnsTheSameTaskOnEveryCall(string state)
     {
-        Task task = TaskIn(state);
-        AsyncKafkaFuture future = new AsyncKafkaFuture(task);
+        KafkaFutureImpl<bool> impl = ImplIn(state);
+        AsyncKafkaFuture future = new AsyncKafkaFuture(impl);
 
         Task first = future.Get();
         Task second = future.Get();
 
-        Assert.Same(task, first);
+        Assert.Same(impl.GetAsync(), first);
         Assert.Same(first, second);
 
-        _ = task.Exception;
+        _ = first.Exception;
     }
 
     [Fact]
-    public void Equality_IsReferenceIdentityOfTheTask()
+    public void Equality_IsReferenceIdentityOfTheImpl()
     {
-        Task task = Task.CompletedTask;
-        AsyncKafkaFuture a = new AsyncKafkaFuture(task);
-        AsyncKafkaFuture sameTask = new AsyncKafkaFuture(task);
-        Assert.True(a.Equals(sameTask));
-        Assert.True(a == sameTask);
-        Assert.False(a != sameTask);
-        Assert.Equal(a.GetHashCode(), sameTask.GetHashCode());
+        KafkaFutureImpl<bool> impl = ImplIn("completed");
+        AsyncKafkaFuture a = new AsyncKafkaFuture(impl);
+        AsyncKafkaFuture sameImpl = new AsyncKafkaFuture(impl);
+        Assert.True(a.Equals(sameImpl));
+        Assert.True(a == sameImpl);
+        Assert.False(a != sameImpl);
+        Assert.Equal(a.GetHashCode(), sameImpl.GetHashCode());
 
-        Task firstTask = TaskIn("completed");
-        Task secondTask = TaskIn("completed");
-        Assert.NotSame(firstTask, secondTask);
-        AsyncKafkaFuture x = new AsyncKafkaFuture(firstTask);
-        AsyncKafkaFuture y = new AsyncKafkaFuture(secondTask);
+        KafkaFutureImpl<bool> firstImpl = ImplIn("completed");
+        KafkaFutureImpl<bool> secondImpl = ImplIn("completed");
+        Assert.NotSame(firstImpl, secondImpl);
+        AsyncKafkaFuture x = new AsyncKafkaFuture(firstImpl);
+        AsyncKafkaFuture y = new AsyncKafkaFuture(secondImpl);
         Assert.False(x.Equals(y));
         Assert.False(x == y);
         Assert.True(x != y);
@@ -96,37 +95,36 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         Assert.True(a != d1);
         Assert.False(d1 == a);
 
-        Task<bool> typedTask = Task.FromResult(true);
-        object boxedEqual = sameTask;
+        KafkaFutureImpl<bool> typedImpl = ImplIn("completed");
+        object boxedEqual = sameImpl;
         object boxedDifferent = y;
-        object rawTask = task;
-        object typedOverTheSameTask = new AsyncKafkaFuture<bool>(typedTask);
+        object rawImpl = impl;
+        object typedOverTheSameImpl = new AsyncKafkaFuture<bool>(typedImpl);
         Assert.True(a.Equals(boxedEqual));
         Assert.False(x.Equals(boxedDifferent));
-        Assert.False(a.Equals(rawTask));
-        Assert.True(new AsyncKafkaFuture(typedTask).Equals(typedOverTheSameTask));
+        Assert.False(a.Equals(rawImpl));
+        Assert.True(new AsyncKafkaFuture(typedImpl).Equals(typedOverTheSameImpl));
         Assert.False(a.Equals("not a future"));
         Assert.False(a.Equals(null));
     }
 
     [Fact]
-    public async Task Erasure_WrapsTheSameTask_AndCompletesExactlyWhenTheTypedFutureDoes()
+    public async Task Erasure_WrapsTheSameImpl_AndCompletesExactlyWhenTheTypedFutureDoes()
     {
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture<bool> typed = new AsyncKafkaFuture<bool>(completion.Task);
+        KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
+        AsyncKafkaFuture<bool> typed = new AsyncKafkaFuture<bool>(completion);
 
         AsyncKafkaFuture first = typed.Erase();
         AsyncKafkaFuture second = typed.Erase();
 
         Assert.Same(typed.Get(), first.Get());
         Assert.True(first == second);
-        Assert.True(first == new AsyncKafkaFuture(completion.Task));
+        Assert.True(first == new AsyncKafkaFuture(completion));
         Assert.Equal(typed.GetHashCode(), first.GetHashCode());
-        Assert.True(first != new AsyncKafkaFuture<bool>(Task.FromResult(true)).Erase());
+        Assert.True(first != new AsyncKafkaFuture<bool>(ImplIn("completed")).Erase());
 
         Assert.False(first.Get().IsCompleted);
-        completion.SetResult(true);
+        Assert.True(completion.Complete(true));
         await TestTimeout.Run(() => first.Get(), BlockingCall.Deadline);
         Assert.True(first.Get().IsCompleted);
         Assert.True(typed.Get().IsCompleted);
@@ -164,7 +162,6 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         {
             default(AsyncKafkaFuture),
             new AsyncKafkaFuture(new KafkaFutureImpl<object?>()),
-            new AsyncKafkaFuture(TaskIn("pending")),
         };
         foreach (AsyncKafkaFuture future in futures)
         {
@@ -176,20 +173,14 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
     [Theory]
     [InlineData("succeeded")]
     [InlineData("failed")]
-    public void OverATask_TheMembersThatBuildADependant_ThrowNotSupportedException_OnlyWhilePending(string outcome)
+    public void OnceDone_ThenApplyWhenCompleteAndAllOf_RunInsideTheCall(string outcome)
     {
         InvalidOperationException failure = new InvalidOperationException("the operation failed");
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture future = new AsyncKafkaFuture(completion.Task);
+        KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
+        AsyncKafkaFuture future = new AsyncKafkaFuture(completion);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
-        AssertNotSupported("ThenApply", () => future.ThenApply(() => 1));
-        AssertNotSupported("WhenComplete", () => future.WhenComplete(error => { }));
-        AssertNotSupported("AllOf", () => AsyncKafkaFuture.AllOf(future));
-        AssertNotSupported("AllOf", () => AsyncKafkaFuture.AllOf(AsyncKafkaFuture.CompletedFuture(1), future));
-
-        Assert.True(outcome == "succeeded" ? completion.TrySetResult(true) : completion.TrySetException(failure));
+        Assert.True(outcome == "succeeded" ? completion.Complete(true) : completion.CompleteWithError(failure));
         cancellation.Cancel();
         int caller = Environment.CurrentManagedThreadId;
         int appliedOn = 0;
@@ -212,9 +203,9 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         Assert.True(completed.IsDone);
         Assert.True(all.IsDone);
         Assert.Equal(caller, completedOn);
-        Assert.Same(completion.Task, future.Get(TimeSpan.Zero));
-        Assert.Same(completion.Task, future.Get(TimeSpan.FromSeconds(1)));
-        Assert.Same(completion.Task, future.Get(cancellation.Token));
+        Assert.Same(future.Get(), future.Get(TimeSpan.Zero));
+        Assert.Same(future.Get(), future.Get(TimeSpan.FromSeconds(1)));
+        Assert.Same(future.Get(), future.Get(cancellation.Token));
         if (outcome == "succeeded")
         {
             Assert.Equal(caller, appliedOn);
@@ -232,34 +223,32 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
             Assert.Same(failure, seenError);
             AssertFailsWith(failure, () => completed.GetNow());
             AssertFailsWith(failure, () => all.GetNow());
-            _ = completion.Task.Exception;
+            _ = future.Get().Exception;
         }
     }
 
     [Fact]
-    public async Task OverAPendingTask_TheTimedGet_AnswersFromTheTask()
+    public async Task OverAPendingImpl_TheTimedGet_AnswersFromTheTask()
     {
         InvalidOperationException failure = new InvalidOperationException("the operation failed");
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture future = new AsyncKafkaFuture(completion.Task);
+        KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
+        AsyncKafkaFuture future = new AsyncKafkaFuture(completion);
 
-        Assert.Same(completion.Task, future.Get(Timeout.InfiniteTimeSpan));
+        Assert.Same(future.Get(), future.Get(Timeout.InfiniteTimeSpan));
         await AssertTimesOut(future.Get(TimeSpan.Zero));
         await AssertTimesOut(future.Get(TimeSpan.FromMilliseconds(-5)));
         await AssertTimesOut(future.Get(TimeSpan.FromMilliseconds(50)));
 
         Task waiting = future.Get(BlockingCall.Deadline);
         Assert.False(waiting.IsCompleted);
-        Assert.True(completion.TrySetResult(true));
+        Assert.True(completion.Complete(true));
         await TestTimeout.Run(() => waiting, BlockingCall.Deadline);
         Assert.True(waiting.Status == TaskStatus.RanToCompletion);
 
-        TaskCompletionSource<bool> failing =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Task waitingForFailure = new AsyncKafkaFuture(failing.Task).Get(BlockingCall.Deadline);
+        KafkaFutureImpl<bool> failing = new KafkaFutureImpl<bool>();
+        Task waitingForFailure = new AsyncKafkaFuture(failing).Get(BlockingCall.Deadline);
         Assert.False(waitingForFailure.IsCompleted);
-        Assert.True(failing.TrySetException(failure));
+        Assert.True(failing.CompleteWithError(failure));
         InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
             () => TestTimeout.Run(() => waitingForFailure, BlockingCall.Deadline));
         Assert.Same(failure, thrown);
@@ -267,17 +256,16 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
     }
 
     [Fact]
-    public async Task OverAPendingTask_TheCancellableGet_AnswersFromTheTask()
+    public async Task OverAPendingImpl_TheCancellableGet_AnswersFromTheTask()
     {
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        AsyncKafkaFuture future = new AsyncKafkaFuture(completion.Task);
+        KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
+        AsyncKafkaFuture future = new AsyncKafkaFuture(completion);
         using CancellationTokenSource preCanceled = new CancellationTokenSource();
         preCanceled.Cancel();
         using CancellationTokenSource firing = new CancellationTokenSource();
         using CancellationTokenSource unfired = new CancellationTokenSource();
 
-        Assert.Same(completion.Task, future.Get(CancellationToken.None));
+        Assert.Same(future.Get(), future.Get(CancellationToken.None));
         Task canceledAtOnce = future.Get(preCanceled.Token);
         Assert.True(canceledAtOnce.IsCanceled);
         await AssertCanceledBy(preCanceled.Token, canceledAtOnce);
@@ -286,68 +274,13 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         Assert.False(canceledLater.IsCompleted);
         firing.Cancel();
         await AssertCanceledBy(firing.Token, canceledLater);
-        Assert.False(completion.Task.IsCompleted);
+        Assert.False(completion.IsDone);
 
         Task waiting = future.Get(unfired.Token);
         Assert.False(waiting.IsCompleted);
-        Assert.True(completion.TrySetResult(true));
+        Assert.True(completion.Complete(true));
         await TestTimeout.Run(() => waiting, BlockingCall.Deadline);
         Assert.True(waiting.Status == TaskStatus.RanToCompletion);
-    }
-
-    [Theory]
-    [InlineData("pending")]
-    [InlineData("completed")]
-    [InlineData("faulted")]
-    [InlineData("canceled")]
-    public void OverATask_StateReadsFollowIt_AndCancelChangesNothing(string state)
-    {
-        InvalidOperationException failure = new InvalidOperationException("the operation failed");
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        switch (state)
-        {
-            case "completed":
-                Assert.True(completion.TrySetResult(true));
-                break;
-            case "faulted":
-                Assert.True(completion.TrySetException(failure));
-                break;
-            case "canceled":
-                Assert.True(completion.TrySetCanceled());
-                break;
-        }
-
-        AsyncKafkaFuture future = new AsyncKafkaFuture(completion.Task);
-
-        Assert.False(future.Cancel(true));
-        Assert.Equal(state != "pending", future.IsDone);
-        Assert.False(future.IsCancelled);
-        Assert.Equal(state == "faulted" || state == "canceled", future.IsCompletedExceptionally);
-        Assert.Same(completion.Task, future.Get());
-        Assert.Same(completion.Task, future.ToCompletionStage());
-        switch (state)
-        {
-            case "faulted":
-                Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => future.GetNow()));
-                Assert.Equal(
-                    "KafkaFuture{value=null,exception=System.InvalidOperationException: the operation failed,done=true}",
-                    future.ToString());
-                break;
-            case "canceled":
-                TaskCanceledException canceled = Assert.Throws<TaskCanceledException>(() => future.GetNow());
-                Assert.Equal(
-                    "KafkaFuture{value=null,exception=System.Threading.Tasks.TaskCanceledException: "
-                        + canceled.Message + ",done=true}",
-                    future.ToString());
-                break;
-            default:
-                future.GetNow();
-                Assert.Equal("KafkaFuture{value=null,exception=null,done=false}", future.ToString());
-                break;
-        }
-
-        _ = completion.Task.Exception;
     }
 
     [Fact]
@@ -523,7 +456,7 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         ConstructorInfo[] constructors = type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.All(constructors, constructor => Assert.True(constructor.IsAssembly));
         Assert.Equal(
-            new[] { typeof(KafkaFutureImpl).ToString(), typeof(Task).ToString() },
+            new[] { typeof(KafkaFutureImpl).ToString() },
             constructors
                 .Select(constructor => Assert.Single(constructor.GetParameters()).ParameterType.ToString())
                 .OrderBy(name => name, StringComparer.Ordinal)
@@ -546,7 +479,7 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
             Assert.True(field.IsInitOnly);
         });
         Assert.Equal(
-            new[] { typeof(KafkaFutureImpl) + " _impl", typeof(Task) + " _task" },
+            new[] { typeof(KafkaFutureImpl) + " _impl" },
             fields.Select(field => field.FieldType + " " + field.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
     }
 
@@ -554,14 +487,6 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
     {
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => { _ = call(); });
         Assert.Equal(DefaultValueMessage, thrown.Message);
-    }
-
-    private static void AssertNotSupported(string member, Func<object?> call)
-    {
-        NotSupportedException thrown = Assert.Throws<NotSupportedException>(() => { _ = call(); });
-        Assert.Equal(
-            "AsyncKafkaFuture." + member + " is not supported on a pending future returned by an IAsyncAdmin result.",
-            thrown.Message);
     }
 
     private static void AssertFailsWith(InvalidOperationException failure, Action call)
@@ -596,28 +521,27 @@ public sealed class PublicNonGenericAsyncKafkaFutureTests
         Assert.Null(returned);
     }
 
-    private static Task TaskIn(string state)
+    private static KafkaFutureImpl<bool> ImplIn(string state)
     {
-        TaskCompletionSource<bool> completion =
-            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        KafkaFutureImpl<bool> completion = new KafkaFutureImpl<bool>();
         switch (state)
         {
             case "pending":
                 break;
             case "completed":
-                completion.SetResult(true);
+                Assert.True(completion.Complete(true));
                 break;
             case "faulted":
-                completion.SetException(new InvalidOperationException("the operation failed"));
+                Assert.True(completion.CompleteWithError(new InvalidOperationException("the operation failed")));
                 break;
             case "canceled":
-                completion.SetCanceled();
+                Assert.True(completion.Cancel(true));
                 break;
             default:
-                throw new ArgumentOutOfRangeException(nameof(state), state, "unknown task state");
+                throw new ArgumentOutOfRangeException(nameof(state), state, "unknown future state");
         }
 
-        return completion.Task;
+        return completion;
     }
 
     private static string Signature(MethodInfo method) =>

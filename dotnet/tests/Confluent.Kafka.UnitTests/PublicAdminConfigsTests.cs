@@ -24,9 +24,8 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public behaviour of M15/P3 Stage 2's two RPCs, driven end to end through
-/// <see cref="MockAdminClient"/> — the real marshalling, the real bridge, the real
-/// teardown, with no broker.
+/// <c>DescribeConfigs</c> and <c>IncrementalAlterConfigs</c> end to end against the mocks: an alter is visible to a
+/// later describe, a resource with no operations completes, and each resource fails on its own.
 /// </summary>
 public sealed class PublicAdminConfigsTests
 {
@@ -34,17 +33,12 @@ public sealed class PublicAdminConfigsTests
 
     private const string Topic = "public-cfg-topic";
 
-    /// <summary>Java's <c>Errors.UNSUPPORTED_VERSION</c> code, which the core mock's "Not implemented yet" carries.</summary>
     private const int UnsupportedVersionCode = 35;
 
-    /// <summary>
-    /// <c>describeConfigs</c> reports the configuration a topic was created with, keyed by
-    /// the resource.
-    /// </summary>
     [Fact]
     public async Task DescribeConfigs_ReportsATopicsConfiguration()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -64,21 +58,14 @@ public sealed class PublicAdminConfigsTests
         ConfigEntry entry = Assert.IsType<ConfigEntry>(config.Get("cleanup.policy"));
         Assert.Equal("compact", entry.Value);
 
-        // …and All() gathers the same value under the same key, which only holds because the
-        // aggregate is built with the bridge's own comparer.
         IReadOnlyDictionary<ConfigResource, Config> all = await TestTimeout.Run(() => result.All().Get(), s_deadline);
         Assert.Equal("compact", all[resource].Get("cleanup.policy")!.Value);
     }
 
-    /// <summary>
-    /// <c>incrementalAlterConfigs</c> applies a <see cref="AlterConfigOpType.Set"/>, and the
-    /// change is visible to a subsequent describe — the round trip through the mock's own
-    /// state.
-    /// </summary>
     [Fact]
     public async Task IncrementalAlterConfigs_SetIsVisibleToASubsequentDescribe()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -101,19 +88,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("1000", config.Get("retention.ms")!.Value);
     }
 
-    /// <summary>
-    /// A <see cref="AlterConfigOpType.Delete"/> — whose entry value is
-    /// <see langword="null"/> — removes the entry.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The null value is the request, not an omission; the submit path passes it to the
-    /// ABI as a NULL pointer. That the mock then deletes the key is the end-to-end
-    /// confirmation that no <c>?? string.Empty</c> intervened.
-    /// </remarks>
     [Fact]
     public async Task IncrementalAlterConfigs_DeleteWithANullValue_RemovesTheEntry()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -144,13 +122,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Null(config.Get("retention.ms"));
     }
 
-    /// <summary>
-    /// A failing resource faults only its own awaitable, with the mock's exact message.
-    /// </summary>
     [Fact]
     public async Task IncrementalAlterConfigs_AnUnknownTopic_FaultsOnlyItsOwnAwaitable()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -172,24 +147,14 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("No such topic as public-cfg-absent", failure.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>Stage 1's test debt, paid.</b> The Rust mock creates a client-metrics resource
-    /// only as a <em>side effect</em> of an <c>incrementalAlterConfigs</c> against a
-    /// <see cref="ConfigResourceType.ClientMetrics"/> resource, so until this stage a
-    /// client-metrics listing could only ever be exercised <b>empty</b>. Now it can be
-    /// seeded, and <see cref="IAdmin.ListConfigResources"/> filtered to
-    /// <see cref="ConfigResourceType.ClientMetrics"/> — the replacement Java's deprecated
-    /// <c>listClientMetricsResources</c> points callers at — must report it.
-    /// </summary>
     [Fact]
     public async Task ListConfigResources_ReportsASeededClientMetricsResource()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource subscription = new ConfigResource(ConfigResourceType.ClientMetrics, "sub-1");
 
-        // Empty before — the state Stage 1 was limited to asserting.
         Assert.Empty(await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline));
 
@@ -205,40 +170,19 @@ public sealed class PublicAdminConfigsTests
                 }).All().Get(),
             s_deadline);
 
-        // The listing now reports it…
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
             () => admin.ListConfigResources(new[] { ConfigResourceType.ClientMetrics }).All().Get(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));
 
-        // …and describing it returns the config the alter set.
         Config config = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { subscription }).Values[subscription].Get(), s_deadline);
         Assert.Equal("60000", config.Get("interval.ms")!.Value);
     }
 
-    /// <summary>
-    /// ⚠ <b>A resource that exists, mapped to an EMPTY operation collection, completes
-    /// SUCCESSFULLY</b> — Java's outcome, and now the <b>core's</b> answer.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// ⚠ <b>The success comes from the core, not from the binding</b> (M15/P13.2, finding
-    /// F1). The zero-op resource reaches the ABI as its sentinel row, the Rust mock applies
-    /// an empty operation list to the existing topic, and the real callback reports that
-    /// outcome — there is no local completion left for it to ride on. That the same shape
-    /// against an <em>absent</em> topic faults is asserted by
-    /// <see cref="IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne"/>,
-    /// which is what shows the success here is an answer rather than a default.
-    /// </para>
-    /// <para>
-    /// The mixed case is asserted alongside it so the zero-op key cannot be riding on a
-    /// blanket success: the sibling resource's operation is checked for its actual effect.
-    /// </para>
-    /// </remarks>
     [Fact]
     public async Task IncrementalAlterConfigs_AResourceWithNoOps_CompletesSuccessfully()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -256,31 +200,23 @@ public sealed class PublicAdminConfigsTests
                 [sibling] = new[] { new AlterConfigOp(new ConfigEntry("k", "v"), AlterConfigOpType.Set) },
             });
 
-        // The zero-op resource completes — it does not fault.
         await TestTimeout.Run(() => result.Values[noOps].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
-        // …and the sibling's operation really was applied, so the success above is not a
-        // blanket one that would also cover a broken row-flattening.
+        // The sibling's operation was applied, so the success above is not a blanket one.
         Config config = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { sibling }).Values[sibling].Get(), s_deadline);
         Assert.Equal("v", config.Get("k")!.Value);
 
-        // The zero-op resource was genuinely left untouched.
         Config untouched = await TestTimeout.Run(
             () => admin.DescribeConfigs(new[] { noOps }).Values[noOps].Get(), s_deadline);
         Assert.Empty(untouched.Entries);
     }
 
-    /// <summary>
-    /// A map consisting only of zero-op resources completes successfully — the degenerate
-    /// case, where the ABI request carries <b>one sentinel row per resource</b> and no
-    /// operation at all, and the core still answers each resource.
-    /// </summary>
     [Fact]
     public async Task IncrementalAlterConfigs_OnlyZeroOpResources_CompletesSuccessfully()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);
@@ -297,30 +233,15 @@ public sealed class PublicAdminConfigsTests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// ⚠ <b>A zero-op resource that does not exist FAULTS, exactly like the same resource
-    /// with an operation</b> — Java's outcome, because Java sends the resource and the broker
-    /// answers it (M15/P13.2, finding F1).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The A/B is the evidence: the <em>same absent resource</em> faults with the core's
-    /// own message whether its operation list is empty (A) or not (B). The Rust core checks
-    /// the resource before applying operations (<c>mock_admin_client.rs:627-630</c>), so
-    /// the zero-op case can only fault this way if the resource really reached it — as the
-    /// sentinel row. Before F1 the binding completed (A) locally and it <em>succeeded</em>;
-    /// this test is that pin, inverted.
-    /// </para>
-    /// </remarks>
     [Fact]
     public async Task IncrementalAlterConfigs_ZeroOpsAgainstAnAbsentResource_FaultsExactlyLikeANonEmptyOne()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource absent = new ConfigResource(ConfigResourceType.Topic, "public-cfg-never-created");
 
-        // (A) zero ops — sent as the sentinel row, so the core answers and rejects it.
+        // Zero operations are sent as an empty operation list, so the core answers and rejects them.
         AsyncAlterConfigsResult zeroOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
@@ -330,7 +251,7 @@ public sealed class PublicAdminConfigsTests
             () => Assert.ThrowsAsync<KafkaException>(() => zeroOps.Values[absent].Get()), s_deadline);
         Assert.Equal("No such topic as public-cfg-never-created", zeroOpsFailure.Message);
 
-        // (B) the SAME absent resource with one op — sent, so the core rejects it.
+        // The same absent resource with one operation is sent, so the core rejects it.
         AsyncAlterConfigsResult withOps = admin.IncrementalAlterConfigs(
             new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
             {
@@ -341,25 +262,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("No such topic as public-cfg-never-created", failure.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>A resource of an UNDEFINED type is answered as an <see cref="ConfigResourceType.Unknown"/>
-    /// one</b> — the key survives the round trip, and its awaitable faults with the core
-    /// mock's own answer for that type (M15/P13.2, finding G2-1).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The ABI folds the undefined id to <c>UNKNOWN</c> and names the resource that way on
-    /// the callback. Before G2-1 the key kept its raw value, so the callback's key matched
-    /// nothing and the awaitable faulted with the bridge's own "result contained no entry"
-    /// message instead of the core's answer. That message is what this test rules out: the
-    /// assertion is the Rust mock's <c>get_resource_description</c> <c>_ =&gt;</c> arm,
-    /// <c>unsupported_version("Not implemented yet")</c> (<c>mock_admin_client.rs:599</c>).
-    /// </para>
-    /// </remarks>
     [Fact]
     public async Task DescribeConfigs_OfAnUndefinedType_IsAnsweredAsUnknown()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ConfigResource undefined = new ConfigResource((ConfigResourceType)64, "x");
@@ -375,16 +281,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("Not implemented yet", failure.Message);
     }
 
-    /// <summary>
-    /// A negative <c>TimeoutMs</c> is not rejected on either RPC (M15/P13.5 X2): it is sent as
-    /// 0, Java's <c>calcDeadlineMs</c> clamp. The value actually sent is pinned at the submit
-    /// seam by <c>AdminConfigsSubmitArgumentTests.X2_DescribeConfigs_NegativeTimeout_IsSentAsZero</c>
-    /// and <c>X2_IncrementalAlterConfigs_NegativeTimeout_IsSentAsZero</c>.
-    /// </summary>
     [Fact]
     public void NegativeTimeout_IsNotRejectedSynchronously()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
 
@@ -396,13 +296,10 @@ public sealed class PublicAdminConfigsTests
                 new AlterConfigsOptions { TimeoutMs = -2 })));
     }
 
-    /// <summary>
-    /// Null and null-element inputs are rejected before any pin or native call (ffi §B5).
-    /// </summary>
     [Fact]
     public void NullInputs_AreRejectedBeforeTheNativeCall()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Throws<ArgumentNullException>(() => admin.DescribeConfigs(null!));
@@ -430,11 +327,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Throws<ArgumentNullException>(() => new AlterConfigOp(null!, AlterConfigOpType.Set));
     }
 
-    /// <summary>Both RPCs reject use after close.</summary>
     [Fact]
     public void AfterDispose_BothRpcsThrowObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.Topic, Topic);
@@ -444,14 +340,10 @@ public sealed class PublicAdminConfigsTests
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>()));
     }
 
-    /// <summary>
-    /// The TFM-matrix smoke leg for Stage 2: both RPCs load and round-trip on whichever
-    /// framework is executing (net462 via netstandard2.0, net8.0, net10.0).
-    /// </summary>
     [Fact]
     public async Task TfmSmoke_TheTwoNewRpcsWorkOnThisFramework()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         await TestTimeout.Run(
@@ -472,14 +364,10 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal("v", config.Get("k")!.Value);
     }
 
-    /// <summary>
-    /// Both RPCs work through the <see cref="IAsyncAdmin"/> interface, not only the concrete
-    /// mock.
-    /// </summary>
     [Fact]
     public async Task TheTwoRpcs_AreReachableThroughIAdmin()
     {
-        IAsyncAdmin admin = new AsyncMockAdminClient();
+        IAsyncAdmin admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(() => admin.CreateTopics(new[] { new NewTopic(Topic, 1, 1) }).All().Get(), s_deadline);

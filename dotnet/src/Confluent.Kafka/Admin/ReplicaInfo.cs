@@ -17,27 +17,12 @@ using System.Globalization;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// A description of one replica in a log directory — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.admin.ReplicaInfo</c> (<c>ReplicaInfo.java:22</c>).
+/// A description of one replica in a log directory — Java's
+/// <c>org.apache.kafka.clients.admin.ReplicaInfo</c>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>There is no <c>kafka_admin_ReplicaInfo_t</c> handle.</b> Replicas are read through
-/// six flattened indexed accessors on the parent <c>LogDirDescription_t</c>
-/// (<c>replica_topic</c> / <c>_partition</c> / <c>_size</c> / <c>_offset_lag</c> /
-/// <c>_is_future</c>, bounded by <c>replica_count</c>), so this is a plain managed value
-/// assembled from them.
-/// </para>
-/// <para>
-/// <b>Accessors are properties</b> (decision D18) — each is a pure managed field read.
-/// </para>
-/// </remarks>
 public sealed class ReplicaInfo
 {
-    /// <summary>
-    /// Initializes a replica description — Java's
-    /// <c>ReplicaInfo(long size, long offsetLag, boolean isFuture)</c> (<c>:28</c>).
-    /// </summary>
+    /// <summary>Initializes a replica description — Java's constructor.</summary>
     /// <param name="size">The total size of this replica's log segments, in bytes.</param>
     /// <param name="offsetLag">The replica's offset lag.</param>
     /// <param name="isFuture">Whether this is a future replica being moved in.</param>
@@ -49,25 +34,24 @@ public sealed class ReplicaInfo
     }
 
     /// <summary>
-    /// The total size of this replica's log segments in bytes — Java's <c>size()</c>
-    /// (<c>:38</c>). Does not include data in remote storage.
+    /// The total size of this replica's log segments in bytes — Java's <c>size()</c>. Does not
+    /// include data in remote storage.
     /// </summary>
     public long Size { get; }
 
     /// <summary>
     /// The lag of the log's end offset behind the partition's high watermark — or, for a
-    /// future replica, behind the current replica's end offset. Java's <c>offsetLag()</c>
-    /// (<c>:48</c>).
+    /// future replica, behind the current replica's end offset. Java's <c>offsetLag()</c>.
     /// </summary>
     public long OffsetLag { get; }
 
     /// <summary>
     /// Whether this replica was created by an <c>alterReplicaLogDirs</c> move and has not
-    /// yet replaced the current replica — Java's <c>isFuture()</c> (<c>:59</c>).
+    /// yet replaced the current replica — Java's <c>isFuture()</c>.
     /// </summary>
     public bool IsFuture { get; }
 
-    /// <summary>A diagnostic rendering matching Java's <c>toString()</c> (<c>:63</c>).</summary>
+    /// <summary>A diagnostic rendering — Java's <c>toString()</c>.</summary>
     /// <returns>The rendering.</returns>
     public override string ToString() =>
         string.Format(
@@ -75,6 +59,5 @@ public sealed class ReplicaInfo
             "ReplicaInfo(size={0}, offsetLag={1}, isFuture={2})",
             Size,
             OffsetLag,
-            // Java renders a boolean lowercase; bool.ToString() would give True/False.
             IsFuture ? "true" : "false");
 }

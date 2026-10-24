@@ -20,167 +20,85 @@ using Confluent.Kafka.Admin;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Reads one row of the <c>describeProducers</c> table — the nested <c>(i, j)</c> walk over
-/// that partition's active producers.
+/// Copies the partition producer state a describe-producers future delivers into a managed value.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The inner walk is bounded by <c>get_producer_count(i)</c>, never by the outer
-/// <c>count</c>.</b> The two are unrelated, and the inner count is <c>0</c> for a partition
-/// the call failed to describe (header,
-/// <c>kafka_admin_DescribeProducersResult_get_producer_count</c>).
-/// </para>
-/// <para>
-/// ⚠ Both optionals spell their discriminant as the <b>return value</b>
-/// (header, <c>kafka_admin_DescribeProducersResult_get_current_transaction_start_offset</c>,
-/// <c>kafka_admin_DescribeProducersResult_get_coordinator_epoch</c>) rather than as a sentinel,
-/// because every <c>long</c> is a legal start offset — so the out-param must not be read when the
-/// accessor returns false. The four plain scalars beside them <em>do</em> use <c>-1</c>, as Java's
-/// own <c>RecordBatch.NO_PRODUCER_ID</c> / <c>NO_SEQUENCE</c> / <c>NO_TIMESTAMP</c>; the two
-/// encodings must not be conflated.
-/// </para>
-/// <para>
-/// The accessor set is a <b>parameter</b> for the <see cref="UserScramCredentialMarshal"/>
-/// reason: both mocks mirror Java's own <c>UnsupportedOperationException</c> for this RPC, so
-/// the ABI offers no way to construct a populated result to drive the walk on.
-/// </para>
-/// </remarks>
 internal static class PartitionProducerStateMarshal
 {
-    /// <summary>The production <c>kafka_admin_DescribeProducersResult_*</c> set.</summary>
-    internal static readonly Accessors NativeAccessors = new Accessors(
-        NativeMethods.DescribeProducersResultGetProducerCount,
-        NativeMethods.DescribeProducersResultGetProducerId,
-        NativeMethods.DescribeProducersResultGetProducerEpoch,
-        NativeMethods.DescribeProducersResultGetLastSequence,
-        NativeMethods.DescribeProducersResultGetLastTimestamp,
-        NativeMethods.DescribeProducersResultGetCurrentTransactionStartOffset,
-        NativeMethods.DescribeProducersResultGetCoordinatorEpoch);
-
-    /// <summary>Reads row <paramref name="index"/> through the production accessors.</summary>
-    /// <param name="result">The owned result root.</param>
-    /// <param name="index">The row index, inside the result's own count.</param>
-    /// <returns>The copied-out partition state.</returns>
-    internal static DescribeProducersResult.PartitionProducerState ReadPartitionProducerState(
-        IntPtr result, int index) =>
-        ReadPartitionProducerState(result, index, NativeAccessors);
-
-    /// <summary>Reads row <paramref name="index"/> through an injected accessor set.</summary>
-    /// <param name="result">The result root, or a stand-in under an injected set.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="accessors">The seven accessors to decode it with.</param>
-    /// <returns>The copied-out partition state.</returns>
-    internal static DescribeProducersResult.PartitionProducerState ReadPartitionProducerState(
-        IntPtr result, int index, Accessors accessors)
+    internal static DescribeProducersResult.PartitionProducerState CopyOut(IntPtr state)
     {
-        // ⚠ Its own count — never the outer one. See the type remarks.
-        int producerCount = accessors.GetProducerCount(result, index);
-        List<ProducerState> producers = new List<ProducerState>(Math.Max(producerCount, 0));
-        for (int producer = 0; producer < producerCount; producer++)
+        if (state == IntPtr.Zero)
         {
-            // ⚠ Each out-param is only meaningful when its accessor returns true.
-            int? coordinatorEpoch =
-                accessors.TryGetCoordinatorEpoch(result, index, producer, out int epoch)
-                    ? epoch
-                    : (int?)null;
-            long? startOffset =
-                accessors.TryGetCurrentTransactionStartOffset(result, index, producer, out long offset)
-                    ? offset
-                    : (long?)null;
-
-            producers.Add(
-                new ProducerState(
-                    accessors.GetProducerId(result, index, producer),
-                    accessors.GetProducerEpoch(result, index, producer),
-                    accessors.GetLastSequence(result, index, producer),
-                    accessors.GetLastTimestamp(result, index, producer),
-                    coordinatorEpoch,
-                    startOffset));
+            throw new KafkaException("The admin result produced no partition producer state.");
         }
 
-        return new DescribeProducersResult.PartitionProducerState(producers);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr producers = NativeMethods.PartitionProducerStateActiveProducers(state, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            List<ProducerState> copied = new List<ProducerState>();
+            if (producers != IntPtr.Zero)
+            {
+                int count = NativeMethods.ListSize(producers, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                copied.Capacity = Math.Max(count, 0);
+                for (int i = 0; i < count; i++)
+                {
+                    IntPtr producer = NativeMethods.ListGet(producers, i, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    copied.Add(CopyOutProducer(producer));
+                }
+            }
+
+            return new DescribeProducersResult.PartitionProducerState(copied);
+        }
+        finally
+        {
+            DestroyList(producers);
+        }
     }
 
-    /// <summary>Reads an <c>int64_t</c> indexed by <c>(row, producer)</c>.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="producerIndex">The producer index within that row.</param>
-    /// <returns>The value, or <c>-1</c> when either index is out of range.</returns>
-    internal delegate long NestedInt64Accessor(IntPtr result, int index, int producerIndex);
-
-    /// <summary>Reads an <c>int32_t</c> indexed by <c>(row, producer)</c>.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="producerIndex">The producer index within that row.</param>
-    /// <returns>The value, or <c>-1</c> when either index is out of range.</returns>
-    internal delegate int NestedInt32Accessor(IntPtr result, int index, int producerIndex);
-
-    /// <summary>Java's <c>OptionalLong</c> at the ABI: false means empty, and leaves the out-param.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="producerIndex">The producer index within that row.</param>
-    /// <param name="value">The value, written only when this returns true.</param>
-    /// <returns>Whether the producer carries a value.</returns>
-    internal delegate bool NestedOptionalInt64Accessor(
-        IntPtr result, int index, int producerIndex, out long value);
-
-    /// <summary>Java's <c>OptionalInt</c> at the ABI: false means empty, and leaves the out-param.</summary>
-    /// <param name="result">The result root.</param>
-    /// <param name="index">The row index.</param>
-    /// <param name="producerIndex">The producer index within that row.</param>
-    /// <param name="value">The value, written only when this returns true.</param>
-    /// <returns>Whether the producer carries a value.</returns>
-    internal delegate bool NestedOptionalInt32Accessor(
-        IntPtr result, int index, int producerIndex, out int value);
-
-    /// <summary>The seven per-row accessors, as one set.</summary>
-    internal sealed class Accessors
+    internal static ProducerState CopyOutProducer(IntPtr producer)
     {
-        /// <summary>Creates a set, in the ABI's own accessor order.</summary>
-        /// <param name="getProducerCount">The row's producer count — the inner bound.</param>
-        /// <param name="getProducerId">One producer's id.</param>
-        /// <param name="getProducerEpoch">One producer's epoch.</param>
-        /// <param name="getLastSequence">One producer's last written sequence.</param>
-        /// <param name="getLastTimestamp">One producer's last written timestamp.</param>
-        /// <param name="tryGetCurrentTransactionStartOffset">One producer's optional start offset.</param>
-        /// <param name="tryGetCoordinatorEpoch">One producer's optional coordinator epoch.</param>
-        internal Accessors(
-            Func<IntPtr, int, int> getProducerCount,
-            NestedInt64Accessor getProducerId,
-            NestedInt32Accessor getProducerEpoch,
-            NestedInt32Accessor getLastSequence,
-            NestedInt64Accessor getLastTimestamp,
-            NestedOptionalInt64Accessor tryGetCurrentTransactionStartOffset,
-            NestedOptionalInt32Accessor tryGetCoordinatorEpoch)
+        if (producer == IntPtr.Zero)
         {
-            GetProducerCount = getProducerCount;
-            GetProducerId = getProducerId;
-            GetProducerEpoch = getProducerEpoch;
-            GetLastSequence = getLastSequence;
-            GetLastTimestamp = getLastTimestamp;
-            TryGetCurrentTransactionStartOffset = tryGetCurrentTransactionStartOffset;
-            TryGetCoordinatorEpoch = tryGetCoordinatorEpoch;
+            throw new KafkaException("The admin result produced no producer state.");
         }
 
-        /// <summary><c>get_producer_count(i)</c> — the inner walk's bound.</summary>
-        internal Func<IntPtr, int, int> GetProducerCount { get; }
+        IntPtr outErr = IntPtr.Zero;
+        long producerId = NativeMethods.ProducerStateProducerId(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int producerEpoch = NativeMethods.ProducerStateProducerEpoch(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int lastSequence = NativeMethods.ProducerStateLastSequence(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long lastTimestamp = NativeMethods.ProducerStateLastTimestamp(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        int coordinatorEpoch = NativeMethods.ProducerStateCoordinatorEpoch(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long currentTransactionStartOffset = NativeMethods.ProducerStateCurrentTransactionStartOffset(producer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new ProducerState(
+            producerId,
+            producerEpoch,
+            lastSequence,
+            lastTimestamp,
+            coordinatorEpoch < 0 ? null : coordinatorEpoch,
+            currentTransactionStartOffset < 0 ? null : currentTransactionStartOffset);
+    }
 
-        /// <summary><c>get_producer_id(i, j)</c>.</summary>
-        internal NestedInt64Accessor GetProducerId { get; }
+    private static void DestroyList(IntPtr list)
+    {
+        if (list == IntPtr.Zero)
+        {
+            return;
+        }
 
-        /// <summary><c>get_producer_epoch(i, j)</c>.</summary>
-        internal NestedInt32Accessor GetProducerEpoch { get; }
-
-        /// <summary><c>get_last_sequence(i, j)</c>.</summary>
-        internal NestedInt32Accessor GetLastSequence { get; }
-
-        /// <summary><c>get_last_timestamp(i, j)</c>.</summary>
-        internal NestedInt64Accessor GetLastTimestamp { get; }
-
-        /// <summary><c>get_current_transaction_start_offset(i, j, &amp;out)</c>.</summary>
-        internal NestedOptionalInt64Accessor TryGetCurrentTransactionStartOffset { get; }
-
-        /// <summary><c>get_coordinator_epoch(i, j, &amp;out)</c>.</summary>
-        internal NestedOptionalInt32Accessor TryGetCoordinatorEpoch { get; }
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ListDestroy(list, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(outErr);
+        }
     }
 }

@@ -12,42 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.RenewDelegationToken"/> — Java's
 /// <c>org.apache.kafka.clients.admin.RenewDelegationTokenResult</c>: one future over the
-/// token's new expiry timestamp (<c>:26</c>).
+/// token's new expiry timestamp.
 /// </summary>
-/// <remarks>
-/// ⚠ This type and <see cref="AsyncExpireDelegationTokenResult"/> sit on <b>byte-identical</b> ABI
-/// accessor sets, so a cross-wired reader would return a plausible answer for either. Their
-/// readers are pinned apart by a wiring guard in the unit tests.
-/// </remarks>
 /// <seealso cref="RenewDelegationTokenResult"/>
 public sealed class AsyncRenewDelegationTokenResult
 {
-    private readonly Task<long> _expiryTimestamp;
+    private readonly KafkaFutureImpl<long> _expiryTimestamp;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncRenewDelegationTokenResult(Task<long> expiryTimestamp)
+    private AsyncRenewDelegationTokenResult(KafkaFutureImpl<long> expiryTimestamp, SafeAdminResultHandle native)
     {
         _expiryTimestamp = expiryTimestamp;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncRenewDelegationTokenResult From(SingleAdminOperation<long> operation) =>
-        new AsyncRenewDelegationTokenResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
-    /// The new expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>
-    /// (<c>:35</c>).
+    /// The new expiry timestamp, in ms since the epoch — Java's <c>expiryTimestamp()</c>.
     /// </summary>
     /// <returns>A future over the timestamp.</returns>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<long> ExpiryTimestamp() => new AsyncKafkaFuture<long>(_expiryTimestamp);
+
+    internal static AsyncRenewDelegationTokenResult OfClient(
+        (KafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) native) =>
+        new AsyncRenewDelegationTokenResult(native.ExpiryTimestamp, native.Result);
 }

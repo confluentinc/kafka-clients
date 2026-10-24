@@ -17,62 +17,61 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Turns a <c>ConfigResource.Type.id()</c> code coming out of the ABI into a
-/// <see cref="ConfigResourceType"/>. <b>Route an ABI resource-type id through here rather
-/// than casting it at the reader</b> — see the remarks for what a cast gets wrong.
+/// Builds a <c>kafka_common_config_ConfigResource_t</c> from a <see cref="ConfigResource"/> and copies one
+/// out, mapping the type through Java's <c>ConfigResource.Type</c> id (<c>forId</c> degrades an id this
+/// client does not know to <see cref="ConfigResourceType.Unknown"/>).
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠ <b>Two different unknowns arrive on the same accessor, and merging them is the
-/// defect.</b> A <c>get_type(i)</c> of <c>-1</c> is the ABI's <em>index out of range</em>
-/// return — a value no Java <c>ConfigResource.Type</c> has. It must not become
-/// <see cref="ConfigResourceType.Unknown"/>, which is <c>0</c> and is a real Java member
-/// (<c>ConfigResource.java:41</c>): a genuine <c>UNKNOWN</c> resource and a read past the
-/// end would then be indistinguishable. A <b>non-negative</b> id with no member is the
-/// other case entirely — a type a newer broker knows and this client does not — and Java
-/// degrades it to <c>UNKNOWN</c> rather than failing
-/// (<c>ConfigResource.java:57-59</c>: <c>TYPES.getOrDefault(id, UNKNOWN)</c>).
-/// </para>
-/// <para>
-/// <b>Extracted rather than inlined at each reader (M15/P3 round 1, finding 69.2).</b>
-/// The mapping is reached from <c>listConfigResources</c>' element reader today and from
-/// the config RPCs' composite <em>key</em> readers next; open-coding it per reader is how
-/// one of them ends up a raw cast with no <c>forId</c> fallback, handing a caller an
-/// unnamed enum value where Java yields <c>UNKNOWN</c>. Same argument as
-/// <see cref="AuthorizedOperationsMarshal"/>: state the rule once so the sibling readers
-/// are consistent by construction rather than by imitation.
-/// </para>
-/// </remarks>
 internal static class ConfigResourceMarshal
 {
-    /// <summary>
-    /// Java's <c>ConfigResource.Type.forId</c>, plus a guard for the ABI's own
-    /// out-of-range return.
-    /// </summary>
-    /// <param name="id">
-    /// The <c>ConfigResource.Type.id()</c> code the ABI produced for one index.
-    /// </param>
-    /// <returns>
-    /// The matching member, or <see cref="ConfigResourceType.Unknown"/> for a
-    /// non-negative id this client has no member for.
-    /// </returns>
-    /// <exception cref="KafkaException">
-    /// <paramref name="id"/> is negative — the ABI's "index out of range" return, for an
-    /// index the caller took from the result's own <c>count</c>. Unreachable in practice;
-    /// throwing rather than inventing a type is the same defensive treatment
-    /// <see cref="KeyedResultMarshal.ReadStringKey"/> gives a missing key. The throw
-    /// propagates to the trampoline's no-throw boundary, which faults the awaiter.
-    /// </exception>
-    internal static ConfigResourceType TypeFromId(int id)
+    internal static ConfigResourceType TypeFromId(int id) =>
+        Enum.IsDefined(typeof(ConfigResourceType), id) ? (ConfigResourceType)id : ConfigResourceType.Unknown;
+
+    internal static IntPtr NativeType(ConfigResourceType type)
     {
-        if (id < 0)
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native = NativeMethods.ConfigResourceTypeForId((sbyte)TypeFromId((int)type), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    internal static IntPtr Build(ConfigResource resource)
+    {
+        IntPtr type = NativeType(resource.Type);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native;
+        using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(resource.Name))
         {
-            throw new KafkaException(
-                "The admin result produced no resource type for an index within its own count.");
+            native = NativeMethods.ConfigResourceNew(type, name.Pointer, ref outErr);
         }
 
-        return Enum.IsDefined(typeof(ConfigResourceType), id)
-            ? (ConfigResourceType)id
-            : ConfigResourceType.Unknown;
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    internal static ConfigResource CopyOut(IntPtr resource)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr type = NativeMethods.ConfigResourceGetType(resource, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        sbyte id = NativeMethods.ConfigResourceTypeId(type, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr name = NativeMethods.ConfigResourceName(resource, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new ConfigResource(TypeFromId(id), Utf8Marshal.PtrToString(name) ?? string.Empty);
+    }
+
+    internal static void Destroy(IntPtr resource)
+    {
+        if (resource == IntPtr.Zero)
+        {
+            return;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConfigResourceDestroy(resource, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(outErr);
+        }
     }
 }

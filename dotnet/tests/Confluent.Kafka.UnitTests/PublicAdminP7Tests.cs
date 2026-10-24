@@ -25,43 +25,27 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// M15/P7's eight RPCs end to end against <see cref="MockAdminClient"/>, plus the public value
-/// types' Java-mirroring preconditions and the secrets discipline.
+/// The delegation-token, feature and SCRAM RPCs end to end against the mocks, the public value types' Java
+/// preconditions, and that secrets never reach a string.
 /// </summary>
 /// <remarks>
-/// <para>
-/// ⚠⚠ <b>The two SCRAM RPCs have no happy path here, and that is faithful.</b> Java's own
-/// <c>MockAdminClient</c> throws <c>UnsupportedOperationException("Not implemented yet")</c>
-/// for both (<c>MockAdminClient.java:1254-1255,1259-1260</c>) and the core mirrors it, so their
-/// marshalling is asserted at the submit seam instead
-/// (<c>AdminP7SubmitArgumentTests</c>) and their readers over injected accessors
-/// (<c>AdminP7ResultMarshalTests</c>).
-/// </para>
-/// <para>
-/// ⚠⚠ <b>Known divergence — <c>describeUserScramCredentials</c> cannot report "not
-/// found".</b> Java distinguishes three <c>RESOURCE_NOT_FOUND</c> shapes; the ABI collapses
-/// all of them into <em>success with zero credentials</em> and exposes no discriminant, so the
-/// binding ships the ABI's behaviour. No managed heuristic is applied — "zero credentials
-/// implies not found" is wrong for a user who genuinely has none — and no test here asserts a
-/// Java behaviour the ABI cannot produce.
-/// </para>
+/// Java's mock refuses both SCRAM RPCs with "Not implemented yet", and so does the core's, so these tests assert that
+/// refusal; the C handles the SCRAM requests become are read back in <c>AdminP7SubmitArgumentTests</c>, and the SCRAM
+/// readers run over real C handles in <c>AdminP7ResultMarshalTests</c>.
 /// </remarks>
 public sealed class PublicAdminP7Tests
 {
+    private const int DelegationTokenNotFoundCode = 62;
+
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    // ------------------------------------------------------------------------------------
-    // Delegation tokens — create, describe, renew, expire.
-    // ------------------------------------------------------------------------------------
+    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
 
-    /// <summary>
-    /// A created token carries its metadata and a non-empty MAC, and the owner defaults to the
-    /// sole renewer when none is given.
-    /// </summary>
     [Fact]
     public async Task CreateDelegationToken_ReturnsATokenWithItsMetadata()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await admin.CreateDelegationToken(
@@ -82,11 +66,10 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(-1L, token.TokenInfo.ExpiryTimestamp);
     }
 
-    /// <summary>A describe with no owners filter returns every token the mock minted.</summary>
     [Fact]
     public async Task DescribeDelegationToken_ReturnsEveryTokenWhenUnfiltered()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken first = await Create(admin, "alice");
@@ -100,14 +83,10 @@ public sealed class PublicAdminP7Tests
             described.Select(token => token.TokenInfo.TokenId).OrderBy(id => id, StringComparer.Ordinal));
     }
 
-    /// <summary>
-    /// Renewing and expiring a token by its MAC returns the new expiry; the MAC round-trips
-    /// through both calls, which is what a truncating read would break.
-    /// </summary>
     [Fact]
     public async Task RenewAndExpire_MatchTheTokenByItsMac()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await Create(admin, "alice");
@@ -120,33 +99,65 @@ public sealed class PublicAdminP7Tests
             token.Hmac, new ExpireDelegationTokenOptions { ExpiryTimePeriodMs = 0L }).ExpiryTimestamp().Get();
         Assert.Equal(0L, expired);
 
-        // Expired, so it is gone from the describe — the MAC matched both calls.
         Assert.Empty(await admin.DescribeDelegationToken().DelegationTokens().Get());
     }
 
-    /// <summary>An unknown MAC faults the returned task rather than throwing from the call.</summary>
     [Fact]
     public async Task RenewDelegationToken_UnknownMacFaultsTheTask()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await Assert.ThrowsAsync<KafkaException>(
             () => admin.RenewDelegationToken(new byte[] { 0xDE, 0x00, 0xAD }).ExpiryTimestamp().Get());
     }
 
-    // ------------------------------------------------------------------------------------
-    // Features.
-    // ------------------------------------------------------------------------------------
+    [Fact]
+    public async Task RenewAndExpire_ANullMac_FailsTheFutureOnBothMocks()
+    {
+        MockAdminClient sync = MockAdminClient.Create().Build();
+        using IDisposable syncDisposal = TestTimeout.Disposal(sync);
+        AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
+        using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-    /// <summary>
-    /// <c>describeFeatures</c> returns both tables and the epoch, and the result is the same
-    /// snapshot on every accessor — the whole walk plus the destroy runs here.
-    /// </summary>
+        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(Assert.Throws<KafkaException>(() => sync.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(
+            await Assert.ThrowsAsync<KafkaException>(() => async.RenewDelegationToken(null!).ExpiryTimestamp().Get()));
+        AssertTokenNotFound(
+            await Assert.ThrowsAsync<KafkaException>(() => async.ExpireDelegationToken(null!).ExpiryTimestamp().Get()));
+    }
+
+    [Fact]
+    public async Task RenewAndExpire_ANullMac_ThrowsOnTheRealClients()
+    {
+        KafkaAdminClient sync = new KafkaAdminClient(s_unreachable);
+        try
+        {
+            Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.RenewDelegationToken(null!)).ParamName);
+            Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => sync.ExpireDelegationToken(null!)).ParamName);
+        }
+        finally
+        {
+            TestTimeout.Dispose(sync);
+        }
+
+        AsyncKafkaAdminClient async = new AsyncKafkaAdminClient(s_unreachable);
+        try
+        {
+            Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => async.RenewDelegationToken(null!)).ParamName);
+            Assert.Equal("hmac", Assert.Throws<ArgumentNullException>(() => async.ExpireDelegationToken(null!)).ParamName);
+        }
+        finally
+        {
+            await TestTimeout.DisposeAsync(async);
+        }
+    }
+
     [Fact]
     public async Task DescribeFeatures_ReturnsBothTablesAndTheEpoch()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         FeatureMetadata metadata = await admin.DescribeFeatures().FeatureMetadata().Get();
@@ -156,25 +167,17 @@ public sealed class PublicAdminP7Tests
         Assert.NotNull(metadata.FinalizedFeaturesEpoch);
     }
 
-    /// <summary>
-    /// A <c>describeFeatures</c> targeted at a node id still completes — the discriminant is
-    /// honoured rather than rejected.
-    /// </summary>
     [Fact]
     public async Task DescribeFeatures_AcceptsANodeId() =>
         Assert.NotNull(
-            await new AsyncMockAdminClient()
+            await AsyncMockAdminClient.Create().Build()
                 .DescribeFeatures(new DescribeFeaturesOptions { NodeId = 0 })
                 .FeatureMetadata().Get());
 
-    /// <summary>
-    /// <c>updateFeatures</c> rejects an update the mock has no bounds for, and the rejection
-    /// reaches <b>every</b> requested feature's task — the keyed-void completion.
-    /// </summary>
     [Fact]
     public async Task UpdateFeatures_SurfacesTheRejectionOnEveryKey()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
@@ -195,17 +198,10 @@ public sealed class PublicAdminP7Tests
         }
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The mock ACCEPTS an empty map</b> (M15/P13.5 G6-1), as Java's does:
-    /// <c>MockAdminClient.updateFeatures</c> validates nothing and returns an empty result
-    /// (<c>MockAdminClient.java:1286-1300</c>), and the mock's core entry point never calls
-    /// back for it — so zero awaitables, and an <c>All()</c> that reports success. The real
-    /// client's rejection is <see cref="G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap"/>.
-    /// </summary>
     [Fact]
     public async Task G6_1_UpdateFeatures_MockAcceptsAnEmptyMap()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result =
@@ -215,14 +211,6 @@ public sealed class PublicAdminP7Tests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The real client REJECTS an empty map, with Java's own exception kind and
-    /// message</b> (<c>KafkaAdminClient.java:4590-4592</c>), before anything is enqueued
-    /// (M15/P13.5 G6-1 keeps it). The binding's guard is what makes it an
-    /// <see cref="ArgumentException"/> rather than the core's <see cref="KafkaException"/>
-    /// refusal of the same input (M15/P13.3 F6). No broker is needed: the guard runs before the
-    /// submit, and the client does not connect eagerly.
-    /// </summary>
     [Fact]
     public void G6_1_UpdateFeatures_RealClientRejectsAnEmptyMap()
     {
@@ -233,21 +221,13 @@ public sealed class PublicAdminP7Tests
         ArgumentException thrown = Assert.Throws<ArgumentException>(
             () => admin.UpdateFeatures(new Dictionary<string, FeatureUpdate>(StringComparer.Ordinal)));
 
-        Assert.Equal("featureUpdates", thrown.ParamName);
-        Assert.StartsWith(
-            "Feature updates can not be null or empty.", thrown.Message, StringComparison.Ordinal);
+        Assert.Equal("Feature updates can not be null or empty.", thrown.Message);
     }
 
-    /// <summary>
-    /// ⚠ <b>A null feature name gets Java's blank-name message</b> (M15/P13.5 G6-9): Java has
-    /// no separate null check, and <c>Utils.isBlank(null)</c> is true
-    /// (<c>KafkaAdminClient.java:4597-4599</c>). A real dictionary cannot hold a null key, so
-    /// the map here is a hostile <see cref="IReadOnlyDictionary{TKey, TValue}"/> that yields one.
-    /// </summary>
     [Fact]
     public void G6_9_UpdateFeatures_ANullName_GetsTheBlankNameMessage()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentException thrown = Assert.Throws<ArgumentException>(
@@ -260,20 +240,6 @@ public sealed class PublicAdminP7Tests
         Assert.StartsWith("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// ⚠⚠ A <b>blank</b> feature name is rejected by the real client with Java's own message
-    /// and exception kind (<c>Utils.isBlank</c>, <c>KafkaAdminClient.java:4597-4599</c>) —
-    /// including the whitespace-only forms, which neither the binding nor the core rejected
-    /// before and which therefore reached the broker as a request Java refuses to send. No
-    /// broker is needed: the guard runs before the submit, and the client does not connect
-    /// eagerly. The mock accepts these names (G6-1):
-    /// <see cref="G6_1_UpdateFeatures_MockAcceptsABlankFeatureName"/>.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The control character <c>U+0001</c> is in the theory because Java's <c>trim</c>
-    /// strips every char <c>&lt;= ' '</c> while <see cref="string.IsNullOrWhiteSpace"/> does
-    /// not — the one input that tells the two implementations apart.
-    /// </remarks>
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -295,14 +261,10 @@ public sealed class PublicAdminP7Tests
         Assert.Contains("Provided feature can not be empty.", thrown.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The guard is on <b>blankness</b>, not on the presence of whitespace — a name with an
-    /// interior space is a legal request and must reach the submit.
-    /// </summary>
     [Fact]
     public void UpdateFeatures_AcceptsANameWithInteriorWhitespace()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
@@ -314,15 +276,6 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(new[] { "a b" }, result.Values.Keys);
     }
 
-    /// <summary>
-    /// G6-1: <b>the mock ACCEPTS a blank feature name</b>, as Java's mock does —
-    /// <c>MockAdminClient.updateFeatures</c> checks no names (<c>MockAdminClient.java:1286-1300</c>)
-    /// — so the name is sent and the call settles through its own awaitable. Deleting an
-    /// unseeded feature (level 0, a downgrade type) passes the mock's validation, so the
-    /// awaitable completes. The real client's rejection is
-    /// <see cref="UpdateFeatures_RejectsABlankFeatureName"/>.
-    /// </summary>
-    /// <param name="feature">A name the real client calls blank.</param>
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -330,7 +283,7 @@ public sealed class PublicAdminP7Tests
     [InlineData("\u0001")]
     public async Task G6_1_UpdateFeatures_MockAcceptsABlankFeatureName(string feature)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
@@ -343,24 +296,10 @@ public sealed class PublicAdminP7Tests
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>The one mock input that makes <c>updateFeatures</c> SUCCEED, and therefore the
-    /// only test that reaches its per-key walk at all.</b> Every failing update takes the
-    /// whole-call-error branch, where the key reader never runs.
-    /// </summary>
-    /// <remarks>
-    /// Deleting an unseeded feature — level <c>0</c> with a downgrade type — passes the mock's
-    /// validation with <c>cur = min = max = 0</c>, so the ABI hands back a populated result and
-    /// the walk resolves each key by name. That makes this the guard against a **mis-wired**
-    /// key reader too: a reader pointed at a sibling result resolves keys the request never
-    /// asked for, leaving the real ones to <c>FailUncompleted</c> — so the awaits below fault.
-    /// Measured: it is RED against a reader that throws, where
-    /// <see cref="UpdateFeatures_SurfacesTheRejectionOnEveryKey"/> stays green.
-    /// </remarks>
     [Fact]
     public async Task UpdateFeatures_WalksEveryKey_OnTheSuccessPath()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
@@ -374,8 +313,8 @@ public sealed class PublicAdminP7Tests
             new[] { "group.version", "metadata.version" },
             result.Values.Keys.OrderBy(key => key, StringComparer.Ordinal));
 
-        // A null per-key error IS the success value for a KafkaFuture<Void> result.
-        // (Status, not IsCompletedSuccessfully — the latter post-dates the netstandard2.0 floor.)
+        // A null per-key error is the success of a KafkaFuture<Void> result. Status, as IsCompletedSuccessfully post-dates
+        // netstandard2.0.
         await result.All().Get();
         foreach (AsyncKafkaFuture value in result.Values.Values)
         {
@@ -383,19 +322,10 @@ public sealed class PublicAdminP7Tests
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // SCRAM — Java's own "Not implemented yet" (T-N10).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// Both SCRAM RPCs fault with the <b>exact</b> message Java's mock throws. The message is
-    /// asserted because the code alone does not distinguish it from any other unsupported
-    /// operation.
-    /// </summary>
     [Fact]
     public async Task DescribeUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
@@ -404,15 +334,10 @@ public sealed class PublicAdminP7Tests
         Assert.Equal("Not implemented yet", error.Message);
     }
 
-    /// <summary>
-    /// ⚠ A repeated user is <b>not</b> rejected (M15/P13.2 G4-2): the call returns
-    /// synchronously, as Java's does, and the mock answers it with its own message — the
-    /// same as for a single user.
-    /// </summary>
     [Fact]
     public async Task DescribeUserScramCredentials_ARepeatedUser_IsSent_AndFaultsWithJavasOwnMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeUserScramCredentialsResult result =
@@ -423,11 +348,10 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(35, error.Code);
     }
 
-    /// <summary>The alter half, same message.</summary>
     [Fact]
     public async Task AlterUserScramCredentials_FaultsWithJavasOwnMessage()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         KafkaException error = await Assert.ThrowsAsync<KafkaException>(
@@ -437,14 +361,10 @@ public sealed class PublicAdminP7Tests
         Assert.Equal("Not implemented yet", error.Message);
     }
 
-    /// <summary>
-    /// The three <c>describeUserScramCredentials</c> accessors are derived from one snapshot,
-    /// so a failure reaches all three — <c>Description</c> included.
-    /// </summary>
     [Fact]
     public async Task DescribeUserScramCredentials_FailureReachesEveryAccessor()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
@@ -454,116 +374,23 @@ public sealed class PublicAdminP7Tests
         await Assert.ThrowsAsync<KafkaException>(() => result.Description("alice").Get());
     }
 
-    // ------------------------------------------------------------------------------------
-    // The three views are independent of one another (M15/P10).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>THE test for the three-view shape.</b> <c>all()</c> faulting is scoped to
-    /// <see cref="DescribeUserScramCredentialsResult.All"/> — it does <b>not</b> reach
-    /// <see cref="DescribeUserScramCredentialsResult.Users"/>, which Java answers from the
-    /// response regardless (<c>:92-104</c>).
-    /// </summary>
-    /// <remarks>
-    /// The code <b>and</b> the message are asserted: the code alone does not distinguish this
-    /// from any other fault reaching the same accessor.
-    /// </remarks>
-    [Fact]
-    public async Task DescribeUserScramCredentials_AllFaulting_DoesNotFaultUsers()
-    {
-        AsyncDescribeUserScramCredentialsResult result = ResultOver(
-            allError: new KafkaException(29, "cluster authorization failed", isRetriable: false),
-            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
-            users: new[] { "alice", "bob" });
-
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
-        Assert.Equal(29, error.Code);
-        Assert.Equal("cluster authorization failed", error.Message);
-
-        Assert.Equal(new[] { "alice", "bob" }, await result.Users().Get());
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>The D44-closing assertion.</b> A <c>RESOURCE_NOT_FOUND</c> user is a key in
-    /// <see cref="DescribeUserScramCredentialsResult.All"/> with <b>zero</b> credentials —
-    /// Java's map is built from every row (<c>:72-74</c>) — yet is <b>absent</b> from
-    /// <see cref="DescribeUserScramCredentialsResult.Users"/>, which Java filters
-    /// (<c>:98-100</c>). Before M15/P10 the binding could not tell the two views apart.
-    /// </summary>
-    [Fact]
-    public async Task DescribeUserScramCredentials_ResourceNotFoundUser_IsInAllButNotUsers()
-    {
-        UserScramCredentialsDescription notFound =
-            new UserScramCredentialsDescription("ghost", Array.Empty<ScramCredentialInfo>());
-        UserScramCredentialsDescription alice = new UserScramCredentialsDescription(
-            "alice", new[] { new ScramCredentialInfo(ScramMechanism.ScramSha256, 4096) });
-
-        AsyncDescribeUserScramCredentialsResult result = ResultOver(
-            allError: null,
-            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal)
-            {
-                ["alice"] = alice,
-                ["ghost"] = notFound,
-            },
-            users: new[] { "alice" });
-
-        IReadOnlyDictionary<string, UserScramCredentialsDescription> all = await result.All().Get();
-        Assert.Equal(new[] { "alice", "ghost" }, all.Keys.OrderBy(name => name, StringComparer.Ordinal));
-        Assert.Empty(all["ghost"].CredentialInfos);
-
-        Assert.Equal(new[] { "alice" }, await result.Users().Get());
-    }
-
-    /// <summary>
-    /// The <see cref="ArgumentNullException"/> guard fires <b>before</b> the views are
-    /// awaited, so a null user is rejected even on a result that would fault.
-    /// </summary>
     [Fact]
     public void DescribeUserScramCredentials_NullUser_ThrowsSynchronously()
     {
-        AsyncDescribeUserScramCredentialsResult result = ResultOver(
-            allError: null,
-            all: new Dictionary<string, UserScramCredentialsDescription>(StringComparer.Ordinal),
-            users: Array.Empty<string>());
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
         ArgumentNullException nullUser =
             Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
         Assert.Equal("userName", nullUser.ParamName);
     }
 
-    /// <summary>
-    /// Builds a result over the copied-out views the completion callback would have produced.
-    /// </summary>
-    /// <remarks>
-    /// ⚠ The retained root is the <b>invalid</b> (zero) handle, which <c>SafeHandle</c> never
-    /// releases — sound because no caller here reaches <c>Description</c>, whose P/Invoke is
-    /// the only member that touches the root. A populated root cannot be built in a unit
-    /// test: the ABI exports no constructor for one and the Rust mock faults this RPC.
-    /// </remarks>
-    private static AsyncDescribeUserScramCredentialsResult ResultOver(
-        KafkaException? allError,
-        IReadOnlyDictionary<string, UserScramCredentialsDescription> all,
-        IReadOnlyList<string> users) =>
-        new AsyncDescribeUserScramCredentialsResult(
-            Task.FromResult(new Internal.DescribeUserScramCredentialsViews(
-                allError,
-                all,
-                users,
-                Internal.Interop.SafeDescribeUserScramCredentialsResultHandle.Adopt(IntPtr.Zero))));
-
-    // ------------------------------------------------------------------------------------
-    // Secrets never surface (T-N4).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>A MAC never appears in <see cref="DelegationToken.ToString"/></b> — it is a
-    /// bearer credential, and a token logged at debug level would hand it to anyone reading the
-    /// log.
-    /// </summary>
     [Fact]
     public async Task DelegationTokenToString_MasksTheMac()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         DelegationToken token = await Create(admin, "alice");
@@ -575,11 +402,6 @@ public sealed class PublicAdminP7Tests
         Assert.Contains("[*******]", text, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// ⚠⚠ <b>A SCRAM password never reaches a string.</b> Asserted over every string the
-    /// upsertion can produce, and over the precondition messages of the guards that reject a
-    /// bad upsertion — a message that echoed its argument would leak the password into a log.
-    /// </summary>
     [Fact]
     public void ScramSecrets_NeverReachAString()
     {
@@ -601,14 +423,6 @@ public sealed class PublicAdminP7Tests
         Assert.DoesNotContain(Password, thrown.Message, StringComparison.Ordinal);
     }
 
-    // ------------------------------------------------------------------------------------
-    // Constructor preconditions, with Java's exact messages (T-N7).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// <see cref="FinalizedVersionRange"/> mirrors Java's bounds check <b>and</b> its message
-    /// (<c>FinalizedVersionRange.java:39</c> / <c>:42-44</c>).
-    /// </summary>
     [Theory]
     [InlineData((short)-1, (short)1)]
     [InlineData((short)1, (short)-1)]
@@ -625,10 +439,6 @@ public sealed class PublicAdminP7Tests
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// <see cref="SupportedVersionRange"/> mirrors Java's own — note the different wording and
-    /// the trailing period (<c>SupportedVersionRange.java:39</c> / <c>:42</c>).
-    /// </summary>
     [Theory]
     [InlineData((short)-1, (short)1)]
     [InlineData((short)3, (short)2)]
@@ -643,7 +453,6 @@ public sealed class PublicAdminP7Tests
             StringComparison.Ordinal);
     }
 
-    /// <summary>An equal-bounds range is legal on both types — the boundary Java allows.</summary>
     [Fact]
     public void EqualBounds_AreAccepted()
     {
@@ -651,11 +460,6 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(0, new SupportedVersionRange(0, 0).MaxVersion);
     }
 
-    /// <summary>
-    /// <see cref="FeatureUpdate"/> mirrors Java's two throws
-    /// (<c>FeatureUpdate.java:69</c> and <c>:74</c>): a downgrade needs a downgrade type, and no level may
-    /// be negative.
-    /// </summary>
     [Fact]
     public void FeatureUpdate_RejectsADowngradeWithoutADowngradeType()
     {
@@ -669,7 +473,6 @@ public sealed class PublicAdminP7Tests
             StringComparison.Ordinal);
     }
 
-    /// <summary>The negative-level throw, and its exact message.</summary>
     [Fact]
     public void FeatureUpdate_RejectsANegativeLevel()
     {
@@ -679,19 +482,10 @@ public sealed class PublicAdminP7Tests
         Assert.Contains("Cannot specify a negative version level.", thrown.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>Deleting a feature — level <c>0</c> with a downgrade type — is legal.</summary>
     [Fact]
     public void FeatureUpdate_AcceptsADeletion() =>
         Assert.Equal(0, new FeatureUpdate(0, FeatureUpdate.UpgradeType.SafeDowngrade).MaxVersionLevel);
 
-    /// <summary>
-    /// G6-4: <see cref="FeatureUpdate.ToString"/> prints Java's constant name, as Java's
-    /// <c>String.format("…upgradeType:%s}", upgradeType)</c> does
-    /// (<c>FeatureUpdate.java:108-110</c>, constants at <c>:28-32</c>), not the C# member name.
-    /// An undefined value — the constructor stores what it is given — falls back to its number.
-    /// </summary>
-    /// <param name="type">The upgrade type.</param>
-    /// <param name="expected">Java's rendering.</param>
     [Theory]
     [InlineData(FeatureUpdate.UpgradeType.Unknown, "FeatureUpdate{maxVersionLevel:1, upgradeType:UNKNOWN}")]
     [InlineData(FeatureUpdate.UpgradeType.Upgrade, "FeatureUpdate{maxVersionLevel:1, upgradeType:UPGRADE}")]
@@ -701,10 +495,6 @@ public sealed class PublicAdminP7Tests
     public void G6_4_FeatureUpdate_ToString_PrintsJavasConstantName(FeatureUpdate.UpgradeType type, string expected) =>
         Assert.Equal(expected, new FeatureUpdate(1, type).ToString());
 
-    /// <summary>
-    /// <see cref="KafkaPrincipal"/> mirrors Java's two null guards
-    /// (<c>KafkaPrincipal.java:52-57</c>).
-    /// </summary>
     [Fact]
     public void KafkaPrincipal_RejectsANullTypeOrName()
     {
@@ -719,11 +509,6 @@ public sealed class PublicAdminP7Tests
             StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Principal equality is over <c>(type, name)</c> only — Java excludes
-    /// <c>tokenAuthenticated</c> from both <c>equals</c> and <c>hashCode</c>
-    /// (<c>KafkaPrincipal.java:70-85</c>).
-    /// </summary>
     [Fact]
     public void KafkaPrincipal_EqualityIgnoresTokenAuthentication()
     {
@@ -736,10 +521,6 @@ public sealed class PublicAdminP7Tests
         Assert.Equal("User:alice", plain.ToString());
     }
 
-    /// <summary>
-    /// A mechanism name round-trips through both directions, and an unknown name falls back to
-    /// <see cref="ScramMechanism.Unknown"/> rather than throwing.
-    /// </summary>
     [Fact]
     public void ScramMechanism_RoundTripsItsName()
     {
@@ -750,6 +531,12 @@ public sealed class PublicAdminP7Tests
         Assert.Equal(ScramMechanism.Unknown, ScramMechanisms.FromType(99));
     }
 
+    private static void AssertTokenNotFound(KafkaException failure)
+    {
+        Assert.Equal(DelegationTokenNotFoundCode, failure.Code);
+        Assert.Equal(string.Empty, failure.Message);
+    }
+
     private static Task<DelegationToken> Create(AsyncMockAdminClient admin, string renewer) =>
         admin.CreateDelegationToken(
             new CreateDelegationTokenOptions
@@ -758,13 +545,9 @@ public sealed class PublicAdminP7Tests
             }).DelegationToken().Get();
 
     /// <summary>
-    /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary
-    /// cannot — a null key — so the guard against it is reachable from a test.
+    /// A <see cref="IReadOnlyDictionary{TKey, TValue}"/> that can yield what a real dictionary cannot, a null key, so the
+    /// guard against it is reachable from a test.
     /// </summary>
-    /// <remarks>
-    /// Only <see cref="Count"/> and enumeration are exercised by production; the rest of the
-    /// interface is present because the interface requires it, and says so if called.
-    /// </remarks>
     private sealed class FeatureUpdateEntries : IReadOnlyDictionary<string, FeatureUpdate>
     {
         private readonly KeyValuePair<string, FeatureUpdate>[] _entries;

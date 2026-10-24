@@ -19,205 +19,214 @@ using System.Runtime.InteropServices;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies a borrowed <c>kafka_common_security_token_delegation_DelegationToken_t</c> — and the
-/// <c>TokenInformation_t</c> / <c>KafkaPrincipal_t</c> tree under it — out into the owned
-/// managed shape.
+/// Builds the principal handles the delegation-token options take, passes a MAC to the core, and copies the
+/// tokens the delegation-token futures deliver into managed values.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Every pointer in that tree is <c>const</c>, so it is <b>borrowed</b> and dies with the
-/// <c>*Result_t</c> root: nothing here is destroyed, and everything is copied out before the
-/// trampoline's <c>finally</c> destroys that root (ffi §B2 Category 4).
-/// </para>
-/// <para>
-/// ⚠⚠ <b>The MAC is length-delimited, not NUL-terminated</b>
-/// (header, <c>kafka_common_security_token_delegation_DelegationToken_hmac</c>) — the only such slice on the admin surface.
-/// It is read through <c>out_len</c>; a NUL-scan would truncate at the first interior zero byte,
-/// which a uniformly random 32-byte MAC contains roughly one time in eight, and the truncated MAC
-/// then round-trips into a broker-side rejection rather than a local failure (ffi §B3).
-/// </para>
-/// </remarks>
-internal static class DelegationTokenMarshal
+internal static unsafe class DelegationTokenMarshal
 {
-    /// <summary>
-    /// Builds the per-index reader used by <c>describeDelegationToken</c>'s collection walk,
-    /// over that result's own <c>get_token(i)</c>.
-    /// </summary>
-    /// <param name="getToken">That result's <c>get_token(i)</c>.</param>
-    /// <returns>A reader over <c>(result, index)</c>.</returns>
-    internal static Func<IntPtr, int, DelegationToken> TokenReader(
-        KeyedResultMarshal.IndexedAccessor getToken) =>
-        (result, index) => Read(getToken(result, index));
+    private delegate void NativeDestroy(IntPtr native, ref IntPtr outErr);
 
-    /// <summary>Copies one borrowed token out into the owned managed shape.</summary>
-    /// <param name="token">The borrowed token pointer.</param>
-    /// <returns>The owned token.</returns>
-    /// <exception cref="KafkaException">The ABI produced no token where one was expected.</exception>
-    internal static DelegationToken Read(IntPtr token)
+    internal static T WithHmac<T>(byte[]? hmac, Func<KafkaBytes, T> call)
+    {
+        byte empty = 0;
+        fixed (byte* data = hmac)
+        {
+            // A null MAC crosses as a null pointer; an empty one as a non-null pointer of length 0.
+            KafkaBytes bytes = hmac is null
+                ? new KafkaBytes(IntPtr.Zero, 0)
+                : new KafkaBytes(hmac.Length == 0 ? (IntPtr)(&empty) : (IntPtr)data, hmac.Length);
+            return call(bytes);
+        }
+    }
+
+    internal static IntPtr NewPrincipal(KafkaPrincipal principal)
+    {
+        using Utf8Marshal.PinnedUtf8String principalType = Utf8Marshal.Pin(principal.PrincipalType);
+        using Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(principal.Name);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr native = NativeMethods.KafkaPrincipalNew(principalType.Pointer, name.Pointer, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return native;
+    }
+
+    internal static void DestroyPrincipal(IntPtr principal) =>
+        Destroy(principal, NativeMethods.KafkaPrincipalDestroy);
+
+    internal static IntPtr[] NewPrincipals(IReadOnlyList<KafkaPrincipal> principals)
+    {
+        IntPtr[] natives = new IntPtr[principals.Count];
+        try
+        {
+            for (int i = 0; i < natives.Length; i++)
+            {
+                natives[i] = NewPrincipal(principals[i]);
+            }
+
+            return natives;
+        }
+        catch
+        {
+            DestroyPrincipals(natives);
+            throw;
+        }
+    }
+
+    internal static void DestroyPrincipals(IntPtr[] principals)
+    {
+        foreach (IntPtr principal in principals)
+        {
+            DestroyPrincipal(principal);
+        }
+    }
+
+    internal static IReadOnlyList<DelegationToken> CopyOutTokens(IntPtr tokens)
+    {
+        if (tokens == IntPtr.Zero)
+        {
+            return Array.Empty<DelegationToken>();
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(tokens, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        List<DelegationToken> copied = new List<DelegationToken>(Math.Max(count, 0));
+        for (int i = 0; i < count; i++)
+        {
+            IntPtr token = NativeMethods.ListGet(tokens, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            copied.Add(CopyOutToken(token));
+        }
+
+        return copied;
+    }
+
+    internal static DelegationToken CopyOutToken(IntPtr token)
     {
         if (token == IntPtr.Zero)
         {
             throw new KafkaException("The admin result produced no delegation token.");
         }
 
-        return new DelegationToken(
-            ReadTokenInformation(NativeMethods.DelegationTokenTokenInfo(token)),
-            ReadHmac(token));
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr info = NativeMethods.DelegationTokenTokenInfo(token, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        KafkaBytes hmac = NativeMethods.DelegationTokenHmac(token, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new DelegationToken(CopyOutTokenInformation(info), CopyBytes(hmac));
     }
 
-    /// <summary>Reads the MAC's <c>(ptr, out_len)</c> pair off a token.</summary>
-    /// <param name="token">The borrowed token pointer.</param>
-    /// <param name="length">The MAC's byte length.</param>
-    /// <returns>The borrowed MAC pointer.</returns>
-    internal delegate IntPtr HmacAccessor(IntPtr token, out int length);
-
-    /// <summary>The production <c>kafka_common_security_token_delegation_DelegationToken_hmac</c>.</summary>
-    internal static readonly HmacAccessor NativeHmac = NativeMethods.DelegationTokenHmac;
-
-    /// <summary>
-    /// Copies the MAC out using <c>out_len</c>. ⚠ Never NUL-scanned — see the type remarks.
-    /// </summary>
-    /// <param name="token">The borrowed token pointer.</param>
-    /// <returns>The owned MAC bytes.</returns>
-    internal static byte[] ReadHmac(IntPtr token) => ReadHmac(token, NativeHmac);
-
-    /// <summary>Copies the MAC out through an injected accessor.</summary>
-    /// <remarks>
-    /// The accessor is a parameter because the mock mints its MAC from a Uuid's UTF-8, which
-    /// never carries an interior zero — so the ABI cannot produce the input this read exists to
-    /// survive (the <c>AclRowMarshal.ReadFilter</c> precedent).
-    /// </remarks>
-    /// <param name="token">The borrowed token pointer, or a stand-in under an injected accessor.</param>
-    /// <param name="accessor">The accessor to read the pair with.</param>
-    /// <returns>The owned MAC bytes.</returns>
-    internal static byte[] ReadHmac(IntPtr token, HmacAccessor accessor)
+    internal static byte[] CopyBytes(KafkaBytes bytes)
     {
-        IntPtr bytes = accessor(token, out int length);
-        if (bytes == IntPtr.Zero || length <= 0)
+        if (bytes.Data == IntPtr.Zero || bytes.Length <= 0)
         {
             return Array.Empty<byte>();
         }
 
-        byte[] hmac = new byte[length];
-        Marshal.Copy(bytes, hmac, 0, length);
-        return hmac;
+        byte[] copied = new byte[bytes.Length];
+        Marshal.Copy(bytes.Data, copied, 0, bytes.Length);
+        return copied;
     }
 
-    /// <summary>Copies one borrowed <c>TokenInformation_t</c> out.</summary>
-    /// <param name="info">The borrowed metadata pointer.</param>
-    /// <returns>The owned metadata.</returns>
-    /// <exception cref="KafkaException">The ABI produced no metadata or no token id.</exception>
-    internal static TokenInformation ReadTokenInformation(IntPtr info)
+    internal static TokenInformation CopyOutTokenInformation(IntPtr info)
     {
         if (info == IntPtr.Zero)
         {
             throw new KafkaException("The admin result produced a delegation token with no metadata.");
         }
 
-        int renewerCount = NativeMethods.TokenInformationRenewerCount(info);
-        List<KafkaPrincipal> renewers = new List<KafkaPrincipal>(Math.Max(renewerCount, 0));
-        for (int i = 0; i < renewerCount; i++)
-        {
-            renewers.Add(ReadPrincipal(NativeMethods.TokenInformationGetRenewer(info, i)));
-        }
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr tokenIdPointer = NativeMethods.TokenInformationTokenId(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        string tokenId = Utf8Marshal.PtrToString(tokenIdPointer)
+            ?? throw new KafkaException("The admin result produced a delegation token with no token id.");
+        IntPtr owner = NativeMethods.TokenInformationOwner(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr requester = NativeMethods.TokenInformationTokenRequester(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IReadOnlyList<KafkaPrincipal> renewers = CopyOutRenewers(info);
+        long issueTimestamp = NativeMethods.TokenInformationIssueTimestamp(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long maxTimestamp = NativeMethods.TokenInformationMaxTimestamp(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        long expiryTimestamp = NativeMethods.TokenInformationExpiryTimestamp(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
 
-        return new TokenInformation(
-            Utf8Marshal.PtrToString(NativeMethods.TokenInformationTokenId(info))
-                ?? throw new KafkaException("The admin result produced a delegation token with no token id."),
-            ReadPrincipal(NativeMethods.TokenInformationOwner(info)),
-            ReadPrincipal(NativeMethods.TokenInformationTokenRequester(info)),
-            renewers,
-            NativeMethods.TokenInformationIssueTimestamp(info),
-            NativeMethods.TokenInformationMaxTimestamp(info),
-            NativeMethods.TokenInformationExpiryTimestamp(info));
+        return requester == IntPtr.Zero
+            ? new TokenInformation(
+                tokenId, CopyOutPrincipal(owner), renewers, issueTimestamp, maxTimestamp, expiryTimestamp)
+            : new TokenInformation(
+                tokenId,
+                CopyOutPrincipal(owner),
+                CopyOutPrincipal(requester),
+                renewers,
+                issueTimestamp,
+                maxTimestamp,
+                expiryTimestamp);
     }
 
-    /// <summary>Copies one borrowed <c>KafkaPrincipal_t</c> out.</summary>
-    /// <param name="principal">The borrowed principal pointer.</param>
-    /// <returns>The owned principal.</returns>
-    /// <exception cref="KafkaException">The ABI produced no principal, or no type or name for one.</exception>
-    internal static KafkaPrincipal ReadPrincipal(IntPtr principal)
+    internal static KafkaPrincipal CopyOutPrincipal(IntPtr principal)
     {
         if (principal == IntPtr.Zero)
         {
             throw new KafkaException("The admin result produced no principal.");
         }
 
-        return new KafkaPrincipal(
-            Utf8Marshal.PtrToString(NativeMethods.KafkaPrincipalPrincipalType(principal))
-                ?? throw new KafkaException("The admin result produced a principal with no type."),
-            Utf8Marshal.PtrToString(NativeMethods.KafkaPrincipalName(principal))
-                ?? throw new KafkaException("The admin result produced a principal with no name."),
-            NativeMethods.KafkaPrincipalTokenAuthenticated(principal));
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr typePointer = NativeMethods.KafkaPrincipalPrincipalType(principal, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        string principalType = Utf8Marshal.PtrToString(typePointer)
+            ?? throw new KafkaException("The admin result produced a principal with no type.");
+        IntPtr namePointer = NativeMethods.KafkaPrincipalName(principal, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        string name = Utf8Marshal.PtrToString(namePointer)
+            ?? throw new KafkaException("The admin result produced a principal with no name.");
+        sbyte tokenAuthenticated = NativeMethods.KafkaPrincipalTokenAuthenticated(principal, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return new KafkaPrincipal(principalType, name, tokenAuthenticated != 0);
     }
 
-    /// <summary>
-    /// Projects a principal collection onto the ABI's two parallel <c>(type, name)</c> arrays,
-    /// with call-scoped pins the caller releases.
-    /// </summary>
-    /// <param name="principals">The principals, in request order.</param>
-    /// <returns>The pinned columns.</returns>
-    internal static PrincipalRows PinPrincipals(IReadOnlyList<KafkaPrincipal> principals)
+    private static IReadOnlyList<KafkaPrincipal> CopyOutRenewers(IntPtr info)
     {
-        PrincipalRows rows = new PrincipalRows(principals.Count);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr renewers = NativeMethods.TokenInformationRenewers(info, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
         try
         {
-            for (int i = 0; i < principals.Count; i++)
+            if (renewers == IntPtr.Zero)
             {
-                rows.Set(i, principals[i]);
+                return Array.Empty<KafkaPrincipal>();
             }
 
-            return rows;
+            int count = NativeMethods.ListSize(renewers, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            List<KafkaPrincipal> copied = new List<KafkaPrincipal>(Math.Max(count, 0));
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr renewer = NativeMethods.ListGet(renewers, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                copied.Add(CopyOutPrincipal(renewer));
+            }
+
+            return copied;
         }
-        catch
+        finally
         {
-            rows.Dispose();
-            throw;
+            Destroy(renewers, NativeMethods.ListDestroy);
         }
     }
 
-    /// <summary>One submit's principal columns plus the call-scoped string pins behind them.</summary>
-    internal sealed class PrincipalRows : IDisposable
+    private static void Destroy(IntPtr native, NativeDestroy destroy)
     {
-        private readonly List<Utf8Marshal.PinnedUtf8String> _pinned;
-
-        /// <summary>Allocates the two columns for <paramref name="count"/> principals.</summary>
-        /// <param name="count">The principal count.</param>
-        internal PrincipalRows(int count)
+        if (native == IntPtr.Zero)
         {
-            Count = count;
-            PrincipalTypes = new IntPtr[count];
-            Names = new IntPtr[count];
-            _pinned = new List<Utf8Marshal.PinnedUtf8String>(count * 2);
+            return;
         }
 
-        /// <summary>The row count both columns are sized to.</summary>
-        internal int Count { get; }
-
-        /// <summary>Column 0 — each principal's type.</summary>
-        internal IntPtr[] PrincipalTypes { get; }
-
-        /// <summary>Column 1 — each principal's name.</summary>
-        internal IntPtr[] Names { get; }
-
-        /// <summary>Fills one row, pinning its two strings.</summary>
-        /// <param name="index">The row index.</param>
-        /// <param name="principal">The principal for that row.</param>
-        internal void Set(int index, KafkaPrincipal principal)
+        IntPtr outErr = IntPtr.Zero;
+        destroy(native, ref outErr);
+        if (outErr != IntPtr.Zero)
         {
-            PrincipalTypes[index] = AclRowMarshal.PinName(principal.PrincipalType, _pinned);
-            Names[index] = AclRowMarshal.PinName(principal.Name, _pinned);
-        }
-
-        /// <summary>Releases every string pin — call-scoped, in the submit's <c>finally</c>.</summary>
-        public void Dispose()
-        {
-            foreach (Utf8Marshal.PinnedUtf8String name in _pinned)
-            {
-                name.Dispose();
-            }
-
-            _pinned.Clear();
+            NativeMethods.ErrorDestroy(outErr);
         }
     }
 }

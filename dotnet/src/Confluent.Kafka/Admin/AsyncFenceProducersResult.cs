@@ -14,122 +14,72 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.FenceProducers"/> — Java's
-/// <c>org.apache.kafka.clients.admin.FenceProducersResult</c> (<c>:31</c>).
+/// <c>org.apache.kafka.clients.admin.FenceProducersResult</c>.
 /// </summary>
 /// <remarks>
-/// ⚠ Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> (<c>:33</c>) but never
-/// publishes that pair as itself: <see cref="FencedProducers"/> erases it
-/// (<c>thenApply(p -&gt; null)</c>, <c>:46</c>) and <see cref="ProducerId"/> /
-/// <see cref="EpochId"/> project one field each. Hence there is no public
-/// <c>ProducerIdAndEpoch</c> type here (M15/P8 D50).
+/// Java stores one future per id carrying a <c>ProducerIdAndEpoch</c> but never publishes that
+/// pair: <see cref="FencedProducers"/> erases it and <see cref="ProducerId"/> /
+/// <see cref="EpochId"/> project one field each, so there is no public <c>ProducerIdAndEpoch</c>
+/// type here.
 /// </remarks>
 /// <seealso cref="FenceProducersResult"/>
 public sealed class AsyncFenceProducersResult
 {
-    private readonly IReadOnlyDictionary<string, Task<ProducerIdAndEpoch>> _values;
-    private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _erasedValues;
+    private readonly IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> _futures;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncFenceProducersResult(
-        IReadOnlyDictionary<string, Task<ProducerIdAndEpoch>> values,
-        IEqualityComparer<string> comparer)
+    private AsyncFenceProducersResult(
+        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
     {
-        _values = values;
-
-        // Java's fencedProducers() erases the payload (:46). Each entry wraps the SAME Task
-        // instance, so no second fault can go
-        // unobserved. Java mints a fresh map per call; this one is built once, which is
-        // observationally identical for an immutable view.
-        Dictionary<string, AsyncKafkaFuture> erased = new Dictionary<string, AsyncKafkaFuture>(values.Count, comparer);
-        foreach (KeyValuePair<string, Task<ProducerIdAndEpoch>> entry in values)
-        {
-            erased.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
-        }
-
-        _erasedValues = erased;
+        _futures = futures;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncFenceProducersResult From(KeyedAdminOperation<string, ProducerIdAndEpoch> operation) =>
-        new AsyncFenceProducersResult(operation.Tasks, operation.KeyComparer);
+    internal SafeAdminResultHandle Native => _native;
 
     /// <summary>
     /// One payload-free future per requested transactional id — Java's
-    /// <c>fencedProducers()</c> (<c>:44</c>), whose values are <c>KafkaFuture&lt;Void&gt;</c>.
+    /// <c>fencedProducers()</c>, whose values are <c>KafkaFuture&lt;Void&gt;</c>.
     /// </summary>
-    public IReadOnlyDictionary<string, AsyncKafkaFuture> FencedProducers => _erasedValues;
-
-    /// <summary>
-    /// The producer id generated while initializing that transaction — Java's
-    /// <c>producerId(String)</c> (<c>:53</c>).
-    /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>A future over that id's producer id.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — Java's
-    /// <c>IllegalArgumentException</c> (<c>:74-77</c>), thrown synchronously as Java's is.
-    /// </exception>
-    public AsyncKafkaFuture<long> ProducerId(string transactionalId) =>
-        new AsyncKafkaFuture<long>(FindAndApply(transactionalId, static value => value.ProducerId));
-
-    /// <summary>
-    /// The epoch generated while initializing that transaction — Java's
-    /// <c>epochId(String)</c> (<c>:60</c>), a <see langword="short"/> as Java's is.
-    /// </summary>
-    /// <param name="transactionalId">An id from <see cref="FencedProducers"/>.</param>
-    /// <returns>A future over that id's epoch.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="transactionalId"/> is null.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="transactionalId"/> was not included in the request — see
-    /// <see cref="ProducerId"/>.
-    /// </exception>
-    public AsyncKafkaFuture<short> EpochId(string transactionalId) =>
-        new AsyncKafkaFuture<short>(FindAndApply(transactionalId, static value => value.Epoch));
-
-    /// <summary>
-    /// Completes when <b>every</b> producer has been fenced, and faults with the first failure
-    /// otherwise — Java's <c>all()</c> (<c>:67</c>).
-    /// </summary>
-    /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(Task.WhenAll(_values.Values));
-
-    /// <summary>Java's <c>findAndApply</c> (<c>:71-78</c>).</summary>
-    private Task<TResult> FindAndApply<TResult>(
-        string transactionalId, Func<ProducerIdAndEpoch, TResult> followup)
+    /// <remarks>Each access builds a new map of new futures, as Java's <c>fencedProducers()</c> does.</remarks>
+    public IReadOnlyDictionary<string, AsyncKafkaFuture> FencedProducers
     {
-        // Synchronous, as Java's is: the lookup happens before the thenApply, so an
-        // unrequested id is a usage error at the call site rather than a task outcome.
-        if (transactionalId is null)
+        get
         {
-            throw new ArgumentNullException(nameof(transactionalId));
+            Dictionary<string, AsyncKafkaFuture> fenced =
+                new Dictionary<string, AsyncKafkaFuture>(_futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
+            {
+                fenced.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
+            }
+
+            return fenced;
         }
-
-        if (!_values.TryGetValue(transactionalId, out Task<ProducerIdAndEpoch>? source))
-        {
-            throw new ArgumentException(
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "TransactionalId `{0}` was not included in the request",
-                    transactionalId),
-                nameof(transactionalId));
-        }
-
-        return Project(source, followup);
-
-        static async Task<TResult> Project(
-            Task<ProducerIdAndEpoch> source, Func<ProducerIdAndEpoch, TResult> followup) =>
-            followup(await source.ConfigureAwait(false));
     }
+
+    /// <inheritdoc cref="FenceProducersResult.ProducerId"/>
+    public AsyncKafkaFuture<long> ProducerId(string transactionalId) =>
+        new AsyncKafkaFuture<long>(
+            FenceProducersResult.Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
+
+    /// <inheritdoc cref="FenceProducersResult.EpochId"/>
+    public AsyncKafkaFuture<short> EpochId(string transactionalId) =>
+        new AsyncKafkaFuture<short>(
+            FenceProducersResult.Find(_futures, transactionalId).ThenApply(static value => value.Epoch));
+
+    /// <inheritdoc cref="FenceProducersResult.All"/>
+    public AsyncKafkaFuture All() =>
+        new AsyncKafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_futures.Values)));
+
+    internal static AsyncFenceProducersResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
+        new AsyncFenceProducersResult(native.Producers, native.Result);
 }

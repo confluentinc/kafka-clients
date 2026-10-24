@@ -18,32 +18,29 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A client quota entity filter — the .NET realization of Java's
-/// <c>org.apache.kafka.common.quota.ClientQuotaFilter</c> (<c>:27</c>).
+/// A client quota entity filter — Java's <c>org.apache.kafka.common.quota.ClientQuotaFilter</c>.
 /// </summary>
 public sealed class ClientQuotaFilter
 {
     private readonly ClientQuotaFilterComponent[] _components;
 
-    // Private, like Java's ctor (:38) — the three factories are the only construction path.
     private ClientQuotaFilter(ClientQuotaFilterComponent[] components, bool strict)
     {
         _components = components;
         Strict = strict;
     }
 
-    /// <summary>The filter's components — Java's <c>components()</c> (<c>:73</c>).</summary>
+    /// <summary>The filter's components — Java's <c>components()</c>.</summary>
     public IReadOnlyCollection<ClientQuotaFilterComponent> Components => _components;
 
     /// <summary>
-    /// Whether the filter includes only the specified component types — Java's <c>strict()</c>
-    /// (<c>:80</c>).
+    /// Whether the filter includes only the specified component types — Java's <c>strict()</c>.
     /// </summary>
     public bool Strict { get; }
 
     /// <summary>
-    /// A filter matching all the given components, <em>also</em> including entities with entity
-    /// types no component specifies — Java's <c>contains</c> (<c>:49</c>).
+    /// A filter matching all the given components, also including entities with entity types no
+    /// component specifies — Java's <c>contains</c>.
     /// </summary>
     /// <param name="components">The components to filter on.</param>
     /// <returns>The filter.</returns>
@@ -53,8 +50,8 @@ public sealed class ClientQuotaFilter
         new ClientQuotaFilter(Copy(components), false);
 
     /// <summary>
-    /// A filter matching all the given components and <em>excluding</em> entities with entity
-    /// types no component specifies — Java's <c>containsOnly</c> (<c>:59</c>).
+    /// A filter matching all the given components and excluding entities with entity types no
+    /// component specifies — Java's <c>containsOnly</c>.
     /// </summary>
     /// <param name="components">The components to filter on.</param>
     /// <returns>The filter.</returns>
@@ -64,16 +61,16 @@ public sealed class ClientQuotaFilter
         new ClientQuotaFilter(Copy(components), true);
 
     /// <summary>
-    /// A filter matching every configured entity — Java's <c>all()</c> (<c>:66</c>): no
-    /// components, not strict.
+    /// A filter matching every configured entity — Java's <c>all()</c>: no components, not
+    /// strict.
     /// </summary>
     /// <returns>The filter.</returns>
     public static ClientQuotaFilter All() =>
         new ClientQuotaFilter(Array.Empty<ClientQuotaFilterComponent>(), false);
 
     /// <summary>
-    /// Value equality over the components and strictness — Java's <c>equals</c> (<c>:85</c>);
-    /// components compare in order, as Java's <c>List.equals</c> does.
+    /// Value equality over the components and strictness — Java's <c>equals</c>; components
+    /// compare in order, as Java's <c>List.equals</c> does.
     /// </summary>
     /// <param name="obj">The object to compare with.</param>
     /// <returns>Whether the two describe the same filter.</returns>
@@ -97,10 +94,7 @@ public sealed class ClientQuotaFilter
         return true;
     }
 
-    /// <summary>
-    /// The hash of the components and strictness — Java's <c>hashCode</c> (<c>:93</c>), same
-    /// <c>31 *</c> fold as <c>Objects.hash</c> over <c>List.hashCode</c>.
-    /// </summary>
+    /// <summary>The hash of the components and strictness — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>
     public override int GetHashCode()
     {
@@ -120,9 +114,8 @@ public sealed class ClientQuotaFilter
     }
 
     /// <summary>
-    /// A diagnostic rendering in the shape of Java's <c>toString()</c> (<c>:98</c>). It embeds
-    /// <see cref="ClientQuotaFilterComponent.ToString"/>, which differs from Java's text, so
-    /// this does too.
+    /// A diagnostic rendering in the shape of Java's <c>toString()</c>, each component as
+    /// <see cref="ClientQuotaFilterComponent.ToString"/> renders it.
     /// </summary>
     /// <returns>The rendering.</returns>
     public override string ToString()
@@ -141,8 +134,6 @@ public sealed class ClientQuotaFilter
             ")");
     }
 
-    // Copied so the filter is immutable, and null-checked here rather than at the FFI boundary
-    // (ffi-marshalling.md §A5: preconditions are validated before the native call).
     private static ClientQuotaFilterComponent[] Copy(
         IReadOnlyCollection<ClientQuotaFilterComponent> components)
     {

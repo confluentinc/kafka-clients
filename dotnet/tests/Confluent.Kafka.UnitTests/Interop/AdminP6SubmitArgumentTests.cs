@@ -15,11 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Internal;
@@ -30,1682 +26,809 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// What P6's inputs actually become on the wire: <c>AclRowMarshal</c>'s seven-array
-/// projection behind <c>create_acls_async</c> / <c>delete_acls_async</c> /
-/// <c>describe_acls_async</c>, and <c>ClientQuotaMarshal</c>'s two projections behind
-/// <c>describe_client_quotas_async</c> and the ragged <c>alter_client_quotas_async</c>
-/// (M15/P6).
+/// What the admin inputs become in C: the ACL bindings and filters, the client-quota filters and alterations, and
+/// their options, read back from the C handles the client builds.
 /// </summary>
-/// <remarks>
-/// <para>
-/// ⚠⚠ <b>The defect this file exists to catch is <see langword="null"/> collapsing into
-/// <c>""</c>.</b> On a filter row a null name means "match any resource name" and must
-/// travel as <see cref="IntPtr.Zero"/>; <c>""</c> is a filter on the literal empty name and
-/// must travel as a <b>non-null</b> pointer to a NUL byte
-/// (header, <c>kafka_common_acl_AclBindingFilter_resource_name</c>). A helper mapping both to
-/// <see cref="IntPtr.Zero"/> turns a filter on <c>""</c> into match-everything, which on
-/// <c>delete_acls</c> deletes ACLs the caller never named. It is asserted here, on the
-/// <b>pointer</b>, where it is a fact rather than an inference — twice: once on the projector
-/// itself and once through the <c>delete_acls</c> submit, the RPC that can act on it.
-/// </para>
-/// <para>
-/// <b>The projector is also driven directly for the filter shape.</b> The two overloads share
-/// the one rule by construction, so exercising it at both levels is what keeps a change to
-/// either from silently diverging.
-/// </para>
-/// <para>
-/// ⚠⚠ <b>The quota family carries the same class of defect on two more axes.</b> An entity
-/// name of <see langword="null"/> is the built-in <em>default</em> entity rather than the name
-/// <c>""</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>), and a cleared
-/// <c>op_has_values[i][j]</c> is Java's <c>Op(key, null)</c> — <em>remove</em> the quota
-/// rather than set it to <c>0</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
-/// Both are asserted on the submitted bytes for the same reason the ACL rule is: neither is visible
-/// end to end.
-/// </para>
-/// <para>
-/// ⚠ <b>Everything is decoded inside the submit, never after it.</b> Production unpins every
-/// string in its <c>finally</c> (ffi §A4), so a pointer read after <c>CreateAcls</c> returns
-/// is a use-after-unpin. Reading them in the stand-in is also the only way to observe that
-/// the pins are live for the whole call.
-/// </para>
-/// </remarks>
 public sealed class AdminP6SubmitArgumentTests
 {
-    // ------------------------------------------------------------------------------------
-    // AclRowMarshal — the projector itself.
-    // ------------------------------------------------------------------------------------
+    public static TheoryData<ResourceType> ResourceTypes => EnumValues<ResourceType>();
 
-    /// <summary>
-    /// ⚠⚠ <b>THE test for this slice.</b> A null filter name, principal and host each become
-    /// <see cref="IntPtr.Zero"/>; an <b>empty</b> one becomes a non-null pointer to a NUL
-    /// byte, and decodes back to <c>""</c>.
-    /// </summary>
+    public static TheoryData<PatternType> PatternTypes => EnumValues<PatternType>();
+
+    public static TheoryData<AclOperation> Operations => EnumValues<AclOperation>();
+
+    public static TheoryData<AclPermissionType> PermissionTypes => EnumValues<AclPermissionType>();
+
     [Fact]
-    public void FilterRow_NullIsAPointerApart_FromEmpty()
+    public void Filter_NullIsANullPointer_AndEmptyIsAPointerToANul()
     {
-        AclBindingFilter wildcard = new AclBindingFilter(
+        AclBindingFilter nulls = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
             new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any));
+        WithFilter(nulls, (pattern, entry) =>
+        {
+            Assert.Equal(IntPtr.Zero, Read(pattern, NativeMethods.ResourcePatternFilterName));
+            Assert.Equal(IntPtr.Zero, Read(entry, NativeMethods.AccessControlEntryFilterPrincipal));
+            Assert.Equal(IntPtr.Zero, Read(entry, NativeMethods.AccessControlEntryFilterHost));
+        });
 
-        AclBindingFilter literalEmpty = new AclBindingFilter(
+        AclBindingFilter empties = new AclBindingFilter(
             new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Any),
-            new AccessControlEntryFilter(
-                string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any));
-
-        using AclRowMarshal.Rows rows =
-            AclRowMarshal.Pin(new List<AclBindingFilter> { wildcard, literalEmpty });
-
-        Assert.Equal(IntPtr.Zero, rows.ResourceNames[0]);
-        Assert.Equal(IntPtr.Zero, rows.Principals[0]);
-        Assert.Equal(IntPtr.Zero, rows.Hosts[0]);
-
-        // Non-null, and decoding to the empty string — not to null, and not to a stray byte.
-        Assert.NotEqual(IntPtr.Zero, rows.ResourceNames[1]);
-        Assert.NotEqual(IntPtr.Zero, rows.Principals[1]);
-        Assert.NotEqual(IntPtr.Zero, rows.Hosts[1]);
-        Assert.Equal(string.Empty, Utf8Marshal.PtrToString(rows.ResourceNames[1]));
-        Assert.Equal(string.Empty, Utf8Marshal.PtrToString(rows.Principals[1]));
-        Assert.Equal(string.Empty, Utf8Marshal.PtrToString(rows.Hosts[1]));
+            new AccessControlEntryFilter(string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any));
+        WithFilter(empties, (pattern, entry) =>
+        {
+            AssertEmptyString(Read(pattern, NativeMethods.ResourcePatternFilterName));
+            AssertEmptyString(Read(entry, NativeMethods.AccessControlEntryFilterPrincipal));
+            AssertEmptyString(Read(entry, NativeMethods.AccessControlEntryFilterHost));
+        });
     }
 
-    /// <summary>
-    /// Every column of a filter row lands in its own array, at its own index — the
-    /// seven-way destructuring, asserted with seven <em>distinct</em> values so a swapped
-    /// pair cannot pass.
-    /// </summary>
     [Fact]
-    public void FilterRow_ProjectsEveryColumn()
+    public void Filter_CarriesEveryColumn()
     {
         AclBindingFilter filter = new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.TransactionalId, "txn-1", PatternType.Prefixed),
-            new AccessControlEntryFilter(
-                "User:alice", "10.0.0.1", AclOperation.DescribeConfigs, AclPermissionType.Deny));
-
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(new List<AclBindingFilter> { filter });
-
-        Assert.Equal(1, rows.Count);
-        Assert.Equal((int)ResourceType.TransactionalId, rows.ResourceTypes[0]);
-        Assert.Equal("txn-1", Utf8Marshal.PtrToString(rows.ResourceNames[0]));
-        Assert.Equal((int)PatternType.Prefixed, rows.PatternTypes[0]);
-        Assert.Equal("User:alice", Utf8Marshal.PtrToString(rows.Principals[0]));
-        Assert.Equal("10.0.0.1", Utf8Marshal.PtrToString(rows.Hosts[0]));
-        Assert.Equal((int)AclOperation.DescribeConfigs, rows.Operations[0]);
-        Assert.Equal((int)AclPermissionType.Deny, rows.PermissionTypes[0]);
+            new ResourcePatternFilter(ResourceType.Group, "grüppe-ü", PatternType.Prefixed),
+            new AccessControlEntryFilter("User:bjørn", "10.0.0.1", AclOperation.Describe, AclPermissionType.Deny));
+        WithFilter(filter, (pattern, entry) =>
+        {
+            Assert.Equal((sbyte)ResourceType.Group, ResourceTypeCode(pattern, NativeMethods.ResourcePatternFilterResourceType));
+            Assert.Equal("grüppe-ü", Utf8Marshal.PtrToString(Read(pattern, NativeMethods.ResourcePatternFilterName)));
+            Assert.Equal((sbyte)PatternType.Prefixed, PatternTypeCode(pattern, NativeMethods.ResourcePatternFilterPatternType));
+            Assert.Equal("User:bjørn", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryFilterPrincipal)));
+            Assert.Equal("10.0.0.1", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryFilterHost)));
+            Assert.Equal((sbyte)AclOperation.Describe, OperationCode(entry, NativeMethods.AccessControlEntryFilterOperation));
+            Assert.Equal(
+                (sbyte)AclPermissionType.Deny,
+                PermissionTypeCode(entry, NativeMethods.AccessControlEntryFilterPermissionType));
+        });
     }
 
-    /// <summary>
-    /// The concrete overload projects the same seven columns out of the <b>nested</b>
-    /// managed shape — <c>Pattern.*</c> into 0-2 and <c>Entry.*</c> into 3-6.
-    /// </summary>
-    [Fact]
-    public void ConcreteRow_ProjectsEveryColumn()
-    {
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(new List<AclBinding> { Binding("topic-a") });
+    [Theory]
+    [MemberData(nameof(ResourceTypes))]
+    public void Filter_EveryResourceType_CrossesAsItsCode(ResourceType resourceType) =>
+        WithFilter(
+            Filter(resourceType, PatternType.Any, AclOperation.Any, AclPermissionType.Any),
+            (pattern, _) => Assert.Equal(
+                (sbyte)resourceType, ResourceTypeCode(pattern, NativeMethods.ResourcePatternFilterResourceType)));
 
-        Assert.Equal(1, rows.Count);
-        Assert.Equal((int)ResourceType.Topic, rows.ResourceTypes[0]);
-        Assert.Equal("topic-a", Utf8Marshal.PtrToString(rows.ResourceNames[0]));
-        Assert.Equal((int)PatternType.Literal, rows.PatternTypes[0]);
-        Assert.Equal("User:alice", Utf8Marshal.PtrToString(rows.Principals[0]));
-        Assert.Equal("*", Utf8Marshal.PtrToString(rows.Hosts[0]));
-        Assert.Equal((int)AclOperation.Read, rows.Operations[0]);
-        Assert.Equal((int)AclPermissionType.Allow, rows.PermissionTypes[0]);
+    [Theory]
+    [MemberData(nameof(PatternTypes))]
+    public void Filter_EveryPatternType_CrossesAsItsCode(PatternType patternType) =>
+        WithFilter(
+            Filter(ResourceType.Any, patternType, AclOperation.Any, AclPermissionType.Any),
+            (pattern, _) => Assert.Equal(
+                (sbyte)patternType, PatternTypeCode(pattern, NativeMethods.ResourcePatternFilterPatternType)));
+
+    [Theory]
+    [MemberData(nameof(Operations))]
+    public void Filter_EveryOperation_CrossesAsItsCode(AclOperation operation) =>
+        WithFilter(
+            Filter(ResourceType.Any, PatternType.Any, operation, AclPermissionType.Any),
+            (_, entry) => Assert.Equal(
+                (sbyte)operation, OperationCode(entry, NativeMethods.AccessControlEntryFilterOperation)));
+
+    [Theory]
+    [MemberData(nameof(PermissionTypes))]
+    public void Filter_EveryPermissionType_CrossesAsItsCode(AclPermissionType permissionType) =>
+        WithFilter(
+            Filter(ResourceType.Any, PatternType.Any, AclOperation.Any, permissionType),
+            (_, entry) => Assert.Equal(
+                (sbyte)permissionType, PermissionTypeCode(entry, NativeMethods.AccessControlEntryFilterPermissionType)));
+
+    [Fact]
+    public void Binding_CarriesEveryColumn()
+    {
+        AclBinding binding = new AclBinding(
+            new ResourcePattern(ResourceType.TransactionalId, "tx-ünï", PatternType.Literal),
+            new AccessControlEntry("User:ålice", "*", AclOperation.Write, AclPermissionType.Allow));
+        WithBinding(binding, (pattern, entry) =>
+        {
+            Assert.Equal((sbyte)ResourceType.TransactionalId, ResourceTypeCode(pattern, NativeMethods.ResourcePatternResourceType));
+            Assert.Equal("tx-ünï", Utf8Marshal.PtrToString(Read(pattern, NativeMethods.ResourcePatternName)));
+            Assert.Equal((sbyte)PatternType.Literal, PatternTypeCode(pattern, NativeMethods.ResourcePatternPatternType));
+            Assert.Equal("User:ålice", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryPrincipal)));
+            Assert.Equal("*", Utf8Marshal.PtrToString(Read(entry, NativeMethods.AccessControlEntryHost)));
+            Assert.Equal((sbyte)AclOperation.Write, OperationCode(entry, NativeMethods.AccessControlEntryOperation));
+            Assert.Equal((sbyte)AclPermissionType.Allow, PermissionTypeCode(entry, NativeMethods.AccessControlEntryPermissionType));
+        });
     }
 
-    /// <summary>
-    /// A concrete row's strings are never null, so its three pointer columns are never
-    /// <see cref="IntPtr.Zero"/> — including an <b>empty</b> resource name, which the value
-    /// types accept.
-    /// </summary>
     [Fact]
-    public void ConcreteRow_NeverSendsANullPointer()
+    public void Binding_AnEmptyString_IsAPointerToANul()
     {
-        AclBinding empty = new AclBinding(
+        AclBinding binding = new AclBinding(
             new ResourcePattern(ResourceType.Topic, string.Empty, PatternType.Literal),
             new AccessControlEntry(string.Empty, string.Empty, AclOperation.Read, AclPermissionType.Allow));
-
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(new List<AclBinding> { empty });
-
-        Assert.NotEqual(IntPtr.Zero, rows.ResourceNames[0]);
-        Assert.NotEqual(IntPtr.Zero, rows.Principals[0]);
-        Assert.NotEqual(IntPtr.Zero, rows.Hosts[0]);
-    }
-
-    /// <summary>
-    /// Rows keep their request order and their own index across a batch — a projector that
-    /// shared one buffer, or reversed, is caught here.
-    /// </summary>
-    [Fact]
-    public void Rows_KeepRequestOrder()
-    {
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(
-            new List<AclBinding> { Binding("first"), Binding("second"), Binding("third") });
-
-        Assert.Equal(3, rows.Count);
-        Assert.Equal(
-            new[] { "first", "second", "third" },
-            new[] { rows.ResourceNames[0], rows.ResourceNames[1], rows.ResourceNames[2] }
-                .Select(name => Utf8Marshal.PtrToString(name)));
-    }
-
-    /// <summary>
-    /// An empty request produces seven zero-length arrays and a count of <c>0</c> — never a
-    /// null array, which the ABI would read as "absent" rather than "nothing to do".
-    /// </summary>
-    [Fact]
-    public void EmptyRequest_ProducesSevenEmptyArrays()
-    {
-        using AclRowMarshal.Rows rows = AclRowMarshal.Pin(new List<AclBinding>());
-
-        Assert.Equal(0, rows.Count);
-        Assert.Empty(rows.ResourceTypes);
-        Assert.Empty(rows.ResourceNames);
-        Assert.Empty(rows.PatternTypes);
-        Assert.Empty(rows.Principals);
-        Assert.Empty(rows.Hosts);
-        Assert.Empty(rows.Operations);
-        Assert.Empty(rows.PermissionTypes);
-    }
-
-    /// <summary>
-    /// ⚠ <b>Every pin is released, and the assertion is on the pins themselves.</b> A pinned
-    /// <c>GCHandle</c> is a strong root, so a leaked one is a permanent pin that nothing
-    /// downstream can observe — no exception, no failing assertion, just a fragmenting heap
-    /// (ffi §A4).
-    /// </summary>
-    /// <remarks>
-    /// The pins are reached by reflection because <c>Rows</c> deliberately exposes only the
-    /// seven arrays: an accessor added for the test would be production surface that only the
-    /// test uses. A freed <c>GCHandle</c> makes <c>Pointer</c> throw, which is the
-    /// discriminator — a <c>Dispose</c> that cleared the list without freeing would leave
-    /// every pointer readable.
-    /// </remarks>
-    [Fact]
-    public void Dispose_ReleasesEveryPin()
-    {
-        AclRowMarshal.Rows rows = AclRowMarshal.Pin(new List<AclBinding> { Binding("pinned") });
-
-        List<Utf8Marshal.PinnedUtf8String> pins = (List<Utf8Marshal.PinnedUtf8String>)
-            typeof(AclRowMarshal.Rows)
-                .GetField("_pinned", BindingFlags.NonPublic | BindingFlags.Instance)!
-                .GetValue(rows)!;
-
-        // Control-positive: three strings per concrete row, all live before the dispose.
-        Assert.Equal(3, pins.Count);
-        Assert.All(pins, pin => Assert.NotEqual(IntPtr.Zero, pin.Pointer));
-
-        rows.Dispose();
-
-        Assert.All(pins, pin => Assert.Throws<InvalidOperationException>(() => pin.Pointer));
-
-        // The submit's finally runs once, but an inner failure path can reach it twice.
-        rows.Dispose();
-    }
-
-    // ------------------------------------------------------------------------------------
-    // create_acls_async — the submit seam.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// A <see langword="null"/> timeout must become a <b>negative</b> <c>timeout_ms</c>,
-    /// which the ABI reads as "unset, use the client default" — <b>not</b> <c>0</c>, which
-    /// would mean "time out immediately".
-    /// </summary>
-    [Fact]
-    public void NullTimeout_MapsToANegative_NotZero()
-    {
-        Assert.True(
-            Capture(new[] { Binding("t") }, options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
-
-        Assert.True(
-            Capture(new[] { Binding("t") }, new CreateAclsOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-    }
-
-    /// <summary>
-    /// An explicit timeout is forwarded verbatim, and <c>0</c> stays <c>0</c> — a real
-    /// request ("do not wait"), distinct from <see langword="null"/>.
-    /// </summary>
-    [Theory]
-    [InlineData(0)]
-    [InlineData(45_678)]
-    public void ExplicitTimeout_IsForwardedVerbatim(int timeoutMs) =>
-        Assert.Equal(
-            timeoutMs,
-            Capture(new[] { Binding("t") }, new CreateAclsOptions { TimeoutMs = timeoutMs }).TimeoutMs);
-
-    /// <summary>
-    /// The seven arrays reach the P/Invoke with the batch's own count and one row per
-    /// requested binding, in request order.
-    /// </summary>
-    [Fact]
-    public void Submit_SendsSevenParallelArrays()
-    {
-        Captured captured = Capture(
-            new[] { Binding("alpha"), Binding("beta") }, options: null);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { (int)ResourceType.Topic, (int)ResourceType.Topic }, captured.ResourceTypes);
-        Assert.Equal(new[] { "alpha", "beta" }, captured.ResourceNames);
-        Assert.Equal(new[] { (int)PatternType.Literal, (int)PatternType.Literal }, captured.PatternTypes);
-        Assert.Equal(new[] { "User:alice", "User:alice" }, captured.Principals);
-        Assert.Equal(new[] { "*", "*" }, captured.Hosts);
-        Assert.Equal(new[] { (int)AclOperation.Read, (int)AclOperation.Read }, captured.Operations);
-        Assert.Equal(
-            new[] { (int)AclPermissionType.Allow, (int)AclPermissionType.Allow },
-            captured.PermissionTypes);
-    }
-
-    /// <summary>
-    /// A repeated binding collapses to one row and one awaitable — Java keys its result on a
-    /// <c>Map</c>, so two <em>value-equal</em> bindings are one entry.
-    /// </summary>
-    [Fact]
-    public void DuplicateBindings_CollapseToOneRow()
-    {
-        // Distinct instances, equal by value — reference de-duplication would send two rows.
-        Captured captured = Capture(new[] { Binding("dup"), Binding("dup") }, options: null);
-
-        Assert.Equal(1, captured.Count);
-        Assert.Equal(new[] { "dup" }, captured.ResourceNames);
-    }
-
-    /// <summary>
-    /// A concrete binding never sends a null pointer through the submit either — the
-    /// seam-level twin of <see cref="ConcreteRow_NeverSendsANullPointer"/>.
-    /// </summary>
-    [Fact]
-    public void Submit_NeverSendsANullPointerForAConcreteRow()
-    {
-        Captured captured = Capture(
-            new[]
-            {
-                new AclBinding(
-                    new ResourcePattern(ResourceType.Topic, string.Empty, PatternType.Literal),
-                    new AccessControlEntry(
-                        string.Empty, string.Empty, AclOperation.Read, AclPermissionType.Allow)),
-            },
-            options: null);
-
-        Assert.All(captured.ResourceNamePointers, pointer => Assert.NotEqual(IntPtr.Zero, pointer));
-        Assert.All(captured.PrincipalPointers, pointer => Assert.NotEqual(IntPtr.Zero, pointer));
-        Assert.All(captured.HostPointers, pointer => Assert.NotEqual(IntPtr.Zero, pointer));
-    }
-
-    /// <summary>
-    /// A non-ASCII resource name survives the hand-rolled UTF-8 round trip (ffi §A3) — the
-    /// guard against an <c>LPStr</c> slipping into the row projector.
-    /// </summary>
-    [Fact]
-    public void NonAsciiName_RoundTripsThroughTheSubmit() =>
-        Assert.Equal(
-            new[] { "tópico-café-日本" },
-            Capture(new[] { Binding("tópico-café-日本") }, options: null).ResourceNames);
-
-    /// <summary>
-    /// ⚠ <b>Submitted from inside the stand-in (PLAN §4.5 case 2).</b> Since M15/P9 CP6 this
-    /// RPC's key is an owned <c>kafka_common_acl_AclBinding_t</c> only the core can mint, so the
-    /// callback cannot be hand-fired and a whole-call failure is fanned out <b>once per
-    /// binding</b> rather than delivered once. Issuing the real submit from inside the
-    /// stand-in must not deadlock, every binding's awaitable must fault, and the
-    /// <c>GCHandle</c> must be freed once — which the client's
-    /// <see cref="NativeAdminClient.Dispose"/> below would hang on otherwise.
-    /// </summary>
-    [Fact]
-    public async Task PerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AclBinding alpha = Binding("inline-alpha");
-        AclBinding beta = Binding("inline-beta");
-
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
-            new[] { alpha, beta },
-            options: null,
-            AdminFlavour.Async,
-            (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-             operations, permissionTypes, count, timeoutMs, callback, userData) =>
-                NativeMethods.AdminClientCreateAclsAsync(
-                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-                    operations, permissionTypes, count, timeoutMs, callback, userData)));
-
-        foreach (AclBinding binding in new[] { alpha, beta })
+        WithBinding(binding, (pattern, entry) =>
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
-                () => result.Values[binding].Get());
-            Assert.Equal(35, failure.Code);
-            Assert.Equal("Not implemented yet", failure.Message);
-        }
+            AssertEmptyString(Read(pattern, NativeMethods.ResourcePatternName));
+            AssertEmptyString(Read(entry, NativeMethods.AccessControlEntryPrincipal));
+            AssertEmptyString(Read(entry, NativeMethods.AccessControlEntryHost));
+        });
     }
 
-    /// <summary>
-    /// Whatever the <c>GCHandle</c> carries, the submit publishes it <b>before</b> the
-    /// P/Invoke — the ABI requires everything the callback needs to be published before the
-    /// call, because the callback can fire inside it.
-    /// </summary>
     [Fact]
-    public void UserData_IsPublishedBeforeTheCall() =>
-        Assert.NotEqual(IntPtr.Zero, Capture(new[] { Binding("t") }, options: null).UserData);
-
-    // ------------------------------------------------------------------------------------
-    // delete_acls_async — the same seven arrays, but the NULLABLE half of the rule.
-    //
-    // ⚠ Byte-identical signature to create_acls_async, opposite contract: here a NULL string
-    // entry means "match any" and no enum combination is rejected (header,
-    // kafka_admin_AdminClient_delete_acls).
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N1 at the RPC that can act on it.</b> A wildcard filter's three strings reach
-    /// <c>delete_acls</c> as <see cref="IntPtr.Zero"/>, and a literal-empty filter's as
-    /// non-null pointers to a NUL byte. Collapsing them here deletes ACLs the caller never
-    /// named.
-    /// </summary>
-    [Fact]
-    public void DeleteSubmit_KeepsNullApartFromEmpty()
+    public void AclOptions_NoSetterRan_TheCOptionsCarryTheDefaultTimeout()
     {
-        Captured captured = CaptureDelete(
+        Assert.Equal(-1, CreateAclsTimeoutMs(null));
+        Assert.Equal(-1, CreateAclsTimeoutMs(new CreateAclsOptions()));
+        Assert.Empty(new CreateAclsOptions().Setters.InOrder);
+        Assert.Equal(-1, DescribeAclsTimeoutMs(null));
+        Assert.Equal(-1, DescribeAclsTimeoutMs(new DescribeAclsOptions()));
+        Assert.Empty(new DescribeAclsOptions().Setters.InOrder);
+        Assert.Equal(-1, DeleteAclsTimeoutMs(null));
+        Assert.Equal(-1, DeleteAclsTimeoutMs(new DeleteAclsOptions()));
+        Assert.Empty(new DeleteAclsOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void AclOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal(expected, CreateAclsTimeoutMs(new CreateAclsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, DescribeAclsTimeoutMs(new DescribeAclsOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, DeleteAclsTimeoutMs(new DeleteAclsOptions { TimeoutMs = timeoutMs }));
+    }
+
+    [Fact]
+    public void AclOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        CreateAclsOptions create = new CreateAclsOptions { TimeoutMs = 10 };
+        create.TimeoutMs = 20;
+        Assert.Equal(20, CreateAclsTimeoutMs(create));
+        Assert.Equal(new[] { nameof(CreateAclsOptions.TimeoutMs) }, create.Setters.InOrder);
+
+        DescribeAclsOptions describe = new DescribeAclsOptions { TimeoutMs = 10 };
+        describe.TimeoutMs = null;
+        Assert.Equal(-1, DescribeAclsTimeoutMs(describe));
+
+        DeleteAclsOptions delete = new DeleteAclsOptions { TimeoutMs = 10 };
+        delete.TimeoutMs = 30;
+        Assert.Equal(30, DeleteAclsTimeoutMs(delete));
+    }
+
+    [Fact]
+    public void QuotaFilter_TheThreeFactories_CrossAsThreeDistinctMatches()
+    {
+        ClientQuotaFilter filter = ClientQuotaFilter.Contains(
             new[]
             {
-                new AclBindingFilter(
-                    new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
-                    new AccessControlEntryFilter(
-                        null, null, AclOperation.Any, AclPermissionType.Any)),
-                new AclBindingFilter(
-                    new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Any),
-                    new AccessControlEntryFilter(
-                        string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any)),
-            },
-            options: null);
+                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
+                ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.ClientId),
+                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.Ip),
+            });
+        WithQuotaFilter(filter, (components, strict) =>
+        {
+            Assert.False(strict);
+            Assert.Equal(new[] { "user", "client-id", "ip" }, components.Select(ComponentEntityType));
+            Assert.Equal(new[] { MatchExact, MatchDefault, MatchAny }, components.Select(MatchCode));
 
-        Assert.Equal(2, captured.Count);
-
-        Assert.Equal(IntPtr.Zero, captured.ResourceNamePointers[0]);
-        Assert.Equal(IntPtr.Zero, captured.PrincipalPointers[0]);
-        Assert.Equal(IntPtr.Zero, captured.HostPointers[0]);
-
-        Assert.NotEqual(IntPtr.Zero, captured.ResourceNamePointers[1]);
-        Assert.NotEqual(IntPtr.Zero, captured.PrincipalPointers[1]);
-        Assert.NotEqual(IntPtr.Zero, captured.HostPointers[1]);
-
-        Assert.Equal(new string?[] { null, string.Empty }, captured.ResourceNames);
-        Assert.Equal(new string?[] { null, string.Empty }, captured.Principals);
-        Assert.Equal(new string?[] { null, string.Empty }, captured.Hosts);
+            Assert.Equal(Singleton(Native.ClientQuotaMatchDefault), Read(components[1], Native.ClientQuotaFilterComponentMatch));
+            Assert.Equal(Singleton(Native.ClientQuotaMatchAny), Read(components[2], Native.ClientQuotaFilterComponentMatch));
+            Assert.Equal(
+                "ClientQuotaFilterComponent(entityType=user, match=Optional[alice])",
+                OwnedString(components[0], Native.ClientQuotaFilterComponentToString));
+        });
     }
 
-    /// <summary>
-    /// The seven arrays reach the P/Invoke with the batch's own count, one row per filter, in
-    /// request order — and the ANY sentinels are forwarded rather than screened out.
-    /// </summary>
     [Fact]
-    public void DeleteSubmit_SendsSevenParallelArrays()
+    public void QuotaFilter_AnExactEmptyName_IsAnExactMatchOfTheEmptyString()
     {
-        Captured captured = CaptureDelete(
-            new[] { DeleteFilter("alpha"), DeleteFilter("beta") }, options: null);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { (int)ResourceType.Topic, (int)ResourceType.Topic }, captured.ResourceTypes);
-        Assert.Equal(new[] { "alpha", "beta" }, captured.ResourceNames);
-        Assert.Equal(new[] { (int)PatternType.Any, (int)PatternType.Any }, captured.PatternTypes);
-        Assert.Equal(new[] { "User:alice", "User:alice" }, captured.Principals);
-        Assert.Equal(new[] { "*", "*" }, captured.Hosts);
-        Assert.Equal(new[] { (int)AclOperation.Any, (int)AclOperation.Any }, captured.Operations);
-        Assert.Equal(
-            new[] { (int)AclPermissionType.Any, (int)AclPermissionType.Any },
-            captured.PermissionTypes);
-    }
-
-    /// <summary>
-    /// A <see langword="null"/> timeout becomes a <b>negative</b> <c>timeout_ms</c>, and an
-    /// explicit one is forwarded verbatim — <c>0</c> included.
-    /// </summary>
-    [Fact]
-    public void DeleteSubmit_MapsTheTimeout()
-    {
-        Assert.True(
-            CaptureDelete(new[] { DeleteFilter("t") }, options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
-        Assert.True(
-            CaptureDelete(new[] { DeleteFilter("t") }, new DeleteAclsOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-
-        Assert.Equal(
-            0,
-            CaptureDelete(
-                new[] { DeleteFilter("t") }, new DeleteAclsOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            45_678,
-            CaptureDelete(
-                new[] { DeleteFilter("t") }, new DeleteAclsOptions { TimeoutMs = 45_678 }).TimeoutMs);
-    }
-
-    /// <summary>
-    /// A repeated filter collapses to one row — Java keys its result on a map, so two
-    /// value-equal filters are one entry.
-    /// </summary>
-    [Fact]
-    public void DeleteSubmit_DuplicateFiltersCollapseToOneRow()
-    {
-        Captured captured = CaptureDelete(
-            new[] { DeleteFilter("dup"), DeleteFilter("dup") }, options: null);
-
-        Assert.Equal(1, captured.Count);
-        Assert.Equal(new[] { "dup" }, captured.ResourceNames);
-    }
-
-    /// <summary>
-    /// ⚠ Every filter's awaitable faults independently and the <c>GCHandle</c> is freed once —
-    /// which the client's <c>Dispose</c> would hang on otherwise.
-    /// </summary>
-    [Fact]
-    public async Task DeletePerKeyCallbacks_FaultEveryKey_AndReleaseTheRegistration()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AclBindingFilter alpha = DeleteFilter("inline-alpha");
-        AclBindingFilter beta = DeleteFilter("inline-beta");
-
-        // ⚠ Shape 4a's KEY is an owned kafka_common_acl_AclBindingFilter_t that only the core can
-        // mint, so the inline fan-out is driven through the REAL ABI rather than a hand-fired
-        // callback: the mock's submit fails, so every key completes on this thread before the
-        // call returns — which is the inline path this test is about.
-        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
-            new[] { alpha, beta },
-            options: null,
-            AdminFlavour.Async,
-            NativeMethods.AdminClientDeleteAclsAsync));
-
-        // The mock completes each filter's own future exceptionally, so the callbacks arrive
-        // on the core's dispatcher thread rather than inline.
-        await Assert.ThrowsAsync<KafkaException>(() => result.Values[alpha].Get());
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values[beta].Get());
-        Assert.Equal("Not implemented yet", failure.Message);
-        Assert.Equal(35, failure.Code);
-    }
-
-    /// <summary>
-    /// The <c>GCHandle</c> is published before the P/Invoke, because the callback can fire
-    /// inside it.
-    /// </summary>
-    [Fact]
-    public void DeleteUserData_IsPublishedBeforeTheCall() =>
-        Assert.NotEqual(
-            IntPtr.Zero, CaptureDelete(new[] { DeleteFilter("t") }, options: null).UserData);
-
-    // ------------------------------------------------------------------------------------
-    // describe_acls — a SINGLE filter, so seven SCALARS rather than seven arrays.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N1 on the scalar path.</b> The same null-versus-empty rule as the array RPCs,
-    /// applied to one row's worth of scalars: a wildcard field crosses as
-    /// <see cref="IntPtr.Zero"/>, a literal-empty field as a non-null pointer to a NUL byte.
-    /// </summary>
-    [Fact]
-    public void DescribeSubmit_KeepsNullApartFromEmpty()
-    {
-        DescribeCaptured wildcard = CaptureDescribe(
-            new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Topic, null, PatternType.Any),
-                new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any)),
-            options: null);
-
-        Assert.Equal(IntPtr.Zero, wildcard.ResourceNamePointer);
-        Assert.Equal(IntPtr.Zero, wildcard.PrincipalPointer);
-        Assert.Equal(IntPtr.Zero, wildcard.HostPointer);
-        Assert.Null(wildcard.ResourceName);
-        Assert.Null(wildcard.Principal);
-        Assert.Null(wildcard.Host);
-
-        DescribeCaptured empty = CaptureDescribe(
-            new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Topic, string.Empty, PatternType.Any),
-                new AccessControlEntryFilter(
-                    string.Empty, string.Empty, AclOperation.Any, AclPermissionType.Any)),
-            options: null);
-
-        Assert.NotEqual(IntPtr.Zero, empty.ResourceNamePointer);
-        Assert.NotEqual(IntPtr.Zero, empty.PrincipalPointer);
-        Assert.NotEqual(IntPtr.Zero, empty.HostPointer);
-        Assert.Equal(string.Empty, empty.ResourceName);
-        Assert.Equal(string.Empty, empty.Principal);
-        Assert.Equal(string.Empty, empty.Host);
-    }
-
-    /// <summary>
-    /// All seven fields reach the P/Invoke as scalars, in the ABI's own order, with the ANY
-    /// sentinels forwarded rather than screened out.
-    /// </summary>
-    [Fact]
-    public void DescribeSubmit_SendsEveryScalar()
-    {
-        DescribeCaptured captured = CaptureDescribe(
-            new AclBindingFilter(
-                new ResourcePatternFilter(ResourceType.Group, "alpha", PatternType.Prefixed),
-                new AccessControlEntryFilter(
-                    "User:bob", "10.0.0.1", AclOperation.Any, AclPermissionType.Any)),
-            options: null);
-
-        Assert.Equal((int)ResourceType.Group, captured.ResourceType);
-        Assert.Equal("alpha", captured.ResourceName);
-        Assert.Equal((int)PatternType.Prefixed, captured.PatternType);
-        Assert.Equal("User:bob", captured.Principal);
-        Assert.Equal("10.0.0.1", captured.Host);
-        Assert.Equal((int)AclOperation.Any, captured.Operation);
-        Assert.Equal((int)AclPermissionType.Any, captured.PermissionType);
-    }
-
-    /// <summary>A non-ASCII name survives the UTF-8 round trip through the seam.</summary>
-    [Fact]
-    public void DescribeSubmit_NonAsciiNameRoundTrips() =>
-        Assert.Equal(
-            "主题-ü",
-            CaptureDescribe(DescribeFilter("主题-ü"), options: null).ResourceName);
-
-    /// <summary>
-    /// A <see langword="null"/> timeout becomes a <b>negative</b> <c>timeout_ms</c>, and an
-    /// explicit one is forwarded verbatim — <c>0</c> included.
-    /// </summary>
-    [Fact]
-    public void DescribeSubmit_MapsTheTimeout()
-    {
-        Assert.True(
-            CaptureDescribe(DescribeFilter("t"), options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
-        Assert.True(
-            CaptureDescribe(DescribeFilter("t"), new DescribeAclsOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-
-        Assert.Equal(
-            0,
-            CaptureDescribe(DescribeFilter("t"), new DescribeAclsOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            45_678,
-            CaptureDescribe(
-                DescribeFilter("t"), new DescribeAclsOptions { TimeoutMs = 45_678 }).TimeoutMs);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The inline-callback path.</b> Driving the production trampoline from inside the
-    /// stand-in must not deadlock, must fault the single awaitable with the submit error, and
-    /// must free the <c>GCHandle</c> once — which the client's <c>Dispose</c> would hang on
-    /// otherwise.
-    /// </summary>
-    [Fact]
-    public async Task DescribeInlineCallback_FaultsTheTask_AndReleasesTheRegistration()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
-            DescribeFilter("inline"),
-            options: null,
-            AdminFlavour.Async,
-            (handle, resourceType, resourceName, patternType, principal, host,
-             operation, permissionType, timeoutMs, callback, userData) =>
-                // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData)));
-
-        Assert.True(result.Values().Get().IsFaulted);
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Values().Get());
-        Assert.Equal("captured", failure.Message);
-        Assert.Equal(1, failure.Code);
-    }
-
-    /// <summary>
-    /// The <c>GCHandle</c> is published before the P/Invoke, because the callback can fire
-    /// inside it.
-    /// </summary>
-    [Fact]
-    public void DescribeUserData_IsPublishedBeforeTheCall() =>
-        Assert.NotEqual(IntPtr.Zero, CaptureDescribe(DescribeFilter("t"), options: null).UserData);
-
-    // ------------------------------------------------------------------------------------
-    // describe_client_quotas — three parallel arrays plus the `strict` bool.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N3.</b> The three <see cref="ClientQuotaFilterComponent"/> factories submit
-    /// <b>three distinct</b> match types — 0 EXACT / 1 DEFAULT / 2 SPECIFIED. A
-    /// <c>string?</c>-based model has only two states and collapses DEFAULT into SPECIFIED,
-    /// silently turning "the default user's quota" into "every named user's quota".
-    /// </summary>
-    [Fact]
-    public void QuotaSubmit_TheThreeFactories_ProduceThreeDistinctMatchTypes()
-    {
-        QuotaCaptured captured = CaptureQuotas(
-            ClientQuotaFilter.Contains(
-                new[]
-                {
-                    ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "alice"),
-                    ClientQuotaFilterComponent.OfDefaultEntity(ClientQuotaEntity.ClientId),
-                    ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.Ip),
-                }),
-            options: null);
-
-        Assert.Equal(3, captured.Count);
-        Assert.Equal(
+        ClientQuotaFilter filter = ClientQuotaFilter.Contains(
             new[]
             {
-                (int)ClientQuotaMatchType.Exact,
-                (int)ClientQuotaMatchType.Default,
-                (int)ClientQuotaMatchType.Specified,
-            },
-            captured.MatchTypes);
-
-        // The three values really are distinct — a collapsed model fails here first.
-        Assert.Equal(3, captured.MatchTypes.Distinct().Count());
-
-        Assert.Equal(new[] { "user", "client-id", "ip" }, captured.EntityTypes);
-
-        // Only EXACT carries a name; the other two must submit a NULL, not "".
-        Assert.Equal("alice", captured.MatchNames[0]);
-        Assert.Null(captured.MatchNames[1]);
-        Assert.Null(captured.MatchNames[2]);
-        Assert.Equal(IntPtr.Zero, captured.MatchNamePointers[1]);
-        Assert.Equal(IntPtr.Zero, captured.MatchNamePointers[2]);
+                ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, string.Empty),
+                ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User),
+            });
+        WithQuotaFilter(filter, (components, _) =>
+        {
+            Assert.Equal(MatchExact, MatchCode(components[0]));
+            Assert.Equal(
+                "ClientQuotaFilterComponent(entityType=user, match=Optional[])",
+                OwnedString(components[0], Native.ClientQuotaFilterComponentToString));
+            Assert.Equal(MatchAny, MatchCode(components[1]));
+        });
     }
 
-    /// <summary>
-    /// An EXACT component naming <c>""</c> submits a <b>non-null</b> pointer to a NUL byte,
-    /// distinct from the null a nameless component submits.
-    /// </summary>
     [Fact]
-    public void QuotaSubmit_AnExactEmptyName_IsAPointerApartFromNoName()
-    {
-        QuotaCaptured captured = CaptureQuotas(
-            ClientQuotaFilter.Contains(
-                new[]
-                {
-                    ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, string.Empty),
-                    ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User),
-                }),
-            options: null);
+    public void QuotaFilter_All_IsZeroComponentsAndNotStrict() =>
+        WithQuotaFilter(ClientQuotaFilter.All(), (components, strict) =>
+        {
+            Assert.Empty(components);
+            Assert.False(strict);
+        });
 
-        Assert.NotEqual(IntPtr.Zero, captured.MatchNamePointers[0]);
-        Assert.Equal(string.Empty, captured.MatchNames[0]);
-
-        Assert.Equal(IntPtr.Zero, captured.MatchNamePointers[1]);
-        Assert.Null(captured.MatchNames[1]);
-    }
-
-    /// <summary>
-    /// ⚠ <c>count == 0</c> with <c>strict == false</c> is Java's
-    /// <see cref="ClientQuotaFilter.All"/> — the most common call — and must reach the ABI
-    /// as exactly that rather than being rejected as empty.
-    /// </summary>
     [Fact]
-    public void QuotaSubmit_AllFilter_IsZeroComponentsAndNotStrict()
-    {
-        QuotaCaptured captured = CaptureQuotas(ClientQuotaFilter.All(), options: null);
-
-        Assert.Equal(0, captured.Count);
-        Assert.False(captured.Strict);
-        Assert.Empty(captured.EntityTypes);
-        Assert.Empty(captured.MatchTypes);
-    }
-
-    /// <summary>
-    /// <c>containsOnly</c> submits <c>strict == true</c> and <c>contains</c> <c>false</c> —
-    /// the two are not merged, and the one-byte marshalling is exercised both ways.
-    /// </summary>
-    [Fact]
-    public void QuotaSubmit_StrictIsForwardedBothWays()
+    public void QuotaFilter_StrictIsForwardedBothWays()
     {
         ClientQuotaFilterComponent[] components =
             { ClientQuotaFilterComponent.OfEntityType(ClientQuotaEntity.User) };
 
-        Assert.True(CaptureQuotas(ClientQuotaFilter.ContainsOnly(components), options: null).Strict);
-        Assert.False(CaptureQuotas(ClientQuotaFilter.Contains(components), options: null).Strict);
-    }
-
-    /// <summary>
-    /// A <see langword="null"/> timeout becomes a <b>negative</b> <c>timeout_ms</c>, and an
-    /// explicit one is forwarded verbatim — <c>0</c> included.
-    /// </summary>
-    [Fact]
-    public void QuotaSubmit_MapsTheTimeout()
-    {
-        Assert.True(
-            CaptureQuotas(ClientQuotaFilter.All(), options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
-        Assert.True(
-            CaptureQuotas(ClientQuotaFilter.All(), new DescribeClientQuotasOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-
-        Assert.Equal(
-            0,
-            CaptureQuotas(
-                ClientQuotaFilter.All(), new DescribeClientQuotasOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            45_678,
-            CaptureQuotas(
-                ClientQuotaFilter.All(),
-                new DescribeClientQuotasOptions { TimeoutMs = 45_678 }).TimeoutMs);
-    }
-
-    /// <summary>A non-ASCII entity name survives the UTF-8 round trip through the seam.</summary>
-    [Fact]
-    public void QuotaSubmit_NonAsciiNameRoundTrips() =>
-        Assert.Equal(
-            "用户-ü",
-            CaptureQuotas(
-                ClientQuotaFilter.Contains(
-                    new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "用户-ü") }),
-                options: null).MatchNames[0]);
-
-    /// <summary>
-    /// ⚠ <b>The inline-callback path.</b> Driving the production trampoline from inside the
-    /// stand-in must not deadlock, must fault the single awaitable, and must free the
-    /// <c>GCHandle</c> once.
-    /// </summary>
-    [Fact]
-    public async Task QuotaInlineCallback_FaultsTheTask_AndReleasesTheRegistration()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
-            ClientQuotaFilter.All(),
-            options: null,
-            AdminFlavour.Async,
-            (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
-                // Synchronously, on this thread, before the submit returns — as the ABI does.
-                callback(IntPtr.Zero, CapturedError(), userData)));
-
-        Assert.True(result.Entities().Get().IsFaulted);
-
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => result.Entities().Get());
-        Assert.Equal("captured", failure.Message);
-        Assert.Equal(1, failure.Code);
-    }
-
-    /// <summary>
-    /// The <c>GCHandle</c> is published before the P/Invoke, because the callback can fire
-    /// inside it.
-    /// </summary>
-    [Fact]
-    public void QuotaUserData_IsPublishedBeforeTheCall() =>
-        Assert.NotEqual(IntPtr.Zero, CaptureQuotas(ClientQuotaFilter.All(), options: null).UserData);
-
-    // ------------------------------------------------------------------------------------
-    // alter_client_quotas — the phase's only RAGGED 2-level input.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N4.</b> <c>Op(key, null)</c> submits <c>op_has_values == 0</c> — Java's
-    /// <em>remove this quota</em> — while <c>Op(key, 0.0)</c> submits <c>1</c> with the value
-    /// <c>0.0</c>. Two <b>different</b> requests, not one.
-    /// </summary>
-    /// <remarks>
-    /// Every <c>double</c>, <c>0</c> included, is a legal quota value, so no sentinel could
-    /// carry the distinction (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>) — a
-    /// sentinel-based encoding silently turns "set this quota to zero" into "delete it".
-    /// </remarks>
-    [Fact]
-    public void AlterSubmit_ANullOpValueRemoves_AndZeroSets()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                new ClientQuotaAlteration(
-                    Entity(ClientQuotaEntity.User, "ternary"),
-                    new[]
-                    {
-                        new ClientQuotaAlteration.Op("producer_byte_rate", null),
-                        new ClientQuotaAlteration.Op("consumer_byte_rate", 0d),
-                    }),
-            },
-            options: null);
-
-        Assert.Equal(new[] { 2 }, captured.OpCounts);
-        Assert.Equal(new[] { "producer_byte_rate", "consumer_byte_rate" }, captured.OpKeys[0]);
-
-        // The flag is the only channel, and the two ops disagree on it.
-        Assert.Equal(new byte[] { 0, 1 }, captured.OpHasValues[0]);
-        Assert.NotEqual(captured.OpHasValues[0][0], captured.OpHasValues[0][1]);
-
-        // The set op carries 0.0 — the value a sentinel encoding would have to reuse.
-        Assert.Equal(0d, captured.OpValues[0][1]);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The <c>bool**</c> width.</b> The presence flags are one byte each, so an
-    /// alternating pattern reads back at consecutive byte offsets. A 4-byte Win32 <c>BOOL</c>
-    /// encoding would put zeroes at offsets 1..3 and fail here.
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_OpHasValues_AreOneBytePerOp()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                new ClientQuotaAlteration(
-                    Entity(ClientQuotaEntity.User, "width"),
-                    new[]
-                    {
-                        new ClientQuotaAlteration.Op("a", null),
-                        new ClientQuotaAlteration.Op("b", 1d),
-                        new ClientQuotaAlteration.Op("c", null),
-                        new ClientQuotaAlteration.Op("d", 2d),
-                    }),
-            },
-            options: null);
-
-        Assert.Equal(new byte[] { 0, 1, 0, 1 }, captured.OpHasValues[0]);
-        Assert.Equal(new[] { 0d, 1d, 0d, 2d }, captured.OpValues[0]);
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>T-N5.</b> An entity name of <see langword="null"/>, <c>""</c> and <c>"x"</c>
-    /// produce <b>three distinct</b> submitted rows: a NULL pointer (the built-in default
-    /// entity), a non-null pointer to a NUL byte, and a non-null pointer to <c>"x"</c>.
-    /// </summary>
-    /// <remarks>
-    /// A null name is Java's null map value, which is neither omitting the type nor the name
-    /// <c>""</c> (header, <c>kafka_admin_AdminClient_alter_client_quotas</c>).
-    /// </remarks>
-    [Fact]
-    public void AlterSubmit_TheEntityNameTernary_ProducesThreeDistinctRows()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, null), s_noOps),
-                new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, string.Empty), s_noOps),
-                new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "x"), s_noOps),
-            },
-            options: null);
-
-        Assert.Equal(3, captured.Count);
-        Assert.Equal(new[] { 1, 1, 1 }, captured.EntityCounts);
-
-        Assert.Equal(IntPtr.Zero, captured.EntityNamePointers[0][0]);
-        Assert.Null(captured.EntityNames[0][0]);
-
-        Assert.NotEqual(IntPtr.Zero, captured.EntityNamePointers[1][0]);
-        Assert.Equal(string.Empty, captured.EntityNames[1][0]);
-
-        Assert.NotEqual(IntPtr.Zero, captured.EntityNamePointers[2][0]);
-        Assert.Equal("x", captured.EntityNames[2][0]);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The ragged shape.</b> Two alterations with <b>different</b> entity counts and
-    /// <b>different</b> op counts each land against their own row's counts — a test with
-    /// uniform lengths would pass even if the inner arrays were indexed with the wrong row's
-    /// count.
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_BothLevelsAreRagged_AndIndependentOfEachOther()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                // Two entity types, one op.
-                new ClientQuotaAlteration(
-                    new ClientQuotaEntity(
-                        new Dictionary<string, string?>(StringComparer.Ordinal)
-                        {
-                            [ClientQuotaEntity.User] = "u",
-                            [ClientQuotaEntity.ClientId] = "c",
-                        }),
-                    new[] { new ClientQuotaAlteration.Op("only", 1d) }),
-
-                // One entity type, three ops — the opposite raggedness.
-                new ClientQuotaAlteration(
-                    Entity(ClientQuotaEntity.Ip, "10.0.0.1"),
-                    new[]
-                    {
-                        new ClientQuotaAlteration.Op("first", 1d),
-                        new ClientQuotaAlteration.Op("second", null),
-                        new ClientQuotaAlteration.Op("third", 3d),
-                    }),
-            },
-            options: null);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { 2, 1 }, captured.EntityCounts);
-        Assert.Equal(new[] { 1, 3 }, captured.OpCounts);
-
-        // Row 0's (type, name) pairs, as a set — the entity's own map order is not a contract.
-        Assert.Equal(
-            new[] { "client-id=c", "user=u" },
-            Pairs(captured.EntityTypes[0], captured.EntityNames[0]));
-        Assert.Equal(new[] { "ip=10.0.0.1" }, Pairs(captured.EntityTypes[1], captured.EntityNames[1]));
-
-        Assert.Equal(new[] { "only" }, captured.OpKeys[0]);
-        Assert.Equal(new[] { "first", "second", "third" }, captured.OpKeys[1]);
-        Assert.Equal(new byte[] { 1 }, captured.OpHasValues[0]);
-        Assert.Equal(new byte[] { 1, 0, 1 }, captured.OpHasValues[1]);
-    }
-
-    /// <summary>
-    /// An alteration with no ops submits a count of 0 and a <b>NULL</b> inner pointer, which
-    /// the core null-checks before reading — never a pinned empty array, whose address is
-    /// undocumented (ffi §A4).
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_AnAlterationWiths_noOps_SubmitsANullInnerPointer()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[] { new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "no-ops"), s_noOps) },
-            options: null);
-
-        Assert.Equal(new[] { 0 }, captured.OpCounts);
-        Assert.Equal(IntPtr.Zero, captured.OpKeyRows[0]);
-        Assert.Equal(IntPtr.Zero, captured.OpValueRows[0]);
-        Assert.Equal(IntPtr.Zero, captured.OpHasValueRows[0]);
-
-        // The entity level is still populated — the two levels are independent.
-        Assert.Equal(new[] { 1 }, captured.EntityCounts);
-        Assert.NotEqual(IntPtr.Zero, captured.EntityTypeRows[0]);
-    }
-
-    /// <summary>
-    /// ⚠⚠ <b>An EMPTY entity crosses as a count of 0 over NON-NULL inner pointers</b>
-    /// (M15/P13.2 G4-4) — the entity-level inverse of the op level above. A NULL
-    /// <c>entity_types[i]</c> is what the ABI reads as "no entity types", and that fails the
-    /// <b>whole</b> call for every key; Java sends the empty entity and the broker answers it
-    /// per key (<c>KafkaAdminClient.java:4326</c>). Row 0 pins that the neighbour is
-    /// unaffected.
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_AnEmptyEntity_SubmitsACountOfZero_OverNonNullInnerPointers()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                new ClientQuotaAlteration(
-                    Entity(ClientQuotaEntity.User, "valid"),
-                    new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1d) }),
-                new ClientQuotaAlteration(EmptyEntity(), s_noOps),
-            },
-            options: null);
-
-        Assert.Equal(2, captured.Count);
-        Assert.Equal(new[] { 1, 0 }, captured.EntityCounts);
-
-        // The row a NULL would turn into a whole-call "has no entity types" failure.
-        Assert.NotEqual(IntPtr.Zero, captured.EntityTypeRows[1]);
-        Assert.NotEqual(IntPtr.Zero, captured.EntityNameRows[1]);
-        Assert.Empty(captured.EntityTypes[1]);
-        Assert.Empty(captured.EntityNames[1]);
-
-        // Row 0 is exactly what it would be alone.
-        Assert.Equal(new[] { "user=valid" }, Pairs(captured.EntityTypes[0], captured.EntityNames[0]));
-        Assert.Equal(new[] { 1, 0 }, captured.OpCounts);
-        Assert.Equal(new[] { "producer_byte_rate" }, captured.OpKeys[0]);
-    }
-
-    /// <summary>
-    /// ⚠ <b>The empty entity's inner pointers address a pinned ONE-slot placeholder per level,
-    /// and <c>Dispose</c> releases both.</b> A non-null assertion alone cannot tell the
-    /// placeholder from a pinned <b>empty</b> array — whose address is non-null only by
-    /// undocumented runtime behaviour (ffi §A4) — so this reaches the pins themselves.
-    /// </summary>
-    /// <remarks>
-    /// Reflection, as <see cref="Dispose_ReleasesEveryPin"/> does, because
-    /// <c>AlterationRows</c> deliberately exposes only the seven arrays. A pinned
-    /// <c>GCHandle</c> is a strong root, so release is asserted as <b>collectability</b>: a
-    /// <c>Dispose</c> that cleared the list without freeing would keep both placeholders alive.
-    /// The weak references are taken in a non-inlined helper so no Debug-extended local roots
-    /// them here.
-    /// </remarks>
-    [Fact]
-    public void PinAlterations_AnEmptyEntity_PinsAOneSlotPlaceholderPerLevel_ReleasedByDispose()
-    {
-        ClientQuotaMarshal.AlterationRows rows = ClientQuotaMarshal.PinAlterations(
-            new[] { new ClientQuotaAlteration(EmptyEntity(), s_noOps) });
-
-        WeakReference[] placeholders = AssertOneSlotPlaceholders(rows);
-
-        rows.Dispose();
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        Assert.All(
-            placeholders,
-            placeholder => Assert.False(placeholder.IsAlive, "a placeholder is still pinned after Dispose"));
-
-        // The submit's finally runs once, but an inner failure path can reach it twice.
-        rows.Dispose();
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] AssertOneSlotPlaceholders(ClientQuotaMarshal.AlterationRows rows)
-    {
-        List<GCHandle> pins = (List<GCHandle>)typeof(ClientQuotaMarshal.AlterationRows)
-            .GetField("_pinnedArrays", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .GetValue(rows)!;
-
-        // Exactly the two entity-level placeholders: with no ops the op level is NULL and
-        // pins nothing.
-        Assert.Equal(2, pins.Count);
-        Assert.Equal(new[] { 0 }, rows.EntityCounts);
-        Assert.Equal(IntPtr.Zero, rows.OpKeys[0]);
-
-        return new[] { rows.EntityTypes[0], rows.EntityNames[0] }
-            .Select(address =>
-            {
-                GCHandle pin = Assert.Single(pins, candidate => candidate.AddrOfPinnedObject() == address);
-                Assert.Equal(new[] { IntPtr.Zero }, Assert.IsType<IntPtr[]>(pin.Target));
-                return new WeakReference(pin.Target);
-            })
-            .ToArray();
-    }
-
-    /// <summary>
-    /// <c>validateOnly</c> reaches the seam both ways — Java's
-    /// <c>AlterClientQuotasOptions.validateOnly</c>, which validates without applying.
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_ValidateOnlyIsForwardedBothWays()
-    {
-        ClientQuotaAlteration[] alterations =
-            { new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "vo"), s_noOps) };
-
-        Assert.False(CaptureAlter(alterations, options: null).ValidateOnly);
-        Assert.False(
-            CaptureAlter(alterations, new AlterClientQuotasOptions()).ValidateOnly,
-            "Java's default is false (AlterClientQuotasOptions.java:27)");
-        Assert.True(
-            CaptureAlter(alterations, new AlterClientQuotasOptions { ValidateOnly = true })
-                .ValidateOnly);
-    }
-
-    /// <summary>
-    /// A <see langword="null"/> timeout becomes a <b>negative</b> <c>timeout_ms</c>, and an
-    /// explicit one is forwarded verbatim — <c>0</c> included.
-    /// </summary>
-    [Fact]
-    public void AlterSubmit_MapsTheTimeout()
-    {
-        ClientQuotaAlteration[] alterations =
-            { new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "t"), s_noOps) };
-
-        Assert.True(
-            CaptureAlter(alterations, options: null).TimeoutMs < 0,
-            "a null timeout must map to a NEGATIVE timeout_ms (unset), not 0");
-        Assert.True(
-            CaptureAlter(alterations, new AlterClientQuotasOptions()).TimeoutMs < 0,
-            "an explicit options object with a null timeout must map the same way");
-
-        Assert.Equal(
-            0, CaptureAlter(alterations, new AlterClientQuotasOptions { TimeoutMs = 0 }).TimeoutMs);
-        Assert.Equal(
-            45_678,
-            CaptureAlter(alterations, new AlterClientQuotasOptions { TimeoutMs = 45_678 }).TimeoutMs);
-    }
-
-    /// <summary>A non-ASCII entity name and op key survive the UTF-8 round trip at the seam.</summary>
-    [Fact]
-    public void AlterSubmit_NonAsciiRoundTrips()
-    {
-        AlterCaptured captured = CaptureAlter(
-            new[]
-            {
-                new ClientQuotaAlteration(
-                    Entity(ClientQuotaEntity.User, "用户-ü"),
-                    new[] { new ClientQuotaAlteration.Op("配额-café", 7d) }),
-            },
-            options: null);
-
-        Assert.Equal("用户-ü", captured.EntityNames[0][0]);
-        Assert.Equal("配额-café", captured.OpKeys[0][0]);
-    }
-
-    /// <summary>
-    /// ⚠ <b>Submitted from inside the stand-in.</b> Since M15/P9 CP6 this RPC's key is an
-    /// owned <c>kafka_common_quota_ClientQuotaEntity_t</c> only the core can mint, so the callback
-    /// cannot be hand-fired and a whole-call failure is fanned out <b>once per entity</b>.
-    /// Issuing the real submit from inside the stand-in must not deadlock, must fault
-    /// <b>every</b> per-entity awaitable, and must free the <c>GCHandle</c> once.
-    /// </summary>
-    [Fact]
-    public async Task AlterPerKeyCallbacks_FaultEveryTask_AndReleaseTheRegistration()
-    {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
-            new[]
-            {
-                new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "inline-a"), s_noOps),
-                new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "inline-b"), s_noOps),
-            },
-            options: null,
-            AdminFlavour.Async,
-            (handle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues,
-             opCounts, count, timeoutMs, validateOnly, callback, userData) =>
-                NativeMethods.AdminClientAlterClientQuotasAsync(
-                    handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
-                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData)));
-
-        Assert.Equal(2, result.Values.Count);
-
-        // Every per-key task settles: none is left hanging.
-        foreach (AsyncKafkaFuture task in result.Values.Values)
+        WithQuotaFilter(ClientQuotaFilter.ContainsOnly(components), (native, strict) =>
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => task.Get());
+            Assert.True(strict);
+            Assert.Single(native);
+        });
+        WithQuotaFilter(ClientQuotaFilter.Contains(components), (native, strict) =>
+        {
+            Assert.False(strict);
+            Assert.Single(native);
+        });
+    }
 
-            // ⚠ The core's own wording, typo included (mock_admin_client.rs:1766).
-            Assert.Equal("Not implement yet", failure.Message);
-            Assert.Equal(35, failure.Code);
+    [Fact]
+    public void QuotaFilter_NonAsciiNameRoundTrips() =>
+        WithQuotaFilter(
+            ClientQuotaFilter.Contains(
+                new[] { ClientQuotaFilterComponent.OfEntity(ClientQuotaEntity.User, "用户-ü") }),
+            (components, _) => Assert.Equal(
+                "ClientQuotaFilterComponent(entityType=user, match=Optional[用户-ü])",
+                OwnedString(components[0], Native.ClientQuotaFilterComponentToString)));
+
+    [Fact]
+    public void Alteration_ANullOpValueIsNaN_AndZeroIsZero() =>
+        WithAlteration(
+            new ClientQuotaAlteration(
+                Entity(ClientQuotaEntity.User, "ternary"),
+                new[]
+                {
+                    new ClientQuotaAlteration.Op("producer_byte_rate", null),
+                    new ClientQuotaAlteration.Op("consumer_byte_rate", 0d),
+                }),
+            (_, ops) =>
+            {
+                Assert.Equal(new[] { "producer_byte_rate", "consumer_byte_rate" }, ops.Select(OpKey));
+                Assert.True(double.IsNaN(OpValue(ops[0])));
+                Assert.Equal(0d, OpValue(ops[1]));
+            });
+
+    [Fact]
+    public void Alteration_TheEntityNameTernary_IsANullPointer_AnEmptyString_OrTheName()
+    {
+        WithAlteration(
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, null), s_noOps),
+            (entity, _) =>
+            {
+                EntityEntry entry = Assert.Single(EntityEntries(entity));
+                Assert.Equal("user", entry.Type);
+                Assert.True(entry.NameIsNull);
+                Assert.Null(entry.Name);
+            });
+        WithAlteration(
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, string.Empty), s_noOps),
+            (entity, _) =>
+            {
+                EntityEntry entry = Assert.Single(EntityEntries(entity));
+                Assert.False(entry.NameIsNull);
+                Assert.Equal(string.Empty, entry.Name);
+            });
+        WithAlteration(
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "x"), s_noOps),
+            (entity, _) =>
+            {
+                EntityEntry entry = Assert.Single(EntityEntries(entity));
+                Assert.False(entry.NameIsNull);
+                Assert.Equal("x", entry.Name);
+            });
+    }
+
+    [Fact]
+    public void Alteration_CarriesEveryEntityPart_AndTheOpsInOrder()
+    {
+        ClientQuotaAlteration alteration = new ClientQuotaAlteration(
+            new ClientQuotaEntity(
+                new Dictionary<string, string?>(StringComparer.Ordinal)
+                {
+                    [ClientQuotaEntity.User] = "u",
+                    [ClientQuotaEntity.ClientId] = "c",
+                }),
+            new[]
+            {
+                new ClientQuotaAlteration.Op("first", 1d),
+                new ClientQuotaAlteration.Op("second", null),
+                new ClientQuotaAlteration.Op("third", 3d),
+            });
+        WithAlteration(alteration, (entity, ops) =>
+        {
+            Assert.Equal(
+                new[] { "client-id=c", "user=u" },
+                EntityEntries(entity).Select(entry => entry.Type + "=" + entry.Name).OrderBy(pair => pair, StringComparer.Ordinal));
+            Assert.Equal(alteration.Entity, ClientQuotaMarshal.CopyOutEntity(entity));
+            Assert.Equal(new[] { "first", "second", "third" }, ops.Select(OpKey));
+            Assert.Equal(1d, OpValue(ops[0]));
+            Assert.True(double.IsNaN(OpValue(ops[1])));
+            Assert.Equal(3d, OpValue(ops[2]));
+        });
+    }
+
+    [Fact]
+    public void Alteration_AnEmptyEntity_CrossesAsAnEntityWithNoParts() =>
+        WithAlteration(
+            new ClientQuotaAlteration(EmptyEntity(), new[] { new ClientQuotaAlteration.Op("producer_byte_rate", 1d) }),
+            (entity, ops) =>
+            {
+                Assert.Empty(EntityEntries(entity));
+                Assert.Equal("producer_byte_rate", OpKey(Assert.Single(ops)));
+            });
+
+    [Fact]
+    public void Alteration_WithNoOps_CrossesAsAnEmptyOpList() =>
+        WithAlteration(
+            new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "no-ops"), s_noOps),
+            (entity, ops) =>
+            {
+                Assert.Empty(ops);
+                Assert.Equal("no-ops", Assert.Single(EntityEntries(entity)).Name);
+            });
+
+    [Fact]
+    public void Alteration_NonAsciiNameAndKeyRoundTrip() =>
+        WithAlteration(
+            new ClientQuotaAlteration(
+                Entity(ClientQuotaEntity.User, "用户-ü"),
+                new[] { new ClientQuotaAlteration.Op("配额-café", 7d) }),
+            (entity, ops) =>
+            {
+                Assert.Equal("用户-ü", Assert.Single(EntityEntries(entity)).Name);
+                Assert.Equal("配额-café", OpKey(Assert.Single(ops)));
+                Assert.Equal(7d, OpValue(ops[0]));
+            });
+
+    [Fact]
+    public void QuotaOptions_NoSetterRan_TheCOptionsCarryTheDefaults()
+    {
+        Assert.Equal(-1, DescribeClientQuotasTimeoutMs(null));
+        Assert.Equal(-1, DescribeClientQuotasTimeoutMs(new DescribeClientQuotasOptions()));
+        Assert.Empty(new DescribeClientQuotasOptions().Setters.InOrder);
+        Assert.Equal(-1, AlterClientQuotasTimeoutMs(null));
+        Assert.Equal(-1, AlterClientQuotasTimeoutMs(new AlterClientQuotasOptions()));
+        Assert.Equal(0, AlterClientQuotasValidateOnly(null));
+        Assert.Equal(0, AlterClientQuotasValidateOnly(new AlterClientQuotasOptions()));
+        Assert.Empty(new AlterClientQuotasOptions().Setters.InOrder);
+    }
+
+    [Theory]
+    [InlineData(4321, 4321)]
+    [InlineData(0, 0)]
+    [InlineData(null, -1)]
+    [InlineData(-5, 0)]
+    public void QuotaOptions_TimeoutMs_ReachesTheCOptions_NullAsTheDefaultAndANegativeAsZero(int? timeoutMs, int expected)
+    {
+        Assert.Equal(expected, DescribeClientQuotasTimeoutMs(new DescribeClientQuotasOptions { TimeoutMs = timeoutMs }));
+        Assert.Equal(expected, AlterClientQuotasTimeoutMs(new AlterClientQuotasOptions { TimeoutMs = timeoutMs }));
+    }
+
+    [Fact]
+    public void AlterClientQuotasOptions_ValidateOnly_ReachesTheCOptionsBothWays()
+    {
+        Assert.Equal(1, AlterClientQuotasValidateOnly(new AlterClientQuotasOptions { ValidateOnly = true }));
+
+        AlterClientQuotasOptions cleared = new AlterClientQuotasOptions { ValidateOnly = true };
+        cleared.ValidateOnly = false;
+        Assert.Equal(0, AlterClientQuotasValidateOnly(cleared));
+        Assert.Equal(new[] { nameof(AlterClientQuotasOptions.ValidateOnly) }, cleared.Setters.InOrder);
+    }
+
+    [Fact]
+    public void QuotaOptions_ASetterRunTwice_SendsItsLastValue()
+    {
+        DescribeClientQuotasOptions describe = new DescribeClientQuotasOptions { TimeoutMs = 10 };
+        describe.TimeoutMs = 20;
+        Assert.Equal(20, DescribeClientQuotasTimeoutMs(describe));
+        Assert.Equal(new[] { nameof(DescribeClientQuotasOptions.TimeoutMs) }, describe.Setters.InOrder);
+
+        AlterClientQuotasOptions alter = new AlterClientQuotasOptions { TimeoutMs = 10, ValidateOnly = true };
+        alter.TimeoutMs = null;
+        Assert.Equal(-1, AlterClientQuotasTimeoutMs(alter));
+        Assert.Equal(1, AlterClientQuotasValidateOnly(alter));
+        Assert.Equal(
+            new[] { nameof(AlterClientQuotasOptions.ValidateOnly), nameof(AlterClientQuotasOptions.TimeoutMs) },
+            alter.Setters.InOrder);
+    }
+
+    private delegate IntPtr Getter(IntPtr self, ref IntPtr outErr);
+
+    private delegate sbyte CodeGetter(IntPtr self, ref IntPtr outErr);
+
+    private static TheoryData<T> EnumValues<T>()
+        where T : struct, Enum
+    {
+        TheoryData<T> data = new TheoryData<T>();
+        foreach (T value in Enum.GetValues(typeof(T)).Cast<T>())
+        {
+            data.Add(value);
+        }
+
+        return data;
+    }
+
+    private static AclBindingFilter Filter(
+        ResourceType resourceType, PatternType patternType, AclOperation operation, AclPermissionType permissionType) =>
+        new AclBindingFilter(
+            new ResourcePatternFilter(resourceType, "n", patternType),
+            new AccessControlEntryFilter("User:alice", "*", operation, permissionType));
+
+    private static void WithFilter(AclBindingFilter filter, Action<IntPtr, IntPtr> read)
+    {
+        IntPtr native = AclMarshal.NewFilter(filter);
+        try
+        {
+            read(
+                Read(native, NativeMethods.AclBindingFilterPatternFilter),
+                Read(native, NativeMethods.AclBindingFilterEntryFilter));
+        }
+        finally
+        {
+            AclMarshal.DestroyFilter(native);
         }
     }
 
-    /// <summary>
-    /// The <c>GCHandle</c> is published before the P/Invoke, because the callback can fire
-    /// inside it.
-    /// </summary>
-    [Fact]
-    public void AlterUserData_IsPublishedBeforeTheCall() =>
-        Assert.NotEqual(
-            IntPtr.Zero,
-            CaptureAlter(
-                new[] { new ClientQuotaAlteration(Entity(ClientQuotaEntity.User, "ud"), s_noOps) },
-                options: null).UserData);
-
-    // ------------------------------------------------------------------------------------
-    // Harness.
-    // ------------------------------------------------------------------------------------
-
-    /// <summary>A binding differing only in resource name, so batches stay distinguishable.</summary>
-    private static AclBinding Binding(string name) =>
-        new AclBinding(
-            new ResourcePattern(ResourceType.Topic, name, PatternType.Literal),
-            new AccessControlEntry("User:alice", "*", AclOperation.Read, AclPermissionType.Allow));
-
-    /// <summary>
-    /// Runs the production submit with a stand-in that records the seven arrays instead of
-    /// calling native, then completes the operation through the <b>production</b> trampoline
-    /// so the <c>GCHandle</c> and the span-the-op reference are released before the client is
-    /// disposed.
-    /// </summary>
-    private static Captured Capture(IEnumerable<AclBinding> acls, CreateAclsOptions? options)
+    private static void WithBinding(AclBinding binding, Action<IntPtr, IntPtr> read)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Captured captured = new Captured();
-        AsyncCreateAclsResult result = AsyncCreateAclsResult.From(admin.CreateAcls(
-            acls,
-            options,
-            AdminFlavour.Async,
-            (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-             operations, permissionTypes, count, timeoutMs, callback, userData) =>
-            {
-                captured.Count = count;
-                captured.TimeoutMs = timeoutMs;
-                captured.ResourceTypes = resourceTypes;
-                captured.PatternTypes = patternTypes;
-                captured.Operations = operations;
-                captured.PermissionTypes = permissionTypes;
-
-                captured.ResourceNamePointers = resourceNames;
-                captured.PrincipalPointers = principals;
-                captured.HostPointers = hosts;
-
-                // ⚠ Decoded HERE: production unpins every string the moment this returns.
-                captured.ResourceNames = Decode(resourceNames);
-                captured.Principals = Decode(principals);
-                captured.Hosts = Decode(hosts);
-                captured.UserData = userData;
-
-                // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
-                // kafka_common_acl_AclBinding_t that only the core can mint, so a hand-fired
-                // callback cannot supply one.
-                NativeMethods.AdminClientCreateAclsAsync(
-                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-                    operations, permissionTypes, count, timeoutMs, callback, userData);
-            }));
-
-        // Observe the faults the trampolines deliver, so nothing is left unobserved. The
-        // mock completes each binding's own future exceptionally, so they arrive on the
-        // core's dispatcher thread and this waits rather than asserting now.
-        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All().Get();
-        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
-        Assert.True(
-            settled.Wait(TimeSpan.FromSeconds(30)), "the create_acls per-key callbacks never fired");
-        Assert.NotNull(all.Exception);
-        return captured;
+        IntPtr native = AclMarshal.NewBinding(binding);
+        try
+        {
+            read(Read(native, NativeMethods.AclBindingPattern), Read(native, NativeMethods.AclBindingEntry));
+        }
+        finally
+        {
+            AclMarshal.DestroyBinding(native);
+        }
     }
 
-    /// <summary>
-    /// Decodes one pointer array in full — <b>by the array's own length</b>, never by a
-    /// count, so a mismatch between the two is reported by an assertion rather than by an
-    /// index-out-of-range inside the stand-in.
-    /// </summary>
-    private static IReadOnlyList<string?> Decode(IntPtr[] values) =>
-        values.Select(value => Utf8Marshal.PtrToString(value)).ToArray();
-
-    /// <summary>
-    /// An <b>owned</b> error for the trampoline to consume, standing in for the one native
-    /// would hand the callback. The trampoline frees it via
-    /// <see cref="KafkaException.FromHandle"/>, so it must never be freed here.
-    /// </summary>
-    private static IntPtr CapturedError()
+    private static IntPtr Read(IntPtr self, Getter getter)
     {
-        using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin("captured");
-        IntPtr error = NativeMethods.KafkaErrorNew(1, message.Pointer);
-        Assert.NotEqual(IntPtr.Zero, error);
-        return error;
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr value = getter(self, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
     }
 
-    /// <summary>
-    /// A filter differing only in resource name, with ANY everywhere else — the combination
-    /// <c>create_acls</c> rejects and <c>delete_acls</c> accepts.
-    /// </summary>
-    private static AclBindingFilter DeleteFilter(string name) =>
-        new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Any),
-            new AccessControlEntryFilter(
-                "User:alice", "*", AclOperation.Any, AclPermissionType.Any));
-
-    /// <summary>
-    /// The <c>delete_acls</c> twin of <see cref="Capture"/>: records the seven arrays, then
-    /// completes the operation through the <b>production</b> trampoline.
-    /// </summary>
-    private static Captured CaptureDelete(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options)
+    private static sbyte Code(IntPtr singleton, CodeGetter code)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        Captured captured = new Captured();
-        AsyncDeleteAclsResult result = AsyncDeleteAclsResult.From(admin.DeleteAcls(
-            filters,
-            options,
-            AdminFlavour.Async,
-            (handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-             operations, permissionTypes, count, timeoutMs, callback, userData) =>
-            {
-                captured.Count = count;
-                captured.TimeoutMs = timeoutMs;
-                captured.ResourceTypes = resourceTypes;
-                captured.PatternTypes = patternTypes;
-                captured.Operations = operations;
-                captured.PermissionTypes = permissionTypes;
-
-                captured.ResourceNamePointers = resourceNames;
-                captured.PrincipalPointers = principals;
-                captured.HostPointers = hosts;
-
-                // ⚠ Decoded HERE: production unpins every string the moment this returns.
-                captured.ResourceNames = Decode(resourceNames);
-                captured.Principals = Decode(principals);
-                captured.Hosts = Decode(hosts);
-                captured.UserData = userData;
-
-                // Settled by the real ABI (shape 4a's key is core-minted), whose mock submit
-                // fails inline — so every key is complete before this returns.
-                NativeMethods.AdminClientDeleteAclsAsync(
-                    handle, resourceTypes, resourceNames, patternTypes, principals, hosts,
-                    operations, permissionTypes, count, timeoutMs, callback, userData);
-            }));
-
-        // Observe the faults the trampolines deliver, so nothing is left unobserved. They
-        // arrive on the core's dispatcher thread, so this waits rather than asserting now.
-        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All().Get();
-        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
-        Assert.True(
-            settled.Wait(TimeSpan.FromSeconds(30)), "the delete_acls per-key callbacks never fired");
-        Assert.NotNull(all.Exception);
-        return captured;
+        IntPtr outErr = IntPtr.Zero;
+        sbyte value = code(singleton, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
     }
 
-    /// <summary>
-    /// A single-filter stand-in differing only in resource name, with ANY everywhere else.
-    /// </summary>
-    private static AclBindingFilter DescribeFilter(string name) =>
-        new AclBindingFilter(
-            new ResourcePatternFilter(ResourceType.Topic, name, PatternType.Any),
-            new AccessControlEntryFilter(
-                "User:alice", "*", AclOperation.Any, AclPermissionType.Any));
+    private static sbyte ResourceTypeCode(IntPtr self, Getter singleton) =>
+        Code(Read(self, singleton), NativeMethods.ResourceTypeCode);
 
-    /// <summary>
-    /// The <c>describe_acls</c> twin of <see cref="Capture"/>: records the seven
-    /// <b>scalars</b>, then completes the operation through the <b>production</b> trampoline
-    /// so the <c>GCHandle</c> and the span-the-op reference are released before the client is
-    /// disposed.
-    /// </summary>
-    private static DescribeCaptured CaptureDescribe(
-        AclBindingFilter filter, DescribeAclsOptions? options)
+    private static sbyte PatternTypeCode(IntPtr self, Getter singleton) =>
+        Code(Read(self, singleton), NativeMethods.PatternTypeCode);
+
+    private static sbyte OperationCode(IntPtr self, Getter singleton) =>
+        Code(Read(self, singleton), NativeMethods.AclOperationCode);
+
+    private static sbyte PermissionTypeCode(IntPtr self, Getter singleton) =>
+        Code(Read(self, singleton), NativeMethods.AclPermissionTypeCode);
+
+    private static void AssertEmptyString(IntPtr value)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        DescribeCaptured captured = new DescribeCaptured();
-        AsyncDescribeAclsResult result = AsyncDescribeAclsResult.From(admin.DescribeAcls(
-            filter,
-            options,
-            AdminFlavour.Async,
-            (handle, resourceType, resourceName, patternType, principal, host,
-             operation, permissionType, timeoutMs, callback, userData) =>
-            {
-                captured.ResourceType = resourceType;
-                captured.PatternType = patternType;
-                captured.Operation = operation;
-                captured.PermissionType = permissionType;
-                captured.TimeoutMs = timeoutMs;
-
-                captured.ResourceNamePointer = resourceName;
-                captured.PrincipalPointer = principal;
-                captured.HostPointer = host;
-
-                // ⚠ Decoded HERE: production unpins every string the moment this returns.
-                captured.ResourceName = Utf8Marshal.PtrToString(resourceName);
-                captured.Principal = Utf8Marshal.PtrToString(principal);
-                captured.Host = Utf8Marshal.PtrToString(host);
-                captured.UserData = userData;
-            }));
-
-        AdminCallbacks.DescribeAcls(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the fault the trampoline just delivered, so nothing is left unobserved.
-        Assert.NotNull(result.Values().Get().Exception);
-        return captured;
+        Assert.NotEqual(IntPtr.Zero, value);
+        Assert.Equal(0, Marshal.ReadByte(value));
     }
 
-    /// <summary>One <c>describe_acls</c> submit, exactly as it crossed the seam.</summary>
-    private sealed class DescribeCaptured
+    private static int CreateAclsTimeoutMs(CreateAclsOptions? options)
     {
-        internal int ResourceType { get; set; } = int.MinValue;
-
-        internal int PatternType { get; set; } = int.MinValue;
-
-        internal int Operation { get; set; } = int.MinValue;
-
-        internal int PermissionType { get; set; } = int.MinValue;
-
-        internal int TimeoutMs { get; set; }
-
-        internal IntPtr ResourceNamePointer { get; set; } = new IntPtr(-1);
-
-        internal IntPtr PrincipalPointer { get; set; } = new IntPtr(-1);
-
-        internal IntPtr HostPointer { get; set; } = new IntPtr(-1);
-
-        internal string? ResourceName { get; set; }
-
-        internal string? Principal { get; set; }
-
-        internal string? Host { get; set; }
-
-        internal IntPtr UserData { get; set; }
+        IntPtr native = NativeAdminClient.NewCreateAclsOptions(options);
+        try
+        {
+            return TimeoutMs(native, Native.CreateAclsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeCreateAclsOptions(native);
+        }
     }
 
-    /// <summary>
-    /// The <c>describe_client_quotas</c> twin of <see cref="Capture"/>: records the three
-    /// arrays plus <c>strict</c>, then completes the operation through the <b>production</b>
-    /// trampoline.
-    /// </summary>
-    private static QuotaCaptured CaptureQuotas(
-        ClientQuotaFilter filter, DescribeClientQuotasOptions? options)
+    private static int DescribeAclsTimeoutMs(DescribeAclsOptions? options)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        QuotaCaptured captured = new QuotaCaptured();
-        AsyncDescribeClientQuotasResult result = AsyncDescribeClientQuotasResult.From(admin.DescribeClientQuotas(
-            filter,
-            options,
-            AdminFlavour.Async,
-            (handle, entityTypes, matchTypes, matchNames, count, strict, timeoutMs, callback, userData) =>
-            {
-                captured.Count = count;
-                captured.Strict = strict;
-                captured.TimeoutMs = timeoutMs;
-                captured.MatchTypes = matchTypes;
-                captured.MatchNamePointers = matchNames;
-
-                // ⚠ Decoded HERE: production unpins every string the moment this returns.
-                captured.EntityTypes = Decode(entityTypes);
-                captured.MatchNames = Decode(matchNames);
-                captured.UserData = userData;
-            }));
-
-        AdminCallbacks.DescribeClientQuotas(IntPtr.Zero, CapturedError(), captured.UserData);
-
-        // Observe the fault the trampoline just delivered, so nothing is left unobserved.
-        Assert.NotNull(result.Entities().Get().Exception);
-        return captured;
+        IntPtr native = NativeAdminClient.NewDescribeAclsOptions(options);
+        try
+        {
+            return TimeoutMs(native, Native.DescribeAclsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeAclsOptions(native);
+        }
     }
 
-    /// <summary>An alteration with no ops — the entity level exercised on its own.</summary>
+    private static int DeleteAclsTimeoutMs(DeleteAclsOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDeleteAclsOptions(options);
+        try
+        {
+            return TimeoutMs(native, Native.DeleteAclsOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDeleteAclsOptions(native);
+        }
+    }
+
+    private static int TimeoutMs(IntPtr native, Native.Int32Getter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int timeoutMs = getter(native, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return timeoutMs;
+    }
+
+    private const int MatchDefault = 0;
+
+    private const int MatchAny = 1;
+
+    private const int MatchExact = 2;
+
     private static readonly ClientQuotaAlteration.Op[] s_noOps = Array.Empty<ClientQuotaAlteration.Op>();
 
-    /// <summary>A single-entry entity; a null <paramref name="name"/> is the default entity.</summary>
     private static ClientQuotaEntity Entity(string type, string? name) =>
         new ClientQuotaEntity(
             new Dictionary<string, string?>(StringComparer.Ordinal) { [type] = name });
 
-    /// <summary>An entity with <b>no</b> <c>(type, name)</c> pairs (M15/P13.2 G4-4).</summary>
     private static ClientQuotaEntity EmptyEntity() =>
         new ClientQuotaEntity(new Dictionary<string, string?>(StringComparer.Ordinal));
 
-    /// <summary>
-    /// Row <paramref name="types"/>/<paramref name="names"/> rendered as sorted
-    /// <c>type=name</c> pairs, so the assertion does not depend on the entity map's order.
-    /// </summary>
-    private static IReadOnlyList<string> Pairs(
-        IReadOnlyList<string?> types, IReadOnlyList<string?> names) =>
-        types
-            .Select((type, index) => string.Concat(type, "=", names[index] ?? "<null>"))
-            .OrderBy(pair => pair, StringComparer.Ordinal)
-            .ToArray();
-
-    /// <summary>
-    /// The <c>alter_client_quotas</c> twin of <see cref="Capture"/>: records the seven arrays
-    /// — decoding <b>both</b> ragged levels against their own row's count — then completes the
-    /// operation through the <b>production</b> trampoline.
-    /// </summary>
-    private static AlterCaptured CaptureAlter(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options)
+    private static void WithQuotaFilter(ClientQuotaFilter filter, Action<IReadOnlyList<IntPtr>, bool> read)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-
-        AlterCaptured captured = new AlterCaptured();
-        AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.From(admin.AlterClientQuotas(
-            entries,
-            options,
-            AdminFlavour.Async,
-            (handle, entityTypes, entityNames, entityCounts, opKeys, opValues, opHasValues,
-             opCounts, count, timeoutMs, validateOnly, callback, userData) =>
+        IntPtr native = ClientQuotaMarshal.NewFilter(filter);
+        try
+        {
+            IntPtr components = Read(native, Native.ClientQuotaFilterComponents);
+            try
             {
-                captured.Count = count;
-                captured.TimeoutMs = timeoutMs;
-                captured.ValidateOnly = validateOnly;
-                captured.EntityCounts = (int[])entityCounts.Clone();
-                captured.OpCounts = (int[])opCounts.Clone();
-                captured.EntityTypeRows = (IntPtr[])entityTypes.Clone();
-                captured.EntityNameRows = (IntPtr[])entityNames.Clone();
-                captured.OpKeyRows = (IntPtr[])opKeys.Clone();
-                captured.OpValueRows = (IntPtr[])opValues.Clone();
-                captured.OpHasValueRows = (IntPtr[])opHasValues.Clone();
-
-                // ⚠ Decoded HERE: production unpins every string and every inner buffer the
-                // moment this returns. Each row is read with ITS OWN count, which is what
-                // makes the raggedness observable.
-                for (int row = 0; row < count; row++)
-                {
-                    captured.EntityTypes.Add(ReadStrings(entityTypes[row], entityCounts[row]));
-                    captured.EntityNames.Add(ReadStrings(entityNames[row], entityCounts[row]));
-                    captured.EntityNamePointers.Add(ReadPointers(entityNames[row], entityCounts[row]));
-                    captured.OpKeys.Add(ReadStrings(opKeys[row], opCounts[row]));
-                    captured.OpValues.Add(ReadDoubles(opValues[row], opCounts[row]));
-                    captured.OpHasValues.Add(ReadBytes(opHasValues[row], opCounts[row]));
-                }
-
-                captured.UserData = userData;
-
-                // Settled by the real ABI: since M15/P9 CP6 shape 4b's KEY here is an owned
-                // kafka_common_quota_ClientQuotaEntity_t that only the core can mint.
-                NativeMethods.AdminClientAlterClientQuotasAsync(
-                    handle, entityTypes, entityNames, entityCounts, opKeys, opValues,
-                    opHasValues, opCounts, count, timeoutMs, validateOnly, callback, userData);
-            }));
-
-        // Observe the faults the trampolines deliver, so nothing is left unobserved. They
-        // arrive on the core's dispatcher thread, so this waits rather than asserting now.
-        using ManualResetEventSlim settled = new ManualResetEventSlim(false);
-        Task all = result.All().Get();
-        all.ContinueWith(_ => settled.Set(), TaskScheduler.Default);
-        Assert.True(
-            settled.Wait(TimeSpan.FromSeconds(30)),
-            "the alter_client_quotas per-key callbacks never fired");
-        Assert.NotNull(all.Exception);
-        return captured;
+                read(Elements(components), Code(native, Native.ClientQuotaFilterStrict) != 0);
+            }
+            finally
+            {
+                DestroyList(components);
+            }
+        }
+        finally
+        {
+            ClientQuotaMarshal.DestroyFilter(native);
+        }
     }
 
-    /// <summary>Reads <paramref name="count"/> UTF-8 pointers out of an inner string row.</summary>
-    private static IReadOnlyList<string?> ReadStrings(IntPtr row, int count)
+    private static void WithAlteration(ClientQuotaAlteration alteration, Action<IntPtr, IReadOnlyList<IntPtr>> read)
     {
-        string?[] values = new string?[count];
+        IntPtr native = ClientQuotaMarshal.NewAlteration(alteration);
+        try
+        {
+            IntPtr ops = Read(native, Native.ClientQuotaAlterationOps);
+            try
+            {
+                read(Read(native, Native.ClientQuotaAlterationEntity), Elements(ops));
+            }
+            finally
+            {
+                DestroyList(ops);
+            }
+        }
+        finally
+        {
+            ClientQuotaMarshal.DestroyAlteration(native);
+        }
+    }
+
+    private static IReadOnlyList<IntPtr> Elements(IntPtr list)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int count = NativeMethods.ListSize(list, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr[] elements = new IntPtr[count];
         for (int i = 0; i < count; i++)
         {
-            values[i] = Utf8Marshal.PtrToString(Marshal.ReadIntPtr(row, i * IntPtr.Size));
+            elements[i] = NativeMethods.ListGet(list, i, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return values;
+        return elements;
     }
 
-    /// <summary>Reads the raw pointers out of an inner string row — null versus non-null.</summary>
-    private static IReadOnlyList<IntPtr> ReadPointers(IntPtr row, int count)
+    private static void DestroyList(IntPtr list)
     {
-        IntPtr[] values = new IntPtr[count];
-        for (int i = 0; i < count; i++)
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ListDestroy(list, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    private static string? ComponentEntityType(IntPtr component) =>
+        Utf8Marshal.PtrToString(Read(component, Native.ClientQuotaFilterComponentEntityType));
+
+    private static int MatchCode(IntPtr component)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        int code = Native.ClientQuotaMatchEnum(Read(component, Native.ClientQuotaFilterComponentMatch), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return code;
+    }
+
+    private static IntPtr Singleton(Native.SingletonGetter getter)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr singleton = getter(ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        Assert.NotEqual(IntPtr.Zero, singleton);
+        return singleton;
+    }
+
+    private static string? OwnedString(IntPtr self, Getter getter)
+    {
+        IntPtr owned = Read(self, getter);
+        try
         {
-            values[i] = Marshal.ReadIntPtr(row, i * IntPtr.Size);
+            return Utf8Marshal.PtrToString(owned);
         }
-
-        return values;
-    }
-
-    /// <summary>Reads <paramref name="count"/> doubles out of an inner <c>double*</c> row.</summary>
-    private static IReadOnlyList<double> ReadDoubles(IntPtr row, int count)
-    {
-        if (count == 0)
+        finally
         {
-            return Array.Empty<double>();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.StringDestroy(owned, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
         }
-
-        double[] values = new double[count];
-        Marshal.Copy(row, values, 0, count);
-        return values;
     }
 
-    /// <summary>
-    /// Reads <paramref name="count"/> presence flags at a <b>one-byte</b> stride — the stride
-    /// C's <c>bool</c> actually has.
-    /// </summary>
-    private static IReadOnlyList<byte> ReadBytes(IntPtr row, int count)
+    private static string? OpKey(IntPtr op) => Utf8Marshal.PtrToString(Read(op, Native.ClientQuotaAlterationOpKey));
+
+    private static double OpValue(IntPtr op)
     {
-        byte[] values = new byte[count];
-        for (int i = 0; i < count; i++)
+        IntPtr outErr = IntPtr.Zero;
+        double value = Native.ClientQuotaAlterationOpValue(op, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return value;
+    }
+
+    private static IReadOnlyList<EntityEntry> EntityEntries(IntPtr entity)
+    {
+        IntPtr entries = Read(entity, NativeMethods.ClientQuotaEntityEntries);
+        try
         {
-            values[i] = Marshal.ReadByte(row, i);
+            IntPtr outErr = IntPtr.Zero;
+            int count = NativeMethods.MapSize(entries, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            EntityEntry[] read = new EntityEntry[count];
+            for (int i = 0; i < count; i++)
+            {
+                IntPtr type = NativeMethods.MapKey(entries, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                IntPtr name = NativeMethods.MapValue(entries, i, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+                read[i] = new EntityEntry(Utf8Marshal.PtrToString(type), name == IntPtr.Zero, Utf8Marshal.PtrToString(name));
+            }
+
+            return read;
+        }
+        finally
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MapDestroy(entries, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+    }
+
+    private static int DescribeClientQuotasTimeoutMs(DescribeClientQuotasOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewDescribeClientQuotasOptions(options);
+        try
+        {
+            return TimeoutMs(native, Native.DescribeClientQuotasOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeDescribeClientQuotasOptions(native);
+        }
+    }
+
+    private static int AlterClientQuotasTimeoutMs(AlterClientQuotasOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewAlterClientQuotasOptions(options);
+        try
+        {
+            return TimeoutMs(native, Native.AlterClientQuotasOptionsTimeoutMs);
+        }
+        finally
+        {
+            NativeAdminClient.FreeAlterClientQuotasOptions(native);
+        }
+    }
+
+    private static sbyte AlterClientQuotasValidateOnly(AlterClientQuotasOptions? options)
+    {
+        IntPtr native = NativeAdminClient.NewAlterClientQuotasOptions(options);
+        try
+        {
+            return Code(native, Native.AlterClientQuotasOptionsValidateOnly);
+        }
+        finally
+        {
+            NativeAdminClient.FreeAlterClientQuotasOptions(native);
+        }
+    }
+
+    /// <summary>One (type, name) part of a C client-quota entity, read before its map is freed.</summary>
+    private sealed class EntityEntry
+    {
+        internal EntityEntry(string? type, bool nameIsNull, string? name)
+        {
+            Type = type;
+            NameIsNull = nameIsNull;
+            Name = name;
         }
 
-        return values;
+        internal string? Type { get; }
+
+        internal bool NameIsNull { get; }
+
+        internal string? Name { get; }
     }
 
-    /// <summary>One <c>alter_client_quotas</c> submit, exactly as it crossed the seam.</summary>
-    private sealed class AlterCaptured
+    /// <summary>The C getters only these tests call, to read the C handles back.</summary>
+    private static class Native
     {
-        internal int Count { get; set; } = int.MinValue;
+        private const string DllName = "confluent_kafka";
 
-        internal int TimeoutMs { get; set; }
+        internal delegate int Int32Getter(IntPtr self, ref IntPtr outErr);
 
-        internal bool ValidateOnly { get; set; }
+        internal delegate IntPtr SingletonGetter(ref IntPtr outErr);
 
-        internal int[] EntityCounts { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_CreateAclsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int CreateAclsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal int[] OpCounts { get; set; } = Array.Empty<int>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeAclsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeAclsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] EntityTypeRows { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DeleteAclsOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DeleteAclsOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] EntityNameRows { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_DescribeClientQuotasOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int DescribeClientQuotasOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] OpKeyRows { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasOptions_timeout_ms_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int AlterClientQuotasOptionsTimeoutMs(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] OpValueRows { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_admin_AlterClientQuotasOptions_validate_only_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte AlterClientQuotasOptionsValidateOnly(IntPtr self, ref IntPtr outErr);
 
-        internal IntPtr[] OpHasValueRows { get; set; } = Array.Empty<IntPtr>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaFilter_components_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaFilterComponents(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<string?>> EntityTypes { get; } = new List<IReadOnlyList<string?>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaFilter_strict_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern sbyte ClientQuotaFilterStrict(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<string?>> EntityNames { get; } = new List<IReadOnlyList<string?>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaFilterComponent_entity_type_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaFilterComponentEntityType(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<IntPtr>> EntityNamePointers { get; } =
-            new List<IReadOnlyList<IntPtr>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaFilterComponent_match_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaFilterComponentMatch(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<string?>> OpKeys { get; } = new List<IReadOnlyList<string?>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaFilterComponent_to_string_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaFilterComponentToString(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<double>> OpValues { get; } = new List<IReadOnlyList<double>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaMatch__enum_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int ClientQuotaMatchEnum(IntPtr self, ref IntPtr outErr);
 
-        internal List<IReadOnlyList<byte>> OpHasValues { get; } = new List<IReadOnlyList<byte>>();
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaMatch_default_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaMatchDefault(ref IntPtr outErr);
 
-        internal IntPtr UserData { get; set; }
-    }
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaMatch_any_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaMatchAny(ref IntPtr outErr);
 
-    /// <summary>One <c>describe_client_quotas</c> submit, exactly as it crossed the seam.</summary>
-    private sealed class QuotaCaptured
-    {
-        internal int Count { get; set; } = int.MinValue;
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaAlteration_entity_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaAlterationEntity(IntPtr self, ref IntPtr outErr);
 
-        internal bool Strict { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaAlteration_ops_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaAlterationOps(IntPtr self, ref IntPtr outErr);
 
-        internal int TimeoutMs { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaAlteration_Op_key_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClientQuotaAlterationOpKey(IntPtr self, ref IntPtr outErr);
 
-        internal int[] MatchTypes { get; set; } = Array.Empty<int>();
-
-        internal IntPtr[] MatchNamePointers { get; set; } = Array.Empty<IntPtr>();
-
-        internal IReadOnlyList<string?> EntityTypes { get; set; } = Array.Empty<string?>();
-
-        internal IReadOnlyList<string?> MatchNames { get; set; } = Array.Empty<string?>();
-
-        internal IntPtr UserData { get; set; }
-    }
-
-    /// <summary>One submit, exactly as it crossed the seam.</summary>
-    private sealed class Captured
-    {
-        internal int Count { get; set; } = int.MinValue;
-
-        internal int TimeoutMs { get; set; }
-
-        internal int[] ResourceTypes { get; set; } = Array.Empty<int>();
-
-        internal int[] PatternTypes { get; set; } = Array.Empty<int>();
-
-        internal int[] Operations { get; set; } = Array.Empty<int>();
-
-        internal int[] PermissionTypes { get; set; } = Array.Empty<int>();
-
-        internal IntPtr[] ResourceNamePointers { get; set; } = Array.Empty<IntPtr>();
-
-        internal IntPtr[] PrincipalPointers { get; set; } = Array.Empty<IntPtr>();
-
-        internal IntPtr[] HostPointers { get; set; } = Array.Empty<IntPtr>();
-
-        internal IReadOnlyList<string?> ResourceNames { get; set; } = Array.Empty<string?>();
-
-        internal IReadOnlyList<string?> Principals { get; set; } = Array.Empty<string?>();
-
-        internal IReadOnlyList<string?> Hosts { get; set; } = Array.Empty<string?>();
-
-        internal IntPtr UserData { get; set; }
+        [DllImport(DllName, EntryPoint = "kafka_common_quota_ClientQuotaAlteration_Op_value_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern double ClientQuotaAlterationOpValue(IntPtr self, ref IntPtr outErr);
     }
 }

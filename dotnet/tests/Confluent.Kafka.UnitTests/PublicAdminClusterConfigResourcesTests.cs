@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
@@ -24,26 +25,23 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The public behaviour of M15/P3 Stage 1's RPCs, driven end to end through
-/// <see cref="MockAdminClient"/> — the real marshalling, the real bridge, the real
-/// teardown, with no broker.
+/// <c>DescribeCluster</c> and <c>ListConfigResources</c> end to end against the mocks, with no broker.
 /// </summary>
 public sealed class PublicAdminClusterConfigResourcesTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>The mock's <c>DEFAULT_CLUSTER_ID</c> (Java's <c>MockAdminClient</c> value).</summary>
+    private const string ListConfigResourcesThreadExited = "The AdminClient thread has exited. Call: listConfigResources";
+
+    private static readonly IReadOnlyDictionary<string, string> s_unreachable =
+        new Dictionary<string, string>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+
     private const string MockClusterId = "I4ZmrWqfT2e-upky_4fdPA";
 
-    /// <summary>
-    /// <c>describeCluster</c> reports the mock's nodes, its controller and its cluster id,
-    /// and returns <b>immediately</b> — the result is handed back before the broker (here,
-    /// the mock) has answered.
-    /// </summary>
     [Fact]
     public async Task DescribeCluster_ReportsTheMocksNodesControllerAndClusterId()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster();
@@ -59,22 +57,12 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => result.ClusterId().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// M15/P13.3 D12 — every node crosses the ABI with <see cref="Node.IsFenced"/> read from
-    /// <c>kafka_common_Node_is_fenced_err</c>, and renders it in Java's <c>toString()</c>.
-    /// Neither Java's mock nor the core's can report a fenced broker (the header: only
-    /// <c>describeCluster</c> with <c>includeFencedBrokers</c> against a real cluster can), so
-    /// this is the <see langword="false"/> polarity end to end, asked for both ways; the
-    /// <see langword="true"/> polarity is proven at the constructor
-    /// (<c>PublicConsumerPartitionMetadataValueTypeTests.Node_FourArgumentConstructor_IsUnfenced</c>)
-    /// and the marshalling by the I1 pin (<c>CommonNativeMethodsMarshallingTests</c>).
-    /// </summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task DescribeCluster_TheMocksNodesAreUnfenced_AndRenderIt(bool includeFencedBrokers)
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(3);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().NumBrokers(3).Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
@@ -90,20 +78,10 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.False(controller!.IsFenced);
     }
 
-    /// <summary>
-    /// The mock reports an <b>empty but present</b> authorized-operation set, mirroring
-    /// Java's own mock, so the public accessor yields an empty collection rather than
-    /// <see langword="null"/>.
-    /// </summary>
-    /// <remarks>
-    /// The <see langword="null"/> half — the broker reporting nothing — is not reachable
-    /// through the mock and is proven at the marshaller in
-    /// <c>AdminP3ResultMarshalTests.AuthorizedOperations_TheGateDecidesNullVersusEmpty_NotTheCount</c>.
-    /// </remarks>
     [Fact]
     public async Task DescribeCluster_AuthorizedOperations_AreEmptyNotNull_AgainstTheMock()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClusterResult result = admin.DescribeCluster(
@@ -116,15 +94,10 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Empty(operations!);
     }
 
-    /// <summary>
-    /// ⚠ <b>An empty or absent type filter means "every supported type", and must not be
-    /// rejected</b> — that is Java's own default (<c>Admin.java:1812</c> delegates with
-    /// <c>Set.of()</c>). All three spellings agree.
-    /// </summary>
     [Fact]
     public async Task ListConfigResources_NullOrEmptyFilter_MeansEverySupportedType()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> byDefault =
@@ -135,23 +108,17 @@ public sealed class PublicAdminClusterConfigResourcesTests
             () => admin.ListConfigResources(Array.Empty<ConfigResourceType>()).All().Get(), s_deadline);
 
         Assert.NotEmpty(byDefault);
-        Assert.Equal(byDefault, explicitNull);
-        Assert.Equal(byDefault, empty);
+        Assert.Equal(Sorted(byDefault), Sorted(explicitNull));
+        Assert.Equal(Sorted(byDefault), Sorted(empty));
 
-        // A one-broker mock reports its broker's config and logger resources even with no
-        // topics, so "every supported type" really did return more than one type.
+        // A one-broker mock reports its broker's config and logger resources even with no topics.
         Assert.True(byDefault.Select(resource => resource.Type).Distinct().Count() > 1);
     }
 
-    /// <summary>
-    /// The filter is honoured: a created topic appears under
-    /// <see cref="ConfigResourceType.Topic"/> and is excluded when the filter names only
-    /// <see cref="ConfigResourceType.Broker"/>.
-    /// </summary>
     [Fact]
     public async Task ListConfigResources_HonoursTheTypeFilter()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -169,13 +136,10 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Contains(brokers, resource => resource.Type == ConfigResourceType.Broker);
     }
 
-    /// <summary>
-    /// A repeated type is one entry, because Java's parameter is a <c>Set</c>.
-    /// </summary>
     [Fact]
     public async Task ListConfigResources_DeduplicatesTheRequestedTypes()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> once = await TestTimeout.Run(
@@ -188,32 +152,86 @@ public sealed class PublicAdminClusterConfigResourcesTests
         Assert.Equal(once, repeated);
     }
 
-    /// <summary>
-    /// <c>All()</c> returns the <b>same</b> task instance on every call, so a projection
-    /// cannot observe a different cluster state than an earlier one did.
-    /// </summary>
     [Fact]
-    public async Task ListConfigResources_AllReturnsTheSameTaskInstance()
+    public void ListConfigResources_CancellingOneAll_LeavesTheStoredFutureAndTheOtherAllsPending()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient();
-        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        KafkaAdminClient admin = new KafkaAdminClient(s_unreachable);
+        try
+        {
+            ListConfigResourcesResult result = admin.ListConfigResources();
+            KafkaFuture<IReadOnlyCollection<ConfigResource>> before = result.All();
+            KafkaFuture<IReadOnlyCollection<ConfigResource>> cancelled = result.All();
 
-        AsyncListConfigResourcesResult result = admin.ListConfigResources();
-        Assert.Same(result.All().Get(), result.All().Get());
+            Assert.True(cancelled.Cancel(true));
 
-        await TestTimeout.Run(() => result.All().Get(), s_deadline);
+            Assert.True(cancelled.IsCancelled);
+            KafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
+                StoredFuture<KafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
+            KafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
+            Assert.NotEqual(cancelled, after);
+            Assert.False(stored.IsCancelled);
+            Assert.False(stored.IsDone);
+            Assert.False(before.IsDone);
+            Assert.False(after.IsDone);
+
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+
+            AssertListConfigResourcesThreadExited(BlockingCall.RunGet(() => stored.Get()));
+            AssertListConfigResourcesThreadExited(BlockingCall.RunGet(() => before.Get()));
+            AssertListConfigResourcesThreadExited(BlockingCall.RunGet(() => after.Get()));
+            Assert.IsType<OperationCanceledException>(BlockingCall.RunGet(() => cancelled.Get()));
+        }
+        finally
+        {
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(() => admin.Close(TimeSpan.Zero)));
+            TestTimeout.Dispose(admin);
+        }
     }
 
-    /// <summary>
-    /// A negative <c>TimeoutMs</c> is not rejected (M15/P13.5 X2): it is sent as 0, Java's
-    /// <c>calcDeadlineMs</c> clamp, so the call is accepted and fails, if at all, through its
-    /// result. The value actually sent is pinned at the submit seam, for both RPCs, by
-    /// <c>AdminP3SubmitArgumentTests.X2_NegativeTimeout_IsSentAsZero</c>.
-    /// </summary>
+    [Fact]
+    public async Task ListConfigResources_CancellingOneAsyncAll_LeavesTheStoredFutureAndTheOtherAllsPending()
+    {
+        AsyncKafkaAdminClient admin = new AsyncKafkaAdminClient(s_unreachable);
+        try
+        {
+            AsyncListConfigResourcesResult result = admin.ListConfigResources();
+            AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> before = result.All();
+            AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> cancelled = result.All();
+
+            Assert.True(cancelled.Cancel(true));
+
+            Assert.True(cancelled.IsCancelled);
+            AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> stored =
+                StoredFuture<AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>>>(result);
+            AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> after = result.All();
+            Assert.NotEqual(cancelled, after);
+            Assert.False(stored.IsCancelled);
+            Assert.False(stored.IsDone);
+            Assert.False(before.IsDone);
+            Assert.False(after.IsDone);
+
+            await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
+
+            AssertListConfigResourcesThreadExited(
+                await Record.ExceptionAsync(() => TestTimeout.Run(() => stored.Get(), BlockingCall.Deadline)));
+            AssertListConfigResourcesThreadExited(
+                await Record.ExceptionAsync(() => TestTimeout.Run(() => before.Get(), BlockingCall.Deadline)));
+            AssertListConfigResourcesThreadExited(
+                await Record.ExceptionAsync(() => TestTimeout.Run(() => after.Get(), BlockingCall.Deadline)));
+            Assert.IsAssignableFrom<OperationCanceledException>(
+                await Record.ExceptionAsync(() => TestTimeout.Run(() => cancelled.Get(), BlockingCall.Deadline)));
+        }
+        finally
+        {
+            await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), BlockingCall.Deadline);
+            await TestTimeout.DisposeAsync(admin);
+        }
+    }
+
     [Fact]
     public void NegativeTimeout_IsNotRejectedSynchronously()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Null(Record.Exception(
@@ -222,49 +240,42 @@ public sealed class PublicAdminClusterConfigResourcesTests
             () => admin.ListConfigResources(null, new ListConfigResourcesOptions { TimeoutMs = -5 })));
     }
 
-    /// <summary>
-    /// Every new RPC rejects use after close with <see cref="ObjectDisposedException"/>,
-    /// like the shipped ones.
-    /// </summary>
     [Fact]
     public void AfterDispose_EveryNewRpcThrowsObjectDisposed()
     {
-        MockAdminClient admin = new MockAdminClient();
+        MockAdminClient admin = MockAdminClient.Create().Build();
         TestTimeout.Run(admin.Dispose, s_deadline);
 
         Assert.Throws<ObjectDisposedException>(() => admin.DescribeCluster());
         Assert.Throws<ObjectDisposedException>(() => admin.ListConfigResources());
     }
 
-    /// <summary>
-    /// The TFM-matrix smoke leg for M15/P3 Stage 1: the new RPCs load and round-trip
-    /// on whichever framework is executing (net462 via netstandard2.0, net8.0, net10.0).
-    /// </summary>
-    /// <remarks>
-    /// Uses only APIs available on the netstandard2.0 floor, so the net462 leg <b>builds</b>
-    /// locally even though its <em>run</em> is Windows/CI-only.
-    /// </remarks>
     [Fact]
     public async Task TfmSmoke_TheNewRpcsWorkOnThisFramework()
     {
-        AsyncMockAdminClient admin = new AsyncMockAdminClient(1);
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId().Get(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline));
     }
 
-    /// <summary>
-    /// The RPCs work through the <see cref="IAsyncAdmin"/> interface, not only the concrete
-    /// mock — the surface a caller actually programs against.
-    /// </summary>
     [Fact]
     public async Task TheRpcs_AreReachableThroughIAdmin()
     {
-        IAsyncAdmin admin = new AsyncMockAdminClient();
+        IAsyncAdmin admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Assert.Equal(MockClusterId, await TestTimeout.Run(() => admin.DescribeCluster().ClusterId().Get(), s_deadline));
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListConfigResources().All().Get(), s_deadline));
     }
+
+    private static IEnumerable<ConfigResource> Sorted(IEnumerable<ConfigResource> resources) =>
+        resources.OrderBy(resource => (int)resource.Type).ThenBy(resource => resource.Name, StringComparer.Ordinal);
+
+    private static void AssertListConfigResourcesThreadExited(object? thrown) =>
+        BlockingCall.AssertThrew(thrown, 7, ListConfigResourcesThreadExited);
+
+    private static T StoredFuture<T>(object result) =>
+        (T)result.GetType().GetField("_future", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(result)!;
 }

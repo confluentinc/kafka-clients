@@ -13,10 +13,8 @@
 // limitations under the License.
 
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Confluent.Kafka.Internal;
-
+using Confluent.Kafka.Internal.Interop;
 using Token = Confluent.Kafka.DelegationToken;
 
 namespace Confluent.Kafka.Admin;
@@ -24,35 +22,29 @@ namespace Confluent.Kafka.Admin;
 /// <summary>
 /// The result of <see cref="IAsyncAdmin.DescribeDelegationToken"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeDelegationTokenResult</c>: one future over the
-/// whole token list (<c>:29</c>). Java declares no <c>all()</c> here.
+/// whole token list. Java declares no <c>all()</c> here.
 /// </summary>
 /// <seealso cref="DescribeDelegationTokenResult"/>
 public sealed class AsyncDescribeDelegationTokenResult
 {
-    private readonly Task<IReadOnlyList<Token>> _tokens;
+    private readonly KafkaFutureImpl<IReadOnlyList<Token>> _tokens;
+    private readonly SafeAdminResultHandle _native;
 
-    internal AsyncDescribeDelegationTokenResult(Task<IReadOnlyCollection<Token>> tokens)
+    private AsyncDescribeDelegationTokenResult(KafkaFutureImpl<IReadOnlyList<Token>> tokens, SafeAdminResultHandle native)
     {
-        _tokens = Project(tokens);
+        _tokens = tokens;
+        _native = native;
     }
 
-    /// <summary>
-    /// Builds this result over an <see cref="AdminFlavour.Async"/> operation's tasks: the one place it is built
-    /// from an admin operation (M15/P14).
-    /// </summary>
-    internal static AsyncDescribeDelegationTokenResult From(
-        SingleAdminOperation<IReadOnlyCollection<DelegationToken>> operation) =>
-        new AsyncDescribeDelegationTokenResult(operation.Task);
+    internal SafeAdminResultHandle Native => _native;
 
-    /// <summary>The described tokens — Java's <c>delegationTokens()</c> (<c>:38</c>).</summary>
-    /// <returns>A future over the token list, in the order the ABI delivered it.</returns>
-    public AsyncKafkaFuture<IReadOnlyList<Token>> DelegationTokens() => new AsyncKafkaFuture<IReadOnlyList<Token>>(_tokens);
+    /// <summary>The described tokens — Java's <c>delegationTokens()</c>.</summary>
+    /// <returns>A future over the token list, in the order the core delivered it.</returns>
+    /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
+    public AsyncKafkaFuture<IReadOnlyList<Token>> DelegationTokens() =>
+        new AsyncKafkaFuture<IReadOnlyList<Token>>(_tokens);
 
-    // Java's accessor is List-typed (:38) while the collection walker produces
-    // IReadOnlyCollection, so the one list it built is re-presented rather than rebuilt.
-    private static async Task<IReadOnlyList<Token>> Project(Task<IReadOnlyCollection<Token>> tokens)
-    {
-        IReadOnlyCollection<Token> described = await tokens.ConfigureAwait(false);
-        return described as IReadOnlyList<Token> ?? described.ToList();
-    }
+    internal static AsyncDescribeDelegationTokenResult OfClient(
+        (KafkaFutureImpl<IReadOnlyList<Token>> Tokens, SafeAdminResultHandle Result) native) =>
+        new AsyncDescribeDelegationTokenResult(native.Tokens, native.Result);
 }

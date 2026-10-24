@@ -33,6 +33,7 @@ internal sealed class NativeCallArguments : IDisposable
         OffsetAndMetadata,
         Node,
         PartitionInfo,
+        TopicPartitionInfo,
     }
 
     internal IntPtr Utf8(string value)
@@ -97,7 +98,7 @@ internal sealed class NativeCallArguments : IDisposable
     internal IntPtr LongMap(string[] topics, int[] partitions, long[] values, int count)
     {
         IntPtr map = Map();
-        IntPtr block = Values(count);
+        IntPtr block = Values(count, sizeof(long));
         for (int i = 0; i < count; i++)
         {
             IntPtr value = block + (i * sizeof(long));
@@ -115,12 +116,86 @@ internal sealed class NativeCallArguments : IDisposable
         return Track(handle, Kind.Node, ref outErr);
     }
 
+    internal IntPtr Node(Confluent.Kafka.Node node)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr handle = NativeMethods.NodeWithRackIsFenced(
+            node.Id, Utf8(node.Host), node.Port, NullableUtf8(node.Rack), node.IsFenced ? (sbyte)1 : (sbyte)0, ref outErr);
+        return Track(handle, Kind.Node, ref outErr);
+    }
+
+    internal IntPtr NodeList(IReadOnlyList<Confluent.Kafka.Node> nodes)
+    {
+        IntPtr list = List();
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            Add(list, Node(nodes[i]));
+        }
+
+        return list;
+    }
+
+    internal IntPtr StringListList(IReadOnlyList<IReadOnlyList<string>> values)
+    {
+        IntPtr list = List();
+        for (int i = 0; i < values.Count; i++)
+        {
+            Add(list, StringList(values[i]));
+        }
+
+        return list;
+    }
+
+    internal IntPtr StringMap(IReadOnlyList<KeyValuePair<string, string>> entries)
+    {
+        IntPtr map = Map();
+        for (int i = 0; i < entries.Count; i++)
+        {
+            Put(map, Utf8(entries[i].Key), Utf8(entries[i].Value));
+        }
+
+        return map;
+    }
+
+    internal IntPtr ShortMap(IReadOnlyList<KeyValuePair<string, short>> entries)
+    {
+        IntPtr map = Map();
+        IntPtr block = Values(entries.Count, sizeof(short));
+        for (int i = 0; i < entries.Count; i++)
+        {
+            IntPtr value = block + (i * sizeof(short));
+            Marshal.WriteInt16(value, entries[i].Value);
+            Put(map, Utf8(entries[i].Key), value);
+        }
+
+        return map;
+    }
+
     internal IntPtr PartitionInfo(string topic, int partition, IntPtr leader, IntPtr replicas, IntPtr inSyncReplicas)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.PartitionInfoWithOfflineReplicas(
             Utf8(topic), partition, leader, replicas, inSyncReplicas, IntPtr.Zero, ref outErr);
         return Track(handle, Kind.PartitionInfo, ref outErr);
+    }
+
+    internal IntPtr TopicPartitionInfo(Confluent.Kafka.TopicPartitionInfo info)
+    {
+        IntPtr leader = info.Leader is null ? IntPtr.Zero : Node(info.Leader);
+        IntPtr replicas = NodeList(info.Replicas);
+        IntPtr isr = NodeList(info.InSyncReplicas);
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr handle = info.Elr is null && info.LastKnownElr is null
+            ? NativeMethods.TopicPartitionInfoNew(info.Partition, leader, replicas, isr, ref outErr)
+            : NativeMethods.TopicPartitionInfoWithElrLastKnownElr(
+                info.Partition,
+                leader,
+                replicas,
+                isr,
+                info.Elr is null ? IntPtr.Zero : NodeList(info.Elr),
+                info.LastKnownElr is null ? IntPtr.Zero : NodeList(info.LastKnownElr),
+                ref outErr);
+        return Track(handle, Kind.TopicPartitionInfo, ref outErr);
     }
 
     internal IntPtr List()
@@ -200,6 +275,9 @@ internal sealed class NativeCallArguments : IDisposable
             case Kind.PartitionInfo:
                 NativeMethods.PartitionInfoDestroy(entry.Handle, ref outErr);
                 break;
+            case Kind.TopicPartitionInfo:
+                NativeMethods.TopicPartitionInfoDestroy(entry.Handle, ref outErr);
+                break;
         }
 
         if (outErr != IntPtr.Zero)
@@ -222,11 +300,11 @@ internal sealed class NativeCallArguments : IDisposable
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    private IntPtr Values(int count)
+    private IntPtr Values(int count, int elementSize)
     {
         List<IntPtr> blocks = _blocks ??= new List<IntPtr>();
         blocks.Capacity = blocks.Count + 1;
-        IntPtr block = Marshal.AllocHGlobal(Math.Max(count, 1) * sizeof(long));
+        IntPtr block = Marshal.AllocHGlobal(Math.Max(count, 1) * elementSize);
         blocks.Add(block);
         return block;
     }
