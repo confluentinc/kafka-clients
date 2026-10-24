@@ -1,0 +1,183 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Admin;
+
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// <c>DescribeClassicGroups</c> end to end against the mocks, which fail every group with the mock's own answer, as
+/// Java's mock does: one future per distinct group id, <c>All()</c>, the options and the preconditions.
+/// </summary>
+public sealed class PublicAdminDescribeClassicGroupsTests
+{
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    private const int UnsupportedVersionCode = 35;
+
+    private const string NotImplemented = "Not implemented yet";
+
+    [Fact]
+    public async Task DescribeClassicGroups_FansOutOneFuturePerGroupId()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDescribeClassicGroupsResult result =
+            admin.DescribeClassicGroups(new[] { "p5-dclg-a", "p5-dclg-b", "p5-dclg-c" });
+
+        Assert.Equal(
+            new[] { "p5-dclg-a", "p5-dclg-b", "p5-dclg-c" },
+            result.DescribedGroups.Keys.OrderBy(id => id, StringComparer.Ordinal));
+
+        Assert.Equal(3, result.DescribedGroups.Values.Distinct().Count());
+
+        foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> described in result.DescribedGroups)
+        {
+            KafkaException failure = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<KafkaException>(() => described.Value.Get()), s_deadline);
+
+            Assert.Equal(UnsupportedVersionCode, failure.Code);
+            Assert.Equal(NotImplemented, failure.Message);
+        }
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_AllFaultsWhenAKeyFails()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
+
+        KafkaException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+
+        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        Assert.Equal(NotImplemented, failure.Message);
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_DeduplicatesIdsOrdinally()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDescribeClassicGroupsResult result =
+            admin.DescribeClassicGroups(new[] { "p5-cdup", "p5-cdup", "P5-CDUP" });
+
+        Assert.Equal(2, result.DescribedGroups.Count);
+        Assert.Contains("p5-cdup", result.DescribedGroups.Keys);
+        Assert.Contains("P5-CDUP", result.DescribedGroups.Keys);
+
+        await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_AnEmptyRequestCompletesEmpty()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDescribeClassicGroupsResult result =
+            admin.DescribeClassicGroups(Array.Empty<string>());
+
+        Assert.Empty(result.DescribedGroups);
+
+        IReadOnlyDictionary<string, ClassicGroupDescription> all =
+            await TestTimeout.Run(() => result.All().Get(), s_deadline);
+
+        Assert.Empty(all);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task DescribeClassicGroups_AcceptsBothAuthorizedOperationsSettings(bool include)
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(
+            new[] { "p5-dclg-flag" },
+            new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
+
+        KafkaException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+
+        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        Assert.Equal(NotImplemented, failure.Message);
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_IsReachableThroughTheInterface()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+        IAsyncAdmin api = admin;
+
+        AsyncDescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
+
+        Assert.Equal(new[] { "p5-dclg-iface" }, result.DescribedGroups.Keys);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_RejectsAMalformedIdList()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        ArgumentNullException missing = Assert.Throws<ArgumentNullException>(
+            () => { admin.DescribeClassicGroups(null!); });
+        Assert.Equal("groupIds", missing.ParamName);
+
+        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+            () => { admin.DescribeClassicGroups(new string?[] { "p5-dclg-null", null }!); });
+        Assert.Equal("groupIds", nullElement.ParamName);
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_ANegativeTimeout_IsNotRejectedSynchronously()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
+
+        Assert.Null(Record.Exception(
+            () =>
+            {
+                admin.DescribeClassicGroups(
+                    new[] { "p5-dclg-timeout" },
+                    new DescribeClassicGroupsOptions { TimeoutMs = -1 });
+            }));
+    }
+
+    [Fact]
+    public async Task DescribeClassicGroups_AfterDispose_Throws()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        await TestTimeout.DisposeAsync(admin);
+
+        Assert.Throws<ObjectDisposedException>(
+            () => { admin.DescribeClassicGroups(new[] { "p5-dclg-disposed" }); });
+    }
+}
