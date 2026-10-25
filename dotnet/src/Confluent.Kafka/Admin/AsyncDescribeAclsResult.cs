@@ -46,7 +46,8 @@ public sealed class AsyncDescribeAclsResult
     /// </summary>
     /// <returns>
     /// A future yielding the bindings, or faulting with the call's own
-    /// <see cref="KafkaException"/>.
+    /// <see cref="KafkaException"/>; on <see cref="AsyncMockAdminClient"/>, which does not implement the
+    /// call, with a <see cref="System.NotSupportedException"/>.
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> Values() =>

@@ -125,6 +125,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
     /// <exception cref="KafkaException">The core reported a pause failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -139,6 +143,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
     /// <exception cref="KafkaException">The core reported a resume failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void Resume(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -152,6 +160,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -165,6 +177,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -178,6 +194,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentException"><paramref name="partition"/> is not assigned to the consumer.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a position failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     long Position(TopicPartition partition);
 
     /// <summary>
@@ -197,6 +217,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">
     /// The position could not be determined within <paramref name="timeout"/> (code 7), or the core reported another
     /// position failure.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
     /// </exception>
     long Position(TopicPartition partition, TimeSpan timeout);
 
@@ -314,6 +338,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void Seek(TopicPartition partition, long offset);
 
     /// <summary>
@@ -326,6 +354,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
 
     /// <summary>
@@ -351,6 +383,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a committed-query failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -383,6 +419,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
+    /// <exception cref="NotSupportedException">The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.</exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
 
@@ -401,6 +438,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">
     /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
     /// </exception>
+    /// <exception cref="NotSupportedException">The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.</exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout);
 
@@ -415,6 +453,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a beginning-offsets failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>
@@ -444,6 +486,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an end-offsets failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
+    /// <see cref="ConsumerHandle"/> does not support it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
     /// <summary>

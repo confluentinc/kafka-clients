@@ -57,7 +57,8 @@ public sealed class DescribeClientQuotasResult
     /// </summary>
     /// <returns>
     /// A future yielding the map, or failing with the call's own
-    /// <see cref="KafkaException"/>.
+    /// <see cref="KafkaException"/>; on <see cref="MockAdminClient"/>, which does not implement the
+    /// call, with a <see cref="NotSupportedException"/>.
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities() =>
