@@ -33,8 +33,6 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 public sealed class SafeConsumerHandleTests
 {
-    private const int UnsupportedVersionCode = 35;
-
     private const int HandleRaceRounds = 200;
 
     private const int HandleRaceCreators = 4;
@@ -162,9 +160,7 @@ public sealed class SafeConsumerHandleTests
 
         for (int i = 0; i < 50; i++)
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
-            Assert.False(failure.IsRetriable);
+            NotSupportedException failure = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(config));
             Assert.Equal(ClassicProtocolMessage, failure.Message);
         }
     }

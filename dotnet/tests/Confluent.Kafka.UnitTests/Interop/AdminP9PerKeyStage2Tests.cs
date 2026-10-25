@@ -36,8 +36,6 @@ public sealed class AdminP9PerKeyStage2Tests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -105,7 +103,7 @@ public sealed class AdminP9PerKeyStage2Tests
         KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
             () => TestTimeout.Run(() => result.Values[absent].Get(), s_deadline));
         Assert.Equal(
-            "Resource ConfigResource(type=Topic, name='cp3-cfg-absent') not found.", failure.Message);
+            "Resource ConfigResource(type=TOPIC, name='cp3-cfg-absent') not found.", failure.Message);
     }
 
     [Fact]
@@ -160,9 +158,8 @@ public sealed class AdminP9PerKeyStage2Tests
         Assert.Equal(keys.Length, awaitables.Count);
         foreach (Func<Task> awaitable in awaitables)
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(awaitable, s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
     }

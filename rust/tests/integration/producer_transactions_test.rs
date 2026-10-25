@@ -249,8 +249,8 @@ fn transactional_producer(ctx: &TestContext, transactional_id: &str) -> KafkaPro
     ctx.apply_security(&mut props);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid transactional producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("failed to build a transactional producer")
 }
@@ -301,8 +301,8 @@ fn plain_producer(ctx: &TestContext, client_id: &str) -> KafkaProducer<Vec<u8>, 
     ctx.apply_security(&mut props);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid plain producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("failed to build a plain producer")
 }
@@ -351,8 +351,8 @@ fn consumer_from_props(props: &HashMap<String, String>) -> Box<dyn DynConsumer<V
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(props).expect("invalid consumer config"),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -1035,8 +1035,8 @@ fn create_transactional_producer_with_all_timeouts(
     ]);
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid transactional producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("failed to build a transactional producer")
 }
@@ -1082,8 +1082,8 @@ fn create_consumer(
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("invalid consumer config"),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -2259,8 +2259,8 @@ fn cluster_producer(bootstrap: &str, configs: &[(&str, &str)]) -> KafkaProducer<
         .or_insert_with(|| bootstrap.to_string());
     KafkaProducer::new(
         ProducerConfig::new(&props).expect("invalid producer config"),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("failed to build a producer")
 }
@@ -2791,8 +2791,8 @@ fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn DynC
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             ConsumerConfig::new(&props).expect("invalid consumer config"),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )

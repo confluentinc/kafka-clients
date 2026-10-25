@@ -1142,8 +1142,9 @@ static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
 
 // Producer_destroy(handle): frees the class handle (which stops the submission
 // task, waits for the `_cb` tasks and runs every still-pending callback exactly
-// once -- on this thread) and then the C struct. Close first for a graceful
-// close. No other call may use the handle meanwhile or afterwards.
+// once -- on this thread) and then the C struct. A KafkaProducer not closed
+// yet is closed first, as Producer_close closes it. No other call may use the
+// handle meanwhile or afterwards.
 static PyObject* py_Producer_destroy(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long ptr;
@@ -2371,6 +2372,8 @@ static kafka_common_Error_t* mock_error_from_code(int code, const char* message)
             return ffi_built(kafka_common_Error_local_illegal_argument_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION:
             return ffi_built(kafka_common_Error_local_concurrent_modification_err(message, &ffi_err), &ffi_err);
+        case kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION:
+            return ffi_built(kafka_common_Error_local_unsupported_operation_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_REQUEST_TIMED_OUT:
             return ffi_built(kafka_common_Error_timeout_err(message, &ffi_err), &ffi_err);
         case kafka_common_Error_MESSAGE_TOO_LARGE:
@@ -3661,11 +3664,11 @@ static PyObject* ConsumerRecord_get_headers(ConsumerRecordObject* self, void* cl
         return out;
     }
     // The interface view is borrowed from the class handle (never destroyed);
-    // the `__as_` conversion takes the handle non-const.
+    // the `__as_` conversion takes the read-only handle, and only the reading
+    // `to_array` is called on its view.
     kafka_common_header_Headers_t* headers = NULL;
     kafka_List_t* arr = NULL;  // owned list of borrowed headers
-    if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(
-            (kafka_common_header_internals_RecordHeaders_t*)rh, &ffi_err), ffi_take(&ffi_err)))
+    if (ffi_raise((headers = kafka_common_header_internals_RecordHeaders__as_Headers_err(rh, &ffi_err), ffi_take(&ffi_err)))
         || ffi_raise((arr = kafka_common_header_Headers_to_array_err(headers, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     int32_t n = 0;
     if (arr != NULL
@@ -4325,7 +4328,7 @@ static PyObject* py_Consumer_MockConsumer_new(PyObject* self, PyObject* args) {
 // the handle is 0 and `error` the owned error handle (an int, 0 on success);
 // the construction runs with the GIL released (it resolves the bootstrap
 // servers). The handle keeps the configuration's `client.id`, generated when
-// unset, for Consumer_client_id.
+// unset, for Consumer_client_id: the consumer runs under that same id.
 static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     PyObject* config_dict;
@@ -4360,7 +4363,7 @@ static PyObject* py_Consumer_KafkaConsumer_new(PyObject* self, PyObject* args) {
             py_client_id = PyUnicode_FromString(client_id);
         if (err == NULL && py_client_id != NULL) {
             Py_BEGIN_ALLOW_THREADS
-            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // config copied
+            err = (kc = kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err), ffi_take(&ffi_err));  // copies config, keeping its client.id
             Py_END_ALLOW_THREADS
         }
         destroy_err = (kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err), ffi_take(&ffi_err));
@@ -4615,6 +4618,18 @@ static void consumer_i64_cb(int64_t value, kafka_common_Error_t* error, void* op
     PyGILState_STATE g;
     if (!gil_ensure_unless_finalizing(&g)) return;
     deliver_value_cb(ctx->cb, PyLong_FromLongLong((long long)value), error);
+    Py_DECREF(ctx->cb);
+    PyMem_Free(ctx);
+    PyGILState_Release(g);
+}
+
+// Java's OptionalLong as the FFI's presence flag: (present, lag), lag 0 when
+// not present.
+static void consumer_optional_i64_cb(int8_t present, int64_t lag, kafka_common_Error_t* error, void* opaque) {
+    VoidCbCtx* ctx = (VoidCbCtx*)opaque;
+    PyGILState_STATE g;
+    if (!gil_ensure_unless_finalizing(&g)) return;
+    deliver_value_cb(ctx->cb, Py_BuildValue("(iL)", (int)present, (long long)lag), error);
     Py_DECREF(ctx->cb);
     PyMem_Free(ctx);
     PyGILState_Release(g);
@@ -5030,9 +5045,10 @@ DEF_POSITION_OPS(Consumer_position, kafka_consumer_Consumer_t*, consumer_self,
                  kafka_consumer_Consumer_position, kafka_consumer_Consumer_position_with_timeout,
                  kafka_consumer_Consumer_position_cb, kafka_consumer_Consumer_position_with_timeout_cb)
 
-// Shape: current_lag(self, tp) -> lag, -1 for Java's empty OptionalLong.
-// py(h, topic, partition) -> (int, err | None) / py_cb(h, topic, partition, cb)
-// with cb(int, err | None); Python reads -1 as None. The consumer has only the
+// Shape: current_lag(self, tp, &lag) -> present, Java's OptionalLong as a
+// presence flag. py(h, topic, partition) -> ((present, lag), err | None) /
+// py_cb(h, topic, partition, cb) with cb((present, lag), err | None); lag is 0
+// when not present, and Python reads present 0 as None. The consumer has only the
 // `_cb` twin here (its sync class waits on it); the ConsumerHandle has both,
 // and a listener calls the blocking form from inside the consumer's own waiting
 // call.
@@ -5044,13 +5060,15 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     kafka_common_TopicPartition_t* tp = NULL;                                           \
     if (ffi_raise((tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err)))) return NULL; \
     SELF_T s = SELF_FN(h);                                                              \
-    int64_t lag = -1;                                                                   \
+    int64_t lag = 0;                                                                    \
+    int8_t present = 0;                                                                 \
     kafka_common_Error_t* err = NULL;                                                   \
     Py_BEGIN_ALLOW_THREADS                                                              \
-    lag = OP(s, tp, &err);                                                              \
+    present = OP(s, tp, &lag, &err);                                                    \
     Py_END_ALLOW_THREADS                                                                \
     ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
-    PyObject* value = PyLong_FromLongLong((long long)(err ? -1 : lag));                 \
+    if (err || !present) { present = 0; lag = 0; }                                      \
+    PyObject* value = Py_BuildValue("(iL)", (int)present, (long long)lag);              \
     if (value == NULL) { if (err) ffi_unraisable((kafka_common_Error_destroy_err(err, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
     PyObject* ret = cvalue_error(value, err);                                           \
     Py_DECREF(value);                                                                   \
@@ -5068,7 +5086,7 @@ static PyObject* py_##pyname(PyObject* self, PyObject* args) {                  
     if (ctx == NULL) { ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); return NULL; } \
     SELF_T s = SELF_FN(h);                                                              \
     Py_BEGIN_ALLOW_THREADS                                                              \
-    OP_CB(s, tp, consumer_i64_cb, ctx);                                                 \
+    OP_CB(s, tp, consumer_optional_i64_cb, ctx);                                        \
     Py_END_ALLOW_THREADS                                                                \
     ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err))); \
     Py_RETURN_NONE;                                                                     \
@@ -5542,9 +5560,7 @@ static PyObject* py_Consumer_list_topics_cb(PyObject* self, PyObject* args) {
 //
 // Java captures the consumer variable inside a listener; the Rust client
 // exposes a ConsumerHandle for the same re-entrancy (consumer-threading.md
-// §31; Phase 41,
-// design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md).
-// The blocking forms run the operation on the runtime and wait on a
+// §31/§41). The blocking forms run the operation on the runtime and wait on a
 // channel, so they are safe inside a rebalance listener; the `_cb` forms are
 // for coroutine listeners. The handle outliving its consumer fails every
 // operation with LocalIllegalState("consumer destroyed").
@@ -11053,7 +11069,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_commit_async_cb", py_Consumer_commit_async_cb, METH_VARARGS, "commit_async twin; cb(err | None)"},
     {"Consumer_position", py_Consumer_position, METH_VARARGS, "position(h, topic, partition, timeout_ms) -> (int, err | None)"},
     {"Consumer_position_cb", py_Consumer_position_cb, METH_VARARGS, "position twin; cb(int, err | None)"},
-    {"Consumer_current_lag_cb", py_Consumer_current_lag_cb, METH_VARARGS, "current_lag twin; cb(int, err | None), -1 for an empty lag"},
+    {"Consumer_current_lag_cb", py_Consumer_current_lag_cb, METH_VARARGS, "current_lag twin; cb((present, lag), err | None), present 0 for an empty lag"},
     {"Consumer_committed", py_Consumer_committed, METH_VARARGS, "committed(h, [(topic, partition)], timeout_ms) -> (dict | None, err | None)"},
     {"Consumer_committed_cb", py_Consumer_committed_cb, METH_VARARGS, "committed twin; cb(dict | None, err | None)"},
     {"Consumer_beginning_offsets", py_Consumer_beginning_offsets, METH_VARARGS, "beginning_offsets(h, [(topic, partition)], timeout_ms) -> (dict | None, err | None)"},
@@ -11093,8 +11109,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"ConsumerHandle_resume", py_ConsumerHandle_resume, METH_VARARGS, "resume(hh, tps) -> err | None"},
     {"ConsumerHandle_resume_cb", py_ConsumerHandle_resume_cb, METH_VARARGS, "resume twin; cb(err | None)"},
     {"ConsumerHandle_position", py_ConsumerHandle_position, METH_VARARGS, "position(hh, topic, partition, timeout_ms) -> (int, err | None)"},
-    {"ConsumerHandle_current_lag", py_ConsumerHandle_current_lag, METH_VARARGS, "current_lag(hh, topic, partition) -> (int, err | None), -1 for an empty lag"},
-    {"ConsumerHandle_current_lag_cb", py_ConsumerHandle_current_lag_cb, METH_VARARGS, "current_lag twin; cb(int, err | None)"},
+    {"ConsumerHandle_current_lag", py_ConsumerHandle_current_lag, METH_VARARGS, "current_lag(hh, topic, partition) -> ((present, lag), err | None), present 0 for an empty lag"},
+    {"ConsumerHandle_current_lag_cb", py_ConsumerHandle_current_lag_cb, METH_VARARGS, "current_lag twin; cb((present, lag), err | None)"},
     {"ConsumerHandle_position_cb", py_ConsumerHandle_position_cb, METH_VARARGS, "position twin; cb(int, err | None)"},
     {"ConsumerHandle_committed", py_ConsumerHandle_committed, METH_VARARGS, "committed(hh, tps, timeout_ms) -> (dict | None, err | None)"},
     {"ConsumerHandle_committed_cb", py_ConsumerHandle_committed_cb, METH_VARARGS, "committed twin; cb(dict | None, err | None)"},

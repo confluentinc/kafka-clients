@@ -965,7 +965,7 @@ mod tests {
         let subscriptions = std::sync::Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)));
         let config = crate::consumer::ConsumerConfig {
             bootstrap_servers: vec!["localhost:9092".to_string()],
-            ..Default::default()
+            ..ConsumerConfig::defaults()
         };
         let metadata = ConsumerMetadata::with_config(
             &config,

@@ -144,13 +144,14 @@ public sealed class ChaosConsumerTests
         Assert.Equal(Proto.RebalanceKind.Assigned, rebalances[2].Rebalance.Kind);
 
         // The revoke committed through the handle, which on a mock-derived handle is core
-        // behaviour: UnsupportedVersion with this exact text. Being an error, it ends that
-        // callback before any read-back.
+        // behaviour: a NotSupportedException with this exact text, which the server sends as -4.
+        // Being an error, it ends that callback before any read-back.
         int revokedAt = events.ToList().IndexOf(rebalances[1]);
         Proto.WorkloadEvent revokeCommit = events[revokedAt + 1];
         Assert.Equal(Proto.ConsumerOp.RevokeCommit, revokeCommit.ConsumerError?.Op);
-        Assert.Equal(35, revokeCommit.ConsumerError!.Error.Code);
-        Assert.Equal(MockHandleUnsupported, revokeCommit.ConsumerError.Error.Message);
+        Assert.Equal(-4, revokeCommit.ConsumerError!.Error.Code);
+        Assert.Equal(
+            "dotnet server: NotSupportedException: " + MockHandleUnsupported, revokeCommit.ConsumerError.Error.Message);
         Assert.DoesNotContain(events, e => e.ConsumerError?.Op == Proto.ConsumerOp.ReadCommitted);
     }
 

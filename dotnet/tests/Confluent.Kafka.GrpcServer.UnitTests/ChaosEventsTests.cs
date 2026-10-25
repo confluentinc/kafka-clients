@@ -246,7 +246,7 @@ public sealed class ChaosEventsTests
 
         listener.OnPartitionsLost(new[] { new TopicPartition("t", 3) });
 
-        // A commit through a mock-derived handle always fails (UnsupportedVersion), so a lost
+        // A commit through a mock-derived handle always fails (NotSupportedException), so a lost
         // callback that committed would leave a ConsumerError behind: its absence proves none ran.
         Proto.WorkloadEvent lost = Assert.Single(events);
         Assert.Equal(Proto.RebalanceKind.Lost, lost.Rebalance.Kind);

@@ -129,9 +129,10 @@ internal sealed class NativeConsumerHandle : IDisposable
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr outErr = IntPtr.Zero;
-        long lag = NativeMethods.ConsumerHandleCurrentLag(_handle, arguments.TopicPartition(topic, partition), ref outErr);
+        sbyte present = NativeMethods.ConsumerHandleCurrentLag(
+            _handle, arguments.TopicPartition(topic, partition), out long lag, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        return lag < 0 ? (long?)null : lag;
+        return present != 0 ? lag : null;
     }
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed((string Topic, int Partition)[] partitions)

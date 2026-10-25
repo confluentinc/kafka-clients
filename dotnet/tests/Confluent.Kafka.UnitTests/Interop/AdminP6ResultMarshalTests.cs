@@ -249,9 +249,8 @@ public sealed class AdminP6ResultMarshalTests
         AsyncDescribeClientQuotasResult result =
             AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(ClientQuotaFilter.All(), options: null));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
-        Assert.Equal(35, failure.Code);
         Assert.Equal("Not implement yet", failure.Message);
     }
 

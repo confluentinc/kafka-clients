@@ -387,6 +387,8 @@ struct Args {
     /// Kafka client properties file (e.g. SASL_SSL creds for Confluent Cloud).
     /// Merged into the consumer props AND passed to the producer via `--producer.config`.
     client_config: Option<String>,
+    /// `compression.type` of the spawned load generator. `None` => its default.
+    compression_type: Option<String>,
 }
 
 impl Args {
@@ -420,6 +422,7 @@ impl Args {
             fetch_max_bytes: None,
             max_poll_records: None,
             client_config: None,
+            compression_type: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -453,6 +456,16 @@ impl Args {
                 "--fetch-max-bytes" => a.fetch_max_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--max-poll-records" => a.max_poll_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
                 "--client-config" => a.client_config = Some(next()?),
+                "--compression-type" => {
+                    let codec = next()?;
+                    // The load generator's output is discarded, so reject a typo here.
+                    if !matches!(codec.as_str(), "none" | "gzip" | "snappy" | "lz4" | "zstd") {
+                        return Err(format!(
+                            "invalid --compression-type '{codec}' (expected one of: none, gzip, snappy, lz4, zstd)"
+                        ));
+                    }
+                    a.compression_type = Some(codec);
+                },
                 "--help" | "-h" => return Err("help".to_string()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -490,6 +503,7 @@ fn print_usage() {
                --max-partition-fetch-bytes <N>  max.partition.fetch.bytes (client default 1MB)\n  \
                --fetch-max-bytes <N>     fetch.max.bytes (client default 50MB)\n  \
                --max-poll-records <N>    max.poll.records (client default 500)\n  \
+               --compression-type <CODEC>  Producer compression.type: none|gzip|snappy|lz4|zstd (default: producer default)\n  \
            -v, --verbose                 Log every poll (record counts / heartbeats)\n"
     );
 }
@@ -557,11 +571,12 @@ fn spawn_producer(args: &Args) -> std::io::Result<Child> {
         args.throughput.to_string()
     };
     println!(
-        ">>> Launching producer: throughput={} ({}), {} bytes, ~{} records",
+        ">>> Launching producer: throughput={} ({}), {} bytes, ~{} records, compression={}",
         throughput_arg,
         if args.peak { "PEAK/unbounded" } else { "fixed msg/s" },
         args.message_size,
-        total_records
+        total_records,
+        args.compression_type.as_deref().unwrap_or("default")
     );
     let mut pargs: Vec<String> = vec![
         "--topic".into(),
@@ -584,6 +599,10 @@ fn spawn_producer(args: &Args) -> std::io::Result<Child> {
         pargs.push("--producer-props".into());
         pargs.push(format!("bootstrap.servers={}", args.bootstrap));
         pargs.push("acks=1".into());
+    }
+    // Both branches end with `--producer-props`, which takes every k=v after it.
+    if let Some(ref codec) = args.compression_type {
+        pargs.push(format!("compression.type={codec}"));
     }
     Command::new(&bin)
         .args(&pargs)
@@ -701,8 +720,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     props.insert("enable.auto.commit".to_string(), "true".to_string());
     let config = ConsumerConfig::new(&props)?;
 
-    let mut consumer =
-        KafkaConsumer::<usize, usize>::new(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
+    let mut consumer = KafkaConsumer::<usize, usize>::new(config, LenDeserializer, LenDeserializer)?;
 
     consumer.subscribe_with_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");
@@ -1118,7 +1136,7 @@ fn write_config(run_dir: &Path, args: &Args) -> std::io::Result<()> {
         f,
         "{{\"bootstrap\":\"{}\",\"topic\":\"{}\",\"group_id\":\"{}\",\"throughput_msg_s\":{},\
          \"duration_s\":{},\"message_size\":{},\"partitions\":{},\"warmup_messages\":{},\
-         \"interval_s\":{},\"poll_timeout_ms\":{},\"produce\":{}}}",
+         \"interval_s\":{},\"poll_timeout_ms\":{},\"produce\":{},\"compression_type\":{}}}",
         args.bootstrap,
         args.topic,
         args.group_id,
@@ -1130,5 +1148,8 @@ fn write_config(run_dir: &Path, args: &Args) -> std::io::Result<()> {
         args.interval_s,
         args.poll_timeout_ms,
         args.produce,
+        args.compression_type
+            .as_deref()
+            .map_or("null".to_string(), |c| format!("\"{c}\"")),
     )
 }

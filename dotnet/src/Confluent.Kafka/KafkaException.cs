@@ -35,6 +35,8 @@ public class KafkaException : Exception
 
     private const int LocalTimeout = -5;
 
+    private const int LocalUnsupportedOperation = -31;
+
     /// <summary>
     /// Initializes an exception with a default message; <see cref="Code"/> is 0 and <see cref="IsRetriable"/>
     /// is <see langword="false"/>.
@@ -173,6 +175,7 @@ public class KafkaException : Exception
                 LocalConcurrentModification or LocalIllegalState => new InvalidOperationException(message, inner),
                 LocalIllegalArgument => new ArgumentException(message, inner),
                 LocalTimeout => new TimeoutException(message, inner),
+                LocalUnsupportedOperation => new NotSupportedException(message, inner),
                 _ => new KafkaException(code, message, isRetriable, inner),
             };
         }

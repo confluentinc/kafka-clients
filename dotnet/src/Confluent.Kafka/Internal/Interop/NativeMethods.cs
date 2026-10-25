@@ -386,7 +386,8 @@ internal static partial class NativeMethods
     internal static extern void ConsumerCloseWithOptions(SafeConsumerHandle self, IntPtr options, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_current_lag", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern long ConsumerCurrentLag(SafeConsumerHandle self, IntPtr topicPartition, ref IntPtr outErr);
+    internal static extern sbyte ConsumerCurrentLag(
+        SafeConsumerHandle self, IntPtr topicPartition, out long outLag, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_metrics_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerMetrics(SafeConsumerHandle self, ref IntPtr outErr);
@@ -400,6 +401,9 @@ internal static partial class NativeMethods
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ConsumerScalarCallback(long value, IntPtr error, IntPtr opaque);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ConsumerOptionalScalarCallback(sbyte present, long value, IntPtr error, IntPtr opaque);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void ConsumerPointerCallback(IntPtr value, IntPtr error, IntPtr opaque);
@@ -486,7 +490,7 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_current_lag_cb", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerCurrentLagCb(
-        SafeConsumerHandle self, IntPtr topicPartition, ConsumerScalarCallback cb, IntPtr opaque);
+        SafeConsumerHandle self, IntPtr topicPartition, ConsumerOptionalScalarCallback cb, IntPtr opaque);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async_cb", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerCommitAsyncCb(SafeConsumerHandle self, ConsumerVoidCallback cb, IntPtr opaque);
@@ -977,6 +981,6 @@ internal static partial class NativeMethods
         SafeConsumerReentrancyHandle self, IntPtr offsets, IntPtr callback, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_current_lag", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern long ConsumerHandleCurrentLag(
-        SafeConsumerReentrancyHandle self, IntPtr topicPartition, ref IntPtr outErr);
+    internal static extern sbyte ConsumerHandleCurrentLag(
+        SafeConsumerReentrancyHandle self, IntPtr topicPartition, out long outLag, ref IntPtr outErr);
 }

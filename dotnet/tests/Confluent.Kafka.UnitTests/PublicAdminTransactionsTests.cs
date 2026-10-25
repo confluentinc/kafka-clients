@@ -29,8 +29,6 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class PublicAdminTransactionsTests
 {
-    private const int UnsupportedVersionCode = 35;
-
     private const int RequestTimedOutCode = 7;
 
     private const string NotImplementedMessage = "Not implemented yet";
@@ -67,10 +65,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (TopicPartition partition in s_partitions)
         {
-            AssertNotImplemented(Assert.Throws<KafkaException>(() => result.PartitionResult(partition).Get(s_deadline)));
+            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.PartitionResult(partition).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -83,10 +81,10 @@ public sealed class PublicAdminTransactionsTests
 
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<KafkaException>(() => result.Description(id).Get(s_deadline)));
+            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.Description(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -97,7 +95,7 @@ public sealed class PublicAdminTransactionsTests
 
         AbortTransactionResult result = admin.AbortTransaction(s_spec, new AbortTransactionOptions { TimeoutMs = 1000 });
 
-        AssertNotImplemented(Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -111,12 +109,12 @@ public sealed class PublicAdminTransactionsTests
         Assert.Equal(s_transactionalIds.Length, result.FencedProducers.Count);
         foreach (string id in s_transactionalIds)
         {
-            AssertNotImplemented(Assert.Throws<KafkaException>(() => result.FencedProducers[id].Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<KafkaException>(() => result.ProducerId(id).Get(s_deadline)));
-            AssertNotImplemented(Assert.Throws<KafkaException>(() => result.EpochId(id).Get(s_deadline)));
+            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.FencedProducers[id].Get(s_deadline)));
+            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.ProducerId(id).Get(s_deadline)));
+            AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.EpochId(id).Get(s_deadline)));
         }
 
-        AssertNotImplemented(Assert.Throws<KafkaException>(() => result.All().Get(s_deadline)));
+        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.All().Get(s_deadline)));
     }
 
     [Fact]
@@ -128,11 +126,11 @@ public sealed class PublicAdminTransactionsTests
         TerminateTransactionResult result =
             admin.ForceTerminateTransaction("txn-a", new TerminateTransactionOptions { TimeoutMs = 1000 });
 
-        AssertNotImplemented(Assert.Throws<KafkaException>(() => result.Result().Get(s_deadline)));
+        AssertNotImplemented(Assert.Throws<NotSupportedException>(() => result.Result().Get(s_deadline)));
     }
 
     [Fact]
-    public async Task AsyncMockAdminClient_FailsEveryFutureWithTheMocksCode()
+    public async Task AsyncMockAdminClient_FailsEveryFutureWithTheMocksRefusal()
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
@@ -145,25 +143,25 @@ public sealed class PublicAdminTransactionsTests
         foreach (TopicPartition partition in s_partitions)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => producers.PartitionResult(partition).Get()), s_deadline));
+                () => Assert.ThrowsAsync<NotSupportedException>(() => producers.PartitionResult(partition).Get()), s_deadline));
         }
 
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => transactions.Description(id).Get()), s_deadline));
+                () => Assert.ThrowsAsync<NotSupportedException>(() => transactions.Description(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => producers.All().Get()), s_deadline));
+            () => Assert.ThrowsAsync<NotSupportedException>(() => producers.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => transactions.All().Get()), s_deadline));
+            () => Assert.ThrowsAsync<NotSupportedException>(() => transactions.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => abort.All().Get()), s_deadline));
+            () => Assert.ThrowsAsync<NotSupportedException>(() => abort.All().Get()), s_deadline));
     }
 
     [Fact]
-    public async Task AsyncMockAdminClient_FenceAndTerminate_FailEveryFutureWithTheMocksCode()
+    public async Task AsyncMockAdminClient_FenceAndTerminate_FailEveryFutureWithTheMocksRefusal()
     {
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
@@ -174,17 +172,17 @@ public sealed class PublicAdminTransactionsTests
         foreach (string id in s_transactionalIds)
         {
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => fence.FencedProducers[id].Get()), s_deadline));
+                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.FencedProducers[id].Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => fence.ProducerId(id).Get()), s_deadline));
+                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.ProducerId(id).Get()), s_deadline));
             AssertNotImplemented(await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => fence.EpochId(id).Get()), s_deadline));
+                () => Assert.ThrowsAsync<NotSupportedException>(() => fence.EpochId(id).Get()), s_deadline));
         }
 
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => fence.All().Get()), s_deadline));
+            () => Assert.ThrowsAsync<NotSupportedException>(() => fence.All().Get()), s_deadline));
         AssertNotImplemented(await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => terminate.Result().Get()), s_deadline));
+            () => Assert.ThrowsAsync<NotSupportedException>(() => terminate.Result().Get()), s_deadline));
     }
 
     [Fact]
@@ -219,13 +217,15 @@ public sealed class PublicAdminTransactionsTests
 
             if (round == 0)
             {
-                Assert.Throws<KafkaException>(() => producers.All().Get(s_deadline));
-                Assert.Throws<KafkaException>(() => transactions.All().Get(s_deadline));
-                Assert.Throws<KafkaException>(() => abort.All().Get(s_deadline));
-                await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => asyncProducers.All().Get()), s_deadline);
-                await TestTimeout.Run(
-                    () => Assert.ThrowsAsync<KafkaException>(() => asyncTransactions.All().Get()), s_deadline);
-                await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => asyncAbort.All().Get()), s_deadline);
+                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => producers.All().Get(s_deadline)));
+                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => transactions.All().Get(s_deadline)));
+                AssertNotImplemented(Assert.Throws<NotSupportedException>(() => abort.All().Get(s_deadline)));
+                AssertNotImplemented(await TestTimeout.Run(
+                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncProducers.All().Get()), s_deadline));
+                AssertNotImplemented(await TestTimeout.Run(
+                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncTransactions.All().Get()), s_deadline));
+                AssertNotImplemented(await TestTimeout.Run(
+                    () => Assert.ThrowsAsync<NotSupportedException>(() => asyncAbort.All().Get()), s_deadline));
             }
         }
 
@@ -363,10 +363,8 @@ public sealed class PublicAdminTransactionsTests
         Assert.Throws<ObjectDisposedException>(() => asyncReal.ForceTerminateTransaction("txn-a"));
     }
 
-    private static void AssertNotImplemented(KafkaException exception)
+    private static void AssertNotImplemented(NotSupportedException exception)
     {
-        Assert.Equal(UnsupportedVersionCode, exception.Code);
-        Assert.False(exception.IsRetriable);
         Assert.Equal(NotImplementedMessage, exception.Message);
     }
 

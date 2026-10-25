@@ -30,8 +30,6 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -45,14 +43,12 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             "p5-group",
             new[] { tp });
 
-        KafkaException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp).Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromPartitionResult.Code);
+        NotSupportedException fromPartitionResult = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
-        KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        NotSupportedException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -90,16 +86,14 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         AsyncDeleteConsumerGroupOffsetsResult result = admin.DeleteConsumerGroupOffsets(
             "p5-group", new[] { first, second, new TopicPartition("p5-dcgo", 0) });
 
-        KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        NotSupportedException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
 
         foreach (TopicPartition partition in new[] { first, second })
         {
-            KafkaException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(partition).Get()), s_deadline);
-            Assert.Equal(UnsupportedVersionCode, thrown.Code);
+            NotSupportedException thrown = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -113,8 +107,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
         Task all = admin.DeleteConsumerGroupOffsets("p5-group", Array.Empty<TopicPartition>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        KafkaException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => all), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, thrown.Code);
+        NotSupportedException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -133,8 +126,7 @@ public sealed class PublicAdminDeleteConsumerGroupOffsetsTests
             StringComparison.Ordinal);
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(get);
-            Assert.Equal(UnsupportedVersionCode, thrown.Code);
+            NotSupportedException thrown = Assert.Throws<NotSupportedException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

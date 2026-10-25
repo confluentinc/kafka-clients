@@ -199,8 +199,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records: usize, starting_timestamp: i64) {
     let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
         make_producer_config(ctx),
-        Box::new(ByteArraySerializer::default()),
-        Box::new(ByteArraySerializer::default()),
+        ByteArraySerializer::default(),
+        ByteArraySerializer::default(),
     )
     .expect("Failed to build test producer");
 
@@ -511,8 +511,8 @@ async fn test_async_assign_and_commit_async_not_committed() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -577,8 +577,8 @@ async fn test_async_assign_and_commit_sync_not_committed() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -623,8 +623,8 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -669,8 +669,8 @@ async fn test_async_assign_and_consume() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -706,8 +706,8 @@ async fn test_async_assign_and_consume_skipping_position() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -761,8 +761,8 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     {
         let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed (consumer 1)");
 
@@ -789,8 +789,8 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     {
         let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed (consumer 2)");
 
@@ -826,8 +826,8 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     {
         let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed (consumer 1)");
 
@@ -862,8 +862,8 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
     {
         let mut another = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             make_consumer_config_bytes(&ctx, Some(&group_id)),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed (consumer 2)");
 
@@ -909,8 +909,8 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
 
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         make_consumer_config_bytes(&ctx, Some(&group_id)),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 
@@ -985,8 +985,8 @@ async fn test_async_poll_after_topic_deleted() {
     ]);
     let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
         ConsumerConfig::new(&props).expect("invalid test config"),
-        Box::new(ByteArrayDeserializer),
-        Box::new(ByteArrayDeserializer),
+        ByteArrayDeserializer,
+        ByteArrayDeserializer,
     )
     .expect("KafkaConsumer::new should succeed");
 

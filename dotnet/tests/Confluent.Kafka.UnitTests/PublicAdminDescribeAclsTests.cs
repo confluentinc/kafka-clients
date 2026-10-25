@@ -65,10 +65,9 @@ public sealed class PublicAdminDescribeAclsTests
 
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("unimplemented"));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
-        Assert.NotEqual(0, failure.Code);
     }
 
     [Fact]
@@ -80,7 +79,7 @@ public sealed class PublicAdminDescribeAclsTests
         AsyncDescribeAclsResult result = admin.DescribeAcls(Filter("same-task"));
         Assert.Same(result.Values().Get(), result.Values().Get());
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
     }
 
@@ -95,7 +94,7 @@ public sealed class PublicAdminDescribeAclsTests
                 new ResourcePatternFilter(ResourceType.Any, null, PatternType.Any),
                 new AccessControlEntryFilter(null, null, AclOperation.Any, AclPermissionType.Any)));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

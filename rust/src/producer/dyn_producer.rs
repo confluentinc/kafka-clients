@@ -385,10 +385,10 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
 /// has pre-append wait points to skip. The C FFI, though, reaches the producer
 /// it wraps only through a `dyn` handle (see [`DynProducer`]), and its
 /// non-blocking send entry point needs the fast path of the real producer and
-/// the always-ready `send` of the mock through that same handle. This trait is
-/// that handle's type: [`try_send`](Self::try_send) is the real producer's
-/// `try_send`, and the mock's `send_with_callback`, which never waits, reported
-/// as [`TrySendOutcome::Accepted`]. It cannot be a method of `DynProducer`: that
+/// the `send` of the mock through that same handle. This trait is that
+/// handle's type: [`try_send`](Self::try_send) is the real producer's
+/// `try_send`, and the mock's `send_with_callback`, which has no metadata or
+/// buffer wait to skip, reported as [`TrySendOutcome::Accepted`]. It cannot be a method of `DynProducer`: that
 /// trait's blanket impl covers every [`Producer`], and a `Producer` has no
 /// `try_send` to forward to. Crate-internal, and only the `ffi` feature names
 /// it.
@@ -403,6 +403,11 @@ pub(crate) trait DynTrySend<K, V>: DynProducer<K, V> {
     where
         K: 'a,
         V: 'a;
+
+    /// Whether this producer has a sender task that no close has stopped: a
+    /// `KafkaProducer` not closed yet. The C binding's `destroy` closes such a
+    /// producer before dropping it. The mock has no sender.
+    fn has_unclosed_sender(&self) -> bool;
 }
 
 #[cfg(feature = "ffi")]
@@ -422,10 +427,15 @@ where
     {
         Box::pin(KafkaProducer::try_send(self, record, callback))
     }
+
+    fn has_unclosed_sender(&self) -> bool {
+        self.is_running()
+    }
 }
 
-/// The mock never waits — its `send_with_callback` resolves the record at once
-/// under its own lock — so its non-blocking send is its send, always `Accepted`.
+/// The mock has no metadata or buffer wait — its `send_with_callback` awaits only
+/// the serializers, then records the send under its own lock — so its
+/// non-blocking send is its send, always `Accepted`.
 #[cfg(feature = "ffi")]
 impl<K, V> DynTrySend<K, V> for MockProducer<K, V>
 where
@@ -447,6 +457,10 @@ where
                 .map(TrySendOutcome::Accepted)
         })
     }
+
+    fn has_unclosed_sender(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -458,8 +472,9 @@ mod tests {
         ProducerRecord::with_key("topic".to_string(), Some("key".to_string()), Some(value.to_string()))
     }
 
-    /// The mock's non-blocking send is its send: it never waits, so through the
-    /// `dyn` handle every record is `Accepted` and lands in its history.
+    /// The mock's non-blocking send is its send: it has no wait to skip, so
+    /// through the `dyn` handle every record is `Accepted` and lands in its
+    /// history.
     #[cfg(feature = "ffi")]
     #[tokio::test]
     async fn test_mock_try_send_is_always_accepted() {

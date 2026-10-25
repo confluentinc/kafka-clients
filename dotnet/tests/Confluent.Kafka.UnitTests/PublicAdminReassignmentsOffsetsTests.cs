@@ -37,8 +37,6 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implement yet";
 
     [Fact]
@@ -60,9 +58,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
                 [viaEarliest] = OffsetSpec.Earliest(),
             });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(viaTimestamp).Get()), s_deadline);
         Assert.Equal(NotImplemented, failure.Message);
 
         ListOffsetsResult.ListOffsetsResultInfo earliest =
@@ -128,8 +125,8 @@ public sealed class PublicAdminReassignmentsOffsetsTests
 
         Assert.NotNull(await TestTimeout.Run(() => result.PartitionResult(good).Get(), s_deadline));
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(bad).Get()), s_deadline);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(bad).Get()), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]

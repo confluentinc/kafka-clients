@@ -30,8 +30,6 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Theory]
@@ -124,8 +122,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
 
     private static async Task AssertNotImplemented(Task outcome)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => outcome, s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => outcome, s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
 

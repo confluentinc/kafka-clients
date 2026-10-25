@@ -227,7 +227,6 @@ internal static class VerifyConsumed
             ["group.protocol"] = "consumer",
             ["enable.auto.commit"] = "false",
             ["auto.offset.reset"] = "earliest",
-            ["session.timeout.ms"] = "10000",
             ["check.crcs"] = "true",
         };
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))

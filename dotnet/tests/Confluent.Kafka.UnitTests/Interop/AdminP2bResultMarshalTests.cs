@@ -33,8 +33,6 @@ public sealed class AdminP2bResultMarshalTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Theory]
@@ -83,8 +81,7 @@ public sealed class AdminP2bResultMarshalTests
         Assert.Equal(3, deleted.LowWatermarks.Values.Distinct().Count());
         foreach (TopicPartition key in new[] { a0, a1, b0 })
         {
-            KafkaException failure = Assert.Throws<KafkaException>(() => deleted.LowWatermarks[key].Get(s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
+            NotSupportedException failure = Assert.Throws<NotSupportedException>(() => deleted.LowWatermarks[key].Get(s_deadline));
             Assert.Equal(NotImplemented, failure.Message);
         }
     }

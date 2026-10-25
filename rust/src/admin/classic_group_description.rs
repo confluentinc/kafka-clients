@@ -25,7 +25,7 @@ use crate::common::{ClassicGroupState, Node};
 /// A detailed description of a single classic group in the cluster.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ClassicGroupDescription`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription")]
 pub struct ClassicGroupDescription {
     group_id: String,
@@ -118,9 +118,47 @@ impl ClassicGroupDescription {
     }
 }
 
+impl std::fmt::Display for ClassicGroupDescription {
+    /// Java's `toString()`: an absent coordinator or operation set prints as
+    /// `null`, and the operations as Java's `[A, B]`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let members = self.members.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .map_or_else(|| "null".to_string(), ToString::to_string);
+        let operations = self.authorized_operations.as_ref().map_or_else(
+            || "null".to_string(),
+            |operations| {
+                format!(
+                    "[{}]",
+                    operations.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            },
+        );
+        write!(
+            f,
+            "(groupId={}, protocol='{}', protocolData={}, members={}, state={}, coordinator={}, \
+             authorizedOperations={})",
+            self.group_id, self.protocol, self.protocol_data, members, self.state, coordinator, operations,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_string_follows_java() {
+        let d =
+            ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None, None);
+        assert_eq!(
+            d.to_string(),
+            "(groupId=g, protocol='consumer', protocolData=range, members=, state=Stable, coordinator=null, \
+             authorizedOperations=null)"
+        );
+    }
 
     #[test]
     fn is_simple_consumer_group_when_protocol_empty() {

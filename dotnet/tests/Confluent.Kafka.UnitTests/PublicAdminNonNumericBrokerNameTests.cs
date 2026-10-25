@@ -40,8 +40,6 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
     private const int RequestTimedOutCode = 7;
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     private const string Topic = "d10-topic";
@@ -108,7 +106,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncDescribeConfigsResult result = admin.DescribeConfigs(new[] { brokerLogger, topic });
 
-        await AssertNotImplemented(result.Values[brokerLogger].Get());
+        await AssertNotSupported(result.Values[brokerLogger].Get(), NotImplemented);
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
@@ -136,7 +134,7 @@ public sealed class PublicAdminNonNumericBrokerNameTests
 
         AsyncAlterConfigsResult result = admin.IncrementalAlterConfigs(Alterations(brokerLogger, topic));
 
-        await AssertNotImplemented(result.Values[brokerLogger].Get());
+        await AssertNotSupported(result.Values[brokerLogger].Get(), string.Empty);
         await TestTimeout.Run(() => result.Values[topic].Get(), s_deadline);
     }
 
@@ -157,12 +155,11 @@ public sealed class PublicAdminNonNumericBrokerNameTests
         Assert.Equal(message, failure.Message);
     }
 
-    private static async Task AssertNotImplemented(Task outcome)
+    private static async Task AssertNotSupported(Task outcome, string message)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => outcome, s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
-        Assert.Equal(NotImplemented, failure.Message);
+        Assert.Equal(message, failure.Message);
     }
 
     private static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> Alterations(

@@ -212,9 +212,8 @@ public sealed class AdminStringsTests
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
                 admin.ListTransactions(new ListTransactionsOptions { FilteredTransactionalIdPattern = "txn-.*" }));
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.All().Get(), s_deadline));
-            Assert.Equal(35, failure.Code);
             Assert.Equal("Not implemented yet", failure.Message);
         }
         finally
@@ -237,9 +236,8 @@ public sealed class AdminStringsTests
 
             AsyncDescribeClientQuotasResult result =
                 AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: null));
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
-            Assert.Equal(35, failure.Code);
             Assert.Equal("Not implement yet", failure.Message);
         }
         finally
@@ -287,9 +285,8 @@ public sealed class AdminStringsTests
             Assert.Equal("userName", rejected.ParamName);
             Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
 
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
-            Assert.Equal(35, failure.Code);
             Assert.Equal("Not implemented yet", failure.Message);
         }
         finally

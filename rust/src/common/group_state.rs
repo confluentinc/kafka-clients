@@ -24,7 +24,7 @@ use crate::common::GroupType;
 /// The state of a group.
 ///
 /// Corresponds to `org.apache.kafka.common.GroupState`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupState")]
 pub enum GroupState {

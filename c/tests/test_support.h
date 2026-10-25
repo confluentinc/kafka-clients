@@ -191,6 +191,14 @@ static inline void assert_ok(kafka_common_Error_t *err, const char *what) {
     }
 }
 
+/* Asserts that an owned string a `_to_string` export returned equals
+ * `expected`, then frees it with `kafka_string_destroy`. */
+static inline void assert_owned_string(const char *expected, char *actual) {
+    TEST_ASSERT_NOT_NULL(actual);
+    TEST_ASSERT_EQUAL_STRING(expected, actual);
+    kafka_string_destroy(actual);
+}
+
 /* The consumer's state reads (`assignment`, `subscription`, `paused`,
  * `current_lag`, `group_metadata`) fail with LOCAL_CONCURRENT_MODIFICATION
  * only while another call holds the consumer, as Java's `acquire()` throws
@@ -217,11 +225,15 @@ static inline kafka_List_t *consumer_paused(kafka_consumer_Consumer_t *consumer)
     return out;
 }
 
+/* `current_lag` for a lag Java reports present: asserts the presence flag is
+ * 1 and returns the lag, which may be negative. */
 static inline int64_t consumer_current_lag(kafka_consumer_Consumer_t *consumer,
                                            const kafka_common_TopicPartition_t *tp) {
     kafka_common_Error_t *err = NULL;
-    int64_t out = kafka_consumer_Consumer_current_lag(consumer, tp, &err);
+    int64_t out = 0;
+    int8_t present = kafka_consumer_Consumer_current_lag(consumer, tp, &out, &err);
     assert_ok(err, "current_lag");
+    TEST_ASSERT_EQUAL_INT8(1, present);
     return out;
 }
 
@@ -233,26 +245,29 @@ static inline kafka_consumer_ConsumerGroupMetadata_t *consumer_group_metadata(
     return out;
 }
 
-/* What a `current_lag_cb` completion observed: the lag (-1 for Java's empty
- * `OptionalLong`, or beside an error) and the owned error, if any, kept for
- * the test to classify and free. Both twins' completions
+/* What a `current_lag_cb` completion observed: the presence flag (0 for Java's
+ * empty `OptionalLong`, or beside an error), the lag (0 when not present) and
+ * the owned error, if any, kept for the test to classify and free. Both twins' completions
  * (`kafka_consumer_Consumer_current_lag_cb_t`,
  * `kafka_consumer_ConsumerHandle_current_lag_cb_t`) share this shape. */
 typedef struct {
     atomic_int fired;
+    int8_t present;
     int64_t value;
     kafka_common_Error_t *error;
 } lag_completion_t;
 
 static inline void lag_completion_init(lag_completion_t *c) {
-    c->value = 0;
+    c->present = -1;
+    c->value = -1;
     c->error = NULL;
     atomic_init(&c->fired, 0);
 }
 
-static inline void on_lag(int64_t value, kafka_common_Error_t *error, void *opaque) {
+static inline void on_lag(int8_t present, int64_t lag, kafka_common_Error_t *error, void *opaque) {
     lag_completion_t *c = (lag_completion_t *)opaque;
-    c->value = value;
+    c->present = present;
+    c->value = lag;
     c->error = error;
     atomic_fetch_add(&c->fired, 1);
 }

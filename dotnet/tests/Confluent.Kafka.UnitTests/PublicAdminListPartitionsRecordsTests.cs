@@ -37,8 +37,6 @@ public sealed class PublicAdminListPartitionsRecordsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -90,13 +88,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
             new Dictionary<string, NewPartitions> { ["p2b-grow"] = NewPartitions.IncreaseTo(3) });
 
         Task perTopic = Assert.Single(result.Values).Value.Get();
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => perTopic, s_deadline));
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -128,10 +125,9 @@ public sealed class PublicAdminListPartitionsRecordsTests
             });
 
         Task<DeletedRecords> perPartition = Assert.Single(result.LowWatermarks).Value.Get();
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => perPartition, s_deadline));
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
 
         Assert.Equal(partition, Assert.Single(result.LowWatermarks).Key);
@@ -214,9 +210,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
             };
         Assert.Equal(2, offsets.Count);
         AsyncListOffsetsResult listed = admin.ListOffsets(offsets);
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => listed.PartitionResult(new TopicPartition(Topic, 0)).Get(), s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal("Not implement yet", failure.Message);
     }
 
@@ -346,7 +341,7 @@ public sealed class PublicAdminListPartitionsRecordsTests
 
         Assert.NotEmpty(await TestTimeout.Run(() => admin.ListTopics().Names().Get(), s_deadline));
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(
                 () => admin.CreatePartitions(
                     new Dictionary<string, NewPartitions> { ["p2b-smoke"] = NewPartitions.IncreaseTo(2) }).All().Get(),

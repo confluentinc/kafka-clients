@@ -40,7 +40,6 @@ public sealed class PublicAdminP14DifferentialTests
 
     private const int UnknownTopicOrPartitionCode = 3;
     private const int UnknownTopicIdCode = 100;
-    private const int UnsupportedVersionCode = 35;
 
     private const int ReplicaNotAvailableCode = 9;
     private const int InvalidRequestCode = 42;
@@ -362,13 +361,11 @@ public sealed class PublicAdminP14DifferentialTests
 
         Assert.Equal(new[] { "diff-h" }, syncResult.Values.Keys);
         Assert.Equal(new[] { "diff-h" }, asyncResult.Values.Keys);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.Values["diff-h"]), FutureProbe.Of(asyncResult.Values["diff-h"])));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -391,13 +388,11 @@ public sealed class PublicAdminP14DifferentialTests
 
         Assert.Equal(new[] { partition }, syncResult.LowWatermarks.Keys);
         Assert.Equal(new[] { partition }, asyncResult.LowWatermarks.Keys);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.LowWatermarks[partition]), FutureProbe.Of(asyncResult.LowWatermarks[partition])));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         Dictionary<TopicPartition, RecordsToDelete> none = new Dictionary<TopicPartition, RecordsToDelete>();
@@ -509,7 +504,7 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(asyncResult.Values[broker]),
                 static outcome => string.Join(",", Entries((Config)outcome))));
 
-        const string MissingTopic = "Resource ConfigResource(type=Topic, name='diff-k-missing') not found.";
+        const string MissingTopic = "Resource ConfigResource(type=TOPIC, name='diff-k-missing') not found.";
         AssertKafka(
             UnknownTopicOrPartitionCode,
             MissingTopic,
@@ -770,13 +765,11 @@ public sealed class PublicAdminP14DifferentialTests
             ElectLeadersResult syncResult = sync.ElectLeaders(ElectionType.Preferred, selection);
             AsyncElectLeadersResult asyncResult = async.ElectLeaders(ElectionType.Preferred, selection);
 
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.Partitions()), FutureProbe.Of(asyncResult.Partitions())));
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
         }
     }
@@ -935,13 +928,11 @@ public sealed class PublicAdminP14DifferentialTests
                 FutureProbe.Of(asyncResult.PartitionResult(latest)),
                 static outcome => Offsets((ListOffsetsResult.ListOffsetsResultInfo)outcome)));
         Assert.Equal("42/-1/none", Offsets(fromLatest));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.PartitionResult(byTime)), FutureProbe.Of(asyncResult.PartitionResult(byTime))));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-u", 7);
@@ -1032,15 +1023,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (string group in groups)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1060,15 +1049,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (string group in groups)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.DescribedGroups[group]), FutureProbe.Of(asyncResult.DescribedGroups[group])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1166,17 +1153,15 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncListConsumerGroupOffsetsResult asyncSeveral = async.ListConsumerGroupOffsets(several);
         foreach (string group in groups)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(
                     FutureProbe.Of(syncSeveral.PartitionsToOffsetAndMetadata(group)),
                     FutureProbe.Of(asyncSeveral.PartitionsToOffsetAndMetadata(group))));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncSeveral.All()), FutureProbe.Of(asyncSeveral.All())));
 
         InvalidOperationException syncNoArgument = Assert.Throws<InvalidOperationException>(
@@ -1203,15 +1188,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (string group in groups)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.DeletedGroups[group]), FutureProbe.Of(asyncResult.DeletedGroups[group])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1229,15 +1212,13 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncRemoveMembersFromConsumerGroupResult asyncResult = async.RemoveMembersFromConsumerGroup("diff-ab-group", named);
         foreach (MemberToRemove member in members)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.MemberResult(member)), FutureProbe.Of(asyncResult.MemberResult(member))));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         MemberToRemove unrequested = new MemberToRemove("diff-ab-3");
@@ -1253,9 +1234,8 @@ public sealed class PublicAdminP14DifferentialTests
         RemoveMembersFromConsumerGroupOptions everyone = new RemoveMembersFromConsumerGroupOptions();
         RemoveMembersFromConsumerGroupResult syncAll = sync.RemoveMembersFromConsumerGroup("diff-ab-group", everyone);
         AsyncRemoveMembersFromConsumerGroupResult asyncAll = async.RemoveMembersFromConsumerGroup("diff-ab-group", everyone);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncAll.All()), FutureProbe.Of(asyncAll.All())));
         AssertThrowAlike<ArgumentException>(
             () => { _ = syncAll.MemberResult(members[0]); },
@@ -1280,19 +1260,16 @@ public sealed class PublicAdminP14DifferentialTests
 
         AlterConsumerGroupOffsetsResult syncResult = sync.AlterConsumerGroupOffsets("diff-ac-group", offsets);
         AsyncAlterConsumerGroupOffsetsResult asyncResult = async.AlterConsumerGroupOffsets("diff-ac-group", offsets);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-ac", 7);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.PartitionResult(unrequested)), FutureProbe.Of(asyncResult.PartitionResult(unrequested))));
     }
 
@@ -1307,13 +1284,11 @@ public sealed class PublicAdminP14DifferentialTests
 
         DeleteConsumerGroupOffsetsResult syncResult = sync.DeleteConsumerGroupOffsets("diff-ad-group", new[] { partition });
         AsyncDeleteConsumerGroupOffsetsResult asyncResult = async.DeleteConsumerGroupOffsets("diff-ad-group", new[] { partition });
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         TopicPartition unrequested = new TopicPartition("diff-ad", 7);
@@ -1428,15 +1403,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (AclBinding binding in bindings)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.Values[binding]), FutureProbe.Of(asyncResult.Values[binding])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1457,15 +1430,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (AclBindingFilter filter in filters)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.Values[filter]), FutureProbe.Of(asyncResult.Values[filter])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1480,9 +1451,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeAclsResult syncResult = sync.DescribeAcls(filter);
         AsyncDescribeAclsResult asyncResult = async.DescribeAcls(filter);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.Values()), FutureProbe.Of(asyncResult.Values())));
     }
 
@@ -1498,9 +1468,8 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeClientQuotasResult syncResult = sync.DescribeClientQuotas(filter);
         AsyncDescribeClientQuotasResult asyncResult = async.DescribeClientQuotas(filter);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.Entities()), FutureProbe.Of(asyncResult.Entities())));
     }
 
@@ -1526,15 +1495,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (ClientQuotaEntity entity in entities)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementYet,
+            AssertNotSupported(
+                                NotImplementYet,
                 await Agree(FutureProbe.Of(syncResult.Values[entity]), FutureProbe.Of(asyncResult.Values[entity])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementYet,
+        AssertNotSupported(
+                        NotImplementYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1600,17 +1567,14 @@ public sealed class PublicAdminP14DifferentialTests
 
         DescribeUserScramCredentialsResult syncResult = sync.DescribeUserScramCredentials(users);
         AsyncDescribeUserScramCredentialsResult asyncResult = async.DescribeUserScramCredentials(users);
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.Users()), FutureProbe.Of(asyncResult.Users())));
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(
                 FutureProbe.Of(syncResult.Description(users[0])), FutureProbe.Of(asyncResult.Description(users[0]))));
     }
@@ -1637,15 +1601,13 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (string user in users)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.Values[user]), FutureProbe.Of(asyncResult.Values[user])));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
     }
 
@@ -1939,23 +1901,19 @@ public sealed class PublicAdminP14DifferentialTests
 
         foreach (string id in ids)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.FencedProducers[id]), FutureProbe.Of(asyncResult.FencedProducers[id])));
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.ProducerId(id)), FutureProbe.Of(asyncResult.ProducerId(id))));
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.EpochId(id)), FutureProbe.Of(asyncResult.EpochId(id))));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         FenceProducersResult syncEmpty = sync.FenceProducers(Array.Empty<string>());
@@ -1978,15 +1936,13 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncDescribeTransactionsResult asyncResult = async.DescribeTransactions(ids);
         foreach (string id in ids)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.Description(id)), FutureProbe.Of(asyncResult.Description(id))));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<string, TransactionDescription>>(
@@ -2011,16 +1967,14 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncDescribeProducersResult asyncResult = async.DescribeProducers(partitions);
         foreach (TopicPartition partition in partitions)
         {
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(
                     FutureProbe.Of(syncResult.PartitionResult(partition)), FutureProbe.Of(asyncResult.PartitionResult(partition))));
         }
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
 
         Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>>(
@@ -2048,17 +2002,14 @@ public sealed class PublicAdminP14DifferentialTests
         {
             ListTransactionsResult syncResult = sync.ListTransactions(options);
             AsyncListTransactionsResult asyncResult = async.ListTransactions(options);
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.ByBrokerId()), FutureProbe.Of(asyncResult.ByBrokerId())));
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.AllByBrokerId()), FutureProbe.Of(asyncResult.AllByBrokerId())));
-            AssertKafka(
-                UnsupportedVersionCode,
-                NotImplementedYet,
+            AssertNotSupported(
+                                NotImplementedYet,
                 await Agree(FutureProbe.Of(syncResult.All()), FutureProbe.Of(asyncResult.All())));
         }
     }
@@ -2072,9 +2023,8 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         AbortTransactionSpec spec = new AbortTransactionSpec(new TopicPartition("diff-at", 3), 91_234L, 7, 42);
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(FutureProbe.Of(sync.AbortTransaction(spec).All()), FutureProbe.Of(async.AbortTransaction(spec).All())));
     }
 
@@ -2086,9 +2036,8 @@ public sealed class PublicAdminP14DifferentialTests
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
 
-        AssertKafka(
-            UnsupportedVersionCode,
-            NotImplementedYet,
+        AssertNotSupported(
+                        NotImplementedYet,
             await Agree(
                 FutureProbe.Of(sync.ForceTerminateTransaction("diff-ft").Result()),
                 FutureProbe.Of(async.ForceTerminateTransaction("diff-ft").Result())));
@@ -2253,6 +2202,12 @@ public sealed class PublicAdminP14DifferentialTests
     {
         KafkaException failure = Assert.IsType<KafkaException>(outcome);
         Assert.Equal(code, failure.Code);
+        Assert.Equal(message, failure.Message);
+    }
+
+    private static void AssertNotSupported(string message, object? outcome)
+    {
+        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
         Assert.Equal(message, failure.Message);
     }
 

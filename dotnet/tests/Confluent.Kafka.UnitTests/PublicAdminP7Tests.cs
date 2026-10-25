@@ -328,7 +328,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
             () => admin.DescribeUserScramCredentials(new[] { "alice" }).All().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -343,9 +343,8 @@ public sealed class PublicAdminP7Tests
         AsyncDescribeUserScramCredentialsResult result =
             admin.DescribeUserScramCredentials(new[] { "alice", "alice" });
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
         Assert.Equal("Not implemented yet", error.Message);
-        Assert.Equal(35, error.Code);
     }
 
     [Fact]
@@ -354,7 +353,7 @@ public sealed class PublicAdminP7Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
             () => admin.AlterUserScramCredentials(
                 new[] { new UserScramCredentialDeletion("alice", ScramMechanism.ScramSha256) }).All().Get());
 
@@ -369,9 +368,9 @@ public sealed class PublicAdminP7Tests
 
         AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials();
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
-        await Assert.ThrowsAsync<KafkaException>(() => result.Users().Get());
-        await Assert.ThrowsAsync<KafkaException>(() => result.Description("alice").Get());
+        await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get());
+        await Assert.ThrowsAsync<NotSupportedException>(() => result.Users().Get());
+        await Assert.ThrowsAsync<NotSupportedException>(() => result.Description("alice").Get());
     }
 
     [Fact]

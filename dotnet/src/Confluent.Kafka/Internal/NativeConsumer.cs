@@ -311,9 +311,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return QuerySync<long?>(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
-            long lag = NativeMethods.ConsumerCurrentLag(_handle, arguments.TopicPartition(topic, partition), ref outErr);
+            sbyte present = NativeMethods.ConsumerCurrentLag(
+                _handle, arguments.TopicPartition(topic, partition), out long lag, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            return lag < 0 ? (long?)null : lag;
+            return present != 0 ? lag : null;
         },
         UseKind.UnownedOnMock);
     }

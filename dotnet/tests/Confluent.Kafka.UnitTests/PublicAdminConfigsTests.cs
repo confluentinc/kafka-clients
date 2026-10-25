@@ -33,8 +33,6 @@ public sealed class PublicAdminConfigsTests
 
     private const string Topic = "public-cfg-topic";
 
-    private const int UnsupportedVersionCode = 35;
-
     [Fact]
     public async Task DescribeConfigs_ReportsATopicsConfiguration()
     {
@@ -275,9 +273,8 @@ public sealed class PublicAdminConfigsTests
         Assert.Equal(ConfigResourceType.Unknown, key.Type);
         Assert.True(result.Values.ContainsKey(new ConfigResource(ConfigResourceType.Unknown, "x")));
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.Values[undefined].Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.Values[undefined].Get()), s_deadline);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

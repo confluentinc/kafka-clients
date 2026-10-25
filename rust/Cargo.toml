@@ -3,7 +3,7 @@ members = [".", "generator/crate", "xtask", "consumer-perf", "multilanguage-test
 
 [package]
 name = "confluent-kafka"
-version = "0.2.0-beta.1"
+version = "0.3.0-beta.1"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -27,6 +27,8 @@ include = [
     "!/src/common/message/**",
     "!/src/integration_tests/**",
     "!/src/test_alloc_tracker.rs",
+    "!/src/test_fake_broker.rs",
+    "!/src/test_thread_safety.rs",
     "!/src/producer/internals/producer_test_utils.rs",
     "/generator/src/**/*.rs",
     "/generator/messages/*.json",
@@ -93,6 +95,13 @@ crc32fast = "1"
 # `ring-io`/`ring-sig-verify` compat shims (which would pull an extra `untrusted`
 # crate we don't need for PBKDF2), keeping the dependency graph unchanged.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# Reverse DNS (`getnameinfo` with `NI_NAMEREQD`) for Java's
+# `InetAddress.getCanonicalHostName()` in
+# `client.dns.lookup=resolve_canonical_bootstrap_servers_only`
+# (`ClientUtils::canonical_host_name`); the standard library has no reverse
+# lookup. MIT OR Apache-2.0; its `socket2`, `libc` and `windows-sys`
+# dependencies are already in the graph.
+dns-lookup = "4.0.2"
 dashmap = "6"
 futures-util = "0.3"
 async-trait = "0.1"

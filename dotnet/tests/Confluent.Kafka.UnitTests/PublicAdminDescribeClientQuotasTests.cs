@@ -67,10 +67,9 @@ public sealed class PublicAdminDescribeClientQuotasTests
 
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
-        Assert.NotEqual(0, failure.Code);
     }
 
     [Fact]
@@ -82,7 +81,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(ClientQuotaFilter.All());
         Assert.Same(result.Entities().Get(), result.Entities().Get());
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
     }
 
@@ -107,7 +106,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
         AsyncDescribeClientQuotasResult result = admin.DescribeClientQuotas(
             ClientQuotaFilter.ContainsOnly(new[] { component }));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Entities().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }

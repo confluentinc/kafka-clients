@@ -1042,7 +1042,7 @@ RPCs: `describeUserScramCredentials` (`LeastLoadedNodeProvider`),
   `UserScramCredential{Alteration,Upsertion,Deletion}` (abstract base → closed enum),
   `UserScramCredentialsDescription`, both `{Options,Result}`, and net-new
   `{Describe,Alter}UserScramCredentials` wire types.
-- `MockAdminClient` returns `KafkaError::unsupported_version("Not implemented yet")`
+- `MockAdminClient` returns `Error::local_unsupported_operation("Not implemented yet")`
   for both (finding #9 — Java's mock throws `UnsupportedOperationException`); unit
   tests run against the network-mocked `KafkaAdminClient`.
 

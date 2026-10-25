@@ -32,8 +32,6 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -81,10 +79,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
 
         foreach (Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future in futures)
         {
-            KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => future), s_deadline);
+            NotSupportedException failure = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => future), s_deadline);
 
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
 
@@ -106,10 +103,9 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                 ["p5-lcgo-all-b"] = new ListConsumerGroupOffsetsSpec(),
             });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
     }
 

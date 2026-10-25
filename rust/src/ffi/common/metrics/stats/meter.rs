@@ -24,6 +24,8 @@
 //! Java's `IllegalArgumentException`: a programming precondition the C
 //! caller must respect.
 
+use std::ffi::c_char;
+
 use crate::common::metrics::stats::Meter;
 use crate::ffi::common::metric_name::{kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metrics::compound_stat::kafka_common_metrics_CompoundStat_t;
@@ -32,6 +34,7 @@ use crate::ffi::common::metrics::stats::StatHandle;
 use crate::ffi::common::metrics::stats::sampled_stat::{kafka_common_metrics_stats_SampledStat_t, sampled_stat_ref};
 use crate::ffi::common::metrics::time_unit::{kafka_common_metrics_TimeUnit_t, value_of as time_unit_of};
 use crate::ffi::ffi_guard;
+use crate::ffi::util::into_c_string;
 use std::sync::Arc;
 
 /// Opaque handle to a [`Meter`].
@@ -206,6 +209,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_CompoundStat(
     // requires. The view returned is cached in the handle's `OnceLock`, so it lives as long as the
     // handle; that is the rustdoc's "valid as long as the handle".
     unsafe { handle(self_) }.as_compound_stat()
+}
+
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_to_string(
+    self_: *const kafka_common_metrics_stats_Meter_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, as `handle` requires; the string is built during the call.
+    into_c_string(&unsafe { handle(self_) }.stat().to_string())
 }
 
 /// Frees an owned handle; null is a no-op. A sensor the meter was added to

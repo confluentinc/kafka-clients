@@ -34,8 +34,6 @@ public sealed class PublicAdminElectionsReassignmentsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const int UnknownTopicOrPartitionCode = 3;
 
     private const string NotImplemented = "Not implemented yet";
@@ -57,14 +55,12 @@ public sealed class PublicAdminElectionsReassignmentsTests
         {
             AsyncElectLeadersResult result = admin.ElectLeaders(ElectionType.Preferred, selection);
 
-            KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => result.Partitions().Get()), s_deadline);
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
+            NotSupportedException failure = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => result.Partitions().Get()), s_deadline);
             Assert.Equal(NotImplemented, failure.Message);
 
-            KafkaException fromAll = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-            Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+            NotSupportedException fromAll = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
             Assert.Equal(NotImplemented, fromAll.Message);
         }
     }
@@ -77,12 +73,11 @@ public sealed class PublicAdminElectionsReassignmentsTests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         await using IAsyncDisposable adminDisposal = TestTimeout.AsyncDisposal(admin);
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(
                 () => admin.ElectLeaders(type, new[] { new TopicPartition("p4-type", 0) }).Partitions().Get()),
             s_deadline);
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -95,7 +90,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
         Assert.Same(result.Partitions().Get(), result.Partitions().Get());
 
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.Partitions().Get()), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => result.Partitions().Get()), s_deadline);
     }
 
     [Fact]
@@ -238,7 +233,7 @@ public sealed class PublicAdminElectionsReassignmentsTests
         IAsyncAdmin admin = mock;
 
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(
+            () => Assert.ThrowsAsync<NotSupportedException>(
                 () => admin.ElectLeaders(ElectionType.Preferred, null).Partitions().Get()),
             s_deadline);
 

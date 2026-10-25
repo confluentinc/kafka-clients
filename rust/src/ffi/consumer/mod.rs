@@ -107,8 +107,8 @@ use crate::ffi::common::topic_partition::{
     topic_partition_i64_map, topic_partition_ref,
 };
 use crate::ffi::common::{
-    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_value, in_tokio_runtime,
-    init_default_logger, kafka_common_Error_t, spawn_callback_task, spawn_teardown, take_error,
+    box_error, catch_task_panic, deliver_panic, deliver_panic_i64, deliver_panic_optional_i64, deliver_panic_value,
+    in_tokio_runtime, init_default_logger, kafka_common_Error_t, spawn_callback_task, spawn_teardown, take_error,
 };
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::close_options::{close_options_ref, kafka_consumer_CloseOptions_t};
@@ -747,6 +747,29 @@ fn deliver_i64(client: &Client, cb: I64Cb, opaque: SendPtr, result: Result<i64, 
         // SAFETY: As the `Ok` arm; the error is the fresh `box_error` handle, owned by no one else,
         // so handing it to `cb` transfers its ownership, as the entry point's `_cb_t` documents.
         Err(error) => unsafe { cb(-1, box_error(error), opaque.get()) },
+    }));
+}
+
+type OptionalI64Cb =
+    unsafe extern "C" fn(present: i8, value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+
+/// Delivers a Java `OptionalLong` to a `_cb` completion: `present` 1 with the
+/// value, or `present` 0 with a value of 0 when it is empty or the call failed.
+fn deliver_optional_i64(client: &Client, cb: OptionalI64Cb, opaque: SendPtr, result: Result<Option<i64>, Error>) {
+    client.delivery.queue.push(Box::new(move || match result {
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to a `_cb` entry point: every
+        // caller of `deliver_optional_i64` (the `deliver` closure a `_cb` entry point hands
+        // `run_cb` or `HandleInner::run_cb`, which run it at most once) passes them on unchanged,
+        // so calling `cb` with `opaque` is the completion that caller waits for, and `cb` is still
+        // valid, as each entry point's `# Safety` requires it to stay valid until it fires. The job
+        // is a `FnOnce` and runs one arm, so `cb` fires exactly once; here with a null error.
+        Ok(Some(value)) => unsafe { cb(1, value, std::ptr::null_mut(), opaque.get()) },
+        // SAFETY: As the first arm.
+        Ok(None) => unsafe { cb(0, 0, std::ptr::null_mut(), opaque.get()) },
+        // SAFETY: As the first arm; the error is the fresh `box_error` handle, owned by no one
+        // else, so handing it to `cb` transfers its ownership, as the entry point's `_cb_t`
+        // documents.
+        Err(error) => unsafe { cb(0, 0, box_error(error), opaque.get()) },
     }));
 }
 
@@ -3912,28 +3935,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     unsafe { deliver_value(paused, out_err, |p| sorted_topic_partition_list(p.iter())) }
 }
 
-/// `currentLag(TopicPartition topicPartition)`: the lag, or `-1` for
-/// `OptionalLong.empty()`.
+/// `currentLag(TopicPartition topicPartition)`: Java's `OptionalLong`
+/// (`Consumer.java:259`) as a presence flag: 1 with the lag stored in
+/// `*out_lag`, or 0 for `OptionalLong.empty()`, leaving `*out_lag` unwritten.
+/// The lag can be negative (a position past the log end), so no value of it
+/// can stand for "empty".
 ///
 /// Blocking (CLAUDE.md §4 rule 5): it waits for the consumer's background task
 /// to answer its `CurrentLagEvent`, as Java's `addAndGet`. On failure the error
-/// is stored in `*out_err` and -1 returned: `LOCAL_CONCURRENT_MODIFICATION`
-/// while another call holds the consumer, as Java's `acquire()` throws
-/// `ConcurrentModificationException`, `LOCAL_ILLEGAL_STATE` for a closed
-/// consumer or an unassigned partition. Since -1 is also the empty lag, the
-/// caller tells the two apart by `*out_err`.
+/// is stored in `*out_err` and 0 returned, `*out_lag` unwritten:
+/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
+/// Java's `acquire()` throws `ConcurrentModificationException`,
+/// `LOCAL_ILLEGAL_STATE` for a closed consumer or an unassigned partition. The
+/// caller tells an empty lag from a failure by `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live consumer handle, `topic_partition` a valid handle and
-/// `out_err` a valid slot pointing at null.
+/// `self_` must be a live consumer handle, `topic_partition` a valid handle,
+/// `out_lag` a valid pointer to write to and `out_err` a valid slot pointing at
+/// null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     self_: *mut kafka_consumer_Consumer_t,
     topic_partition: *const kafka_common_TopicPartition_t,
+    out_lag: *mut i64,
     out_err: *mut *mut kafka_common_Error_t,
-) -> i64 {
+) -> i8 {
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // alive for this expression, the only use of the reference, as `topic_partition_ref` requires;
     // the value is cloned.
@@ -3942,14 +3970,32 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     // this call, as `run` requires.
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.current_lag(&partition).await })) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the result
-    // to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |lag| lag.unwrap_or(-1)) }
+    // to, as `deliver_value` requires, and `out_lag` a valid pointer to write the lag to.
+    unsafe { deliver_value(result, out_err, |lag| present_lag(lag, out_lag)) }
 }
 
-/// The completion of the `_cb` twin: the lag, `-1` for `OptionalLong.empty()`,
-/// beside a null `error` on success; `-1` beside an owned `error` otherwise.
+/// Stores a present lag in `*out_lag` and returns the presence flag of the
+/// blocking `current_lag` entry points: 1 when present, 0 when empty.
+///
+/// # Safety
+///
+/// `out_lag` must be a valid pointer to write to.
+pub(crate) unsafe fn present_lag(lag: Option<i64>, out_lag: *mut i64) -> i8 {
+    match lag {
+        Some(lag) => {
+            // SAFETY: Per this function's `# Safety`, `out_lag` is a valid pointer to write to.
+            unsafe { out_lag.write(lag) };
+            1
+        },
+        None => 0,
+    }
+}
+
+/// The completion of the `_cb` twin: `present` 1 with the `lag`, or `present` 0
+/// and a `lag` of 0 for `OptionalLong.empty()`, beside a null `error` on
+/// success; `present` 0 and a `lag` of 0 beside an owned `error` otherwise.
 pub type kafka_consumer_Consumer_current_lag_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
 /// on the client's runtime, the interface methods it triggers and
@@ -3962,10 +4008,10 @@ pub type kafka_consumer_Consumer_current_lag_cb_t =
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
     // first and hands nothing over; the body hands `cb` over only as the last step of `run_cb`: to
-    // the job `deliver_i64` queues when `acquire` fails, or to the task `Client::spawn` registers;
-    // nothing that can panic runs after either. So `cb` has not fired for this `opaque`, as
-    // `deliver_panic_i64` requires.
-    unsafe { deliver_panic_i64(completion_sink(self_), cb, opaque, err) }
+    // the job `deliver_optional_i64` queues when `acquire` fails, or to the task `Client::spawn`
+    // registers; nothing that can panic runs after either. So `cb` has not fired for this
+    // `opaque`, as `deliver_panic_optional_i64` requires.
+    unsafe { deliver_panic_optional_i64(completion_sink(self_), cb, opaque, err) }
 })]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(
@@ -3985,8 +4031,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(
         run_cb(
             "kafka_consumer_Consumer_current_lag_cb",
             self_,
-            move |c| Box::pin(async move { c.current_lag(&partition).await.map(|lag| lag.unwrap_or(-1)) }),
-            move |client, result| deliver_i64(client, cb, opaque, result),
+            move |c| Box::pin(async move { c.current_lag(&partition).await }),
+            move |client, result| deliver_optional_i64(client, cb, opaque, result),
         )
     }
 }
@@ -4048,10 +4094,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 }
 
 /// `handle()`: the reentrancy handle a listener calls the consumer back
-/// through (consumer-threading.md §31; Phase 41,
-/// design/history/Milestone-8/Phase-41-consumer-handle-reentrancy/PLAN.md),
-/// owned by the caller (`kafka_consumer_ConsumerHandle_destroy`) and usable
-/// after the consumer is destroyed, when its operations fail.
+/// through (consumer-threading.md §31, §41), owned by the caller
+/// (`kafka_consumer_ConsumerHandle_destroy`) and usable after the consumer
+/// is destroyed, when its operations fail.
 ///
 /// The handle is outside the consumer's single-owner flag but has its own
 /// guard: on a `KafkaConsumer` its async operations are admitted only while

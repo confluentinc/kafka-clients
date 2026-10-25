@@ -37,7 +37,7 @@ internal sealed partial class NativeConsumer
 
     private static readonly Func<IntPtr, long, IntPtr> s_records = (records, _) => records;
 
-    private static readonly Func<IntPtr, long, long?> s_lag = (_, value) => value < 0 ? (long?)null : value;
+    private static readonly Func<IntPtr, long, long?> s_lag = (present, value) => present != IntPtr.Zero ? value : null;
 
     private static readonly NativeMethods.ConsumerVoidCallback s_closed = OnClosed;
 
@@ -340,7 +340,7 @@ internal sealed partial class NativeConsumer
                 (arguments, opaque) => NativeMethods.ConsumerCurrentLagCb(
                     _handle,
                     arguments.TopicPartition(partition.Topic, partition.Partition),
-                    ConsumerCompletion.Scalar,
+                    ConsumerCompletion.OptionalScalar,
                     opaque),
                 kind: UseKind.UnownedOnMock),
             AsyncOperation.CurrentLag,

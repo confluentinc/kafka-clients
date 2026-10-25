@@ -32,6 +32,7 @@
 #![expect(non_camel_case_types)]
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -130,13 +131,26 @@ impl Serializer<GenericValue> for ArcSerializer {
         Serializer::serialize(self.0.get(), topic, data).await
     }
 
-    async fn serialize_with_headers<'a>(
+    async fn serialize_with_headers<'a, 'h>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'h mut RecordHeaders,
         data: Option<&'a GenericValue>,
-    ) -> Result<Option<Cow<'a, [u8]>>, Error> {
+    ) -> Result<Option<Cow<'a, [u8]>>, Error>
+    where
+        'a: 'h,
+    {
         Serializer::serialize_with_headers(self.0.get(), topic, headers, data).await
+    }
+
+    /// The handle is shared, so `configure` goes through the shared form,
+    /// which reaches a C implementation as `&mut` would.
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+        self.0.get().configure_shared(configs, is_key).await;
+    }
+
+    async fn close(&self) {
+        Serializer::close(self.0.get()).await;
     }
 }
 
@@ -189,8 +203,15 @@ unsafe fn producer(self_: *const kafka_producer_KafkaProducer_t) -> *const kafka
 }
 
 /// `new KafkaProducer(ProducerConfig, Serializer<K>, Serializer<V>)`: the
-/// configuration stays the caller's; the producer is delivered owned, freed
-/// with [`kafka_producer_KafkaProducer_destroy`].
+/// producer gets its own copy of the handle's configuration, with the handle's
+/// `client.id` (the producers of one handle share it, as Java's producers
+/// given one `ProducerConfig` do), so the configuration stays the caller's and
+/// can build further producers; the producer is delivered owned, freed with
+/// [`kafka_producer_KafkaProducer_destroy`]. A constructor that fails
+/// after taking the serializers closes them, as Java's does
+/// (`KafkaProducer.java:519-523`), and returns without waiting for a C
+/// serializer's `close` to report: that report may arrive after this
+/// returned, on the handle, which stays valid for it.
 ///
 /// # Safety
 ///
@@ -224,7 +245,9 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     };
     let tries_send_inline = !(key_is_c || value_is_c);
     match ProducerHandle::new(
-        || KafkaProducer::new(config, key_serializer, value_serializer),
+        // The boxes go in as they are: `new` would box them again (see
+        // `with_boxed_serializers`).
+        || KafkaProducer::with_boxed_serializers(config, key_serializer, value_serializer),
         true,
         tries_send_inline,
     ) {
@@ -552,6 +575,12 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_send_cb(
 /// [`crate::ffi::producer`]); null is a no-op. Every `__as_Producer` view of
 /// it is invalid afterwards.
 ///
+/// A producer not closed yet is closed first, as
+/// [`kafka_producer_Producer_close`](crate::ffi::producer::kafka_producer_Producer_close)
+/// closes it: the records it holds are
+/// sent, and their delivery callbacks fire with the outcome before this
+/// returns. With no broker reachable that waits up to `delivery.timeout.ms`.
+///
 /// # Safety
 ///
 /// `self_` must be null or a handle not yet destroyed.
@@ -576,28 +605,18 @@ mod tests {
 
     /// A C serializer's calls go through `ArcSerializer`, whose futures must
     /// fit `InlineFuture`'s buffer, or every record would box one: for a
-    /// built-in, a synchronous C implementation (a blocking-pool task) and an
-    /// asynchronous one (a pending report).
+    /// built-in and a C implementation (a pending report).
     #[test]
     fn arc_serializer_futures_are_stored_inline() {
         use std::ffi::c_void;
 
         use crate::common::serialization::InlineFuture;
-        use crate::ffi::common::kafka_common_Error_t;
         use crate::ffi::common::serialization::serializer::{
-            FfiSerializer, kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
+            FfiSerializer, kafka_common_serialization_Serializer_new_async,
         };
         use crate::ffi::common::serialization::string_serializer::GenericStringSerializer;
 
         // Never called: the futures are only built.
-        unsafe extern "C" fn sync_fn(
-            _: *mut c_void,
-            _: *const std::ffi::c_char,
-            _: *const c_void,
-            _: *mut *mut kafka_common_Error_t,
-        ) -> kafka_Bytes_t {
-            kafka_Bytes_t::NULL
-        }
         unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
 
         let built_in = ArcSerializer(SerializerInner::view(Arc::new(FfiSerializer::String(
@@ -605,29 +624,24 @@ mod tests {
         ))));
         // SAFETY: Test code: each handle comes from its constructor and is consumed once, here; the
         // producer's `Arc` frees it.
-        let (sync, asynchronous) = unsafe {
-            (
-                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new(
-                    std::ptr::null_mut(),
-                    sync_fn,
-                    None,
-                ))),
-                ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
-                    std::ptr::null_mut(),
-                    async_fn,
-                    None,
-                ))),
-            )
+        let asynchronous = unsafe {
+            ArcSerializer(take_serializer(kafka_common_serialization_Serializer_new_async(
+                std::ptr::null_mut(),
+                async_fn,
+                None,
+                None,
+                None,
+            )))
         };
-        let headers = RecordHeaders::new();
-        for (kind, serializer) in [("built-in", &built_in), ("sync", &sync), ("async", &asynchronous)] {
+        let mut headers = RecordHeaders::new();
+        for (kind, serializer) in [("built-in", &built_in), ("C", &asynchronous)] {
             let future = Serializer::serialize(serializer, "t", None);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} serialize: {} bytes",
                 size_of_val(&future)
             );
-            let future = Serializer::serialize_with_headers(serializer, "t", &headers, None);
+            let future = Serializer::serialize_with_headers(serializer, "t", &mut headers, None);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers: {} bytes",
@@ -679,27 +693,17 @@ mod tests {
 
     /// `send_cb` tries the producer on the calling thread only when neither
     /// serializer is a C implementation (COMMENTS.1 Issue 1): a `NULL` handle
-    /// and a built-in class keep the fast path, a C implementation, sync or
-    /// async, sends every record through the submission task.
+    /// and a built-in class keep the fast path, a C implementation sends
+    /// every record through the submission task.
     #[test]
     fn send_cb_tries_inline_only_without_a_c_serializer() {
-        use crate::ffi::common::serialization::serializer::{
-            kafka_common_serialization_Serializer_new, kafka_common_serialization_Serializer_new_async,
-        };
+        use crate::ffi::common::serialization::serializer::kafka_common_serialization_Serializer_new_async;
         use crate::ffi::common::serialization::string_serializer::{
             kafka_common_serialization_StringSerializer__as_Serializer,
             kafka_common_serialization_StringSerializer_destroy, kafka_common_serialization_StringSerializer_new,
         };
 
         // Never called: no record is sent.
-        unsafe extern "C" fn sync_fn(
-            _: *mut c_void,
-            _: *const std::ffi::c_char,
-            _: *const c_void,
-            _: *mut *mut kafka_common_Error_t,
-        ) -> kafka_Bytes_t {
-            kafka_Bytes_t::NULL
-        }
         unsafe extern "C" fn async_fn(_: *mut c_void, _: *const std::ffi::c_char, _: *const c_void, _: i64) {}
 
         let props = box_string_map([("bootstrap.servers", "127.0.0.1:1")]);
@@ -714,20 +718,20 @@ mod tests {
             assert!(err.is_null());
             kafka_Map_destroy(props);
             let string = kafka_common_serialization_StringSerializer_new();
-            let built_in = kafka_common_serialization_StringSerializer__as_Serializer(string).cast_mut();
+            let built_in = kafka_common_serialization_StringSerializer__as_Serializer(string);
             let cases = [
                 ("NULL", std::ptr::null_mut(), std::ptr::null_mut(), true),
                 ("built-in", built_in, built_in, true),
                 (
-                    "sync C key",
-                    kafka_common_serialization_Serializer_new(std::ptr::null_mut(), sync_fn, None),
+                    "C key",
+                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
                     std::ptr::null_mut(),
                     false,
                 ),
                 (
-                    "async C value",
+                    "C value",
                     built_in,
-                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None),
+                    kafka_common_serialization_Serializer_new_async(std::ptr::null_mut(), async_fn, None, None, None),
                     false,
                 ),
             ];
@@ -740,6 +744,66 @@ mod tests {
             }
             kafka_common_serialization_StringSerializer_destroy(string);
             kafka_producer_ProducerConfig_destroy(config);
+        }
+    }
+
+    /// A producer created from a handle runs under the handle's resolved
+    /// `client.id`, the one `_get_string` answers, so the producers of one
+    /// handle share it, as Java's producers given one `ProducerConfig` do;
+    /// the next handle takes the next number from the sequence, as Java's
+    /// next `ProducerConfig` does (`producer-1`, then `producer-2`).
+    #[test]
+    fn producers_run_under_the_client_id_of_their_handle() {
+        use crate::ffi::producer::producer_config::kafka_producer_ProducerConfig_get_string;
+        // SAFETY: Test code: `producer` is a live class handle; the view is used only within this
+        // call, while the handle lives.
+        let client_ids = |producer: *mut kafka_producer_KafkaProducer_t| unsafe {
+            client_ref(kafka_producer_KafkaProducer__as_Producer(producer))
+                .producer()
+                .expect("not destroyed")
+                .metrics()
+                .keys()
+                .filter_map(|name| name.tags().get("client-id").cloned())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let props = box_string_map([("bootstrap.servers", "127.0.0.1:1")]);
+        // SAFETY: Test code: the map, both configs and every producer handle are live until they
+        // are destroyed once below; the strings `_get_string` lends are copied before their
+        // handle is destroyed; `err` is a valid slot pointing at null before each call.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let mut handle_ids = Vec::new();
+            let mut producers = Vec::new();
+            for _ in 0..2 {
+                let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+                assert!(err.is_null());
+                let id = kafka_producer_ProducerConfig_get_string(config, c"client.id".as_ptr(), &raw mut err);
+                assert!(err.is_null());
+                let id = c_str_to_string(id);
+                for _ in 0..2 {
+                    let producer = kafka_producer_KafkaProducer_new(
+                        config,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &raw mut err,
+                    );
+                    assert!(err.is_null());
+                    assert_eq!(client_ids(producer), std::collections::HashSet::from([id.clone()]));
+                    producers.push(producer);
+                }
+                kafka_producer_ProducerConfig_destroy(config);
+                handle_ids.push(id);
+            }
+            kafka_Map_destroy(props);
+            let numbers: Vec<i32> = handle_ids
+                .iter()
+                .map(|id| id.strip_prefix("producer-").unwrap().parse().unwrap())
+                .collect();
+            // Other tests take numbers concurrently, so the next one is only later.
+            assert!(numbers[1] > numbers[0], "{handle_ids:?}");
+            for producer in producers {
+                kafka_producer_KafkaProducer_destroy(producer);
+            }
         }
     }
 
@@ -1080,6 +1144,103 @@ mod tests {
             assert!(elapsed < std::time::Duration::from_secs(10), "destroy took {elapsed:?}");
             assert_eq!(*closes.lock().unwrap(), vec![None, None]);
             assert_eq!(sends.lock().unwrap().len(), 1);
+            kafka_producer_ProducerRecord_destroy(record);
+        }
+    }
+
+    /// Records a delivery callback's outcome in the test's slot: the record's
+    /// offset, or the error's message. It does not report: `_destroy` completes
+    /// the callbacks still unreported.
+    unsafe extern "C" fn record_delivery(
+        self_: *mut c_void,
+        metadata: *const crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_t,
+        error: *const kafka_common_Error_t,
+        _callback_id: i64,
+    ) {
+        let outcome = if error.is_null() {
+            // SAFETY: Test code: without an error, `metadata` is a live handle borrowed for the
+            // call.
+            Ok(unsafe { crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_offset(metadata) })
+        } else {
+            // SAFETY: Test code: `error` is a live handle borrowed for the call.
+            Err(unsafe { c_str_to_string(kafka_common_Error_message(error)) })
+        };
+        // SAFETY: Test code: `self_` is the test's slot, alive until the producer is destroyed.
+        unsafe { &*(self_ as *const std::sync::Mutex<Vec<Result<i64, String>>>) }
+            .lock()
+            .unwrap()
+            .push(outcome);
+    }
+
+    /// `_destroy` of a `KafkaProducer` the caller did not close closes it as
+    /// `close()` does, so the records it holds are delivered, and their delivery
+    /// callbacks fire with the broker's answer before `_destroy` returns. The
+    /// records stay in the accumulator (`linger.ms`) until `_destroy`. It used to
+    /// drop the producer, which force-closed it, and then stop the runtime, so a
+    /// record failed with "Producer is closed forcefully." or its callback never
+    /// fired.
+    #[test]
+    fn destroy_without_close_delivers_the_records_the_producer_holds() {
+        use crate::test_fake_broker::FakeBroker;
+
+        const SENDS: i64 = 5;
+        // The fake broker runs on a runtime of its own.
+        let broker_runtime = tokio::runtime::Runtime::new().unwrap();
+        let broker = broker_runtime.block_on(FakeBroker::start_acknowledging_produce("fake-cluster", "topic"));
+        let bootstrap = broker.bootstrap();
+        let props = box_string_map([
+            ("bootstrap.servers", bootstrap.as_str()),
+            // Non-idempotent, as the fake never answers InitProducerId.
+            ("enable.idempotence", "false"),
+            ("linger.ms", "60000"),
+        ]);
+        let topic = CString::new("topic").unwrap();
+        let bytes = kafka_Bytes_t::from_slice(b"v");
+        let delivered = std::sync::Mutex::new(Vec::<Result<i64, String>>::new());
+        // SAFETY: Test code: `err` is a valid slot pointing at null before each call (no call
+        // fails), `props`, `config`, `record` and the producer are live from their constructor to
+        // their single destroy below, each callback is consumed by the send it is passed to, each
+        // future is read and destroyed once, the
+        // value `get` returns is the future's own record-metadata handle, read before the future is
+        // destroyed, and `delivered` outlives the destroy that runs the callbacks writing it.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let config = kafka_producer_ProducerConfig_new(props, &raw mut err);
+            assert!(err.is_null());
+            kafka_Map_destroy(props);
+            let producer =
+                kafka_producer_KafkaProducer_new(config, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut err);
+            assert!(err.is_null());
+            kafka_producer_ProducerConfig_destroy(config);
+            let record =
+                kafka_producer_ProducerRecord_new(topic.as_ptr(), &bytes as *const kafka_Bytes_t as *const c_void);
+            let mut futures = Vec::new();
+            for _ in 0..SENDS {
+                let callback = crate::ffi::producer::callback::kafka_producer_Callback_new(
+                    &delivered as *const std::sync::Mutex<Vec<Result<i64, String>>> as *mut c_void,
+                    record_delivery,
+                );
+                futures.push(kafka_producer_KafkaProducer_send(producer, record, callback, &raw mut err));
+                assert!(err.is_null());
+            }
+            assert!(delivered.lock().unwrap().is_empty(), "the records are still held");
+
+            kafka_producer_KafkaProducer_destroy(producer);
+
+            assert_eq!(
+                *delivered.lock().unwrap(),
+                (0..SENDS).map(Ok).collect::<Vec<_>>(),
+                "each callback fired with its record's offset before destroy returned"
+            );
+            for (offset, future) in (0..SENDS).zip(futures) {
+                let value = crate::ffi::kafka_future::kafka_common_KafkaFuture_get(future, &raw mut err);
+                assert!(err.is_null(), "the record was delivered");
+                assert_eq!(
+                    crate::ffi::producer::record_metadata::kafka_producer_RecordMetadata_offset(value as *const _),
+                    offset
+                );
+                kafka_common_KafkaFuture_destroy(future);
+            }
             kafka_producer_ProducerRecord_destroy(record);
         }
     }

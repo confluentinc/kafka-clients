@@ -34,7 +34,7 @@ public sealed class PublicAdminP8Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
             () => admin.AbortTransaction(
                 new AbortTransactionSpec(new TopicPartition("txn-topic", 3), 91_234L, 7, 42)).All().Get());
 
@@ -91,7 +91,7 @@ public sealed class PublicAdminP8Tests
         AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
             () => admin.ForceTerminateTransaction("txn-a").Result().Get());
 
         Assert.Equal("Not implemented yet", error.Message);
@@ -140,19 +140,19 @@ public sealed class PublicAdminP8Tests
         Assert.Equal(2, result.FencedProducers.Count);
         foreach (AsyncKafkaFuture fenced in result.FencedProducers.Values)
         {
-            KafkaException error = await Assert.ThrowsAsync<KafkaException>(() => fenced.Get());
+            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => fenced.Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
+            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.ProducerId("txn-x").Get())).Message);
+            (await Assert.ThrowsAsync<NotSupportedException>(() => result.ProducerId("txn-x").Get())).Message);
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.EpochId("txn-y").Get())).Message);
+            (await Assert.ThrowsAsync<NotSupportedException>(() => result.EpochId("txn-y").Get())).Message);
     }
 
     [Fact]
@@ -176,7 +176,7 @@ public sealed class PublicAdminP8Tests
         AsyncFenceProducersResult result = admin.FenceProducers(new[] { "txn-a", "txn-a" });
 
         Assert.Equal(new[] { "txn-a" }, result.FencedProducers.Keys);
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -207,7 +207,7 @@ public sealed class PublicAdminP8Tests
         Assert.Throws<ArgumentNullException>(() => { _ = result.EpochId(null!); });
 
         // Observe the requested id's own fault, so nothing goes unobserved.
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -253,14 +253,14 @@ public sealed class PublicAdminP8Tests
 
         foreach (string id in new[] { "txn-a", "txn-b" })
         {
-            KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
                 () => result.Description(id).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
+            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
     }
 
     [Fact]
@@ -293,7 +293,7 @@ public sealed class PublicAdminP8Tests
         Assert.Throws<ArgumentNullException>(() => { _ = result.Description(null!); });
 
         // Observe the requested id's own fault, so nothing goes unobserved.
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -346,14 +346,14 @@ public sealed class PublicAdminP8Tests
 
         foreach (TopicPartition partition in requested)
         {
-            KafkaException error = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
                 () => result.PartitionResult(partition).Get());
             Assert.Equal("Not implemented yet", error.Message);
         }
 
         Assert.Equal(
             "Not implemented yet",
-            (await Assert.ThrowsAsync<KafkaException>(() => result.All().Get())).Message);
+            (await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get())).Message);
     }
 
     [Fact]
@@ -374,10 +374,10 @@ public sealed class PublicAdminP8Tests
         AsyncDescribeProducersResult result = admin.DescribeProducers(
             new[] { new TopicPartition("alpha", 0), new TopicPartition("alpha", 0) });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
 
-        await Assert.ThrowsAsync<KafkaException>(
-            () => result.PartitionResult(new TopicPartition("alpha", 0)).Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(
+            () => result.PartitionResult(new TopicPartition("alpha", 0)).Get()));
         Assert.Throws<ArgumentException>(
             () => { _ = result.PartitionResult(new TopicPartition("alpha", 1)); });
     }
@@ -404,7 +404,7 @@ public sealed class PublicAdminP8Tests
             StringComparison.Ordinal);
         Assert.Equal("partition", missing.ParamName);
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -442,7 +442,7 @@ public sealed class PublicAdminP8Tests
             new[] { new TopicPartition("alpha", 0) },
             new DescribeProducersOptions { BrokerId = -1 });
 
-        await Assert.ThrowsAsync<KafkaException>(() => result.All().Get());
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -463,9 +463,9 @@ public sealed class PublicAdminP8Tests
 
         AsyncListTransactionsResult result = admin.ListTransactions();
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.ByBrokerId().Get()));
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.AllByBrokerId().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.ByBrokerId().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.AllByBrokerId().Get()));
     }
 
     [Fact]
@@ -483,7 +483,7 @@ public sealed class PublicAdminP8Tests
                 FilteredTransactionalIdPattern = "txn-.*",
             });
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -505,7 +505,7 @@ public sealed class PublicAdminP8Tests
         AsyncListTransactionsResult result =
             admin.ListTransactions(new ListTransactionsOptions { FilteredDuration = -5L });
 
-        AssertNotImplemented(await Assert.ThrowsAsync<KafkaException>(() => result.All().Get()));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()));
     }
 
     [Fact]
@@ -527,13 +527,12 @@ public sealed class PublicAdminP8Tests
             new AbortTransactionSpec(new TopicPartition("t", 0), 1L, 1, 1)).All().Get();
         Task terminate = admin.ForceTerminateTransaction("txn-a").Result().Get();
 
-        await Assert.ThrowsAsync<KafkaException>(() => abort);
-        await Assert.ThrowsAsync<KafkaException>(() => terminate);
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => abort));
+        AssertNotImplemented(await Assert.ThrowsAsync<NotSupportedException>(() => terminate));
     }
 
-    private static void AssertNotImplemented(KafkaException exception)
+    private static void AssertNotImplemented(NotSupportedException exception)
     {
-        Assert.Equal(35, exception.Code);
         Assert.Equal("Not implemented yet", exception.Message);
     }
 }

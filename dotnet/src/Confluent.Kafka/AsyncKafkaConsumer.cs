@@ -49,6 +49,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+    /// <exception cref="NotSupportedException"><c>group.protocol</c> is <c>classic</c>, which this client does not support.</exception>
     public AsyncKafkaConsumer(
         IReadOnlyDictionary<string, string> config,
         IDeserializer<TKey> keyDeserializer,

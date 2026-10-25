@@ -19,7 +19,7 @@
 /// Options for `Admin::delete_acls`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteAclsOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsOptions")]
 pub struct DeleteAclsOptions {
     timeout_ms: Option<i32>,

@@ -253,6 +253,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
+/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+///
+/// # Safety
+///
+/// `self_` must be a valid handle of this class.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_to_string(
+    self_: *const kafka_common_metrics_stats_Rate_t,
+) -> *mut c_char {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, as `handle` requires; the string is built during the call.
+    into_c_string(&unsafe { handle(self_) }.stat().to_string())
+}
+
 /// Frees an owned handle; null is a no-op. A sensor the stat was added to
 /// keeps it alive.
 ///

@@ -180,7 +180,7 @@ public sealed class AdminConfigsMarshalTests
 
         KafkaException failure = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.Values[missing].Get()), s_deadline);
-        Assert.Equal("Resource ConfigResource(type=Topic, name='cfg-absent-topic') not found.", failure.Message);
+        Assert.Equal("Resource ConfigResource(type=TOPIC, name='cfg-absent-topic') not found.", failure.Message);
 
         KafkaException all = await TestTimeout.Run(
             () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);

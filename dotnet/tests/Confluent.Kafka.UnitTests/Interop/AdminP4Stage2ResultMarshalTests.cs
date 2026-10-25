@@ -32,8 +32,6 @@ public sealed class AdminP4Stage2ResultMarshalTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     [Theory]
     [InlineData(42L, 1700000000000L, -1, null)]
     [InlineData(0L, -1L, 0, 0)]
@@ -82,8 +80,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
         Assert.Equal(-1L, info.Timestamp);
         Assert.Null(info.LeaderEpoch);
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => listed.Futures[timestamp].Get(s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
+        NotSupportedException failure = Assert.Throws<NotSupportedException>(() => listed.Futures[timestamp].Get(s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
 

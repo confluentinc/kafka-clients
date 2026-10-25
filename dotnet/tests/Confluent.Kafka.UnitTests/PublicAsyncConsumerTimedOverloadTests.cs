@@ -29,8 +29,6 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
 
     private const int RequestTimedOutCode = 7;
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string CoreNegative = "Timeout must not be negative";
 
     private const string TimerNegative = "Invalid negative timeout {0}";
@@ -322,9 +320,8 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
                 Assert.Equal(2, (await async.PartitionsFor(Topic, timeout)).Count);
                 Assert.Equal(2, (await async.ListTopics(timeout))[Topic].Count);
 
-                KafkaException untimed = await Assert.ThrowsAsync<KafkaException>(() => async.OffsetsForTimes(Timestamps(0)));
-                KafkaException timed = await Assert.ThrowsAsync<KafkaException>(() => async.OffsetsForTimes(Timestamps(0), timeout));
-                Assert.Equal(UnsupportedVersionCode, timed.Code);
+                NotSupportedException untimed = await Assert.ThrowsAsync<NotSupportedException>(() => async.OffsetsForTimes(Timestamps(0)));
+                NotSupportedException timed = await Assert.ThrowsAsync<NotSupportedException>(() => async.OffsetsForTimes(Timestamps(0), timeout));
                 Assert.Equal(untimed.Message, timed.Message);
             }
         }

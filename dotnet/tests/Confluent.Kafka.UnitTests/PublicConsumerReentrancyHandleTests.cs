@@ -37,8 +37,6 @@ public sealed class PublicConsumerReentrancyHandleTests
 
     private const string NonAsciiTopic = "grüße-café-Ω-topic";
 
-    private const int UnsupportedVersionCode = 35;
-
     private const int WakeupCode = -18;
 
     private const string MockAsyncUnsupportedMessage =
@@ -257,7 +255,7 @@ public sealed class PublicConsumerReentrancyHandleTests
 
     [Theory]
     [MemberData(nameof(MockUnsupportedOperations))]
-    public void MockDerivedHandle_EveryUnwiredOperation_ThrowsUnsupportedVersion(
+    public void MockDerivedHandle_EveryUnwiredOperation_ThrowsNotSupportedException(
         string name, Action<ConsumerHandle> operation)
     {
         MockConsumer<byte[], byte[]> consumer = NewMock();
@@ -265,11 +263,10 @@ public sealed class PublicConsumerReentrancyHandleTests
         consumer.Assign(new[] { s_tp0 });
         using ConsumerHandle handle = consumer.Handle();
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => operation(handle));
+        NotSupportedException failure = Assert.Throws<NotSupportedException>(() => operation(handle));
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(MockAsyncUnsupportedMessage, failure.Message);
-        Assert.False(failure.IsRetriable, name);
+        Assert.True(failure.InnerException is null, name);
     }
 
     [Fact]
@@ -695,6 +692,60 @@ public sealed class PublicConsumerReentrancyHandleTests
                 Assert.Equal(
                     "You can only check the position for partitions assigned to this consumer.", viaHandle.Message);
                 Assert.Equal(viaConsumer.Message, viaHandle.Message);
+            },
+            s_deadline);
+    }
+
+    [Fact]
+    public void MockDerivedHandle_InsideACommitCallback_CurrentLag_IsANegativeValue_OrTheCoreError()
+    {
+        MockConsumer<byte[], byte[]> consumer = NewMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition unassigned = new TopicPartition("unassigned-lag-topic", 0);
+        consumer.Assign(new[] { s_tp0 });
+        consumer.UpdateEndOffset(s_tp0.Topic, s_tp0.Partition, 2);
+        consumer.UpdateEndOffset(unassigned.Topic, unassigned.Partition, 2);
+        consumer.Seek(s_tp0, 5);
+        using ConsumerHandle handle = consumer.Handle();
+        long? lag = null;
+        Exception? failure = null;
+
+        consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
+        {
+            lag = handle.CurrentLag(s_tp0);
+            failure = Record.Exception(() => handle.CurrentLag(unassigned));
+        }));
+
+        Assert.Equal((long?)-3, lag);
+        ArgumentException argument = Assert.IsType<ArgumentException>(failure);
+        Assert.Equal("You can only check the position for partitions assigned to this consumer.", argument.Message);
+    }
+
+    [Fact]
+    public void KafkaConsumerHandle_InsideACommitCallback_CurrentLag_OfAnUnassignedPartition_ThrowsTheCoreError()
+    {
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer("handle-lag-failure");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+
+        TestTimeout.Run(
+            () =>
+            {
+                consumer.Assign(new[] { s_tp0 });
+                using ConsumerHandle handle = consumer.Handle();
+                TopicPartition unassigned = new TopicPartition(Topic, 7);
+                long? lag = -1;
+                Exception? failure = null;
+
+                consumer.CommitAsync(Empty(), new DelegateCallback((_, _) =>
+                {
+                    lag = handle.CurrentLag(s_tp0);
+                    failure = Record.Exception(() => handle.CurrentLag(unassigned));
+                }));
+                consumer.Commit(Empty());
+
+                Assert.Null(lag);
+                InvalidOperationException invalid = Assert.IsType<InvalidOperationException>(failure);
+                Assert.Equal($"No current assignment for partition {unassigned}", invalid.Message);
             },
             s_deadline);
     }

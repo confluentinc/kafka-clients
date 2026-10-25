@@ -28,7 +28,8 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 public sealed class KafkaExceptionTests
 {
-    private const int UnsupportedVersionCode = 35;
+    private const string ClassicUnsupported =
+        "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848).";
 
     private static Dictionary<string, string> BaseConfig() => new()
     {
@@ -36,27 +37,22 @@ public sealed class KafkaExceptionTests
     };
 
     [Fact]
-    public void ClassicGroupProtocol_ThrowsFlatKafkaException_UnsupportedVersion()
+    public void ClassicGroupProtocol_ThrowsNotSupportedException()
     {
         Dictionary<string, string> config = BaseConfig();
         config["group.protocol"] = "classic";
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => NativeConsumer.Create(config));
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(config));
 
-        Assert.Equal(UnsupportedVersionCode, ex.Code);
-
-        Assert.False(ex.IsRetriable);
-
-        Assert.Contains("Classic group protocol", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(ClassicUnsupported, ex.Message);
     }
 
     [Fact]
-    public void DefaultGroupProtocol_IsClassic_ThrowsUnsupportedVersion()
+    public void DefaultGroupProtocol_IsClassic_ThrowsNotSupportedException()
     {
-        KafkaException ex = Assert.Throws<KafkaException>(() => NativeConsumer.Create(BaseConfig()));
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => NativeConsumer.Create(BaseConfig()));
 
-        Assert.Equal(UnsupportedVersionCode, ex.Code);
-        Assert.Contains("Classic group protocol", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(ClassicUnsupported, ex.Message);
     }
 
     [Fact]

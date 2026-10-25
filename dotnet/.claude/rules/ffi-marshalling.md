@@ -415,8 +415,11 @@ awaits it (decision 9).
   - An async `Send` whose record is taken at once (`AsyncMockProducer`) completes its first
     stage synchronously, before `Send` returns.
   - Teardown settles both stages of every send exactly once, and leaves no uncompleted
-    `TaskCompletionSource` or `KafkaFutureImpl`. Exception: a mock send left uncompleted at `Close`
-    stays pending, as in Java's and Python's mocks; `Dispose` flushes first.
+    `TaskCompletionSource` or `KafkaFutureImpl`. Two exceptions, as in Java and Python: a mock
+    send left uncompleted at `Close` stays pending (`Dispose` flushes first); and a record whose
+    batch a produce response did not complete, still in flight when a graceful `Close` ends, is
+    dropped by the core without a delivery, so its second stage stays pending
+    (`rust/src/producer/internals/sender.rs:1379-1400` at `9bff36d1`).
   - A `Send` racing `Close` (decision 7 refuses a `Send` that starts after `Close` with
     `ObjectDisposedException`, before any P/Invoke, so the core's refusal inside the call is
     reached only by a `Send` already past that check): each `Send` throws
@@ -1232,11 +1235,11 @@ the calling thread; a `_cb` form queues them, and its own completion, for
     **core's** wait, inside the ABI, not a managed sync-over-async façade
     (CLAUDE.md §4).
   - **A `MockConsumer` handle** supports `Wakeup`, the sync reads, `CurrentLag` and
-    the commits. Its other operations fail with `UNSUPPORTED_VERSION` (35) and the
-    message "ConsumerHandle async operations are not supported on a MockConsumer
+    the commits. Its other operations fail with `LOCAL_UNSUPPORTED_OPERATION` (−31) and
+    the message "ConsumerHandle async operations are not supported on a MockConsumer
     handle; drive the MockConsumer directly."
-    (`rust/src/consumer/internals/async_kafka_consumer.rs:316-327`, `:822-825` at
-    `3f8a5bc6`), a `KafkaException` (decision 14, §B5).
+    (`rust/src/consumer/internals/async_kafka_consumer.rs:841-844` at `9bff36d1`), a
+    `NotSupportedException` (decision 14, §B5; ledger 206).
   - After the consumer's destroy, every handle op fails with `LOCAL_ILLEGAL_STATE`
     (-4): §B2 Category 6.
   - **Inside a callback** (ledgers 113, 127) means on the thread that runs a sync listener
@@ -1916,13 +1919,12 @@ shapes: **wakeup** and **concurrent use**.
         `acquire()` refuses other threads), and Python has no public one.
       - **A `MockConsumer` handle is not gated**, as Java's `MockConsumer` has no
         `acquire()`. `Wakeup`, the sync reads, `CurrentLag` and every commit work against
-        the mock; every other async op fails with `UnsupportedVersion` (35) and the
-        message "ConsumerHandle async operations are not supported on a MockConsumer
-        handle; drive the MockConsumer directly." → `KafkaException`
-        (`rust/src/consumer/internals/async_kafka_consumer.rs:316-327`, `:816-826` at
-        `3f8a5bc6`). **Assert it, do not work around it**, and assert the exact message
-        (DoD §3), since the code alone does not distinguish it from any other
-        `UnsupportedVersion`.
+        the mock; every other async op fails with `LocalUnsupportedOperation` (−31) and
+        the message "ConsumerHandle async operations are not supported on a MockConsumer
+        handle; drive the MockConsumer directly." → `NotSupportedException`
+        (`rust/src/consumer/internals/async_kafka_consumer.rs:841-844` at `9bff36d1`).
+        **Assert it, do not work around it**, and assert the exact message (DoD §3),
+        since the type alone does not tell it from another unsupported operation.
       - **After the consumer is destroyed** every handle op fails with -4 →
         `InvalidOperationException`, and a `_cb` handle op fires its `cb` inline (ledger
         34 (i); `rust/src/ffi/consumer/consumer_handle.rs:48-51` at `3f8a5bc6`).
@@ -1932,7 +1934,7 @@ shapes: **wakeup** and **concurrent use**.
     (`rust/src/ffi/consumer/consumer_handle.rs:37-46` at `3f8a5bc6`).
   - **The core's local codes map by the error table (decision 14, M19/P1).** -2 and -4 →
     `InvalidOperationException`, -3 → `ArgumentException`, -5 → `System.TimeoutException`,
-    each with the core's message; a `local_callback` error → the carried instance; every
+    -31 → `NotSupportedException`, each with the core's message; a `local_callback` error → the carried instance; every
     other code → `KafkaException`. This holds on every surface, the `ConsumerHandle`
     included, so a handle op and the same consumer op throw the same type
     (`HandleAndConsumer_ReportTheSameCoreError_Identically` keeps asserting it). It
@@ -1985,7 +1987,7 @@ the precondition exceptions are unchanged.
     (`OperationCanceledException`).
   - Any type other than `InvalidOperationException` for a concurrent call (-2), a state
     read or an op, sync or async (decision 17).
-  - Treating `UnsupportedVersionError` on a mock-derived `ConsumerHandle`, or the -2 a
+  - Treating the −31 `NotSupportedException` on a mock-derived `ConsumerHandle`, or the -2 a
     `KafkaConsumer` handle op gets outside a callback (ledger 104), as a bug to route
     around (a managed pre-check, a silent no-op, an invented "mock unsupported"
     exception) — it is documented core behavior, and the binding's job is to surface it
@@ -2014,8 +2016,7 @@ the precondition exceptions are unchanged.
     `InvalidOperationException` with the exact gate message (ledger 104); on a
     mock-derived handle `Wakeup`, the sync reads, `CurrentLag` and the commits succeed
     (`CommitAsync(offsets)` from a listener commits into the mock), and every other async
-    op throws `KafkaException` with the `UnsupportedVersion` code **and the exact
-    message**; after the consumer's destroy every handle op throws
+    op throws `NotSupportedException` **and the exact message**; after the consumer's destroy every handle op throws
     `InvalidOperationException`. And the guard-bypass contrast — inside a listener fired
     by `MockConsumer.Rebalance`, `handle.Assignment()` **succeeds**, the same listener's
     `consumer.Assignment()` is routed to the handle (ledger 114) and returns the same

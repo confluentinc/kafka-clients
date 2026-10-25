@@ -466,9 +466,9 @@ public sealed class PublicConsumerRebalanceListenerTests
                 new[]
                 {
                     "Assignment: ok [" + Topic + "-0]",
-                    "Seek: KafkaException 35: " + MockHandleUnsupported,
+                    "Seek: NotSupportedException: " + MockHandleUnsupported,
                     "Commit: ok",
-                    "Position: KafkaException 35: " + MockHandleUnsupported,
+                    "Position: NotSupportedException: " + MockHandleUnsupported,
                 },
                 seen);
             Assert.Equal(new OffsetAndMetadata(4), consumer.Committed(new[] { tp0 })[tp0]);

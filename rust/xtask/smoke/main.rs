@@ -173,8 +173,8 @@ async fn produce_and_consume(
             ),
             (ProducerConfig::ACKS_CONFIG.to_string(), "all".to_string()),
         ]))?,
-        Box::new(StringSerializer::new()),
-        Box::new(StringSerializer::new()),
+        StringSerializer::new(),
+        StringSerializer::new(),
     )?;
     let mut deliveries = Vec::with_capacity(NUM_RECORDS);
     for (key, value) in &expected {
@@ -200,8 +200,8 @@ async fn produce_and_consume(
             ),
             (ConsumerConfig::AUTO_OFFSET_RESET_CONFIG.to_string(), "earliest".to_string()),
         ]))?,
-        Box::new(StringDeserializer::new()),
-        Box::new(StringDeserializer::new()),
+        StringDeserializer::new(),
+        StringDeserializer::new(),
     )?;
     let consumed = consume_all(&mut consumer, topic, expected.len()).await;
     let close = consumer.close().await;

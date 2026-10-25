@@ -31,8 +31,6 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -47,15 +45,13 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         foreach (KeyValuePair<string, AsyncKafkaFuture> entry in result.DeletedGroups)
         {
-            KafkaException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => entry.Value.Get()), s_deadline);
-            Assert.Equal(UnsupportedVersionCode, thrown.Code);
+            NotSupportedException thrown = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => entry.Value.Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
 
-        KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        NotSupportedException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -68,9 +64,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         AsyncDeleteConsumerGroupsResult result = admin.DeleteConsumerGroups(new[] { "p5-group-a", "p5-group-b", "p5-group-a" });
 
         Assert.Equal(new[] { "p5-group-a", "p5-group-b" }, result.DeletedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
-        KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        NotSupportedException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 

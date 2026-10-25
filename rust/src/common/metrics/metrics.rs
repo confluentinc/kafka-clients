@@ -118,6 +118,7 @@ pub struct Metrics {
 // a naming change. No `Copy` either: `config` is an `Option<Arc<..>>`.
 #[derive(Clone)]
 #[non_exhaustive]
+#[derive(Debug)]
 // the options of the Metrics.sensor overloads (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SensorOptions<'a> {
@@ -142,6 +143,7 @@ pub struct SensorOptions<'a> {
 /// fluent setter, and [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like [`SensorOptions`] it has no Java counterpart and
 /// exists solely to satisfy that naming rule (DoD #7).
+#[derive(Debug)]
 // builds SensorOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct SensorOptionsBuilder<'a> {
@@ -230,6 +232,18 @@ impl<'a> SensorOptionsBuilder<'a> {
     }
 }
 
+impl std::fmt::Debug for Metrics {
+    /// How many sensors and metrics the registry holds, not their state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sensors = self.sensors.lock().expect("sensors mutex poisoned").len();
+        let metrics = self.shared.metrics.lock().expect("metrics mutex poisoned").len();
+        f.debug_struct("Metrics")
+            .field("sensors", &sensors)
+            .field("metrics", &metrics)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Metrics {
     // Java's `Metrics` constructors (`Metrics.java:85,93,101,111,122,134,145,158`)
     // have an EMPTY parameter-name intersection, and the no-arg `:85` matches it,
@@ -301,16 +315,12 @@ impl Metrics {
             time,
         };
         // Java registers a "count" gauge in kafka-metrics-count group
-        // (`Metrics.java:190-191`, `(config, now) -> metrics.size()`).
-        //
-        // The gauge is stored in `shared.metrics`, so it must hold the registry
-        // only weakly: Java's lambda captures `this` and the garbage collector
-        // frees the cycle, but a strong `Arc` here would make every registry own
-        // itself, so no registered metric (nor anything a gauge captures, such as
-        // the consumer's `SubscriptionState`) would ever be freed. While the
-        // registry is alive the value is exactly Java's; once it is gone (only
-        // reachable by a caller still holding this `KafkaMetric`) the registry
-        // holds no metrics, so the count is 0.
+        // (`Metrics.java:190-191`). The gauge is stored in the very map it
+        // reads, so it holds the shared state weakly: a strong `Arc` would be a
+        // cycle keeping the registry, and everything its metrics' providers
+        // capture, allocated after the last `Metrics` is dropped (Java's
+        // garbage collector frees the same graph). The upgrade fails only once
+        // the registry is gone, when no one can read the gauge any more.
         let shared = Arc::downgrade(&metrics.shared);
         let count_gauge = gauge::new(move |_config, _now| {
             let n = shared
@@ -576,7 +586,7 @@ impl Metrics {
         }
         let sensor_config = config.unwrap_or_else(|| Arc::clone(&self.config));
         let sensor = Arc::new(Sensor::new(
-            Some(Arc::clone(&self.shared)),
+            Some(Arc::downgrade(&self.shared)),
             name,
             parents.to_vec(),
             sensor_config,
@@ -1831,5 +1841,64 @@ mod tests {
             );
             assert!(metrics.metric(&name).is_some());
         }
+    }
+
+    /// A dropped registry frees its shared state. The "count" gauge lives in the
+    /// map it reads, so before it held the state weakly it kept the map, and
+    /// every provider and stat in it, allocated for the life of the process.
+    #[test]
+    fn test_dropped_registry_is_freed() {
+        let metrics = Metrics::new();
+        let sensor = metrics.sensor("s").expect("sensor");
+        sensor
+            .add_with_metric_name(metrics.metric_name("s-count", "grp1"), Box::new(CumulativeCount::new()))
+            .expect("add");
+        assert_eq!(
+            Some(MetricValue::Double(2.0)),
+            metrics
+                .metric(&metrics.metric_name("count", "kafka-metrics-count"))
+                .map(|metric| metric.metric_value())
+        );
+        let shared = Arc::downgrade(&metrics.shared);
+        drop(metrics);
+        assert!(shared.upgrade().is_none(), "the registry's shared state is still referenced");
+        // A sensor that outlives its registry keeps working on its own.
+        assert!(
+            sensor
+                .add_with_metric_name(MetricName::new("late", "grp1", "", BTreeMap::new()), Box::new(Value::new()))
+                .expect("add after the registry is gone")
+        );
+        sensor.record_with_value(1.0);
+    }
+
+    /// A provider capturing an object that holds one of the registry's sensors
+    /// does not keep the registry alive: the producer's `BufferPool` gauges
+    /// capture the pool, which holds its `bufferpool-wait-time` sensor. With a
+    /// strong sensor back-reference this was a cycle through the metrics map.
+    #[test]
+    fn test_provider_capturing_a_sensor_does_not_keep_the_registry() {
+        let metrics = Metrics::new();
+        let sensor = metrics.sensor("wait-time").expect("sensor");
+        sensor
+            .add_with_metric_name(metrics.metric_name("wait-time-total", "grp1"), Box::new(CumulativeSum::new()))
+            .expect("add");
+        let sensor_for_gauge = Arc::clone(&sensor);
+        metrics
+            .add_metric_with_measurable(
+                metrics.metric_name("gauge", "grp1"),
+                Box::new(crate::common::metrics::ClosureMeasurable::new(move |_config, _now| {
+                    sensor_for_gauge.name().len() as f64
+                })),
+            )
+            .expect("add gauge");
+        let shared = Arc::downgrade(&metrics.shared);
+        let weak_sensor = Arc::downgrade(&sensor);
+        drop(sensor);
+        drop(metrics);
+        assert!(shared.upgrade().is_none(), "the registry's shared state is still referenced");
+        assert!(
+            weak_sensor.upgrade().is_none(),
+            "the sensor captured by the gauge is still referenced"
+        );
     }
 }

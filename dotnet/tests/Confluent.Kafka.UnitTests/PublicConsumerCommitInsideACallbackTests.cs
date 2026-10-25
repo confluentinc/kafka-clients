@@ -228,7 +228,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
                 {
                     "Assignment: ok [" + Topic + "-0]",
                     "CommitAsync: ok",
-                    "Pause: " + (mock ? "KafkaException 35: " + MockHandleUnsupported : "ok"),
+                    "Pause: " + (mock ? "NotSupportedException: " + MockHandleUnsupported : "ok"),
                     "Paused: ok [" + (mock ? string.Empty : Topic + "-0") + "]",
                 },
                 Snapshot(seen));

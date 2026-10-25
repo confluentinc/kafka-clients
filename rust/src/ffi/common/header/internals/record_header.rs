@@ -40,13 +40,44 @@ pub struct kafka_common_header_internals_RecordHeader_t {
 /// What a [`kafka_common_header_internals_RecordHeader_t`] points at: the
 /// header plus the lazily built `Header` view.
 pub(crate) struct RecordHeaderInner {
-    header: RecordHeader,
+    header: HeaderStorage,
     view: OnceLock<HeaderInner>,
 }
 
+/// Where a [`RecordHeaderInner`]'s header lives.
+///
+/// Has no Java counterpart (`definition-of-done.md` §7): Java hands out the
+/// header object itself; here a handle either owns its header or, for the
+/// elements the `Headers` getters return, points at the header inside the
+/// `RecordHeaders` it was read from, so that C reads the record's own key and
+/// value buffers rather than a copy.
+enum HeaderStorage {
+    Owned(RecordHeader),
+    /// A header owned by a `RecordHeaders` that outlives the handle and is
+    /// not mutated while it exists (see [`RecordHeaderInner::borrowed`]).
+    Borrowed(*const RecordHeader),
+}
+
+// SAFETY: `Borrowed` points at a `RecordHeader` (`Send + Sync`) that, per
+// `RecordHeaderInner::borrowed`'s `# Safety`, outlives the handle and is not mutated while it
+// exists, so moving the handle to another thread is as sound as moving a shared reference to it.
+unsafe impl Send for HeaderStorage {}
+// SAFETY: As for `Send`: through a shared handle the header is only read.
+unsafe impl Sync for HeaderStorage {}
+
 impl RecordHeaderInner {
     pub(crate) fn new(header: RecordHeader) -> Self {
-        Self { header, view: OnceLock::new() }
+        Self { header: HeaderStorage::Owned(header), view: OnceLock::new() }
+    }
+
+    /// A handle on `header`, owned elsewhere: no copy of its key or value.
+    ///
+    /// # Safety
+    ///
+    /// `header` must point at a live `RecordHeader` that outlives the handle
+    /// and is not mutated while the handle exists.
+    pub(crate) unsafe fn borrowed(header: *const RecordHeader) -> Self {
+        Self { header: HeaderStorage::Borrowed(header), view: OnceLock::new() }
     }
 
     /// A handle at a stable address, as the `Header` view requires.
@@ -55,7 +86,12 @@ impl RecordHeaderInner {
     }
 
     pub(crate) fn header(&self) -> &RecordHeader {
-        &self.header
+        match &self.header {
+            HeaderStorage::Owned(header) => header,
+            // SAFETY: Per `borrowed`'s `# Safety`, the header outlives this handle and is not
+            // mutated while it exists, so the shared reference, bounded by `&self`, is sound.
+            HeaderStorage::Borrowed(header) => unsafe { &**header },
+        }
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
@@ -67,13 +103,14 @@ impl RecordHeaderInner {
     /// into `self`, which therefore must not move afterwards.
     pub(crate) fn as_header_ptr(&self) -> *const kafka_common_header_Header_t {
         self.view
-            // SAFETY: `&self.header` is a live `RecordHeader` that outlives the view and is not
+            // SAFETY: `self.header()` is a live `RecordHeader` that outlives the view and is not
             // mutated while it exists, as `HeaderInner::new` requires: the view is cached in
             // `self.view`, a field of the same `RecordHeaderInner`, so it is dropped with the
-            // header; no code mutates a `RecordHeaderInner`'s `header`; and, per this method's
+            // handle; no code mutates a `RecordHeaderInner`'s owned header, and a borrowed one
+            // outlives the handle unmutated (`borrowed`'s `# Safety`); and, per this method's
             // rustdoc, `self` does not move once the view exists.
             .get_or_init(|| unsafe {
-                HeaderInner::new(&self.header as *const RecordHeader as *const (dyn Header + Send + Sync))
+                HeaderInner::new(self.header() as *const RecordHeader as *const (dyn Header + Send + Sync))
             })
             .as_ptr()
     }

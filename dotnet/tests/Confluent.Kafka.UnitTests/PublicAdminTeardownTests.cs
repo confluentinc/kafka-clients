@@ -161,8 +161,7 @@ public sealed class PublicAdminTeardownTests
 
         Assert.Equal(-10, failure.Code);
         Assert.Equal(
-            "Invalid value GSSAPI for configuration sasl.mechanism: SASL mechanism 'GSSAPI' is not supported by this "
-            + "client: only PLAIN is implemented",
+            "Invalid value GSSAPI for configuration sasl.mechanism: only PLAIN is supported by this client",
             failure.Message);
     }
 

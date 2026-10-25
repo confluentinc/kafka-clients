@@ -31,6 +31,8 @@ internal abstract class ConsumerCompletion
 
     internal static readonly NativeMethods.ConsumerScalarCallback Scalar = OnScalar;
 
+    internal static readonly NativeMethods.ConsumerOptionalScalarCallback OptionalScalar = OnOptionalScalar;
+
     internal static readonly NativeMethods.ConsumerPointerCallback Pointer = OnPointer;
 
     internal const long NoOwnWake = -1;
@@ -60,6 +62,9 @@ internal abstract class ConsumerCompletion
     private static void OnVoid(IntPtr error, IntPtr opaque) => Deliver(opaque, IntPtr.Zero, 0, error);
 
     private static void OnScalar(long value, IntPtr error, IntPtr opaque) => Deliver(opaque, IntPtr.Zero, value, error);
+
+    private static void OnOptionalScalar(sbyte present, long value, IntPtr error, IntPtr opaque) =>
+        Deliver(opaque, (IntPtr)present, value, error);
 
     private static void OnPointer(IntPtr value, IntPtr error, IntPtr opaque) => Deliver(opaque, value, 0, error);
 

@@ -31,8 +31,6 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implemented yet";
 
     [Fact]
@@ -52,10 +50,9 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 
         foreach (KeyValuePair<string, AsyncKafkaFuture<ClassicGroupDescription>> described in result.DescribedGroups)
         {
-            KafkaException failure = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => described.Value.Get()), s_deadline);
+            NotSupportedException failure = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => described.Value.Get()), s_deadline);
 
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
     }
@@ -68,10 +65,9 @@ public sealed class PublicAdminDescribeClassicGroupsTests
 
         AsyncDescribeClassicGroupsResult result = admin.DescribeClassicGroups(new[] { "p5-dclg-all" });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -89,7 +85,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         Assert.Contains("P5-CDUP", result.DescribedGroups.Keys);
 
         await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]
@@ -121,10 +117,9 @@ public sealed class PublicAdminDescribeClassicGroupsTests
             new[] { "p5-dclg-flag" },
             new DescribeClassicGroupsOptions { IncludeAuthorizedOperations = include });
 
-        KafkaException failure = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        NotSupportedException failure = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
 
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
     }
 
@@ -138,7 +133,7 @@ public sealed class PublicAdminDescribeClassicGroupsTests
         AsyncDescribeClassicGroupsResult result = api.DescribeClassicGroups(new[] { "p5-dclg-iface" });
 
         Assert.Equal(new[] { "p5-dclg-iface" }, result.DescribedGroups.Keys);
-        await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
+        await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
     }
 
     [Fact]

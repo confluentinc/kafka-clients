@@ -35,6 +35,8 @@ public sealed class PublicConsumerSeekLagTests
     private const string Topic = "seeklag-topic";
     private const int Partition = 0;
 
+    private const string PositionNotAssigned = "You can only check the position for partitions assigned to this consumer.";
+
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyAssigned(string topic = Topic, int partition = Partition)
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -169,6 +171,57 @@ public sealed class PublicConsumerSeekLagTests
         consumer.Seek(tp, 10L);
 
         Assert.Equal(90L, consumer.CurrentLag(tp));
+    }
+
+    [Fact]
+    public void CurrentLag_APositionPastTheEnd_IsANegativeValue_OnTheSyncMock()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition tp = new TopicPartition(Topic, Partition);
+        consumer.Assign(new[] { tp });
+        consumer.UpdateEndOffset(Topic, Partition, 2);
+        consumer.Seek(tp, 5L);
+
+        Assert.Equal(-3L, consumer.CurrentLag(tp));
+    }
+
+    [Fact]
+    public async Task CurrentLag_APositionPastTheEnd_IsANegativeValue()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition tp = new TopicPartition(Topic, Partition);
+        consumer.UpdateEndOffset(Topic, Partition, 2);
+        await TestTimeout.Run(() => consumer.Seek(tp, 5L), s_deadline);
+
+        Assert.Equal(-3L, await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
+    }
+
+    [Fact]
+    public void CurrentLag_AFailingPosition_ThrowsTheCoreError_OnTheSyncMock()
+    {
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.UpdateEndOffset("unassigned-topic", 0, 2);
+
+        ArgumentException ex = Assert.Throws<ArgumentException>(
+            () => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)));
+
+        Assert.Equal(PositionNotAssigned, ex.Message);
+    }
+
+    [Fact]
+    public async Task CurrentLag_AFailingPosition_FaultsWithTheCoreError()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.UpdateEndOffset("unassigned-topic", 0, 2);
+
+        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(
+            () => TestTimeout.Run(() => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)), s_deadline));
+
+        Assert.Equal(PositionNotAssigned, ex.Message);
     }
 
     [Fact]

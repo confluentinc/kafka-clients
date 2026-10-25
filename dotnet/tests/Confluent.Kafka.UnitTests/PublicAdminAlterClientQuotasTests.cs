@@ -52,12 +52,11 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         foreach (AsyncKafkaFuture perEntity in new[] { result.Values[Entity("valid")], result.Values[empty] })
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => perEntity.Get(), s_deadline));
 
             // The core mock's own per-entity wording, typo included, not the whole-call rejection.
             Assert.Equal(NotImplemented, failure.Message);
-            Assert.Equal(35, failure.Code);
         }
     }
 
@@ -76,10 +75,9 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.Equal(EmptyEntity(), Assert.Single(result.Values).Key);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[EmptyEntity()].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
-        Assert.Equal(35, failure.Code);
     }
 
     [Fact]
@@ -93,12 +91,11 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.Equal(Entity("dup"), Assert.Single(result.Values).Key);
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[Entity("dup")].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
-        Assert.Equal(35, failure.Code);
 
-        KafkaException all = await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        NotSupportedException all = await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, all.Message);
     }
 
@@ -115,7 +112,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -141,7 +138,7 @@ public sealed class PublicAdminAlterClientQuotasTests
 
         Assert.NotEqual(Entity(null), Entity(string.Empty));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -179,9 +176,9 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
@@ -195,12 +192,12 @@ public sealed class PublicAdminAlterClientQuotasTests
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("solo-first", 1d), Alteration("solo-second", 2d) });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -212,7 +209,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         AsyncAlterClientQuotasResult result = admin.AlterClientQuotas(
             new[] { Alteration("all-a", 1d), Alteration("all-b", 2d) });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -243,7 +240,7 @@ public sealed class PublicAdminAlterClientQuotasTests
         Assert.Equal("用户-café", key.Entries[ClientQuotaEntity.User]);
         Assert.Equal(Entity("用户-café"), key);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]

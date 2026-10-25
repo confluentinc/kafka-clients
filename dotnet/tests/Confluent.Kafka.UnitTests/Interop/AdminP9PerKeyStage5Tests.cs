@@ -37,8 +37,6 @@ public sealed class AdminP9PerKeyStage5Tests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const int UnknownTopicOrPartitionCode = 3;
 
     private const int KafkaStorageErrorCode = 56;
@@ -58,9 +56,8 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(bindings.Length, result.Values.Count);
         foreach (AclBinding binding in bindings)
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.Values[binding].Get(), s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
     }
@@ -80,9 +77,8 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (ClientQuotaEntity entity in new[] { alpha, beta })
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.Values[entity].Get(), s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
 
             // The core mock's own wording, typo included.
             Assert.Equal("Not implement yet", failure.Message);
@@ -187,9 +183,8 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, groups.DeletedGroups.Count);
         foreach (string group in new[] { "cp6-group-alpha", "cp6-group-beta" })
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => groups.DeletedGroups[group].Get(), s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
     }
@@ -212,9 +207,8 @@ public sealed class AdminP9PerKeyStage5Tests
         Assert.Equal(2, result.Values.Count);
         foreach (string user in new[] { "cp6-user-a", "cp6-user-b" })
         {
-            KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
                 () => TestTimeout.Run(() => result.Values[user].Get(), s_deadline));
-            Assert.Equal(UnsupportedVersionCode, failure.Code);
             Assert.Equal(NotImplemented, failure.Message);
         }
     }

@@ -559,8 +559,7 @@ public sealed class AdminP7SubmitArgumentTests
 
     private static void AssertNotImplemented(Exception? outcome)
     {
-        KafkaException failure = Assert.IsType<KafkaException>(outcome);
-        Assert.Equal(35, failure.Code);
+        NotSupportedException failure = Assert.IsType<NotSupportedException>(outcome);
         Assert.Equal("Not implemented yet", failure.Message);
     }
 

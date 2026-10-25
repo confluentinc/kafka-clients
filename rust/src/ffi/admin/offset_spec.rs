@@ -60,7 +60,7 @@ static VARIANTS: [OffsetSpec; 6] = [
 
 /// Exhaustive, so a kind Java adds fails to compile until it has its C
 /// enumerator and singleton.
-fn enum_of(spec: OffsetSpec) -> kafka_admin_OffsetSpec_e {
+fn enum_of(spec: &OffsetSpec) -> kafka_admin_OffsetSpec_e {
     match spec {
         OffsetSpec::Earliest => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST,
         OffsetSpec::Latest => kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST,
@@ -90,7 +90,7 @@ fn is_singleton(spec: *const kafka_admin_OffsetSpec_t) -> bool {
 pub(crate) fn box_offset_spec(spec: OffsetSpec) -> *mut kafka_admin_OffsetSpec_t {
     match spec {
         OffsetSpec::Timestamp(_) => Box::into_raw(Box::new(spec)) as *mut kafka_admin_OffsetSpec_t,
-        _ => singleton(enum_of(spec)) as *mut kafka_admin_OffsetSpec_t,
+        _ => singleton(enum_of(&spec)) as *mut kafka_admin_OffsetSpec_t,
     }
 }
 
@@ -98,15 +98,15 @@ pub(crate) fn box_offset_spec(spec: OffsetSpec) -> *mut kafka_admin_OffsetSpec_t
 ///
 /// # Safety
 ///
-/// `spec` must be a handle returned by this module and, if owned, not yet
-/// destroyed.
-pub(crate) unsafe fn offset_spec_value_of(spec: *const kafka_admin_OffsetSpec_t) -> OffsetSpec {
+/// `spec` must be a handle returned by this module and, if owned, not
+/// destroyed while the returned reference is used.
+pub(crate) unsafe fn offset_spec_value_of<'a>(spec: *const kafka_admin_OffsetSpec_t) -> &'a OffsetSpec {
     // SAFETY: Per this function's `# Safety`, `spec` is a handle returned by this module and, if
     // owned, not yet destroyed; this module hands out only `&VARIANTS[i]` cast from
     // `*const OffsetSpec` (`singleton`) and the `Box::into_raw` of a `Box<OffsetSpec>`
-    // (`box_offset_spec`), so `spec` points at a live `OffsetSpec`, which is `Copy` and which no
-    // entry point mutates.
-    unsafe { *(spec as *const OffsetSpec) }
+    // (`box_offset_spec`), so `spec` points at a live `OffsetSpec` that no entry point mutates,
+    // borrowed for as long as the caller keeps the handle.
+    unsafe { &*(spec as *const OffsetSpec) }
 }
 
 /// `OffsetSpec.earliest()`: a borrowed singleton.
@@ -203,21 +203,22 @@ mod tests {
     use std::ptr;
 
     use super::*;
+    use crate::admin::offset_spec::spec_key;
 
     #[test]
     fn singletons_match_their_enumerator_and_survive_destroy() {
-        for (index, &spec) in VARIANTS.iter().enumerate() {
-            let handle = box_offset_spec(spec);
+        for (index, spec) in VARIANTS.iter().enumerate() {
+            let handle = box_offset_spec(spec.clone());
             assert!(is_singleton(handle));
             // SAFETY: Test code: `handle` is the singleton `box_offset_spec` returned for a kind
             // without data, a pointer into the static `VARIANTS`, so it is a handle of this module
             // for `offset_spec_value_of` and `kafka_admin_OffsetSpec__enum` both before and after
             // `kafka_admin_OffsetSpec_destroy`, a no-op on a singleton.
             unsafe {
-                assert_eq!(offset_spec_value_of(handle), spec);
+                assert_eq!(spec_key(offset_spec_value_of(handle)), spec_key(spec));
                 assert_eq!(kafka_admin_OffsetSpec__enum(handle) as usize, index);
                 kafka_admin_OffsetSpec_destroy(handle);
-                assert_eq!(offset_spec_value_of(handle), spec);
+                assert_eq!(spec_key(offset_spec_value_of(handle)), spec_key(spec));
             }
         }
         assert_eq!(kafka_admin_OffsetSpec_earliest(), box_offset_spec(OffsetSpec::Earliest));
@@ -250,8 +251,8 @@ mod tests {
         // returned, used only on this thread and each destroyed once, last; destroying null is a
         // no-op.
         unsafe {
-            assert_eq!(offset_spec_value_of(handle), OffsetSpec::for_timestamp(42));
-            assert_eq!(offset_spec_value_of(other), offset_spec_value_of(handle));
+            assert_eq!(spec_key(offset_spec_value_of(handle)), spec_key(&OffsetSpec::for_timestamp(42)));
+            assert_eq!(spec_key(offset_spec_value_of(other)), spec_key(offset_spec_value_of(handle)));
             assert_eq!(
                 kafka_admin_OffsetSpec__enum(handle),
                 kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_TIMESTAMP

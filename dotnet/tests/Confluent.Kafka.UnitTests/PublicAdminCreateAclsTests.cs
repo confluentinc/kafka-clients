@@ -44,7 +44,7 @@ public sealed class PublicAdminCreateAclsTests
         Assert.NotSame(lookup, Assert.Single(result.Values).Key);
         Assert.True(result.Values.ContainsKey(lookup));
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[lookup].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -71,9 +71,9 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Contains(alpha, result.Values.Keys);
         Assert.Contains(beta, result.Values.Keys);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[alpha].Get(), s_deadline));
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[beta].Get(), s_deadline));
     }
 
@@ -86,12 +86,12 @@ public sealed class PublicAdminCreateAclsTests
         AclBinding first = Binding("solo-first");
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { first, Binding("solo-second") });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.Values[first].Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
 
         // Observe the other one too, so no task is left with an unobserved fault.
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public sealed class PublicAdminCreateAclsTests
 
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("all-a"), Binding("all-b") });
 
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => result.All().Get(), s_deadline));
         Assert.Equal(NotImplemented, failure.Message);
     }
@@ -128,7 +128,7 @@ public sealed class PublicAdminCreateAclsTests
         AsyncCreateAclsResult result = admin.CreateAcls(new[] { Binding("dup"), Binding("dup") });
 
         Assert.Single(result.Values);
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]
@@ -144,7 +144,7 @@ public sealed class PublicAdminCreateAclsTests
         Assert.Equal("tópico-café-日本", key.Pattern.Name);
         Assert.Equal(binding, key);
 
-        await Assert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
+        await Assert.ThrowsAsync<NotSupportedException>(() => TestTimeout.Run(() => result.All().Get(), s_deadline));
     }
 
     [Fact]

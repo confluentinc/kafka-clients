@@ -170,8 +170,8 @@ fn new_bytes_consumer(ctx: &TestContext, group_id: &str) -> BytesConsumer {
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             consumer_config(ctx, group_id),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )
@@ -181,8 +181,8 @@ fn new_static_bytes_consumer(ctx: &TestContext, group_id: &str, instance_id: &st
     Box::new(
         KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
             static_consumer_config(ctx, group_id, instance_id),
-            Box::new(ByteArrayDeserializer),
-            Box::new(ByteArrayDeserializer),
+            ByteArrayDeserializer,
+            ByteArrayDeserializer,
         )
         .expect("KafkaConsumer::new should succeed"),
     )

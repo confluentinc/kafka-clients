@@ -489,7 +489,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static List<string> Expected(bool mock, bool async)
     {
         string fails = async ? "faults " : "throws ";
-        string unsupported = fails + "KafkaException 35: " + MockHandleUnsupported;
+        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
         string refused = "throws InvalidOperationException: " + Concurrent;
         List<string> expected = new List<string>
         {

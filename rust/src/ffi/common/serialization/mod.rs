@@ -20,8 +20,8 @@
 //! holds as a [`GenericValue`] and never reads. What the pointer means is the
 //! business of the implementation on each side:
 //!
-//!   - a C implementation registered with `Serializer_new` /
-//!     `Deserializer_new` decides it, and a `void *` a C deserializer
+//!   - a C implementation registered with `Serializer_new_async` /
+//!     `Deserializer_new_async` decides it, and a `void *` a C deserializer
 //!     produces is owned by the C side, never freed by Rust;
 //!   - each built-in class documents its representation: `StringSerializer`
 //!     reads a NUL-terminated `const char *`, `ByteArraySerializer` a
@@ -43,24 +43,22 @@
 //! is Tokio's: a consumer holds it across the await of the deserializer's
 //! future.
 //!
-//! A C implementation is registered in one of two modes:
-//!
-//!   - `_new` takes the synchronous `_fn_t`s, which return their result. A
-//!     client calls them on Tokio's blocking pool and awaits the task, so a
-//!     slow implementation holds no runtime worker; the invokers call them on
-//!     their calling thread.
-//!   - `_new_async` takes the `_async_fn_t`s, which return `void` and report
-//!     their result later, from any thread, through the handle's
-//!     `__set_callback_result` with the `callback_id` they were given. The
-//!     handle keeps the pending calls in its own [`CallbackResults`], and a
-//!     client awaits the report without holding any thread.
+//! A C implementation is registered with `_new_async`, which takes the
+//! `_async_fn_t`s: each returns `void` and reports its result later, from any
+//! thread, through the handle's `__set_callback_result` with the
+//! `callback_id` it was given. The handle keeps the pending calls in its own
+//! [`CallbackResults`], and a client awaits the report without holding any
+//! thread. There is no synchronous form: a C function returning its result
+//! would hold the thread it runs on, which a client's future cannot give it
+//! without blocking its runtime.
 //!
 //! The built-ins are always-ready futures; the invokers drive every future on
 //! the calling thread, parking it while a report is awaited
 //! ([`block_on_thread`]), and [`ready`] drives the built-ins.
 
-use std::ffi::c_void;
-use std::pin::{Pin, pin};
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{c_char, c_void};
+use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
@@ -69,17 +67,22 @@ use bytes::Bytes;
 use futures_util::FutureExt;
 
 use crate::common::Error;
+use crate::common::header::RecordHeaders;
 use crate::ffi::callback_queue::SendPtr;
-use crate::ffi::callback_result::{CallbackResults, KeepAlive, WaitReport};
-use crate::ffi::common::header::internals::record_headers::RecordHeadersInner;
-use crate::ffi::common::panic_error;
+use crate::ffi::callback_result::{CallbackResults, KeepAlive, ResultSink, WaitReport};
+use crate::ffi::common::header::internals::record_headers::{
+    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t,
+};
 use crate::ffi::common::serialization::deserializer::{
     DeserializerInner, FfiDeserializer, kafka_common_serialization_Deserializer_t,
 };
 use crate::ffi::common::serialization::serializer::{
     FfiSerializer, SerializerInner, kafka_common_serialization_Serializer_t,
 };
-use crate::ffi::util::{kafka_Map_destroy, kafka_Map_t};
+use crate::ffi::util::{
+    box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_destroy, kafka_Map_t,
+    map_entries,
+};
 
 pub(crate) mod byte_array_deserializer;
 pub(crate) mod byte_array_serializer;
@@ -198,8 +201,8 @@ impl DeserializerHandle {
 /// The output of a serde future that a blocking invoker drives on the
 /// calling thread, polled once.
 ///
-/// Every serde a C caller can reach completes in its first poll (the C
-/// implementations are called synchronously, the built-ins never wait), so a
+/// The built-in classes complete in their first poll (they never wait; a C
+/// implementation is waited for with `block_on_thread` instead), so a
 /// pending future is reported as an error rather than waited for.
 pub(crate) fn ready<F: Future>(future: F) -> Result<F::Output, Error> {
     future
@@ -257,20 +260,6 @@ pub(crate) fn block_on_thread<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// Where a synchronous C implementation (`_new`) runs.
-///
-/// Has no Java counterpart (`definition-of-done.md` §7): Java calls a
-/// serializer on the calling thread, which may block; a Rust future must not
-/// block its runtime worker, so a client moves the call to the blocking pool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Dispatch {
-    /// On Tokio's blocking pool, awaited; on the calling thread when there is
-    /// no runtime. What a client's future does.
-    Blocking,
-    /// On the calling thread. What the blocking invokers do.
-    Inline,
-}
-
 /// The arguments an asynchronous C implementation (`_new_async`) reads until
 /// it reports: one per pending call, kept by the handle's
 /// [`CallbackResults`] slot and reused by the slot's next call, so a call
@@ -283,8 +272,14 @@ pub(crate) enum Dispatch {
 pub(crate) struct CallArgs {
     /// The topic, NUL-terminated, truncated at an interior NUL.
     topic: Vec<u8>,
-    /// A copy of the record's headers, for the methods that take them.
+    /// The record's headers, for the methods that take them: a shared
+    /// reference to a deserializer's (a refcount, no copy), or a serializer's
+    /// moved here for the call and moved back by [`Self::restore_headers`].
     headers: Option<RecordHeadersInner>,
+    /// Where a serializer's headers came from and go back to when it
+    /// reports; valid while the call's future lives, which is the only time
+    /// the report is read (see [`Self::take_headers`]).
+    headers_home: Option<SendPtr>,
     /// The record's bytes, for a deserializer: a refcounted slice of the
     /// fetch buffer, or `copy` when the method received a plain slice.
     data: Bytes,
@@ -307,14 +302,49 @@ impl CallArgs {
         self.topic.as_ptr().cast()
     }
 
-    /// Stores a copy of `headers` and returns the handle C reads, at the
-    /// stable address of the boxed `CallArgs`.
-    pub(crate) fn set_headers(
+    /// Shares a deserializer's `headers` (a refcount, no copy) and returns the
+    /// read-only handle C reads, at the stable address of the boxed
+    /// `CallArgs`, valid until the report even if the future is dropped first.
+    pub(crate) fn share_headers(
         &mut self,
-        headers: &crate::common::header::RecordHeaders,
-    ) -> *const crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders_t
-    {
+        headers: &RecordHeaders,
+    ) -> *const kafka_common_header_internals_RecordHeaders_t {
         self.headers.insert(RecordHeadersInner::new(headers.clone())).as_ptr()
+    }
+
+    /// Moves a serializer's `headers` here for the call (a move, no copy),
+    /// leaving them empty, and returns the handle C reads and changes, at the
+    /// stable address of the boxed `CallArgs`. [`Self::restore_headers`] moves
+    /// them back, with C's changes, when the report is read; if the future is
+    /// dropped first, the slot keeps them until C reports and then drops
+    /// them.
+    ///
+    /// # Safety
+    ///
+    /// `headers` must stay valid, and reached by nothing else, for as long
+    /// as the future of the call lives.
+    pub(crate) unsafe fn take_headers(
+        &mut self,
+        headers: *mut RecordHeaders,
+    ) -> *mut kafka_common_header_internals_RecordHeaders_t {
+        self.headers_home = Some(SendPtr(headers.cast()));
+        // SAFETY: Per this function's `# Safety`, `headers` is valid and reached by nothing else.
+        let taken = std::mem::take(unsafe { &mut *headers });
+        self.headers.insert(RecordHeadersInner::new(taken)).as_mut_ptr()
+    }
+
+    /// Moves the headers [`Self::take_headers`] took back where they came
+    /// from, with what C changed; nothing for any other call. Called only
+    /// while the future of the call lives, when it reads the report.
+    pub(crate) fn restore_headers(&mut self) {
+        if let Some(home) = self.headers_home.take()
+            && let Some(headers) = self.headers.as_mut().and_then(RecordHeadersInner::take_headers)
+        {
+            // SAFETY: `home` is the pointer `take_headers` was given, valid and reached by nothing
+            // else while the call's future lives (its `# Safety`), and this runs only then: from
+            // the `finish` of the `WaitReport` that future polls.
+            unsafe { *home.get().cast::<RecordHeaders>() = headers };
+        }
     }
 
     /// Stores `data` and returns the view C reads.
@@ -351,6 +381,7 @@ impl CallArgs {
 impl KeepAlive for CallArgs {
     fn clear(&mut self) {
         self.headers = None;
+        self.headers_home = None;
         self.data = Bytes::new();
         self.output = None;
         self.destroy_configs();
@@ -380,71 +411,66 @@ impl Data<'_> {
             Data::Bytes(bytes) => bytes,
         }
     }
-
-    /// An owned buffer for a call on the blocking pool.
-    pub(crate) fn to_bytes(self) -> Bytes {
-        match self {
-            Data::Slice(slice) => Bytes::copy_from_slice(slice),
-            Data::Bytes(bytes) => bytes.clone(),
-        }
-    }
 }
 
 /// The registry of an asynchronous C implementation's pending calls.
 pub(crate) type Results = CallbackResults<CallArgs>;
 
-/// The future of a C implementation's call.
+/// The future of a C implementation's call: its pending report, converted
+/// by the method's `finish` function.
+pub(crate) type Report<'a, R> = WaitReport<'a, CallArgs, R>;
+
+/// The owned map a C `configure` reads: sorted by key, since Java's map is
+/// unordered and index addressing through the C map is not.
+pub(crate) fn build_configs(configs: &HashMap<String, String>) -> *mut kafka_Map_t {
+    let sorted: BTreeMap<&str, &str> = configs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    box_string_keyed_map(
+        sorted.into_iter().map(|(k, v)| (k, into_c_string(v) as *mut c_void)),
+        Some(destroy_string_element),
+    )
+}
+
+/// The configs a C caller passed, copied.
 ///
-/// Has no Java counterpart (`definition-of-done.md` §7): a hand-written
-/// future rather than an `async` block, so that a serde's future stays small
-/// enough for `InlineFuture`.
-pub(crate) enum Call<'a, R> {
-    /// The result, known when the call was made (an inline call). The error
-    /// is boxed so that it does not size every pending call: a failure
-    /// allocates, a success does not.
-    Done(Option<Result<R, Box<Error>>>),
-    /// A synchronous implementation running on the blocking pool.
-    Task(tokio::task::JoinHandle<Result<R, Error>>),
-    /// An asynchronous implementation's pending report.
-    Wait(WaitReport<'a, CallArgs, R>),
+/// # Safety
+///
+/// `configs` must be null or a valid map of NUL-terminated strings.
+pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String, String> {
+    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map, as `map_entries`
+    // requires (null reads as empty); the borrow of its entries ends when they are collected.
+    unsafe { map_entries(configs) }
+        .iter()
+        .map(|&(k, v)| {
+            // SAFETY: Per this function's `# Safety`, every key and value of `configs` is a valid
+            // NUL-terminated string, as `c_str_to_string` requires; both are copied.
+            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
+                c_str_to_string(v as *const c_char)
+            })
+        })
+        .collect()
 }
 
-impl<R: Unpin> Future for Call<'_, R> {
-    type Output = Result<R, Error>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Call::Done(result) => Poll::Ready(match result.take() {
-                Some(result) => result.map_err(|error| *error),
-                None => Err(Error::local_illegal_state("The serde call was already completed")),
-            }),
-            Call::Task(task) => Pin::new(task).poll(cx).map(|joined| match joined {
-                Ok(result) => result,
-                Err(error) => Err(match error.try_into_panic() {
-                    Ok(payload) => panic_error("a C serde's blocking call", payload.as_ref()),
-                    Err(_) => Error::local_illegal_state("A C serde's blocking call was cancelled"),
-                }),
-            }),
-            Call::Wait(wait) => Pin::new(wait).poll(cx),
-        }
+/// Logs the failure of a `void` method (`configure` or `close`) of the
+/// `serde` (`"serializer"` or `"deserializer"`), which has nowhere to report
+/// it.
+pub(crate) fn log_failure(what: &str, serde: &str, result: Result<(), Error>) {
+    if let Err(error) = result {
+        log::warn!("Failed to {what} the {serde}: {error}");
     }
 }
 
-/// Runs `call` where `dispatch` says: inline, or on the blocking pool when a
-/// runtime is there.
-pub(crate) fn dispatch<'a, R: Send + 'static>(
-    dispatch: Dispatch,
-    call: impl FnOnce() -> Result<R, Error> + Send + 'static,
-) -> Call<'a, R> {
-    match (dispatch, tokio::runtime::Handle::try_current()) {
-        (Dispatch::Blocking, Ok(handle)) => Call::Task(handle.spawn_blocking(call)),
-        _ => Call::Done(Some(call().map_err(Box::new))),
-    }
-}
+/// Completion of the `void` `_cb` twins.
+pub(crate) type OpaqueCb = unsafe extern "C" fn(opaque: *mut c_void);
 
-/// A `void *` the C side owns, carried to the blocking pool.
-pub(crate) fn send_ptr<T>(ptr: *const T) -> SendPtr {
-    SendPtr(ptr.cast_mut().cast::<c_void>())
+/// Fires a `void` completion, logging a failure.
+pub(crate) fn opaque_sink(what: &'static str, serde: &'static str, cb: OpaqueCb, opaque: *mut c_void) -> ResultSink {
+    let opaque = SendPtr(opaque);
+    Box::new(move |result| {
+        log_failure(what, serde, result.map(|_| ()));
+        // SAFETY: `cb` and `opaque` are the pair the C caller passed to the `_cb` twin, a valid
+        // completion until it fires; this `FnOnce` fires it once.
+        unsafe { cb(opaque.get()) }
+    })
 }
 
 #[cfg(test)]

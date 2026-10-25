@@ -37,8 +37,6 @@ public sealed class PublicSyncConsumerQueryTests
     private const int LeaderId = 7;
     private const int LeaderPort = 9092;
 
-    private const int UnsupportedVersionCode = 35;
-
     [Fact]
     public void Committed_AfterCommit_RoundTripsOffsetMetadataAndEpoch()
     {
@@ -99,7 +97,7 @@ public sealed class PublicSyncConsumerQueryTests
     }
 
     [Fact]
-    public void OffsetsForTimes_OnMock_ThrowsUnsupportedVersion()
+    public void OffsetsForTimes_OnMock_ThrowsNotSupportedException()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -108,10 +106,9 @@ public sealed class PublicSyncConsumerQueryTests
             [new TopicPartition(Topic, 0)] = 1_000L,
         };
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(search));
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => consumer.OffsetsForTimes(search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
-        Assert.Equal(UnsupportedVersionCode, ex.Code);
     }
 
     [Fact]
@@ -125,7 +122,7 @@ public sealed class PublicSyncConsumerQueryTests
             [new TopicPartition(Topic, 0)] = -2L, // LATEST sentinel
         };
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(search));
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => consumer.OffsetsForTimes(search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
     }
@@ -136,7 +133,7 @@ public sealed class PublicSyncConsumerQueryTests
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long>()));
+        Assert.Throws<NotSupportedException>(() => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long>()));
     }
 
     [Fact]

@@ -151,7 +151,7 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task OffsetsForTimes_OnMock_FaultsWithUnsupportedVersion()
+    public async Task OffsetsForTimes_OnMock_FaultsWithNotSupportedException()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -160,11 +160,10 @@ public sealed class PublicConsumerOffsetQueryTests
             [new TopicPartition(Topic, 0)] = 1_000L,
         };
 
-        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
             () => OffsetsForTimesOf(consumer, search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
-        Assert.Equal(35, ex.Code);
     }
 
     [Fact]
@@ -178,7 +177,7 @@ public sealed class PublicConsumerOffsetQueryTests
             [new TopicPartition(Topic, 0)] = -2L, // LATEST sentinel
         };
 
-        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
             () => OffsetsForTimesOf(consumer, search));
 
         Assert.Equal("Not implemented yet.", ex.Message);
@@ -190,7 +189,7 @@ public sealed class PublicConsumerOffsetQueryTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        await Assert.ThrowsAsync<KafkaException>(
+        await Assert.ThrowsAsync<NotSupportedException>(
             () => OffsetsForTimesOf(consumer, new Dictionary<TopicPartition, long>()));
     }
 

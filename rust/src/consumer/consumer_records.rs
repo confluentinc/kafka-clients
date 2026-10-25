@@ -36,15 +36,7 @@ use crate::consumer::OffsetAndMetadata;
 /// (Java's `ConsumerRecords` is documented as iterating per the underlying
 /// map's iteration order; the test suite assumes ordering matches insertion
 /// when a `LinkedHashMap` is supplied).
-///
-/// # Equality
-///
-/// `PartialEq` / `Eq` are derived (gated on `K: PartialEq, V: PartialEq` /
-/// `K: Eq, V: Eq`) so that tests can `assert_eq!(actual, expected)`
-/// against an entire batch. Mirrors Java's `ConsumerRecordsTest` which
-/// uses `assertEquals` on whole-batch values. The bounds are gated; users
-/// with non-`PartialEq` keys/values are unaffected.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords")]
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
@@ -61,9 +53,7 @@ pub struct ConsumerRecords<K, V> {
     /// `ConsumerRecords.isEmpty()` (`records.isEmpty()`), but the poll loop
     /// needs Java's internal `Fetch.isEmpty()` (`numRecords == 0 &&
     /// !positionAdvanced`) so it returns promptly when only the position
-    /// advanced — see [`Self::is_fetch_empty`]. It does not affect equality
-    /// in a user-observable way (it is an internal bookkeeping flag, but is
-    /// included in the derived `PartialEq`/`Eq` for completeness).
+    /// advanced — see [`Self::is_fetch_empty`].
     position_advanced: bool,
 }
 

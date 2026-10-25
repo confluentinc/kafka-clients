@@ -31,8 +31,6 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implement yet";
 
     [Fact]
@@ -96,9 +94,8 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
 
     private static async Task AssertNotImplemented(AsyncKafkaFuture future)
     {
-        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+        NotSupportedException failure = await Assert.ThrowsAsync<NotSupportedException>(
             () => TestTimeout.Run(() => future.Get(), s_deadline));
-        Assert.Equal(UnsupportedVersionCode, failure.Code);
         Assert.Equal(NotImplemented, failure.Message);
     }
 

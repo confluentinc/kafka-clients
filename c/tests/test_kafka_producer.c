@@ -174,6 +174,90 @@ void test_config_invalid_value(void) {
     kafka_common_Error_destroy(err);
 }
 
+void test_config_getters(void) {
+    /* `AbstractConfig`'s getters: a present value returns 1, Java's `null`
+     * returns 0 with no error, and a type mismatch or an unknown key fails
+     * through `out_err`. */
+    const char *const pairs[] = {
+        "bootstrap.servers", "localhost:9092",
+        "batch.size",        "7",
+        "acks",              "all",
+        "unknown.key",       "x",
+        NULL
+    };
+    kafka_producer_ProducerConfig_t *config = make_config(pairs);
+    kafka_common_Error_t *err = NULL;
+
+    int32_t batch_size = 0;
+    TEST_ASSERT_EQUAL_INT8(1, kafka_producer_ProducerConfig_get_int(config, "batch.size", &batch_size, &err));
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(7, batch_size);
+
+    int64_t linger_ms = -1;
+    TEST_ASSERT_EQUAL_INT8(1, kafka_producer_ProducerConfig_get_long(config, "linger.ms", &linger_ms, &err));
+    TEST_ASSERT_EQUAL_INT64(5, linger_ms);
+
+    int8_t idempotence = 0;
+    TEST_ASSERT_EQUAL_INT8(
+        1, kafka_producer_ProducerConfig_get_boolean(config, "enable.idempotence", &idempotence, &err));
+    TEST_ASSERT_EQUAL_INT8(1, idempotence);
+
+    /* `parseAcks` turned `all` into `-1`; the string is borrowed. */
+    TEST_ASSERT_EQUAL_STRING("-1", kafka_producer_ProducerConfig_get_string(config, "acks", &err));
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NULL(kafka_producer_ProducerConfig_get_string(config, "transactional.id", &err));
+    TEST_ASSERT_NULL(err);
+
+    kafka_List_t *servers = kafka_producer_ProducerConfig_get_list(config, "bootstrap.servers", &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(servers));
+    TEST_ASSERT_EQUAL_STRING("localhost:9092", (const char *)kafka_List_get(servers, 0));
+    kafka_List_destroy(servers);
+
+    int16_t short_value = 3;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_producer_ProducerConfig_get_short(config, "batch.size", &short_value, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Configuration 'batch.size' is of type INT, not SHORT", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = NULL;
+    TEST_ASSERT_EQUAL_INT16(3, short_value);
+
+    double double_value = 0.0;
+    TEST_ASSERT_EQUAL_INT8(0, kafka_producer_ProducerConfig_get_double(config, "no.such.key", &double_value, &err));
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_STRING("Unknown configuration 'no.such.key'", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
+    err = NULL;
+
+    /* `batch.size` was read above; `ignore` marks `unknown.key` used. */
+    kafka_producer_ProducerConfig_ignore(config, "unknown.key");
+    kafka_List_t *unused = kafka_producer_ProducerConfig_unused(config);
+    for (int32_t i = 0; i < kafka_List_size(unused); i++) {
+        const char *key = (const char *)kafka_List_get(unused, i);
+        TEST_ASSERT_TRUE(strcmp(key, "batch.size") != 0);
+        TEST_ASSERT_TRUE(strcmp(key, "unknown.key") != 0);
+    }
+    kafka_List_destroy(unused);
+    kafka_producer_ProducerConfig_log_unused(config);
+
+    kafka_List_t *names = kafka_producer_ProducerConfig_config_names();
+    int found = 0;
+    for (int32_t i = 0; i < kafka_List_size(names); i++) {
+        const char *name = (const char *)kafka_List_get(names, i);
+        if (strcmp(name, "partitioner.type") == 0) {
+            found = 1;
+        }
+        TEST_ASSERT_TRUE(strcmp(name, "partitioner.class") != 0);
+        if (i > 0) {
+            TEST_ASSERT_TRUE(strcmp((const char *)kafka_List_get(names, i - 1), name) < 0);
+        }
+    }
+    TEST_ASSERT_TRUE(found);
+    kafka_List_destroy(names);
+
+    kafka_producer_ProducerConfig_destroy(config);
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------
@@ -185,7 +269,7 @@ void test_create_close_destroy(void) {
 
 void test_create_destroy_without_close(void) {
     kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
-    /* Destroy without close: the Drop impl handles cleanup. */
+    /* Destroy without close: destroy closes the producer itself. */
     kafka_producer_KafkaProducer_destroy(producer);
 }
 
@@ -255,8 +339,8 @@ void test_create_with_string_serializers(void) {
     kafka_common_Error_t *err = NULL;
     producer = kafka_producer_KafkaProducer_new(
         config,
-        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(key_ser),
-        (kafka_common_serialization_Serializer_t *)kafka_common_serialization_StringSerializer__as_Serializer(value_ser), &err);
+        kafka_common_serialization_StringSerializer__as_Serializer(key_ser),
+        kafka_common_serialization_StringSerializer__as_Serializer(value_ser), &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
     kafka_producer_ProducerConfig_destroy(config);
@@ -275,6 +359,70 @@ void test_create_with_string_serializers(void) {
     close_and_destroy(producer);
     kafka_common_serialization_StringSerializer_destroy(key_ser);
     kafka_common_serialization_StringSerializer_destroy(value_ser);
+}
+
+/* A C serializer whose `close` keeps its `callback_id` and returns without
+ * reporting, so the test reports it after the constructor returned. */
+typedef struct {
+    kafka_common_serialization_Serializer_t *handle;
+    atomic_int close_calls;
+    atomic_llong close_id;
+} late_close_serializer_t;
+
+static void late_close_serialize(void *self, const char *topic, const void *data, int64_t callback_id) {
+    (void)topic;
+    (void)data;
+    late_close_serializer_t *imp = self;
+    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+}
+
+static void late_close_close(void *self, int64_t callback_id) {
+    late_close_serializer_t *imp = self;
+    atomic_store(&imp->close_id, callback_id);
+    atomic_fetch_add(&imp->close_calls, 1);
+}
+
+/* A constructor that fails after taking the serializers closes them, as
+ * Java's does (`KafkaProducer.java:519-523`), without waiting for a C `close`
+ * to report: the report arrives after the constructor returned, on the
+ * consumed handle, which stays valid for it (run under valgrind: no read of
+ * freed memory, no leak). */
+void test_failed_create_keeps_a_closing_serializer_until_it_reports(void) {
+    static const char *const BAD_DELIVERY_TIMEOUT[] = { "bootstrap.servers", "localhost:9092",
+                                                        "delivery.timeout.ms", "1", NULL };
+    kafka_producer_ProducerConfig_t *config = make_config(BAD_DELIVERY_TIMEOUT);
+    late_close_serializer_t key = {0};
+    late_close_serializer_t value = {0};
+    key.handle = kafka_common_serialization_Serializer_new_async(&key, late_close_serialize, NULL, NULL,
+                                                                 late_close_close);
+    value.handle = kafka_common_serialization_Serializer_new_async(&value, late_close_serialize, NULL, NULL,
+                                                                   late_close_close);
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_KafkaProducer_t *producer = kafka_producer_KafkaProducer_new(config, key.handle, value.handle, &err);
+    kafka_producer_ProducerConfig_destroy(config);
+    TEST_ASSERT_NULL(producer);
+    TEST_ASSERT_NOT_NULL(err);
+    /* Java's `KafkaException("Failed to construct kafka producer", t)` around
+     * the `ConfigException` (`KafkaProducer.java:522`). */
+    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
+    const kafka_common_Error_t *cause = kafka_common_Error_source(err);
+    TEST_ASSERT_NOT_NULL(cause);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_config_error(cause));
+    TEST_ASSERT_EQUAL_STRING("delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms",
+                             kafka_common_Error_message(cause));
+    kafka_common_Error_destroy(err);
+
+    /* The key's `close` was called inside the constructor; the value's comes
+     * after the key's reports, as Java closes them one after the other. */
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&key.close_calls));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&value.close_calls));
+    nanosleep(&(struct timespec){ 0, 50 * 1000000L }, NULL); /* the constructor's runtime is gone by now */
+    kafka_common_serialization_Serializer__set_callback_result(key.handle, atomic_load(&key.close_id), NULL, NULL);
+    for (int i = 0; i < 1000 && atomic_load(&value.close_calls) == 0; i++) {
+        nanosleep(&(struct timespec){ 0, 10 * 1000000L }, NULL);
+    }
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&value.close_calls));
+    kafka_common_serialization_Serializer__set_callback_result(value.handle, atomic_load(&value.close_id), NULL, NULL);
 }
 
 void test_create_multiple_config(void) {
@@ -888,12 +1036,14 @@ int main(void) {
     RUN_TEST(test_config_new_and_producer);
     RUN_TEST(test_config_builds_several_producers);
     RUN_TEST(test_config_invalid_value);
+    RUN_TEST(test_config_getters);
 
     /* Lifecycle */
     RUN_TEST(test_create_close_destroy);
     RUN_TEST(test_create_destroy_without_close);
     RUN_TEST(test_destroy_null);
     RUN_TEST(test_create_with_string_serializers);
+    RUN_TEST(test_failed_create_keeps_a_closing_serializer_until_it_reports);
     RUN_TEST(test_create_multiple_config);
     RUN_TEST(test_close_with_negative_timeout_is_rejected);
 

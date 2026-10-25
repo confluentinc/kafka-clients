@@ -30,8 +30,6 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const int UnsupportedVersionCode = 35;
-
     private const string NotImplemented = "Not implement yet";
 
     [Fact]
@@ -45,14 +43,12 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
             "p5-group",
             new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(10) });
 
-        KafkaException fromPartitionResult = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(tp).Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromPartitionResult.Code);
+        NotSupportedException fromPartitionResult = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(tp).Get()), s_deadline);
         Assert.Equal(NotImplemented, fromPartitionResult.Message);
 
-        KafkaException fromAll = await TestTimeout.Run(
-            () => Assert.ThrowsAsync<KafkaException>(() => result.All().Get()), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, fromAll.Code);
+        NotSupportedException fromAll = await TestTimeout.Run(
+            () => Assert.ThrowsAsync<NotSupportedException>(() => result.All().Get()), s_deadline);
         Assert.Equal(NotImplemented, fromAll.Message);
     }
 
@@ -86,9 +82,8 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
         foreach (TopicPartition partition in new[] { requested, new TopicPartition("p5-unknown", 7) })
         {
-            KafkaException thrown = await TestTimeout.Run(
-                () => Assert.ThrowsAsync<KafkaException>(() => result.PartitionResult(partition).Get()), s_deadline);
-            Assert.Equal(UnsupportedVersionCode, thrown.Code);
+            NotSupportedException thrown = await TestTimeout.Run(
+                () => Assert.ThrowsAsync<NotSupportedException>(() => result.PartitionResult(partition).Get()), s_deadline);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }
@@ -102,8 +97,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
         Task all = admin.AlterConsumerGroupOffsets("p5-group", new Dictionary<TopicPartition, OffsetAndMetadata>()).All().Get();
 
         Assert.NotEqual(TaskStatus.RanToCompletion, all.Status);
-        KafkaException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<KafkaException>(() => all), s_deadline);
-        Assert.Equal(UnsupportedVersionCode, thrown.Code);
+        NotSupportedException thrown = await TestTimeout.Run(() => Assert.ThrowsAsync<NotSupportedException>(() => all), s_deadline);
         Assert.Equal(NotImplemented, thrown.Message);
     }
 
@@ -120,8 +114,7 @@ public sealed class PublicAdminAlterConsumerGroupOffsetsTests
 
         foreach (Action get in new Action[] { () => result.All().Get(), () => result.PartitionResult(tp).Get(), () => empty.All().Get() })
         {
-            KafkaException thrown = Assert.Throws<KafkaException>(get);
-            Assert.Equal(UnsupportedVersionCode, thrown.Code);
+            NotSupportedException thrown = Assert.Throws<NotSupportedException>(get);
             Assert.Equal(NotImplemented, thrown.Message);
         }
     }

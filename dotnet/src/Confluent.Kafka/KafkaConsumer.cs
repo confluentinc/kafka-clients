@@ -47,6 +47,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+    /// <exception cref="NotSupportedException"><c>group.protocol</c> is <c>classic</c>, which this client does not support.</exception>
     public KafkaConsumer(
         IReadOnlyDictionary<string, string> config,
         IDeserializer<TKey> keyDeserializer,
