@@ -40,6 +40,8 @@ public sealed class PublicSyncConsumerCloseTests
 
     private static readonly TimeSpan s_blockingTimeout = TimeSpan.FromSeconds(60);
 
+    private static readonly TimeSpan s_sustainedHold = TimeSpan.FromMilliseconds(200);
+
     private static readonly TimeSpan s_negative = TimeSpan.FromMilliseconds(-1);
 
     public static IEnumerable<object[]> Operations() => new[]
@@ -233,18 +235,25 @@ public sealed class PublicSyncConsumerCloseTests
         return owner;
     }
 
+    // A timed call's checks hold the consumer for a moment before its call does, so only a hold that lasts is the call.
     private static void WaitUntilTheConsumerIsHeld(IConsumerCommon consumer)
     {
         DateTime end = DateTime.UtcNow + s_loopBudget;
+        Stopwatch held = new Stopwatch();
         while (true)
         {
             try
             {
                 consumer.Assignment();
+                held.Reset();
             }
             catch (InvalidOperationException e) when (e.Message == ConcurrentMessage)
             {
-                return;
+                held.Start();
+                if (held.Elapsed >= s_sustainedHold)
+                {
+                    return;
+                }
             }
 
             Assert.True(DateTime.UtcNow < end, "the blocking call never held the consumer");
