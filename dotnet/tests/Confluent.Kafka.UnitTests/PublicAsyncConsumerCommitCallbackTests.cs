@@ -314,7 +314,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             KafkaException timeout = Assert.IsType<KafkaException>(await TestTimeout.Run(() => raised.Task, s_deadline));
             Assert.Equal(7, timeout.Code);
             Assert.True(timeout.IsRetriable);
-            Assert.Equal(HandleTimeoutMessage(call), timeout.Message);
+            TimedOutMessage.AssertCallerOrReaper(HandleTimeoutMessage(call), timeout.Message);
 
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
         }

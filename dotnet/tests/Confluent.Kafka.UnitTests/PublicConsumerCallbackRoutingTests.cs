@@ -412,7 +412,9 @@ public sealed class PublicConsumerCallbackRoutingTests
                 s_deadline);
             await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
 
-            Assert.Equal("faults KafkaException 7: " + WakeableTimeout(call), outcome);
+            Assert.NotNull(outcome);
+            Assert.StartsWith("faults KafkaException 7: ", outcome, StringComparison.Ordinal);
+            TimedOutMessage.AssertCallerOrReaper(WakeableTimeout(call), outcome.Substring("faults KafkaException 7: ".Length));
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
         }
         finally

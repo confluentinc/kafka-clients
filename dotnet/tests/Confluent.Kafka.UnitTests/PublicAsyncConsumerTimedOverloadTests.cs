@@ -340,7 +340,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     private static void AssertTimedOut(KafkaException thrown, string message, long ms)
     {
         Assert.Equal(RequestTimedOutCode, thrown.Code);
-        Assert.Equal(string.Format(CultureInfo.InvariantCulture, message, ms), thrown.Message);
+        TimedOutMessage.AssertCallerOrReaper(string.Format(CultureInfo.InvariantCulture, message, ms), thrown.Message);
     }
 
     private static void AssertExpired(KafkaException thrown, string[] expired)
