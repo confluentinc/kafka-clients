@@ -1260,37 +1260,48 @@ the calling thread; a `_cb` form queues them, and its own completion, for
       - **To the consumer's own `ConsumerHandle`** where the handle has the form:
         `Assignment`, `Paused`, `Pause`, `Resume`, `SeekToBeginning`, `SeekToEnd`, both
         `Seek`s, both `Position`s, `CurrentLag`, `Committed`, `BeginningOffsets`,
-        `EndOffsets` and `OffsetsForTimes` without a timeout, `Commit()` and
-        `Commit(offsets)`, and every `CommitAsync` form. An `IAsyncOffsetCommitCallback`
+        `EndOffsets` and `OffsetsForTimes` with and without a timeout, `Commit()` and
+        `Commit(offsets)` with and without a timeout, `PartitionsFor` and `ListTopics`
+        with and without a timeout, `GroupMetadata` (after ledger 105's `group.id`
+        check), and every `CommitAsync` form (ledger 163), as Python's `_reentrant`
+        routes them (`_base.py:1823-1923` at `dd826c17`). A timed call takes the handle's
+        `_with_timeout` form, whose timeout bounds the wait as the consumer's own does.
+        An `IAsyncOffsetCommitCallback`
         goes through the same `OffsetCommitCallback_t` registration as outside a
         callback (BH:31789-31791 at `3f8a5bc6`). The consumer makes the handle on first
         use, as Python's `_handle()` does (`_base.py:714-719`), and destroys it after the
         consumer (safe, §B2 Category 6). A routed call blocks the calling thread (above).
         On the async consumers its `Task` comes back completed, or faulted with the
-        handle's error. A routed `Commit`, `Position` or `Committed` that the consumer's
-        own wakeup ends (ledger 126) is made again, as Python's `_own_wake_raised` does
-        (`_base.py:1307-1315`, `:1660-1663`, `:1684-1688`, `:1699-1701`). Its
+        handle's error. A routed `Commit`, `Position`, `Committed`, `PartitionsFor` or
+        `ListTopics`, timed or not, that the consumer's own wakeup ends (ledger 126) is
+        made again, as Python's `_own_wake_raised` does (`_base.py:1842`, `:1866`,
+        `:1880`, `:1909`, `:1917` at `dd826c17`); the offset lookups and `GroupMetadata`
+        are not, as in Python. Its
         `CancellationToken` is checked before the call, as every async op checks it, and
         not after: nothing can interrupt a handle op, as nothing cancels Python's
         in-callback call, which has no `await`.
       - **Refused at once** with `InvalidOperationException` and the core's message
         "KafkaConsumer is not safe for multi-threaded access.", before anything is
-        submitted, as Python's `_refuse_inside_callback` and `_timeout_ms` raise
-        (`_base.py:960-968`, `:1545-1550`): every other waiting call. These are `Poll`,
-        `Subscribe`, `Unsubscribe`, `Assign`, `PartitionsFor` and `ListTopics`, and the
-        timed `Commit`, `Committed`, `BeginningOffsets`, `EndOffsets` and
-        `OffsetsForTimes`, whose handle forms have no timeout. On the async consumers a
+        submitted, as Python's `_refuse_inside_callback` raises (`_base.py:1027-1035` at
+        `dd826c17`): every other waiting call. These are `Poll`, `Subscribe`,
+        `Unsubscribe` and `Assign`, which the handle has no form of (KIP-1306's
+        `RebalanceConsumer` has none). On the async consumers a
         `_cb` submission's -2 would be queued behind the running callback (Python's
         reason, `_base.py:961-964`); on the sync consumers the blocking form would fail
         the same way.
-      - **To the core, as outside a callback:** `Subscription`, `GroupMetadata` (after
-        ledger 105's `group.id` check) and `EnforceRebalance`, which the core refuses
+      - **To the core, as outside a callback:** `Subscription` and `EnforceRebalance`,
+        which the core refuses
         with -2 while the op that delivers the callback holds its flag, as Python leaves
         `subscription()` to it (`_base.py:1497-1503`); and `Metrics()`, which it
         answers. `Wakeup()` and `Handle()` are unchanged, and `Close` and `Dispose`
         follow ledgers 113 and 120 (`dotnet/CLAUDE.md` §4).
-      - **Order:** the in-callback rule comes first, before the closed check, and the
-        owner check skips a call made inside a callback (above). While the consumer
+      - **Order:** a routed call first makes the checks its call makes outside a
+        callback, in Python's order (closed, owner, null, `group.id`, timeout; ledger
+        164), and routes last, as Python's `_c_*` bodies do
+        (`python/confluent_kafka/consumer/consumer.py:615-629` at `dd826c17`). A refused
+        call is refused right after the closed check, as Python's
+        `_refuse_inside_callback` (`_base.py:1027-1035`). The owner check skips a call
+        made inside a callback (above). While the consumer
         closes, a call inside a callback is not refused as closed, so a listener the
         close runs can call back in, as Java sets `closed` only once its close has run
         (`AsyncKafkaConsumer.java:1566-1576`) and Python lets the closing thread's own
@@ -1298,9 +1309,10 @@ the calling thread; a `_cb` form queues them, and its own completion, for
         `ObjectDisposedException`, as Python's closed check raises
         (`_base.py:605-609`). A routed call is still an in-flight use (§B2), so teardown
         waits for it before the destroy.
-      - **On the mocks** the routing is the same. A `MockConsumer` handle commits and
-        answers `CurrentLag` and the sync reads, and fails its other ops with the
-        `KafkaException` above. Java's and Python's mocks instead let a callback call
+      - **On the mocks** the routing is the same. A `MockConsumer` handle commits, timed
+        or not, and answers `CurrentLag`, `GroupMetadata` and the sync reads; it fails its
+        other ops, the timed lookups, `PartitionsFor` and `ListTopics` included, with the
+        `NotSupportedException` above (−31 since ledger 206). Java's and Python's mocks instead let a callback call
         every method, through their reentrant monitor (`MockConsumer.java`'s
         `synchronized` methods; `_mock_core.py:30-32` at `3f8a5bc6`) *(deviation: the
         core mock's handle lacks those ops; goes when it has them)*.
@@ -1330,7 +1342,8 @@ is the core's, so the binding adds none there.
   - From inside a callback the consumer is running: calling a `Consumer_*` operation
     that the handle has (it fails with -2; route it to `ConsumerHandle`, ledger 114);
     submitting any `_cb` operation (refuse it at once: its -2 would be queued behind the
-    running callback); routing a call the handle lacks, timed overloads included; or
+    running callback); routing a call the handle lacks (`Poll`, `Subscribe`,
+    `Unsubscribe`, `Assign`); or
     treating a thread that a sync callback started as inside the callback (ledger
     127).
   - The owner check, or any managed guard, around handle ops, or a managed copy of the
@@ -1384,17 +1397,24 @@ is the core's, so the binding adds none there.
     core's message.
   - **Routing inside a callback** (ledger 114), on the sync and the async consumer,
     inside a listener and a commit callback, and after an `await` too:
-      - `Commit()`, `Seek`, `Position`, `Committed`, `CurrentLag`, `Assignment` and
-        `CommitAsync(offsets)` succeed through the handle. This is
+      - `Commit()`, `Seek`, `Position`, `Committed`, `CurrentLag`, `Assignment`,
+        `CommitAsync(offsets)`, `GroupMetadata` and the timed `Commit`, `Committed` and
+        offset lookups succeed through the handle, or time out within their own timeout;
+        `PartitionsFor` and `ListTopics`, timed or not, answer as outside a callback
+        (Python's `test_kafka_consumer.py:1069-1146` at `dd826c17`). This is
         `consumer-threading.md` §31's first test, on the public API.
-      - `Poll`, `Subscribe`, `Assign` and a timed `Commit` throw
-        `InvalidOperationException` at once; on the async consumer nothing is submitted.
-      - `Subscription` and `GroupMetadata` throw the core's -2, and `Metrics()` answers.
+      - `Poll`, `Subscribe`, `Unsubscribe` and `Assign` throw `InvalidOperationException`
+        at once; on the async consumer nothing is submitted
+        (`test_kafka_consumer.py:1148-1175`).
+      - `Subscription` throws the core's −2, and `Metrics()` answers.
+      - A routed call that the consumer's own leftover wakeup ends is made again, for
+        each call §B1's routing bullet retries (`test_kafka_consumer.py:3737-3765`).
       - A thread that a sync listener starts is not inside: its `Commit()` is a call
         from another thread.
       - A listener that the close runs commits through the routing.
-      - On a mock, a commit and `CurrentLag` succeed and `Seek` throws the handle's
-        `KafkaException`.
+      - On a mock, the commits, `CurrentLag` and `GroupMetadata` succeed, and `Seek`,
+        `Position`, the lookups, `PartitionsFor` and `ListTopics` throw the handle's
+        `NotSupportedException` (ledger 141; −31 since ledger 206).
   - `Dispose` / `DisposeAsync` return without hanging, with an op in flight and with
     a live `ConsumerHandle`. ⚠ The teardown routes are **not** restated here: see
     §B2's path list.

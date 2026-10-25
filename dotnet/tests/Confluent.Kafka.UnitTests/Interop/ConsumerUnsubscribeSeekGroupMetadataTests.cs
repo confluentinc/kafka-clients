@@ -104,14 +104,12 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
     }
 
     [Fact]
-    public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
+    public async Task Seek_NegativeOffset_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => consumer.Seek("proof-topic", 0, offset: -5));
-        Assert.Equal("offset", ex.ParamName);
+        Assert.Throws<ObjectDisposedException>(() => consumer.Seek("proof-topic", 0, offset: -5));
     }
 
     [Fact]

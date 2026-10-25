@@ -122,14 +122,12 @@ public sealed class PublicConsumerApiTests
     }
 
     [Fact]
-    public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
+    public async Task Seek_NegativeOffset_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.DisposeAsync(consumer);
 
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
-        Assert.Equal("offset", ex.ParamName);
+        Assert.Throws<ObjectDisposedException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
     }
 
     [Fact]

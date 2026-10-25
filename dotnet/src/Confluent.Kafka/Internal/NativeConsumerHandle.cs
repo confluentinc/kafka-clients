@@ -135,14 +135,17 @@ internal sealed class NativeConsumerHandle : IDisposable
         return present != 0 ? lag : null;
     }
 
-    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed((string Topic, int Partition)[] partitions)
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        (string Topic, int Partition)[] partitions, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr list = arguments.TopicPartitionList(partitions);
         while (true)
         {
             IntPtr outErr = IntPtr.Zero;
-            IntPtr map = NativeMethods.ConsumerHandleCommitted(_handle, list, ref outErr);
+            IntPtr map = timeoutMs is long ms
+                ? NativeMethods.ConsumerHandleCommittedWithTimeout(_handle, list, ms, ref outErr)
+                : NativeMethods.ConsumerHandleCommitted(_handle, list, ref outErr);
             if (_owner.OwnWakeRaised(ref outErr))
             {
                 continue;
@@ -153,43 +156,106 @@ internal sealed class NativeConsumerHandle : IDisposable
         }
     }
 
-    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets((string Topic, int Partition)[] partitions)
+    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        (string Topic, int Partition)[] partitions, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr list = arguments.TopicPartitionList(partitions);
         IntPtr outErr = IntPtr.Zero;
-        IntPtr map = NativeMethods.ConsumerHandleBeginningOffsets(_handle, arguments.TopicPartitionList(partitions), ref outErr);
+        IntPtr map = timeoutMs is long ms
+            ? NativeMethods.ConsumerHandleBeginningOffsetsWithTimeout(_handle, list, ms, ref outErr)
+            : NativeMethods.ConsumerHandleBeginningOffsets(_handle, list, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return LongOffsetMapMarshal.CopyOutAndDestroy(map);
     }
 
-    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets((string Topic, int Partition)[] partitions)
+    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets((string Topic, int Partition)[] partitions, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr list = arguments.TopicPartitionList(partitions);
         IntPtr outErr = IntPtr.Zero;
-        IntPtr map = NativeMethods.ConsumerHandleEndOffsets(_handle, arguments.TopicPartitionList(partitions), ref outErr);
+        IntPtr map = timeoutMs is long ms
+            ? NativeMethods.ConsumerHandleEndOffsetsWithTimeout(_handle, list, ms, ref outErr)
+            : NativeMethods.ConsumerHandleEndOffsets(_handle, list, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return LongOffsetMapMarshal.CopyOutAndDestroy(map);
     }
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
-        NativeConsumer.TimestampsSnapshot timestampsToSearch)
+        NativeConsumer.TimestampsSnapshot timestampsToSearch, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr timestamps = arguments.LongMap(
             timestampsToSearch.Topics, timestampsToSearch.Partitions, timestampsToSearch.Timestamps, timestampsToSearch.Count);
         IntPtr outErr = IntPtr.Zero;
-        IntPtr map = NativeMethods.ConsumerHandleOffsetsForTimes(_handle, timestamps, ref outErr);
+        IntPtr map = timeoutMs is long ms
+            ? NativeMethods.ConsumerHandleOffsetsForTimesWithTimeout(_handle, timestamps, ms, ref outErr)
+            : NativeMethods.ConsumerHandleOffsetsForTimes(_handle, timestamps, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         return NativeConsumer.CopyOffsetsForTimes(map, timestampsToSearch);
     }
 
-    internal void CommitSync()
+    internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic, long? timeoutMs)
+    {
+        using NativeCallArguments arguments = new NativeCallArguments();
+        IntPtr topicPointer = arguments.Utf8(topic);
+        while (true)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = timeoutMs is long ms
+                ? NativeMethods.ConsumerHandlePartitionsForWithTimeout(_handle, topicPointer, ms, ref outErr)
+                : NativeMethods.ConsumerHandlePartitionsFor(_handle, topicPointer, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return PartitionInfoListMarshal.CopyOutAndDestroy(list);
+        }
+    }
+
+    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(long? timeoutMs)
+    {
+        while (true)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = timeoutMs is long ms
+                ? NativeMethods.ConsumerHandleListTopicsWithTimeout(_handle, ms, ref outErr)
+                : NativeMethods.ConsumerHandleListTopics(_handle, ref outErr);
+            if (_owner.OwnWakeRaised(ref outErr))
+            {
+                continue;
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return TopicPartitionInfoMapMarshal.CopyOutAndDestroy(map);
+        }
+    }
+
+    internal ConsumerGroupMetadata GroupMetadata()
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr metadata = NativeMethods.ConsumerHandleGroupMetadata(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return ConsumerGroupMetadataMarshal.CopyOutAndDestroy(metadata);
+    }
+
+    internal void CommitSync(long? timeoutMs)
     {
         using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
         while (true)
         {
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.ConsumerHandleCommitSync(_handle, ref outErr);
+            if (timeoutMs is long ms)
+            {
+                NativeMethods.ConsumerHandleCommitSyncWithTimeout(_handle, ms, ref outErr);
+            }
+            else
+            {
+                NativeMethods.ConsumerHandleCommitSync(_handle, ref outErr);
+            }
+
             if (_owner.OwnWakeRaised(ref outErr))
             {
                 continue;
@@ -200,7 +266,7 @@ internal sealed class NativeConsumerHandle : IDisposable
         }
     }
 
-    internal void CommitSync(NativeConsumer.CommitOffsetsSnapshot offsets)
+    internal void CommitSync(NativeConsumer.CommitOffsetsSnapshot offsets, long? timeoutMs)
     {
         using NativeCallArguments arguments = new NativeCallArguments();
         IntPtr map = arguments.OffsetMap(offsets);
@@ -208,7 +274,15 @@ internal sealed class NativeConsumerHandle : IDisposable
         while (true)
         {
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.ConsumerHandleCommitSyncWithOffsets(_handle, map, ref outErr);
+            if (timeoutMs is long ms)
+            {
+                NativeMethods.ConsumerHandleCommitSyncWithOffsetsTimeout(_handle, map, ms, ref outErr);
+            }
+            else
+            {
+                NativeMethods.ConsumerHandleCommitSyncWithOffsets(_handle, map, ref outErr);
+            }
+
             if (_owner.OwnWakeRaised(ref outErr))
             {
                 continue;

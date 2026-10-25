@@ -21,12 +21,12 @@ namespace Confluent.Kafka;
 
 /// <summary>
 /// Calls back into a consumer from inside one of its callbacks (an <see cref="IConsumerRebalanceListener"/> method or an
-/// <see cref="IOffsetCommitCallback"/>); the consumer's own calls made there go through such a handle. On a
-/// <see cref="KafkaConsumer{TKey, TValue}"/> every operation other than <see cref="Wakeup"/>, <see cref="Assignment"/>
-/// and <see cref="Paused"/> works only inside such a callback, and throws <see cref="InvalidOperationException"/>
-/// elsewhere. The handle holds its consumer weakly: once the consumer is destroyed, <see cref="Wakeup"/> does nothing,
-/// <see cref="Assignment"/> and <see cref="Paused"/> still return, and every other operation throws
-/// <see cref="InvalidOperationException"/>.
+/// <see cref="IOffsetCommitCallback"/>); the consumer's own calls made there go through the consumer's own handle,
+/// which also has the forms this class lacks. On a <see cref="KafkaConsumer{TKey, TValue}"/> every operation other
+/// than <see cref="Wakeup"/>, <see cref="Assignment"/> and <see cref="Paused"/> works only inside such a callback, and
+/// throws <see cref="InvalidOperationException"/> elsewhere. The handle holds its consumer weakly: once the consumer is
+/// destroyed, <see cref="Wakeup"/> does nothing, <see cref="Assignment"/> and <see cref="Paused"/> still return, and
+/// every other operation throws <see cref="InvalidOperationException"/>.
 /// </summary>
 public sealed class ConsumerHandle : IDisposable
 {
@@ -158,21 +158,21 @@ public sealed class ConsumerHandle : IDisposable
     public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions)
     {
         ThrowIfDisposed();
-        return _native.Committed(NativeConsumer.SnapshotPartitions(partitions));
+        return _native.Committed(NativeConsumer.SnapshotPartitions(partitions), timeoutMs: null);
     }
 
     /// <summary>Returns the first offset of each of <paramref name="partitions"/>.</summary>
     public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions)
     {
         ThrowIfDisposed();
-        return _native.BeginningOffsets(NativeConsumer.SnapshotPartitions(partitions));
+        return _native.BeginningOffsets(NativeConsumer.SnapshotPartitions(partitions), timeoutMs: null);
     }
 
     /// <summary>Returns the end offset of each of <paramref name="partitions"/>.</summary>
     public IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions)
     {
         ThrowIfDisposed();
-        return _native.EndOffsets(NativeConsumer.SnapshotPartitions(partitions));
+        return _native.EndOffsets(NativeConsumer.SnapshotPartitions(partitions), timeoutMs: null);
     }
 
     /// <summary>
@@ -183,21 +183,21 @@ public sealed class ConsumerHandle : IDisposable
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
     {
         ThrowIfDisposed();
-        return _native.OffsetsForTimes(NativeConsumer.SnapshotTimestamps(timestampsToSearch));
+        return _native.OffsetsForTimes(NativeConsumer.SnapshotTimestamps(timestampsToSearch), timeoutMs: null);
     }
 
     /// <summary>Commits the consumed offsets and waits until the commit completes.</summary>
     public void Commit()
     {
         ThrowIfDisposed();
-        _native.CommitSync();
+        _native.CommitSync(timeoutMs: null);
     }
 
     /// <summary>Commits <paramref name="offsets"/> and waits until the commit completes.</summary>
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         ThrowIfDisposed();
-        _native.CommitSync(NativeConsumer.SnapshotCommitOffsets(offsets));
+        _native.CommitSync(NativeConsumer.SnapshotCommitOffsets(offsets), timeoutMs: null);
     }
 
     /// <summary>Starts a commit of the consumed offsets and returns without waiting for it.</summary>

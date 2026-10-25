@@ -31,15 +31,17 @@ namespace Confluent.Kafka;
 /// asynchronous form, for <see cref="IAsyncConsumer{TKey, TValue}"/> only.
 /// </para>
 /// <para>
-/// A listener can call back into its own consumer, as a Java listener calls the consumer it
-/// captured. A call the <see cref="ConsumerHandle"/> has goes to the consumer's own handle and blocks;
-/// a waiting call it lacks (<c>Poll</c>, <c>Subscribe</c>, <c>Unsubscribe</c>, <c>Assign</c>,
-/// <c>PartitionsFor</c>, <c>ListTopics</c>, and the timed <c>Commit</c>, <c>Committed</c>,
-/// <c>BeginningOffsets</c>, <c>EndOffsets</c> and <c>OffsetsForTimes</c>) throws
-/// <see cref="System.InvalidOperationException"/> at once, and so does <c>Close</c>, which leaves the consumer
-/// open. On a mock consumer the handle has only the commits, <c>CurrentLag</c>, <c>Assignment</c> and
-/// <c>Paused</c>, and another routed call throws <see cref="KafkaException"/>. A thread the listener starts is
-/// not inside the listener.
+/// A listener can call back into its own consumer, as a Java listener calls the consumer it captured. <c>Poll</c>,
+/// <c>Subscribe</c>, <c>Unsubscribe</c> and <c>Assign</c> throw <see cref="System.InvalidOperationException"/> at
+/// once, and so does <c>Close</c>, which leaves the consumer open. <c>Seek</c>, <c>SeekToBeginning</c>,
+/// <c>SeekToEnd</c>, <c>Pause</c>, <c>Resume</c>, <c>Position</c>, <c>CurrentLag</c>, <c>Commit</c>,
+/// <c>CommitAsync</c>, <c>Committed</c>, <c>BeginningOffsets</c>, <c>EndOffsets</c>, <c>OffsetsForTimes</c>,
+/// <c>PartitionsFor</c>, <c>ListTopics</c>, <c>Assignment</c>, <c>Paused</c> and <c>GroupMetadata</c>, timed or not,
+/// go to the consumer's own handle and block, also where <see cref="ConsumerHandle"/> lacks the form. On a mock
+/// consumer only the commits, timed or not, <c>CurrentLag</c>, <c>Assignment</c>, <c>Paused</c> and
+/// <c>GroupMetadata</c> work there; every other routed call throws <see cref="System.NotSupportedException"/>
+/// ("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer
+/// directly."). A thread the listener starts is not inside the listener.
 /// </para>
 /// <para>
 /// An exception a method throws never unwinds into native code: it propagates out of the consumer call that ran

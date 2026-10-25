@@ -47,13 +47,35 @@ public sealed class PublicConsumerCallbackRoutingTests
         "Timeout of 500ms expired before the last committed offset for partitions [" + Topic
         + "-0] could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.";
 
+    private const string ShortCommittedTimeout =
+        "Timeout of 200ms expired before the last committed offset for partitions [" + Topic
+        + "-0] could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.";
+
     private const string OffsetsTimeout = "Failed to get offsets by times in 500ms";
+
+    private const string ShortOffsetsTimeout = "Failed to get offsets by times in 200ms";
+
+    private const string TimedOut = "KafkaException 7: ";
+
+    private const string TopicMetadataExpired =
+        "Timeout expired while fetching topic metadata|Timeout expired while waiting for TopicMetadata";
+
+    private const string AllTopicsMetadataExpired =
+        "Timeout expired while fetching topic metadata|Timeout expired while waiting for AllTopicsMetadata";
 
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_second = TimeSpan.FromSeconds(1);
 
     private static readonly TimeSpan s_negative = TimeSpan.FromMilliseconds(-1);
+
+    private static readonly TimeSpan s_short = TimeSpan.FromMilliseconds(200);
+
+    private static readonly TimeSpan s_minusASecond = TimeSpan.FromSeconds(-1);
+
+    private static readonly TimeSpan s_wakeableTimeout = TimeSpan.FromMilliseconds(300);
+
+    private static readonly TimeSpan s_wait = TimeSpan.FromSeconds(10);
 
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromSeconds(8);
 
@@ -94,7 +116,7 @@ public sealed class PublicConsumerCallbackRoutingTests
 
         IReadOnlyList<string> outcomes = await RunInside(vehicle, Probe);
 
-        Assert.Equal(string.Join("\n", Expected(mock, async)), string.Join("\n", outcomes));
+        AssertOutcomes(Expected(mock, async), outcomes);
     }
 
     [Theory]
@@ -394,10 +416,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     }
 
     [Theory]
-    [InlineData("committed")]
-    [InlineData("position")]
-    [InlineData("commit")]
-    [InlineData("commit_consumed")]
+    [MemberData(nameof(WakeableCalls))]
     public async Task ARoutedCall_EndedByTheConsumersOwnWakeup_IsMadeAgain(string call)
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
@@ -413,8 +432,8 @@ public sealed class PublicConsumerCallbackRoutingTests
             await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
 
             Assert.NotNull(outcome);
-            Assert.StartsWith("faults KafkaException 7: ", outcome, StringComparison.Ordinal);
-            TimedOutMessage.AssertCallerOrReaper(WakeableTimeout(call), outcome.Substring("faults KafkaException 7: ".Length));
+            Assert.StartsWith("faults " + TimedOut, outcome, StringComparison.Ordinal);
+            AssertTimedOutMessage(WakeableTimeout(call), outcome.Substring("faults ".Length + TimedOut.Length));
             Assert.Empty(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
         }
         finally
@@ -488,6 +507,307 @@ public sealed class PublicConsumerCallbackRoutingTests
         }
     }
 
+    public static IEnumerable<object[]> WakeableCalls() => new[]
+    {
+        new object[] { "committed" },
+        new object[] { "committed_timed" },
+        new object[] { "position" },
+        new object[] { "position_timed" },
+        new object[] { "commit" },
+        new object[] { "commit_timed" },
+        new object[] { "commit_consumed" },
+        new object[] { "commit_consumed_timed" },
+        new object[] { "partitions_for" },
+        new object[] { "partitions_for_timed" },
+        new object[] { "list_topics" },
+        new object[] { "list_topics_timed" },
+    };
+
+    [Theory]
+    [MemberData(nameof(WakeableCalls))]
+    public void KafkaConsumer_TheConsumersOwnLeftoverWakeup_IsNotRaisedInsideACallback(string call)
+    {
+        KafkaConsumer<byte[], byte[]> consumer = NewKafkaConsumer();
+        string? outcome = null;
+        try
+        {
+            TestTimeout.Run(
+                () =>
+                {
+                    consumer.Assign(s_partitions);
+                    consumer.CommitAsync(Empty(), new DelegateCallback(() =>
+                    {
+                        LeaveTheConsumersOwnWakeup(consumer);
+                        outcome = Call(() => WakeableSync(consumer, call));
+                    }));
+                    consumer.Commit(Empty());
+                },
+                s_deadline);
+        }
+        finally
+        {
+            TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
+            TestTimeout.Dispose(consumer);
+        }
+
+        Assert.NotNull(outcome);
+        Assert.StartsWith("throws " + TimedOut, outcome, StringComparison.Ordinal);
+        AssertTimedOutMessage(WakeableTimeout(call), outcome.Substring("throws ".Length + TimedOut.Length));
+    }
+
+    [Theory]
+    [MemberData(nameof(Vehicles))]
+    public async Task InsideACallback_ATimedCall_PassesItsTimeout(string vehicle)
+    {
+        bool mock = vehicle.Contains("Mock");
+        string fails = vehicle.StartsWith("Async", StringComparison.Ordinal) ? "faults " : "throws ";
+        Stopwatch elapsed = Stopwatch.StartNew();
+
+        IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeTimed(consumer));
+
+        Assert.True(elapsed.Elapsed < s_wait, "the timed calls took " + elapsed.Elapsed);
+        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string timedOut = fails + TimedOut;
+        string timerNegative = "throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1000";
+        string coreNegative = "throws ArgumentOutOfRangeException(timeout): Timeout must not be negative";
+        AssertOutcomes(
+            new[]
+            {
+                "Commit(offsets, 200): " + (mock ? "ok" : timedOut + "Timeout of 200ms expired before successfully committing offsets"),
+                "Position(200): " + (mock ? unsupported : timedOut + "Timeout of 200ms expired before the position for partition "
+                    + Topic + "-0 could be determined"),
+                "Committed(200): " + (mock ? unsupported : timedOut + ShortCommittedTimeout),
+                "OffsetsForTimes(200): " + (mock ? unsupported : timedOut + ShortOffsetsTimeout),
+                "BeginningOffsets(200): " + (mock ? unsupported : timedOut + ShortOffsetsTimeout),
+                "EndOffsets(200): " + (mock ? unsupported : timedOut + ShortOffsetsTimeout),
+                "Commit(offsets, -1000): " + timerNegative,
+                "Position(-1000): " + timerNegative,
+                "Committed(-1000): " + coreNegative,
+                "OffsetsForTimes(-1000): " + coreNegative,
+                "BeginningOffsets(-1000): " + coreNegative,
+                "EndOffsets(-1000): " + coreNegative,
+            },
+            outcomes);
+    }
+
+    [Theory]
+    [MemberData(nameof(Vehicles))]
+    public async Task InsideACallback_AMetadataCall_GoesThroughTheHandle(string vehicle)
+    {
+        bool mock = vehicle.Contains("Mock");
+        string fails = vehicle.StartsWith("Async", StringComparison.Ordinal) ? "faults " : "throws ";
+
+        IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => ProbeMetadata(consumer));
+
+        string unsupported = fails + "NotSupportedException: " + MockHandleUnsupported;
+        string timedOut = fails + TimedOut;
+        AssertOutcomes(
+            new[]
+            {
+                "PartitionsFor(0): " + (mock ? unsupported
+                    : timedOut + "Timeout of 0ms expired before partitions for topic " + Topic + " could be determined"),
+                "PartitionsFor(200): " + (mock ? unsupported : timedOut + TopicMetadataExpired),
+                "PartitionsFor(): " + (mock ? unsupported : timedOut + TopicMetadataExpired),
+                "ListTopics(0): " + (mock ? unsupported
+                    : timedOut + "Timeout of 0ms expired before all topics' metadata could be listed"),
+                "ListTopics(200): " + (mock ? unsupported : timedOut + AllTopicsMetadataExpired),
+                "ListTopics(): " + (mock ? unsupported : timedOut + AllTopicsMetadataExpired),
+            },
+            outcomes);
+    }
+
+    [Theory]
+    [MemberData(nameof(Vehicles))]
+    public async Task InsideACallback_GroupMetadata_GoesThroughTheHandle_AndAnswersAsOutside(string vehicle)
+    {
+        IReadOnlyList<string> outcomes = await RunInside(
+            vehicle, (consumer, _) => new[] { Call(() => Format(((IConsumerCommon)consumer).GroupMetadata())) });
+
+        Assert.Equal(new[] { "ok " + OutsideGroupMetadata(vehicle) }, outcomes);
+    }
+
+    public static IEnumerable<object[]> RefusedInsideACallback()
+    {
+        foreach (string vehicle in new[] { "KafkaConsumer, a commit callback", "AsyncKafkaConsumer, a commit callback" })
+        {
+            foreach (string call in new[] { "assign", "subscribe", "subscription", "unsubscribe", "poll", "close" })
+            {
+                yield return new object[] { vehicle, call };
+            }
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RefusedInsideACallback))]
+    public async Task InsideACallback_WhatTheHandleHasNoFormOf_IsRefused(string vehicle, string call)
+    {
+        IReadOnlyList<string> outcomes = await RunInside(vehicle, (consumer, _) => new[] { Refusable(consumer, call) });
+
+        string refused = "InvalidOperationException: " + Concurrent;
+        Assert.Single(outcomes);
+        Assert.EndsWith(refused, outcomes[0], StringComparison.Ordinal);
+        Assert.True(
+            outcomes[0] == "throws " + refused || outcomes[0] == "faults " + refused,
+            outcomes[0]);
+    }
+
+    private static List<string> ProbeTimed(object consumer)
+    {
+        List<string> outcomes = new List<string>();
+        foreach (TimeSpan timeout in new[] { s_short, s_minusASecond })
+        {
+            string at = "(" + Format((long)timeout.TotalMilliseconds) + "): ";
+            if (consumer is IConsumer<byte[], byte[]> sync)
+            {
+                outcomes.Add("Commit(offsets, " + at.Substring(1) + Call(() => sync.Commit(Offsets(1), timeout)));
+                outcomes.Add("Position" + at + Call(() => Format(sync.Position(s_tp0, timeout))));
+                outcomes.Add("Committed" + at + Call(() => Format(sync.Committed(s_partitions, timeout))));
+                outcomes.Add("OffsetsForTimes" + at + Call(() => Format(sync.OffsetsForTimes(Timestamps(), timeout))));
+                outcomes.Add("BeginningOffsets" + at + Call(() => Format(sync.BeginningOffsets(s_partitions, timeout))));
+                outcomes.Add("EndOffsets" + at + Call(() => Format(sync.EndOffsets(s_partitions, timeout))));
+            }
+            else
+            {
+                IAsyncConsumer<byte[], byte[]> async = (IAsyncConsumer<byte[], byte[]>)consumer;
+                outcomes.Add("Commit(offsets, " + at.Substring(1) + CallAsync(() => async.Commit(Offsets(1), timeout)));
+                outcomes.Add("Position" + at + CallAsync(() => async.Position(s_tp0, timeout), Format));
+                outcomes.Add("Committed" + at + CallAsync(() => async.Committed(s_partitions, timeout), Format));
+                outcomes.Add("OffsetsForTimes" + at + CallAsync(() => async.OffsetsForTimes(Timestamps(), timeout), Format));
+                outcomes.Add("BeginningOffsets" + at + CallAsync(() => async.BeginningOffsets(s_partitions, timeout), Format));
+                outcomes.Add("EndOffsets" + at + CallAsync(() => async.EndOffsets(s_partitions, timeout), Format));
+            }
+        }
+
+        return outcomes;
+    }
+
+    private static List<string> ProbeMetadata(object consumer)
+    {
+        List<string> outcomes = new List<string>();
+        if (consumer is IConsumer<byte[], byte[]> sync)
+        {
+            outcomes.Add("PartitionsFor(0): " + Call(() => sync.PartitionsFor(Topic, TimeSpan.Zero)));
+            outcomes.Add("PartitionsFor(200): " + Call(() => sync.PartitionsFor(Topic, s_short)));
+            outcomes.Add("PartitionsFor(): " + Call(() => sync.PartitionsFor(Topic)));
+            outcomes.Add("ListTopics(0): " + Call(() => sync.ListTopics(TimeSpan.Zero)));
+            outcomes.Add("ListTopics(200): " + Call(() => sync.ListTopics(s_short)));
+            outcomes.Add("ListTopics(): " + Call(() => sync.ListTopics()));
+        }
+        else
+        {
+            IAsyncConsumer<byte[], byte[]> async = (IAsyncConsumer<byte[], byte[]>)consumer;
+            outcomes.Add("PartitionsFor(0): " + CallAsync(() => async.PartitionsFor(Topic, TimeSpan.Zero)));
+            outcomes.Add("PartitionsFor(200): " + CallAsync(() => async.PartitionsFor(Topic, s_short)));
+            outcomes.Add("PartitionsFor(): " + CallAsync(() => async.PartitionsFor(Topic)));
+            outcomes.Add("ListTopics(0): " + CallAsync(() => async.ListTopics(TimeSpan.Zero)));
+            outcomes.Add("ListTopics(200): " + CallAsync(() => async.ListTopics(s_short)));
+            outcomes.Add("ListTopics(): " + CallAsync(() => async.ListTopics()));
+        }
+
+        return outcomes;
+    }
+
+    private static string Refusable(object consumer, string call)
+    {
+        if (consumer is IConsumer<byte[], byte[]> sync)
+        {
+            return call switch
+            {
+                "assign" => Call(() => sync.Assign(s_partitions)),
+                "subscribe" => Call(() => sync.Subscribe(s_topics)),
+                "subscription" => Call(() => Format(sync.Subscription())),
+                "unsubscribe" => Call(sync.Unsubscribe),
+                "poll" => Call(() => sync.Poll(TimeSpan.Zero)),
+                _ => Call(() => sync.Close(CloseOptions.Timeout(TimeSpan.Zero))),
+            };
+        }
+
+        IAsyncConsumer<byte[], byte[]> async = (IAsyncConsumer<byte[], byte[]>)consumer;
+        return call switch
+        {
+            "assign" => CallAsync(() => async.Assign(s_partitions)),
+            "subscribe" => CallAsync(() => async.Subscribe(s_topics)),
+            "subscription" => Call(() => Format(async.Subscription())),
+            "unsubscribe" => CallAsync(() => async.Unsubscribe()),
+            "poll" => CallAsync(() => async.Poll(TimeSpan.Zero)),
+            _ => CallAsync(() => async.Close(CloseOptions.Timeout(TimeSpan.Zero))),
+        };
+    }
+
+    private static string OutsideGroupMetadata(string vehicle)
+    {
+        bool mock = vehicle.Contains("Mock");
+        bool async = vehicle.StartsWith("Async", StringComparison.Ordinal);
+        IConsumerCommon consumer = (mock, async) switch
+        {
+            (true, false) => NewMock(),
+            (true, true) => NewAsyncMock(),
+            (false, false) => NewKafkaConsumer(),
+            _ => NewAsyncKafkaConsumer(),
+        };
+        using (TestTimeout.Disposal((IDisposable)consumer))
+        {
+            return Format(consumer.GroupMetadata());
+        }
+    }
+
+    // What the consumer's own wakeup leaves when the call it woke ended first: the wakeup armed in the core, marked as
+    // the consumer's own.
+    private static void LeaveTheConsumersOwnWakeup(object consumer)
+    {
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+        NativeConsumer native = (NativeConsumer)consumer.GetType().GetField("_native", Private)!.GetValue(consumer)!;
+        typeof(NativeConsumer).GetField("_ownWakeLeft", Private)!.SetValue(native, true);
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerWakeup(native.Handle, ref outErr);
+        Assert.Equal(IntPtr.Zero, outErr);
+    }
+
+    private static void WakeableSync(IConsumer<byte[], byte[]> consumer, string call)
+    {
+        switch (call)
+        {
+            case "committed":
+                _ = consumer.Committed(s_partitions);
+                break;
+            case "committed_timed":
+                _ = consumer.Committed(s_partitions, s_wakeableTimeout);
+                break;
+            case "position":
+                _ = consumer.Position(s_tp0);
+                break;
+            case "position_timed":
+                _ = consumer.Position(s_tp0, s_wakeableTimeout);
+                break;
+            case "commit":
+                consumer.Commit(Offsets(1));
+                break;
+            case "commit_timed":
+                consumer.Commit(Offsets(1), s_wakeableTimeout);
+                break;
+            case "commit_consumed":
+                consumer.Seek(s_tp0, 1);
+                consumer.Commit();
+                break;
+            case "commit_consumed_timed":
+                consumer.Seek(s_tp0, 1);
+                consumer.Commit(s_wakeableTimeout);
+                break;
+            case "partitions_for":
+                _ = consumer.PartitionsFor("other");
+                break;
+            case "partitions_for_timed":
+                _ = consumer.PartitionsFor("other", s_wakeableTimeout);
+                break;
+            case "list_topics":
+                _ = consumer.ListTopics();
+                break;
+            default:
+                _ = consumer.ListTopics(s_wakeableTimeout);
+                break;
+        }
+    }
+
     private static List<string> Expected(bool mock, bool async)
     {
         string fails = async ? "faults " : "throws ";
@@ -520,23 +840,52 @@ public sealed class PublicConsumerCallbackRoutingTests
             "Subscribe(listener): " + refused,
             "Unsubscribe: " + refused,
             "Assign: " + refused,
-            "Commit(timeout): " + refused,
-            "Commit(negative timeout): " + refused,
-            "Commit(offsets, timeout): " + refused,
-            "Committed(timeout): " + refused,
-            "BeginningOffsets(timeout): " + refused,
-            "EndOffsets(timeout): " + refused,
-            "OffsetsForTimes(timeout): " + refused,
-            "PartitionsFor: " + refused,
-            "PartitionsFor(timeout): " + refused,
-            "ListTopics: " + refused,
-            "ListTopics(timeout): " + refused,
+            "Commit(timeout): ok",
+            "Commit(negative timeout): throws ArgumentOutOfRangeException(timeout): Invalid negative timeout -1",
+            "Commit(offsets, timeout): ok",
+            "Committed(timeout): " + (mock ? unsupported : fails + TimedOut + ShortCommittedTimeout),
+            "BeginningOffsets(timeout): " + (mock ? unsupported : fails + TimedOut + ShortOffsetsTimeout),
+            "EndOffsets(timeout): " + (mock ? unsupported : fails + TimedOut + ShortOffsetsTimeout),
+            "OffsetsForTimes(timeout): " + (mock ? unsupported : fails + TimedOut + ShortOffsetsTimeout),
+            "PartitionsFor: " + (mock ? unsupported : fails + TimedOut + TopicMetadataExpired),
+            "PartitionsFor(timeout): " + (mock ? unsupported : fails + TimedOut + TopicMetadataExpired),
+            "ListTopics: " + (mock ? unsupported : fails + TimedOut + AllTopicsMetadataExpired),
+            "ListTopics(timeout): " + (mock ? unsupported : fails + TimedOut + AllTopicsMetadataExpired),
             "Subscription: " + refused,
-            "GroupMetadata: " + refused,
+            "GroupMetadata: ok " + (mock ? "dummy.group.id" : "callback-routing-group"),
             "EnforceRebalance: " + refused,
             "Metrics: ok a map",
         };
         return expected;
+    }
+
+    // A timed-out call may end with the core reaper's message instead of its own, and a metadata lookup with either of
+    // its two own messages.
+    private static void AssertOutcomes(IReadOnlyList<string> expected, IReadOnlyList<string> actual)
+    {
+        Assert.Equal(expected.Count, actual.Count);
+        for (int i = 0; i < expected.Count; i++)
+        {
+            int at = expected[i].IndexOf(TimedOut, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                Assert.Equal(expected[i], actual[i]);
+                continue;
+            }
+
+            int start = at + TimedOut.Length;
+            Assert.Equal(expected[i].Substring(0, start), actual[i].Substring(0, Math.Min(start, actual[i].Length)));
+            AssertTimedOutMessage(expected[i].Substring(start), actual[i].Substring(start));
+        }
+    }
+
+    private static void AssertTimedOutMessage(string own, string actual)
+    {
+        string[] messages = own.Split('|');
+        if (Array.IndexOf(messages, actual) < 0)
+        {
+            TimedOutMessage.AssertCallerOrReaper(messages[0], actual);
+        }
     }
 
     private static List<string> Probe(object consumer, bool mock) => consumer is IConsumer<byte[], byte[]> sync
@@ -576,14 +925,14 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Commit(timeout)", Call(() => consumer.Commit(s_second)));
         Add("Commit(negative timeout)", Call(() => consumer.Commit(s_negative)));
         Add("Commit(offsets, timeout)", Call(() => consumer.Commit(Empty(), s_second)));
-        Add("Committed(timeout)", Call(() => Format(consumer.Committed(s_partitions, s_second))));
-        Add("BeginningOffsets(timeout)", Call(() => Format(consumer.BeginningOffsets(s_partitions, s_second))));
-        Add("EndOffsets(timeout)", Call(() => Format(consumer.EndOffsets(s_partitions, s_second))));
-        Add("OffsetsForTimes(timeout)", Call(() => Format(consumer.OffsetsForTimes(Timestamps(), s_second))));
+        Add("Committed(timeout)", Call(() => Format(consumer.Committed(s_partitions, s_short))));
+        Add("BeginningOffsets(timeout)", Call(() => Format(consumer.BeginningOffsets(s_partitions, s_short))));
+        Add("EndOffsets(timeout)", Call(() => Format(consumer.EndOffsets(s_partitions, s_short))));
+        Add("OffsetsForTimes(timeout)", Call(() => Format(consumer.OffsetsForTimes(Timestamps(), s_short))));
         Add("PartitionsFor", Call(() => consumer.PartitionsFor(Topic)));
-        Add("PartitionsFor(timeout)", Call(() => consumer.PartitionsFor(Topic, s_second)));
+        Add("PartitionsFor(timeout)", Call(() => consumer.PartitionsFor(Topic, s_short)));
         Add("ListTopics", Call(() => consumer.ListTopics()));
-        Add("ListTopics(timeout)", Call(() => consumer.ListTopics(s_second)));
+        Add("ListTopics(timeout)", Call(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
         Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
@@ -624,14 +973,14 @@ public sealed class PublicConsumerCallbackRoutingTests
         Add("Commit(timeout)", CallAsync(() => consumer.Commit(s_second)));
         Add("Commit(negative timeout)", CallAsync(() => consumer.Commit(s_negative)));
         Add("Commit(offsets, timeout)", CallAsync(() => consumer.Commit(Empty(), s_second)));
-        Add("Committed(timeout)", CallAsync(() => consumer.Committed(s_partitions, s_second), Format));
-        Add("BeginningOffsets(timeout)", CallAsync(() => consumer.BeginningOffsets(s_partitions, s_second), Format));
-        Add("EndOffsets(timeout)", CallAsync(() => consumer.EndOffsets(s_partitions, s_second), Format));
-        Add("OffsetsForTimes(timeout)", CallAsync(() => consumer.OffsetsForTimes(Timestamps(), s_second), Format));
+        Add("Committed(timeout)", CallAsync(() => consumer.Committed(s_partitions, s_short), Format));
+        Add("BeginningOffsets(timeout)", CallAsync(() => consumer.BeginningOffsets(s_partitions, s_short), Format));
+        Add("EndOffsets(timeout)", CallAsync(() => consumer.EndOffsets(s_partitions, s_short), Format));
+        Add("OffsetsForTimes(timeout)", CallAsync(() => consumer.OffsetsForTimes(Timestamps(), s_short), Format));
         Add("PartitionsFor", CallAsync(() => consumer.PartitionsFor(Topic)));
-        Add("PartitionsFor(timeout)", CallAsync(() => consumer.PartitionsFor(Topic, s_second)));
+        Add("PartitionsFor(timeout)", CallAsync(() => consumer.PartitionsFor(Topic, s_short)));
         Add("ListTopics", CallAsync(() => consumer.ListTopics()));
-        Add("ListTopics(timeout)", CallAsync(() => consumer.ListTopics(s_second)));
+        Add("ListTopics(timeout)", CallAsync(() => consumer.ListTopics(s_short)));
         Add("Subscription", Call(() => Format(consumer.Subscription())));
         Add("GroupMetadata", Call(() => consumer.GroupMetadata().GroupId));
         Add("EnforceRebalance", Call(() => consumer.EnforceRebalance()));
@@ -649,23 +998,61 @@ public sealed class PublicConsumerCallbackRoutingTests
         {
             case "committed":
                 return consumer.Committed(s_partitions);
+            case "committed_timed":
+                return consumer.Committed(s_partitions, s_wakeableTimeout);
             case "position":
                 return consumer.Position(s_tp0);
+            case "position_timed":
+                return consumer.Position(s_tp0, s_wakeableTimeout);
             case "commit":
-                return consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(1) });
+                return consumer.Commit(Offsets(1));
+            case "commit_timed":
+                return consumer.Commit(Offsets(1), s_wakeableTimeout);
+            case "partitions_for":
+                return consumer.PartitionsFor("other");
+            case "partitions_for_timed":
+                return consumer.PartitionsFor("other", s_wakeableTimeout);
+            case "list_topics":
+                return consumer.ListTopics();
+            case "list_topics_timed":
+                return consumer.ListTopics(s_wakeableTimeout);
             default:
                 Task seek = consumer.Seek(s_tp0, 1);
-                return seek.IsCompleted && seek.Status == TaskStatus.RanToCompletion ? consumer.Commit() : seek;
+                if (!seek.IsCompleted || seek.Status != TaskStatus.RanToCompletion)
+                {
+                    return seek;
+                }
+
+                return call == "commit_consumed_timed" ? consumer.Commit(s_wakeableTimeout) : consumer.Commit();
         }
     }
 
-    private static string WakeableTimeout(string call) =>
-        call switch
+    private static string WakeableTimeout(string call)
+    {
+        bool timed = call.EndsWith("_timed", StringComparison.Ordinal);
+        string ms = timed ? "300ms" : "500ms";
+        if (call.StartsWith("committed", StringComparison.Ordinal))
         {
-            "committed" => CommittedTimeout,
-            "position" => "Timeout of 500ms expired before the position for partition " + Topic + "-0 could be determined",
-            _ => "Timeout of 500ms expired before successfully committing offsets",
-        };
+            return timed ? CommittedTimeout.Replace("500ms", ms) : CommittedTimeout;
+        }
+
+        if (call.StartsWith("position", StringComparison.Ordinal))
+        {
+            return "Timeout of " + ms + " expired before the position for partition " + Topic + "-0 could be determined";
+        }
+
+        if (call.StartsWith("partitions_for", StringComparison.Ordinal))
+        {
+            return TopicMetadataExpired;
+        }
+
+        if (call.StartsWith("list_topics", StringComparison.Ordinal))
+        {
+            return AllTopicsMetadataExpired;
+        }
+
+        return "Timeout of " + ms + " expired before successfully committing offsets";
+    }
 
     private static async Task<IReadOnlyList<string>> RunInside(string vehicle, Func<object, bool, IReadOnlyList<string>> probe)
     {
@@ -901,6 +1288,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     private static string Format(long? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "null";
 
     private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private static string Format(ConsumerGroupMetadata metadata) =>
+        metadata.GroupId + "/" + metadata.GenerationId.ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId
+        + "/" + (metadata.GroupInstanceId ?? "null");
 
     private static string Format<TValue>(IReadOnlyDictionary<TopicPartition, TValue> values) =>
         "{" + string.Join(",", values.Select(entry => entry.Key.Topic + "-" + entry.Key.Partition.ToString(CultureInfo.InvariantCulture)

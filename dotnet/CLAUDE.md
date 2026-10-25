@@ -900,9 +900,10 @@ Four consequences worth stating with it:
   `3f8a5bc6`). No `Poll` / `Subscribe` / `Unsubscribe` / `Assign` / `Close` /
   `EnforceRebalance` / `Subscription` / `Metrics`: the core's handle has none
   (`rust/src/consumer/internals/async_kafka_consumer.rs:196-209` at `3f8a5bc6`). No other timed
-  form, `PartitionsFor`, `ListTopics` or `GroupMetadata` (ledger 104), as Python refuses those
-  timed forms, `partitions_for` and `list_topics` inside a callback
-  (`python/confluent_kafka/consumer/_base.py:1532-1537` at `3f8a5bc6`).
+  form, `PartitionsFor`, `ListTopics` or `GroupMetadata` (ledger 104): Python has no public
+  handle, and inside a callback the consumer routes those calls to the core handle's own forms
+  (ledger 163), as Python's `_reentrant` does
+  (`python/confluent_kafka/consumer/_base.py:1823-1923` at `dd826c17`).
 - **On a `KafkaConsumer`, its operations other than `Wakeup`, `Assignment` and `Paused` work
   only inside a callback the consumer is running** (a listener method or an `OnComplete`).
   Elsewhere they throw `InvalidOperationException` (the core's -2) with the core's message,

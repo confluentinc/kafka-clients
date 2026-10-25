@@ -396,21 +396,23 @@ public sealed class PublicSyncConsumerQueryTests
     }
 
     [Fact]
-    public void Committed_NullCollection_ThrownBeforeNativeCall_EvenWhenClosed()
+    public void Committed_NullCollection_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ArgumentNullException>(() => consumer.Committed(null!));
+        Assert.Throws<ObjectDisposedException>(() => consumer.Committed(null!));
+        Assert.Throws<ObjectDisposedException>(() => consumer.Committed(null!, TimeSpan.FromSeconds(-1)));
     }
 
     [Fact]
-    public void PartitionsFor_NullTopic_ThrownBeforeNativeCall_EvenWhenClosed()
+    public void PartitionsFor_NullTopic_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<ArgumentNullException>(() => consumer.PartitionsFor(null!));
+        Assert.Throws<ObjectDisposedException>(() => consumer.PartitionsFor(null!));
+        Assert.Throws<ObjectDisposedException>(() => consumer.PartitionsFor(null!, TimeSpan.Zero));
     }
 
     [Fact]

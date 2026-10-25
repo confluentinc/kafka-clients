@@ -231,13 +231,13 @@ internal sealed partial class NativeConsumer
     internal Task AssignWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
-        RunPartitions(partitions, NativeMethods.ConsumerAssignCb, AsyncOperation.Assign, cancellationToken);
+        RunPartitions(SnapshotPartitions(partitions), NativeMethods.ConsumerAssignCb, AsyncOperation.Assign, cancellationToken);
 
     internal Task PauseWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            partitions,
+            CheckInAUse(() => SnapshotPartitions(partitions)),
             NativeMethods.ConsumerPauseCb,
             AsyncOperation.Pause,
             cancellationToken,
@@ -247,7 +247,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            partitions,
+            CheckInAUse(() => SnapshotPartitions(partitions)),
             NativeMethods.ConsumerResumeCb,
             AsyncOperation.Resume,
             cancellationToken,
@@ -257,7 +257,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            partitions,
+            CheckWhenOpen(() => SnapshotPartitions(partitions)),
             NativeMethods.ConsumerSeekToBeginningCb,
             AsyncOperation.SeekToBeginning,
             cancellationToken,
@@ -267,7 +267,7 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default) =>
         RunPartitions(
-            partitions,
+            CheckWhenOpen(() => SnapshotPartitions(partitions)),
             NativeMethods.ConsumerSeekToEndCb,
             AsyncOperation.SeekToEnd,
             cancellationToken,
@@ -275,8 +275,7 @@ internal sealed partial class NativeConsumer
 
     internal Task SeekWithCallback(TopicPartition partition, long offset, CancellationToken cancellationToken = default)
     {
-        RequireTopicPartition(partition.Topic, partition.Partition);
-        RequireSeekOffset(offset);
+        CheckSeekArguments(partition.Topic, partition.Partition, offset);
         if (RoutesToTheHandle)
         {
             return RouteAsync(cancellationToken, handle => handle.Seek(partition.Topic, partition.Partition, offset));
@@ -299,12 +298,7 @@ internal sealed partial class NativeConsumer
         OffsetAndMetadata offsetAndMetadata,
         CancellationToken cancellationToken = default)
     {
-        RequireTopicPartition(partition.Topic, partition.Partition);
-        if (offsetAndMetadata is null)
-        {
-            throw new ArgumentNullException(nameof(offsetAndMetadata));
-        }
-
+        CheckSeekArguments(partition.Topic, partition.Partition, offsetAndMetadata);
         if (RoutesToTheHandle)
         {
             return RouteAsync(
@@ -327,7 +321,7 @@ internal sealed partial class NativeConsumer
 
     internal Task<long?> CurrentLagWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
     {
-        RequireTopicPartition(partition.Topic, partition.Partition);
+        CheckInAUse(() => RequireTopicPartition(partition.Topic, partition.Partition), UseKind.UnownedOnMock);
         if (RoutesToTheHandle)
         {
             return RouteAsync(cancellationToken, handle => handle.CurrentLag(partition.Topic, partition.Partition));
@@ -358,10 +352,7 @@ internal sealed partial class NativeConsumer
 
     internal Task CommitAsyncWithCallback(IOffsetCommitCallback callback, CancellationToken cancellationToken = default)
     {
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
-        }
+        CheckInAUse(() => RequireCallback(callback));
 
         if (RoutesToTheHandle)
         {
@@ -376,7 +367,7 @@ internal sealed partial class NativeConsumer
         IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
             return RouteAsync(cancellationToken, handle => handle.CommitAsync(snapshot, callback));
@@ -390,10 +381,7 @@ internal sealed partial class NativeConsumer
 
     internal Task CommitAsyncWithCallback(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default)
     {
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
-        }
+        CheckInAUse(() => RequireCallback(callback));
 
         if (RoutesToTheHandle)
         {
@@ -408,11 +396,8 @@ internal sealed partial class NativeConsumer
         IAsyncOffsetCommitCallback callback,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
-        }
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        CheckInAUse(() => RequireCallback(callback));
 
         if (RoutesToTheHandle)
         {
@@ -495,27 +480,23 @@ internal sealed partial class NativeConsumer
 
     internal Task<long> PositionWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
     {
-        RequirePositionPartition(partition);
+        CheckInAUse(() => RequirePositionPartition(partition));
         return SubmitPosition(partition, timeoutMs: null, cancellationToken);
     }
 
     internal Task<long> PositionWithCallback(
         TopicPartition partition,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
-    {
-        RequirePositionPartition(partition);
-        ThrowIfClosed();
-        return SubmitPosition(partition, TimerTimeoutMs(timeout), cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        SubmitPosition(partition, PositionTimeoutMs(partition, timeout), cancellationToken);
 
     internal Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> CommittedWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         CancellationToken cancellationToken = default)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = CheckInAUse(() => CommittedPartitions(partitions));
         return RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.Committed(snapshot))
+            ? RouteAsync(cancellationToken, handle => handle.Committed(snapshot, timeoutMs: null))
             : SubmitCommitted(snapshot, timeoutMs: null, cancellationToken);
     }
 
@@ -524,19 +505,19 @@ internal sealed partial class NativeConsumer
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitCommitted(snapshot, TimeoutMs(timeout), cancellationToken);
+        ((string Topic, int Partition)[] snapshot, long timeoutMs) = CommittedArguments(partitions, timeout);
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.Committed(snapshot, timeoutMs))
+            : SubmitCommitted(snapshot, timeoutMs, cancellationToken);
     }
 
     internal Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimesWithCallback(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
         CancellationToken cancellationToken = default)
     {
-        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
+        TimestampsSnapshot snapshot = CheckInAUse(() => SnapshotTimestamps(timestampsToSearch));
         return RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.OffsetsForTimes(snapshot))
+            ? RouteAsync(cancellationToken, handle => handle.OffsetsForTimes(snapshot, timeoutMs: null))
             : SubmitOffsetsForTimes(snapshot, timeoutMs: null, cancellationToken);
     }
 
@@ -545,73 +526,55 @@ internal sealed partial class NativeConsumer
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitOffsetsForTimes(snapshot, TimeoutMs(timeout), cancellationToken);
+        (TimestampsSnapshot snapshot, long timeoutMs) =
+            CheckInAUse(() => (SnapshotTimestamps(timestampsToSearch), TimeoutMs(timeout)));
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.OffsetsForTimes(snapshot, timeoutMs))
+            : SubmitOffsetsForTimes(snapshot, timeoutMs, cancellationToken);
     }
 
     internal Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsetsWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
-        CancellationToken cancellationToken = default)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        return RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.BeginningOffsets(snapshot))
-            : ListOffsets(snapshot, timeoutMs: null, beginning: true, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        LookUpOffsetsWithCallback(partitions, timeout: null, beginning: true, cancellationToken);
 
     internal Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsetsWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return ListOffsets(snapshot, TimeoutMs(timeout), beginning: true, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        LookUpOffsetsWithCallback(partitions, timeout, beginning: true, cancellationToken);
 
     internal Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsetsWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
-        CancellationToken cancellationToken = default)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        return RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.EndOffsets(snapshot))
-            : ListOffsets(snapshot, timeoutMs: null, beginning: false, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        LookUpOffsetsWithCallback(partitions, timeout: null, beginning: false, cancellationToken);
 
     internal Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsetsWithCallback(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return ListOffsets(snapshot, TimeoutMs(timeout), beginning: false, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        LookUpOffsetsWithCallback(partitions, timeout, beginning: false, cancellationToken);
 
     internal Task CommitWithCallback(CancellationToken cancellationToken = default) =>
         RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.CommitSync())
+            ? RouteAsync(cancellationToken, handle => handle.CommitSync(timeoutMs: null))
             : SubmitCommit(timeoutMs: null, cancellationToken);
 
     internal Task CommitWithCallback(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitCommit(TimerTimeoutMs(timeout), cancellationToken);
+        long timeoutMs = CommitTimeoutMs(timeout);
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.CommitSync(timeoutMs))
+            : SubmitCommit(timeoutMs, cancellationToken);
     }
 
     internal Task CommitWithCallback(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         return RoutesToTheHandle
-            ? RouteAsync(cancellationToken, handle => handle.CommitSync(snapshot))
+            ? RouteAsync(cancellationToken, handle => handle.CommitSync(snapshot, timeoutMs: null))
             : SubmitCommitOffsets(snapshot, timeoutMs: null, cancellationToken);
     }
 
@@ -620,23 +583,21 @@ internal sealed partial class NativeConsumer
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitCommitOffsets(snapshot, TimerTimeoutMs(timeout), cancellationToken);
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        long timeoutMs = CommitTimeoutMs(timeout);
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.CommitSync(snapshot, timeoutMs))
+            : SubmitCommitOffsets(snapshot, timeoutMs, cancellationToken);
     }
 
     internal Task<IReadOnlyList<PartitionInfo>> PartitionsForWithCallback(
         string topic,
         CancellationToken cancellationToken = default)
     {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        RefuseInsideACallback();
-        return SubmitPartitionsFor(topic, timeoutMs: null, cancellationToken);
+        CheckInAUse(() => RequirePartitionsForTopic(topic, timeoutMs: null));
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.PartitionsFor(topic, timeoutMs: null))
+            : SubmitPartitionsFor(topic, timeoutMs: null, cancellationToken);
     }
 
     internal Task<IReadOnlyList<PartitionInfo>> PartitionsForWithCallback(
@@ -644,30 +605,26 @@ internal sealed partial class NativeConsumer
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitPartitionsFor(topic, TimeoutMs(timeout), cancellationToken);
+        long timeoutMs = PartitionsForTimeoutMs(topic, timeout);
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.PartitionsFor(topic, timeoutMs))
+            : SubmitPartitionsFor(topic, timeoutMs, cancellationToken);
     }
 
     internal Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopicsWithCallback(
-        CancellationToken cancellationToken = default)
-    {
-        RefuseInsideACallback();
-        return SubmitListTopics(timeoutMs: null, cancellationToken);
-    }
+        CancellationToken cancellationToken = default) =>
+        RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.ListTopics(timeoutMs: null))
+            : SubmitListTopics(timeoutMs: null, cancellationToken);
 
     internal Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopicsWithCallback(
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return SubmitListTopics(TimeoutMs(timeout), cancellationToken);
+        long timeoutMs = CheckInAUse(() => TimeoutMs(timeout));
+        return RoutesToTheHandle
+            ? RouteAsync(cancellationToken, handle => handle.ListTopics(timeoutMs))
+            : SubmitListTopics(timeoutMs, cancellationToken);
     }
 
     internal ValueTask CloseWithCallback(CancellationToken cancellationToken = default) =>
@@ -765,13 +722,12 @@ internal sealed partial class NativeConsumer
     private static void FreeError(IntPtr error) => FreeError(ref error);
 
     private Task RunPartitions(
-        IReadOnlyCollection<TopicPartition> partitions,
+        (string Topic, int Partition)[] snapshot,
         NativePartitionsCb call,
         AsyncOperation operation,
         CancellationToken cancellationToken,
         Action<NativeConsumerHandle, (string Topic, int Partition)[]>? routed = null)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
         if (RoutesToTheHandle)
         {
             if (routed is null)
@@ -789,6 +745,24 @@ internal sealed partial class NativeConsumer
                 call(_handle, arguments.TopicPartitionList(snapshot), ConsumerCompletion.Void, opaque)),
             operation,
             cancellationToken);
+    }
+
+    private Task<IReadOnlyDictionary<TopicPartition, long>> LookUpOffsetsWithCallback(
+        IReadOnlyCollection<TopicPartition> partitions,
+        TimeSpan? timeout,
+        bool beginning,
+        CancellationToken cancellationToken)
+    {
+        ((string Topic, int Partition)[] snapshot, long? timeoutMs) =
+            CheckInAUse(() => (SnapshotPartitions(partitions), OptionalTimeoutMs(timeout)));
+        if (RoutesToTheHandle)
+        {
+            return RouteAsync(cancellationToken, handle => beginning
+                ? handle.BeginningOffsets(snapshot, timeoutMs)
+                : handle.EndOffsets(snapshot, timeoutMs));
+        }
+
+        return ListOffsets(snapshot, timeoutMs, beginning, cancellationToken);
     }
 
     private Task<long> SubmitPosition(TopicPartition partition, long? timeoutMs, CancellationToken cancellationToken) =>

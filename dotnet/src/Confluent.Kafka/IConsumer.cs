@@ -126,8 +126,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
     /// <exception cref="KafkaException">The core reported a pause failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -144,8 +143,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="InvalidOperationException">A partition is not assigned to the consumer.</exception>
     /// <exception cref="KafkaException">The core reported a resume failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Resume(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -161,8 +159,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -178,8 +175,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -195,8 +191,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a position failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     long Position(TopicPartition partition);
 
@@ -219,8 +214,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// position failure.
     /// </exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     long Position(TopicPartition partition, TimeSpan timeout);
 
@@ -243,7 +237,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
     /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
-    /// failure.
+    /// failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24
+    /// (<c>INVALID_GROUP_ID</c>) for a negative <paramref name="timeout"/>, before the timeout check.
     /// </exception>
     void Commit(TimeSpan timeout);
 
@@ -274,7 +269,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
     /// The commit did not complete within <paramref name="timeout"/> (code 7), or the core reported another commit
-    /// failure.
+    /// failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24
+    /// (<c>INVALID_GROUP_ID</c>) for a negative <paramref name="timeout"/>, before the timeout check.
     /// </exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout);
 
@@ -339,8 +335,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Seek(TopicPartition partition, long offset);
 
@@ -355,8 +350,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">The partition is not assigned, or another thread is using the consumer.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);
 
@@ -382,10 +376,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core reported a committed-query failure.</exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a committed-query failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without
+    /// <c>group.id</c> reports code 24 (<c>INVALID_GROUP_ID</c>) for a null <paramref name="partitions"/>, before the
+    /// null check.
+    /// </exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -402,6 +399,11 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
     /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
+    /// A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports code 24 (<c>INVALID_GROUP_ID</c>)
+    /// for a negative <paramref name="timeout"/> or a null <paramref name="partitions"/>, before those checks.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
 
@@ -454,8 +456,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a beginning-offsets failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -473,6 +474,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">
     /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
     /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
 
     /// <summary>
@@ -487,8 +491,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an end-offsets failure.</exception>
     /// <exception cref="NotSupportedException">
-    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose
-    /// <see cref="ConsumerHandle"/> does not support it.
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions);
 
@@ -506,6 +509,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">
     /// The query did not complete within <paramref name="timeout"/> (code 7), or the core reported another failure.
     /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout);
 
     /// <summary>
@@ -521,6 +527,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a partitions-for failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
     /// <summary>
@@ -530,12 +539,19 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="topic">The topic whose partition metadata to read.</param>
     /// <param name="timeout">The maximum time to block.</param>
     /// <returns>The partition metadata for the topic.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/> is null, unless the consumer is a <see cref="KafkaConsumer{TKey, TValue}"/> and
+    /// <paramref name="timeout"/> is zero.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
     /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
-    /// failure.
+    /// failure. On a <see cref="KafkaConsumer{TKey, TValue}"/> a null <paramref name="topic"/> with a zero
+    /// <paramref name="timeout"/> times out at once: code 7, with an empty message.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout);
 
@@ -546,6 +562,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The partition metadata for every visible topic, keyed by topic.</returns>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a list-topics failure.</exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics();
 
     /// <summary>
@@ -559,6 +578,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="KafkaException">
     /// The metadata was not available within <paramref name="timeout"/> (code 7), or the core reported another
     /// failure.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
     IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout);
 

@@ -42,6 +42,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const int InvalidGroupIdCode = 24;
 
+    private const int RequestTimedOutCode = 7;
+
     private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
 
     private const string ConcurrentAccessMessage = "KafkaConsumer is not safe for multi-threaded access.";
@@ -248,8 +250,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Seek(string topic, int partition, long offset)
     {
-        RequireTopicPartition(topic, partition);
-        RequireSeekOffset(offset);
+        CheckSeekArguments(topic, partition, offset);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.Seek(topic, partition, offset));
@@ -275,12 +276,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void SeekWithMetadata(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
     {
-        RequireTopicPartition(topic, partition);
-        if (offsetAndMetadata is null)
-        {
-            throw new ArgumentNullException(nameof(offsetAndMetadata));
-        }
-
+        CheckSeekArguments(topic, partition, offsetAndMetadata);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.SeekWithMetadata(topic, partition, offsetAndMetadata));
@@ -302,7 +298,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal long? CurrentLag(string topic, int partition)
     {
-        RequireTopicPartition(topic, partition);
+        CheckInAUse(() => RequireTopicPartition(topic, partition), UseKind.UnownedOnMock);
         if (RoutesToTheHandle)
         {
             return Route(handle => handle.CurrentLag(topic, partition));
@@ -337,11 +333,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitAsync(IOffsetCommitCallback callback)
     {
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
-        }
-
+        CheckInAUse(() => RequireCallback(callback));
         if (RoutesToTheHandle)
         {
             Route(handle => handle.CommitAsync(callback));
@@ -360,7 +352,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IOffsetCommitCallback? callback)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.CommitAsync(snapshot, callback));
@@ -681,40 +673,42 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            SnapshotPartitions(partitions), NativeMethods.ConsumerPause, (handle, snapshot) => handle.Pause(snapshot));
+            CheckInAUse(() => SnapshotPartitions(partitions)),
+            NativeMethods.ConsumerPause,
+            (handle, snapshot) => handle.Pause(snapshot));
 
     internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            SnapshotPartitions(partitions), NativeMethods.ConsumerResume, (handle, snapshot) => handle.Resume(snapshot));
+            CheckInAUse(() => SnapshotPartitions(partitions)),
+            NativeMethods.ConsumerResume,
+            (handle, snapshot) => handle.Resume(snapshot));
 
     internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            SnapshotPartitions(partitions),
+            CheckWhenOpen(() => SnapshotPartitions(partitions)),
             NativeMethods.ConsumerSeekToBeginning,
             (handle, snapshot) => handle.SeekToBeginning(snapshot));
 
     internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            SnapshotPartitions(partitions), NativeMethods.ConsumerSeekToEnd, (handle, snapshot) => handle.SeekToEnd(snapshot));
+            CheckWhenOpen(() => SnapshotPartitions(partitions)),
+            NativeMethods.ConsumerSeekToEnd,
+            (handle, snapshot) => handle.SeekToEnd(snapshot));
 
     internal long Position(TopicPartition partition)
     {
-        RequirePositionPartition(partition);
+        CheckInAUse(() => RequirePositionPartition(partition));
         return Position(partition, timeoutMs: null);
     }
 
-    internal long Position(TopicPartition partition, TimeSpan timeout)
-    {
-        RequirePositionPartition(partition);
-        ThrowIfClosed();
-        return Position(partition, TimerTimeoutMs(timeout));
-    }
+    internal long Position(TopicPartition partition, TimeSpan timeout) =>
+        Position(partition, PositionTimeoutMs(partition, timeout));
 
     internal void CommitSync()
     {
         if (RoutesToTheHandle)
         {
-            Route(handle => handle.CommitSync());
+            Route(handle => handle.CommitSync(timeoutMs: null));
             return;
         }
 
@@ -723,17 +717,22 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitSync(TimeSpan timeout)
     {
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        CommitSync(TimerTimeoutMs(timeout));
+        long timeoutMs = CommitTimeoutMs(timeout);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(timeoutMs));
+            return;
+        }
+
+        CommitSync(timeoutMs);
     }
 
     internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
         if (RoutesToTheHandle)
         {
-            Route(handle => handle.CommitSync(snapshot));
+            Route(handle => handle.CommitSync(snapshot, timeoutMs: null));
             return;
         }
 
@@ -742,119 +741,280 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
     {
-        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        CommitSyncOffsets(snapshot, TimerTimeoutMs(timeout));
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        long timeoutMs = CommitTimeoutMs(timeout);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(snapshot, timeoutMs));
+            return;
+        }
+
+        CommitSyncOffsets(snapshot, timeoutMs);
     }
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
         IReadOnlyCollection<TopicPartition> partitions)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        (string Topic, int Partition)[] snapshot = CheckInAUse(() => CommittedPartitions(partitions));
         return RoutesToTheHandle
-            ? Route(handle => handle.Committed(snapshot))
+            ? Route(handle => handle.Committed(snapshot, timeoutMs: null))
             : Committed(snapshot, timeoutMs: null);
     }
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return Committed(snapshot, TimeoutMs(timeout));
+        ((string Topic, int Partition)[] snapshot, long timeoutMs) = CommittedArguments(partitions, timeout);
+        return RoutesToTheHandle
+            ? Route(handle => handle.Committed(snapshot, timeoutMs))
+            : Committed(snapshot, timeoutMs);
     }
 
     internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
-        IReadOnlyCollection<TopicPartition> partitions)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        return RoutesToTheHandle
-            ? Route(handle => handle.BeginningOffsets(snapshot))
-            : ListOffsets(snapshot, timeoutMs: null, beginning: true);
-    }
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        LookUpOffsets(partitions, timeout: null, beginning: true);
 
     internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
-        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return ListOffsets(snapshot, TimeoutMs(timeout), beginning: true);
-    }
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        LookUpOffsets(partitions, timeout, beginning: true);
 
     internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
-        IReadOnlyCollection<TopicPartition> partitions)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        return RoutesToTheHandle
-            ? Route(handle => handle.EndOffsets(snapshot))
-            : ListOffsets(snapshot, timeoutMs: null, beginning: false);
-    }
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        LookUpOffsets(partitions, timeout: null, beginning: false);
 
     internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
-        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
-    {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return ListOffsets(snapshot, TimeoutMs(timeout), beginning: false);
-    }
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        LookUpOffsets(partitions, timeout, beginning: false);
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
     {
-        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
+        TimestampsSnapshot snapshot = CheckInAUse(() => SnapshotTimestamps(timestampsToSearch));
         return RoutesToTheHandle
-            ? Route(handle => handle.OffsetsForTimes(snapshot))
+            ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs: null))
             : OffsetsForTimes(snapshot, timeoutMs: null);
     }
 
     internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout)
     {
-        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return OffsetsForTimes(snapshot, TimeoutMs(timeout));
+        (TimestampsSnapshot snapshot, long timeoutMs) =
+            CheckInAUse(() => (SnapshotTimestamps(timestampsToSearch), TimeoutMs(timeout)));
+        return RoutesToTheHandle
+            ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs))
+            : OffsetsForTimes(snapshot, timeoutMs);
     }
 
     internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic)
     {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        RefuseInsideACallback();
-        return PartitionsFor(topic, timeoutMs: null);
+        CheckInAUse(() => RequirePartitionsForTopic(topic, timeoutMs: null));
+        return RoutesToTheHandle
+            ? Route(handle => handle.PartitionsFor(topic, timeoutMs: null))
+            : PartitionsFor(topic, timeoutMs: null);
     }
 
     internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout)
     {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return PartitionsFor(topic, TimeoutMs(timeout));
+        long timeoutMs = PartitionsForTimeoutMs(topic, timeout);
+        return RoutesToTheHandle
+            ? Route(handle => handle.PartitionsFor(topic, timeoutMs))
+            : PartitionsFor(topic, timeoutMs);
     }
 
-    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics()
-    {
-        RefuseInsideACallback();
-        return ListTopics(timeoutMs: null);
-    }
+    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() =>
+        RoutesToTheHandle
+            ? Route(handle => handle.ListTopics(timeoutMs: null))
+            : ListTopics(timeoutMs: null);
 
     internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout)
     {
-        RefuseInsideACallback();
-        ThrowIfClosed();
-        return ListTopics(TimeoutMs(timeout));
+        long timeoutMs = CheckInAUse(() => TimeoutMs(timeout));
+        return RoutesToTheHandle
+            ? Route(handle => handle.ListTopics(timeoutMs))
+            : ListTopics(timeoutMs);
     }
+
+    private IReadOnlyDictionary<TopicPartition, long> LookUpOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout, bool beginning)
+    {
+        ((string Topic, int Partition)[] snapshot, long? timeoutMs) =
+            CheckInAUse(() => (SnapshotPartitions(partitions), OptionalTimeoutMs(timeout)));
+        if (RoutesToTheHandle)
+        {
+            return Route(handle => beginning
+                ? handle.BeginningOffsets(snapshot, timeoutMs)
+                : handle.EndOffsets(snapshot, timeoutMs));
+        }
+
+        return ListOffsets(snapshot, timeoutMs, beginning);
+    }
+
+    // A call checks its arguments in Python's order: closed and owner first, inside one use, then the arguments.
+    private void CheckInAUse(Action checks, UseKind kind = UseKind.Owned)
+    {
+        int owner = EnterUse(kind);
+        try
+        {
+            checks();
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private T CheckInAUse<T>(Func<T> checks)
+    {
+        int owner = EnterUse();
+        try
+        {
+            return checks();
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private long PositionTimeoutMs(TopicPartition partition, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            RequirePositionPartition(partition);
+            return TimerTimeoutMs(timeout);
+        });
+
+    private long CommitTimeoutMs(TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            ThrowIfNoGroupIdBefore(timeout);
+            return TimerTimeoutMs(timeout);
+        });
+
+    private ((string Topic, int Partition)[] Snapshot, long TimeoutMs) CommittedArguments(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            ThrowIfNoGroupIdBefore(timeout);
+            long timeoutMs = TimeoutMs(timeout);
+            return (CommittedPartitions(partitions), timeoutMs);
+        });
+
+    private long PartitionsForTimeoutMs(string topic, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            long timeoutMs = TimeoutMs(timeout);
+            RequirePartitionsForTopic(topic, timeoutMs);
+            return timeoutMs;
+        });
+
+    private CommitOffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        CheckWhenOpen(() => SnapshotCommitOffsets(offsets));
+
+    // Java checks these before acquire(), so on a KafkaConsumer they come after the closed check and before the owner
+    // check, as in Python; on the mocks they come inside the use, after the owner wait, as Python's mock takes its
+    // lock first.
+    private void CheckWhenOpen(Action checks)
+    {
+        if (IsMock)
+        {
+            CheckInAUse(checks);
+            return;
+        }
+
+        ThrowIfClosed();
+        checks();
+    }
+
+    private T CheckWhenOpen<T>(Func<T> checks)
+    {
+        if (IsMock)
+        {
+            return CheckInAUse(checks);
+        }
+
+        ThrowIfClosed();
+        return checks();
+    }
+
+    // As Python's seek: a negative offset is checked before the owner check only for a null partition, otherwise
+    // after it.
+    private void CheckSeekArguments(string topic, int partition, long offset)
+    {
+        if (topic is null)
+        {
+            CheckWhenOpen(() => RequireSeekOffset(offset));
+        }
+
+        CheckInAUse(() =>
+        {
+            RequireTopicPartition(topic, partition);
+            RequireSeekOffset(offset);
+        });
+    }
+
+    private void CheckSeekArguments(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    {
+        CheckWhenOpen(() =>
+        {
+            if (offsetAndMetadata is null)
+            {
+                throw new ArgumentNullException(nameof(offsetAndMetadata));
+            }
+        });
+        CheckInAUse(() => RequireTopicPartition(topic, partition));
+    }
+
+    private static void RequireCallback(object callback)
+    {
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+    }
+
+    // Java's committed checks the group before it reads the partitions.
+    private (string Topic, int Partition)[] CommittedPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (partitions is null && GroupIdMissing)
+        {
+            throw GroupIdNotDefined();
+        }
+
+        return SnapshotPartitions(partitions!);
+    }
+
+    // Java's partitionsFor finds no partitions for a null topic, so a zero timeout times out at once; Java's mock
+    // answers none, which a null topic cannot reach through the native mock.
+    private void RequirePartitionsForTopic(string topic, long? timeoutMs)
+    {
+        if (topic is not null)
+        {
+            return;
+        }
+
+        if (timeoutMs == 0 && !IsMock)
+        {
+            throw new KafkaException(RequestTimedOutCode, string.Empty, isRetriable: true);
+        }
+
+        throw new ArgumentNullException(nameof(topic));
+    }
+
+    // Java's commitSync and committed check the group before they read the timeout.
+    private void ThrowIfNoGroupIdBefore(TimeSpan timeout)
+    {
+        if (timeout < TimeSpan.Zero && GroupIdMissing)
+        {
+            throw GroupIdNotDefined();
+        }
+    }
+
+    private bool GroupIdMissing => !IsMock && !_groupIdDefined;
+
+    private static KafkaException GroupIdNotDefined() =>
+        new KafkaException(InvalidGroupIdCode, GroupIdNotDefinedMessage, isRetriable: false);
+
+    private static long? OptionalTimeoutMs(TimeSpan? timeout) => timeout is TimeSpan value ? TimeoutMs(value) : null;
 
     private long Position(TopicPartition partition, long? timeoutMs) =>
         RoutesToTheHandle
@@ -1012,8 +1172,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    // Inside a callback a call the consumer's own ConsumerHandle has goes to it, as Python's binding routes it, and a
-    // waiting call it lacks is refused before anything reaches the core.
+    // Inside a callback a call the consumer's own ConsumerHandle has a form of, timed or not, goes to it, as Python's
+    // binding routes it; Poll, Subscribe, Unsubscribe and Assign, which it lacks, are refused before anything reaches
+    // the core.
     private bool RoutesToTheHandle => _reporter.InCallback;
 
     private void Route(Action<NativeConsumerHandle> call)
@@ -1136,7 +1297,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return (long)timeout.TotalMilliseconds;
     }
 
-    private static void RequireTopicPartition(string topic, int partition)
+    private static void RequireTopicPartition(string? topic, int partition)
     {
         if (topic is null)
         {
@@ -1646,15 +1807,19 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal ConsumerGroupMetadata GroupMetadata()
     {
-        ThrowIfClosed();
-        if (!IsMock && !_groupIdDefined)
-        {
-            throw new KafkaException(InvalidGroupIdCode, GroupIdNotDefinedMessage, isRetriable: false);
-        }
-
         int owner = EnterUse(UseKind.UnownedOnMock);
         try
         {
+            if (GroupIdMissing)
+            {
+                throw GroupIdNotDefined();
+            }
+
+            if (RoutesToTheHandle)
+            {
+                return CallbackHandle().GroupMetadata();
+            }
+
             IntPtr outErr = IntPtr.Zero;
             IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);

@@ -44,6 +44,10 @@ public interface IConsumerCommon
     /// <exception cref="InvalidOperationException">
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
+    /// <exception cref="KafkaException">
+    /// A <see cref="KafkaConsumer{TKey, TValue}"/> or <see cref="AsyncKafkaConsumer{TKey, TValue}"/> has no
+    /// <c>group.id</c>: code 24 (<c>INVALID_GROUP_ID</c>) with Java's message, after the closed and concurrency checks.
+    /// </exception>
     ConsumerGroupMetadata GroupMetadata();
 
     /// <summary>
@@ -110,8 +114,9 @@ public interface IConsumerCommon
 
     /// <summary>
     /// Returns a new <see cref="ConsumerHandle"/>, the way into this consumer from inside one of its own callbacks,
-    /// as a Java listener calls the <c>consumer</c> it captured. Inside a callback the consumer's own calls that
-    /// the handle has go to such a handle, so a callback can also call the consumer directly.
+    /// as a Java listener calls the <c>consumer</c> it captured. Inside a callback the consumer routes its own calls
+    /// to a handle of its own, which also has the forms <see cref="ConsumerHandle"/> lacks, so a callback can also
+    /// call the consumer directly.
     /// </summary>
     /// <remarks>
     /// It may be called from any thread, a callback included. The handle holds the consumer weakly: it does not

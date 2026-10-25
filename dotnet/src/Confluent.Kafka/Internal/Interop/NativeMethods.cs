@@ -951,23 +951,64 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_committed", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleCommitted(SafeConsumerReentrancyHandle self, IntPtr partitions, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_committed_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommittedWithTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr partitions, long timeout, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_partitions_for", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePartitionsFor(SafeConsumerReentrancyHandle self, IntPtr topic, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_partitions_for_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePartitionsForWithTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr topic, long timeout, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_list_topics", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleListTopics(SafeConsumerReentrancyHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_list_topics_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleListTopicsWithTimeout(
+        SafeConsumerReentrancyHandle self, long timeout, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleBeginningOffsets(
         SafeConsumerReentrancyHandle self, IntPtr partitions, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleBeginningOffsetsWithTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr partitions, long timeout, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_end_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleEndOffsets(SafeConsumerReentrancyHandle self, IntPtr partitions, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_end_offsets_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleEndOffsetsWithTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr partitions, long timeout, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_offsets_for_times", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerHandleOffsetsForTimes(
         SafeConsumerReentrancyHandle self, IntPtr timestampsToSearch, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleOffsetsForTimesWithTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr timestampsToSearch, long timeout, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerHandleCommitSync(SafeConsumerReentrancyHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync_with_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerHandleCommitSyncWithTimeout(
+        SafeConsumerReentrancyHandle self, long timeout, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync_with_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerHandleCommitSyncWithOffsets(
         SafeConsumerReentrancyHandle self, IntPtr offsets, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerHandleCommitSyncWithOffsetsTimeout(
+        SafeConsumerReentrancyHandle self, IntPtr offsets, long timeout, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_group_metadata_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleGroupMetadata(SafeConsumerReentrancyHandle self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerHandleCommitAsync(SafeConsumerReentrancyHandle self, ref IntPtr outErr);

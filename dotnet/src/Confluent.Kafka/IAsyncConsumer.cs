@@ -39,7 +39,9 @@ namespace Confluent.Kafka;
 /// Rebalance listeners and commit callbacks run on the consumer's drain thread,
 /// <c>confluent-kafka-consumer-pump</c>; listeners run only while <c>Poll</c>, <c>Unsubscribe</c> or
 /// <c>Close</c> runs. What a callback may call on its own consumer is in
-/// <see cref="IConsumerRebalanceListener"/>.
+/// <see cref="IConsumerRebalanceListener"/>. Inside a callback a call routed to the consumer's own handle runs to its
+/// end before its <see cref="Task"/> is returned: its cancellation token is checked only before it starts, and no
+/// <c>wakeup()</c> is sent.
 /// </para>
 /// <para>
 /// A cancellation token never cancels the operation. On <c>Poll</c>, <c>Commit</c>, <c>Position</c>,
@@ -177,6 +179,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -194,6 +200,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -211,6 +221,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -228,6 +242,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -245,6 +263,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -265,6 +287,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<long> Position(TopicPartition partition, TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -294,6 +320,11 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="KafkaException">
+    /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws code 24
+    /// (<c>INVALID_GROUP_ID</c>) at once for a negative <paramref name="timeout"/>, before the timeout check. The
+    /// <see cref="Task"/> faults with code 7 when the commit did not complete within <paramref name="timeout"/>.
+    /// </exception>
     Task Commit(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -332,6 +363,11 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="KafkaException">
+    /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws code 24
+    /// (<c>INVALID_GROUP_ID</c>) at once for a negative <paramref name="timeout"/>, before the timeout check. The
+    /// <see cref="Task"/> faults with code 7 when the commit did not complete within <paramref name="timeout"/>.
+    /// </exception>
     Task Commit(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         TimeSpan timeout,
@@ -462,6 +498,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -478,6 +518,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="offsetAndMetadata"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task Seek(
         TopicPartition partition,
         OffsetAndMetadata offsetAndMetadata,
@@ -514,6 +558,14 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="KafkaException">
+    /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws code 24
+    /// (<c>INVALID_GROUP_ID</c>) at once for a null <paramref name="partitions"/>, before the null check.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
@@ -535,6 +587,16 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="KafkaException">
+    /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws code 24
+    /// (<c>INVALID_GROUP_ID</c>) at once for a negative <paramref name="timeout"/> or a null
+    /// <paramref name="partitions"/>, before those checks. The <see cref="Task"/> faults with code 7 when the query
+    /// did not complete within <paramref name="timeout"/>.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -560,6 +622,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it on an <see cref="AsyncMockConsumer{TKey, TValue}"/>, which does not
+    /// implement it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default);
 
@@ -580,6 +646,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative, or <paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it on an <see cref="AsyncMockConsumer{TKey, TValue}"/>, which does not
+    /// implement it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
         TimeSpan timeout,
@@ -600,6 +670,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
@@ -621,6 +695,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -641,6 +719,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default);
 
@@ -662,6 +744,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -684,6 +770,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -697,10 +787,22 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="OperationCanceledException"/> once the operation has ended.
     /// </param>
     /// <returns>The partition metadata for <paramref name="topic"/>, as an owned list.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/> is null, unless the consumer is an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and
+    /// <paramref name="timeout"/> is zero.
+    /// </exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">
+    /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/> a null <paramref name="topic"/> with a zero
+    /// <paramref name="timeout"/> throws code 7 at once, with an empty message. The <see cref="Task"/> faults with
+    /// code 7 when the metadata was not available within <paramref name="timeout"/>.
+    /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(
         string topic,
         TimeSpan timeout,
@@ -717,6 +819,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The partition metadata per topic, keyed by topic name.</returns>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -732,6 +838,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The <see cref="Task"/> faults with it when called inside a callback of an
+    /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
     Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(
         TimeSpan timeout,
         CancellationToken cancellationToken = default);
