@@ -15,14 +15,14 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// The sync flavour's consumer behind the factory seam: a <see cref="MockConsumer{TKey, TValue}"/>
-/// (auto offset reset <c>earliest</c>, like the gRPC consumer servicer's mock) that applies the
-/// <see cref="ConsumerScript"/>'s queued steps on the loop thread at the start of each poll, and
-/// records the calls the servicer makes. Every call reaches the real mock (DoD §12).
+/// The sync flavour's consumer behind the factory seam: a <see cref="MockConsumer{TKey, TValue}"/> (auto
+/// offset reset <c>earliest</c>, as the consumer servicer's mock) that applies the script's steps on the
+/// loop thread at the start of each poll and records the servicer's calls; every call reaches the real mock.
 /// </summary>
 internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockConsumerOperations
 {
@@ -36,89 +36,72 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         _script = script;
     }
 
-    /// <inheritdoc/>
     public ConsumerRecords<byte[], byte[]> Poll(TimeSpan timeout)
     {
-        _script.ApplyPending(this);
+        _script.ApplyPendingAsync(this).GetAwaiter().GetResult();
         ConsumerRecords<byte[], byte[]> records = _inner.Poll(timeout);
         if (records.Count == 0)
         {
-            // The mock returns at once when it has nothing (rust/src/consumer/mock_consumer.rs
-            // poll never waits); a real consumer waits out the timeout first. Waiting here keeps
-            // an idle workload's loop from spinning, without changing what any poll returns.
+            // The mock returns at once when it has nothing, where a real consumer waits out the
+            // timeout: waiting here keeps an idle loop from spinning, without changing what any
+            // poll returns.
             Thread.Sleep(timeout);
         }
 
         return records;
     }
 
-    /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _inner.Subscribe(topics);
 
-    /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
         _inner.Subscribe(topics, listener);
 
-    /// <inheritdoc/>
     public void Unsubscribe() => _inner.Unsubscribe();
 
-    /// <inheritdoc/>
     public void Assign(IReadOnlyCollection<TopicPartition> partitions) => _inner.Assign(partitions);
 
-    /// <inheritdoc/>
     public void Pause(IReadOnlyCollection<TopicPartition> partitions) => _inner.Pause(partitions);
 
-    /// <inheritdoc/>
     public void Resume(IReadOnlyCollection<TopicPartition> partitions) => _inner.Resume(partitions);
 
-    /// <inheritdoc/>
     public void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) => _inner.SeekToBeginning(partitions);
 
-    /// <inheritdoc/>
     public void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) => _inner.SeekToEnd(partitions);
 
-    /// <inheritdoc/>
     public long Position(TopicPartition partition) => _inner.Position(partition);
 
-    /// <inheritdoc/>
     public long Position(TopicPartition partition, TimeSpan timeout) => _inner.Position(partition, timeout);
 
-    /// <inheritdoc/>
     public void Commit()
     {
         _script.OnCall("Commit");
         _inner.Commit();
     }
 
-    /// <inheritdoc/>
     public void Commit(TimeSpan timeout)
     {
         _script.OnCall("Commit(timeout)");
         _inner.Commit(timeout);
     }
 
-    /// <inheritdoc/>
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         _script.OnCall("Commit(offsets)");
         _inner.Commit(offsets);
     }
 
-    /// <inheritdoc/>
     public void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
     {
         _script.OnCall("Commit(offsets, timeout)");
         _inner.Commit(offsets, timeout);
     }
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(IReadOnlyCollection<TopicPartition> partitions)
     {
         _script.OnCall("Committed");
         return _inner.Committed(partitions);
     }
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
     {
@@ -126,113 +109,85 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         return _inner.Committed(partitions, timeout);
     }
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) => _inner.OffsetsForTimes(timestampsToSearch);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout) =>
         _inner.OffsetsForTimes(timestampsToSearch, timeout);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(IReadOnlyCollection<TopicPartition> partitions) =>
         _inner.BeginningOffsets(partitions);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _inner.BeginningOffsets(partitions, timeout);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> EndOffsets(IReadOnlyCollection<TopicPartition> partitions) =>
         _inner.EndOffsets(partitions);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<TopicPartition, long> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) => _inner.EndOffsets(partitions, timeout);
 
-    /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _inner.PartitionsFor(topic);
 
-    /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout) =>
         _inner.PartitionsFor(topic, timeout);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() => _inner.ListTopics();
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout) =>
         _inner.ListTopics(timeout);
 
-    /// <inheritdoc/>
     public void Close()
     {
         _script.OnCall("Close");
-        _script.HandleUsableAtClose = IsHandleUsable();
         _inner.Close();
     }
 
-    /// <inheritdoc/>
     public void Close(CloseOptions option)
     {
         _script.OnCall("Close(option)");
-        _script.HandleUsableAtClose = IsHandleUsable();
         _inner.Close(option);
     }
 
-    /// <inheritdoc/>
     public void Wakeup() => _inner.Wakeup();
 
-    /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Assignment() => _inner.Assignment();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<string> Subscription() => _inner.Subscription();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Paused() => _inner.Paused();
 
-    /// <inheritdoc/>
     public void EnforceRebalance(string? reason = null) => _inner.EnforceRebalance(reason);
 
-    /// <inheritdoc/>
     public void CommitAsync()
     {
         _script.OnCall("CommitAsync");
         _inner.CommitAsync();
     }
 
-    /// <inheritdoc/>
     public void CommitAsync(IOffsetCommitCallback callback)
     {
         _script.OnCall("CommitAsync");
         _inner.CommitAsync(callback);
     }
 
-    /// <inheritdoc/>
     public void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IOffsetCommitCallback? callback = null)
     {
         _script.OnCall("CommitAsync(offsets)");
         _inner.CommitAsync(offsets, callback);
     }
 
-    /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) => _inner.Seek(partition, offset);
 
-    /// <inheritdoc/>
     public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) => _inner.Seek(partition, offsetAndMetadata);
 
-    /// <inheritdoc/>
     public long? CurrentLag(TopicPartition partition) => _inner.CurrentLag(partition);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
-    /// <inheritdoc/>
     public ConsumerHandle Handle()
     {
         ConsumerHandle handle = _inner.Handle();
@@ -240,7 +195,6 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         return handle;
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         _script.OnCall("Dispose");
@@ -250,23 +204,14 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     void IMockConsumerOperations.UpdateBeginningOffset(string topic, int partition, long offset) =>
         _inner.UpdateBeginningOffset(topic, partition, offset);
 
-    void IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _inner.Rebalance(partitions);
+    Task IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        _inner.Rebalance(partitions);
+        return Task.CompletedTask;
+    }
 
     void IMockConsumerOperations.AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _inner.AddRecord(topic, partition, offset, key, value);
 
     void IMockConsumerOperations.SetPollException(KafkaException? exception) => _inner.SetPollException(exception);
-
-    private bool IsHandleUsable()
-    {
-        try
-        {
-            _script.Handle?.Assignment();
-            return _script.Handle is not null;
-        }
-        catch (ObjectDisposedException)
-        {
-            return false;
-        }
-    }
 }

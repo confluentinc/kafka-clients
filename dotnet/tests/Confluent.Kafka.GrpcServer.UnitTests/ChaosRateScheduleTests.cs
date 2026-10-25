@@ -21,8 +21,8 @@ using Xunit;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The producer's absolute send schedule as a pure function of the clock (PLAN §7.1 T13), the
-/// arithmetic of Python's <c>_run_producer_sync</c>: no sleeping, every clock reading supplied.
+/// The producer's absolute send schedule as a pure function of the clock, the arithmetic of Python's
+/// <c>_run_producer_sync</c>: no sleeping, every clock reading supplied.
 /// </summary>
 public sealed class ChaosRateScheduleTests
 {

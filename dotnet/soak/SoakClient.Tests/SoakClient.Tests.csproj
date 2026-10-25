@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Unit tests for the soak client's pure logic (M16/P1, PLAN §3) — the parts a
+    Unit tests for the soak client's logic (M16/P1, PLAN §3) — the parts a
     two-week run depends on being right and that no broker can verify for us: the
     payload round-trip (including the total, never-throwing deserializer), the
     duplicate/gap accounting, the startup configuration validation, the last-value
-    gauge retention, the poll-failure escalation bound, and the exit-code contract
-    shared with run.sh.
+    gauge retention, the poll-failure escalation bound, the exit-code contract
+    shared with run.sh, the topic setup and the delivery reports.
 
-    No broker, no Docker, no native call on any logic path. TFMs net8.0;net10.0 —
+    No broker, no Docker. The topic-setup and delivery-report tests drive the
+    native mocks (AsyncMockAdminClient, AsyncMockProducer, AsyncMockConsumer); the
+    other tests make no native call. TFMs net8.0;net10.0 —
     net462 is deliberately absent: the soak exe itself targets net8.0;net10.0 (it is
     run by `dotnet <dll>` on a Linux box, never on .NET Framework).
 

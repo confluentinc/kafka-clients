@@ -23,9 +23,8 @@ using Xunit;
 namespace Confluent.Kafka.Soak.Tests;
 
 /// <summary>
-/// The shutdown path's two invariants, from the Critic's findings 74.1 and 74.4:
-/// the final metrics window can fail without taking the SUMMARY verdict or the
-/// exit-code contract with it, and the delivery-accounting drain is bounded.
+/// The shutdown path's two invariants: the final metrics window can fail without taking the
+/// SUMMARY verdict or the exit-code contract with it, and the delivery-accounting drain is bounded.
 /// </summary>
 public sealed class ShutdownPathTests
 {
@@ -45,24 +44,6 @@ public sealed class ShutdownPathTests
             null,
             new SoakLogger(SoakLogLevel.Fatal));
 
-    // ---------------------------------------------------------------------------
-    // 74.1 — the shutdown path's final metrics write must not escape
-    // ---------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠ THE 74.1 GUARD. A full disk is the motivating case, and it is the same failure
-    /// the rollover thread's guard already absorbed — the shutdown path's identical
-    /// <c>WriteFinal()</c> was the unguarded twin. If it escapes, <c>FinalReport()</c>
-    /// never runs (no SUMMARY at all, on exactly the run that needs explaining) and the
-    /// process exits with the runtime's unhandled-exception code instead of one of
-    /// <see cref="SoakExitCodes"/>' five, which <c>run.sh</c> then treats as an ordinary
-    /// restartable failure.
-    /// <para>
-    /// <c>Record.Exception</c> is what makes this falsifiable: a bare
-    /// <c>FinalizeMetrics(...)</c> call with assertions after it would simply throw out
-    /// of the test, which is a failure but not a *pinned* one.
-    /// </para>
-    /// </summary>
     [Fact]
     public void FinalizeMetricsAbsorbsAFailingWriter()
     {
@@ -77,12 +58,6 @@ public sealed class ShutdownPathTests
         Assert.True(sampled, "the resource sample must still be taken before the write fails");
     }
 
-    /// <summary>
-    /// The .NET port added two throw sources Python's <c>get_rusage()</c> does not have —
-    /// <c>Process.Refresh()</c> and <c>GC.GetTotalMemory</c> — so the sampler is inside
-    /// the guard, not before it. A guard that only covered the writes would still lose
-    /// the verdict to a sampler failure.
-    /// </summary>
     [Fact]
     public void FinalizeMetricsAbsorbsAFailingResourceSample()
     {
@@ -97,7 +72,6 @@ public sealed class ShutdownPathTests
         Assert.Null(thrown);
     }
 
-    /// <summary>The happy path still writes its final window and closes the file.</summary>
     [Fact]
     public void FinalizeMetricsWritesTheFinalWindowWhenNothingFails()
     {
@@ -109,11 +83,6 @@ public sealed class ShutdownPathTests
         Assert.Contains("\"prefix\": \"" + Prefix + "\"", writer.ToString(), StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The verdict the 74.1 guard exists to protect. Message loss outranks a wedged
-    /// loop — Python checks it first — so a run that BOTH lost messages and gave up must
-    /// still report loss.
-    /// </summary>
     [Theory]
     [InlineData(0L, null, SoakExitCodes.Ok)]
     [InlineData(1L, null, SoakExitCodes.MessageLoss)]
@@ -124,17 +93,6 @@ public sealed class ShutdownPathTests
         Assert.Equal(expected, SoakExitCodes.ExitCodeFor(missed, fatalReason));
     }
 
-    // ---------------------------------------------------------------------------
-    // 74.4 — the delivery-accounting drain is bounded
-    // ---------------------------------------------------------------------------
-
-    /// <summary>
-    /// ⚠ THE 74.4 HAZARD. The drain runs on the shutdown path, where the only backstop
-    /// is the hard-exit watchdog — so it must return on its own even when the counter
-    /// never reaches zero. Asserted on the clock, not merely on the return value: a
-    /// drain that waited forever would hang the whole test run rather than fail, so the
-    /// elapsed bound is what makes "it cannot hang" falsifiable here.
-    /// </summary>
     [Fact]
     public async Task DrainCounterIsBoundedWhenTheCounterNeverReachesZero()
     {
@@ -148,7 +106,6 @@ public sealed class ShutdownPathTests
             "the drain overran its bound by a wide margin (" + clock.Elapsed + ")");
     }
 
-    /// <summary>An already-drained counter returns immediately, without a single delay.</summary>
     [Fact]
     public async Task DrainCounterReturnsImmediatelyWhenAlreadyZero()
     {
@@ -164,12 +121,6 @@ public sealed class ShutdownPathTests
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), "a drained counter must not wait");
     }
 
-    /// <summary>
-    /// The property the fix is actually for: a continuation that has not run yet is
-    /// WAITED for rather than raced, so the SUMMARY's <c>delivered=</c> is complete. The
-    /// counter falls on a background thread partway through the bound, exactly as a
-    /// queued <c>OnDelivery</c> does.
-    /// </summary>
     [Fact]
     public async Task DrainCounterWaitsForALateContinuation()
     {
@@ -196,7 +147,6 @@ public sealed class ShutdownPathTests
         releaser.Join();
     }
 
-    /// <summary>The bound is a real duration, not a sentinel that disables waiting.</summary>
     [Fact]
     public void TheDeliveryDrainBoundIsPositiveAndBounded()
     {

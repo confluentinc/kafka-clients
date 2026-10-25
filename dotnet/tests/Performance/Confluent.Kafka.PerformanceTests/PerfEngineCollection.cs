@@ -21,39 +21,25 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// The collection every engine-level test belongs to. <c>DisableParallelization</c> is mandatory, not
-/// tidiness: <see cref="ConsumerBenchmarkConfig"/> / <see cref="ProducerBenchmarkConfig"/> have private
-/// constructors and private setters, so the only way to configure them is to set environment variables and
-/// call <c>FromEnv()</c> — and both the environment and the current directory are PROCESS-global. Left
-/// parallel, one test's <c>NUM_MESSAGES</c> would leak into another's config, and worse into the perf
-/// smoke's child process (<c>ProcessStartInfo.Environment</c> is pre-populated from this process at
-/// construction time, so a concurrently-mutated variable would land in the launched benchmark).
+/// The collection of every engine-level test, never run in parallel: the benchmark configs are read only from the
+/// process-global environment, which a parallel test would leak into another's config or into a smoke's child process.
 /// </summary>
 [CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class PerfEngineCollection : ICollectionFixture<PerfEngineFixture>
 {
-    /// <summary>The collection name, referenced by each engine test class's <c>[Collection]</c>.</summary>
     public const string Name = "PerfEngine";
 }
 
 /// <summary>
-/// Saves the process-global state the engine tests mutate — every perf environment variable they touch,
-/// plus the current directory — and restores it on dispose. The current directory is pointed at a fresh
-/// temp directory for the duration, because <see cref="Metrics"/>'s public constructor truncates and opens
-/// <c>metrics.jsonl</c> in the current directory and <c>ConsumerBenchmark</c>'s summary writes
-/// <c>results.json</c> beside it; neither belongs in the repo. (There is an <c>internal Metrics(TextWriter)</c>
-/// constructor marked "used by tests", but PerformanceCommon grants no <c>InternalsVisibleTo</c> to this
-/// project, so it is not reachable from here.)
+/// Saves every perf environment variable and the current directory, points the current directory at a temp directory
+/// (where <see cref="Metrics"/> and the consumer summary write their files), and restores both on dispose.
 /// </summary>
 public sealed class PerfEngineFixture : IDisposable
 {
-    // Every variable ConsumerBenchmarkConfig.FromEnv or ProducerBenchmarkConfig.FromEnv reads, plus the
-    // per-client knobs a smoke's child process reads (PERF_LRK_STATS, SKIP_PARTITIONER_OVERRIDE). Apply()
-    // clears the whole set before applying a test's values, so one test can never inherit another's.
     private static readonly string[] s_managedVariables =
     {
-        "ASYNC", "AWAIT_ACCEPTED", "BOOTSTRAP_SERVERS", "CLIENT_VERSION", "CONSUMER_BATCH_SIZE", "CREATE_TOPIC",
-        "DO_VERIFY", "FETCH_MIN_BYTES", "GROUP_ID", "INTERVAL_SECONDS", "JOIN_TIMEOUT_SECONDS",
+        "ASYNC", "AWAIT_ACCEPTED", "BOOTSTRAP_SERVERS", "CLIENT_VERSION", "COMPRESSION_TYPE", "CONSUMER_BATCH_SIZE",
+        "CREATE_TOPIC", "DO_VERIFY", "FETCH_MIN_BYTES", "GROUP_ID", "INTERVAL_SECONDS", "JOIN_TIMEOUT_SECONDS",
         "KAFKA_BIN", "KEY_SIZE", "LIMIT_RPS", "MAX_PARTITION_FETCH_BYTES",
         "NUM_MESSAGES", "P99_LIMIT_MS", "PARTITIONS", "PERF_LRK_STATS", "POLL_SINGLE", "POLL_TIMEOUT_MS",
         "READINESS_MIN_RECORDS", "READINESS_TIMEOUT_SECONDS", "RESULTS_FILE", "SETTLE_TIMEOUT_SECONDS",
@@ -65,7 +51,6 @@ public sealed class PerfEngineFixture : IDisposable
     private readonly string _originalDirectory;
     private readonly string _workDirectory;
 
-    /// <summary>Captures the environment + current directory and switches to a temp working directory.</summary>
     public PerfEngineFixture()
     {
         _originalDirectory = Directory.GetCurrentDirectory();
@@ -79,10 +64,6 @@ public sealed class PerfEngineFixture : IDisposable
         Directory.SetCurrentDirectory(_workDirectory);
     }
 
-    /// <summary>
-    /// Clears every managed variable, then applies <paramref name="values"/> — so the argument is a test's
-    /// COMPLETE environment, not a delta on whatever ran before it.
-    /// </summary>
     public static void Apply(IReadOnlyDictionary<string, string> values)
     {
         foreach (string name in s_managedVariables)
@@ -96,7 +77,6 @@ public sealed class PerfEngineFixture : IDisposable
         }
     }
 
-    /// <summary>Restores the captured environment and current directory, and removes the temp directory.</summary>
     public void Dispose()
     {
         foreach (KeyValuePair<string, string?> pair in _saved)

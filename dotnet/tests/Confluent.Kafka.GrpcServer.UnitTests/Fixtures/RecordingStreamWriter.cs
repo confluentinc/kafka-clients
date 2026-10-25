@@ -26,19 +26,13 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// The response stream of one <c>RunProducer</c> / <c>RunConsumer</c> call (PLAN §7.1): records
-/// every batch written and, through <see cref="TestServerCallContext"/>, every response-header
-/// write, in one ordered log, so a test can assert both the events and where the headers fell.
+/// The response stream of one <c>Run*</c> call: one ordered log of every batch written and every
+/// response-header write, so a test can assert the events and where the headers fell, and a count of
+/// overlapping writes, which gRPC forbids.
 /// </summary>
-/// <remarks>
-/// Writes come from the RPC handler, waits from the test thread; one lock guards the log and
-/// <see cref="Monitor.PulseAll"/> wakes a waiter on every append, so <see cref="WaitFor"/> needs
-/// no polling or sleeping. gRPC allows one write at a time, which the handler honours; the
-/// writer counts any overlap so a test can assert there was none.
-/// </remarks>
 internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.WorkloadEventBatch>
 {
-    /// <summary>The default bound on every wait: generous, because it is a hang guard, not a timing assertion.</summary>
+    // Generous: a hang guard, not a timing assertion.
     internal static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
 
     private readonly object _lock = new object();
@@ -49,10 +43,8 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
     private int _writesInFlight;
     private int _overlappingWrites;
 
-    /// <inheritdoc/>
     public WriteOptions? WriteOptions { get; set; }
 
-    /// <summary>Every batch written so far, in order.</summary>
     internal IReadOnlyList<Proto.WorkloadEventBatch> Batches
     {
         get
@@ -64,7 +56,6 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>Every event written so far, flattened across batches, in order.</summary>
     internal IReadOnlyList<Proto.WorkloadEvent> Events
     {
         get
@@ -76,7 +67,6 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>How many times the handler wrote the response headers.</summary>
     internal int HeaderWrites
     {
         get
@@ -88,10 +78,8 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>
-    /// How many batches had been written when the headers were first written (0 = before any
-    /// message), or -1 when they never were.
-    /// </summary>
+    // The batches written before the headers first were (0 = before any message), or -1 when they
+    // never were.
     internal int HeaderPosition
     {
         get
@@ -103,10 +91,8 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>How many writes started while another was still in progress (gRPC forbids it).</summary>
     internal int OverlappingWrites => Volatile.Read(ref _overlappingWrites);
 
-    /// <inheritdoc/>
     public Task WriteAsync(Proto.WorkloadEventBatch message)
     {
         if (Interlocked.Increment(ref _writesInFlight) > 1)
@@ -131,7 +117,6 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         return Task.CompletedTask;
     }
 
-    /// <summary>Called by <see cref="TestServerCallContext"/> when the handler writes the headers.</summary>
     internal void RecordHeaders()
     {
         lock (_lock)
@@ -146,10 +131,6 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>
-    /// Waits until <paramref name="condition"/> holds over the events written so far, and fails
-    /// the test with <paramref name="what"/> if it does not within <see cref="DefaultTimeout"/>.
-    /// </summary>
     internal IReadOnlyList<Proto.WorkloadEvent> WaitFor(Func<IReadOnlyList<Proto.WorkloadEvent>, bool> condition, string what)
     {
         Stopwatch clock = Stopwatch.StartNew();
@@ -172,11 +153,9 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>Waits until at least <paramref name="count"/> events of <paramref name="kind"/> were written.</summary>
     internal IReadOnlyList<Proto.WorkloadEvent> WaitForCount(Proto.WorkloadEvent.EventOneofCase kind, int count) =>
         WaitFor(events => events.Count(e => e.EventCase == kind) >= count, $"{count} {kind} event(s)");
 
-    /// <summary>Waits until the headers were written.</summary>
     internal void WaitForHeaders()
     {
         Stopwatch clock = Stopwatch.StartNew();
@@ -195,7 +174,6 @@ internal sealed class RecordingStreamWriter : IServerStreamWriter<Proto.Workload
         }
     }
 
-    /// <summary>A compact, readable rendering of an event list for failure messages.</summary>
     internal static string Describe(IEnumerable<Proto.WorkloadEvent> events) =>
         string.Join(", ", events.Take(40).Select(e => e.ToString()));
 }

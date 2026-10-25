@@ -25,51 +25,16 @@ using OpenTelemetry.Resources;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// OpenTelemetry counters and gauges, mirroring <c>soakclient.py</c>'s instruments.
-/// <para>
-/// Built only by <see cref="Create"/>, which returns <see langword="null"/> — loudly —
-/// unless a real, exporting SDK pipeline could be established. <b>Getting that wrong is
-/// worse than having no telemetry at all.</b> The Python version's predecessor called
-/// <c>get_meter(...)</c> with no <c>MeterProvider</c> installed, which returns a no-op
-/// meter that silently discards every measurement while the startup line still said
-/// "otel on"; confirmed against a real collector — 30+ minutes with
-/// <c>OTEL_METRICS_EXPORTER=otlp</c>, counters flat, no errors logged. The .NET twin of
-/// that bug is a <see cref="Meter"/> with no <see cref="MeterProvider"/> listening to it,
-/// so this type never creates the <see cref="Meter"/> until the provider is built.
-/// </para>
-/// <para>
-/// Thread-safe: <see cref="SoakMetrics"/> calls in from the producer loop, the consumer
-/// loop, the delivery continuations and the main thread's resource sampling, and the SDK
-/// collects from its own. One lock covers instrument creation (a check-then-set that
-/// could otherwise register a duplicate instrument, which the SDK drops — silently losing
-/// a series); the gauge store has its own.
-/// </para>
-/// <para>
-/// ⚠ TWO PYTHON BRANCHES ARE DELIBERATELY DROPPED (PLAN D12), not reinvented:
-/// </para>
-/// <list type="number">
-///   <item><description><c>_existing_real_provider()</c> — Python checks for a
-///   <c>MeterProvider</c> already installed by <c>opentelemetry-instrument</c>, to avoid
-///   double-reporting. .NET has no such wrapper in play: this sink builds its own
-///   provider explicitly with <c>Sdk.CreateMeterProviderBuilder()</c> and owns it, and
-///   nothing installs one before <c>Main</c> runs.</description></item>
-///   <item><description>The grpc↔http exporter failover loop — Python fails over because
-///   <i>which</i> exporter package is installed varies. In .NET both protocols ship in the
-///   one <c>OpenTelemetry.Exporter.OpenTelemetryProtocol</c> package and are selected by
-///   <c>OtlpExportProtocol</c>, so the protocol env vars are honoured and there is nothing
-///   to fail over to.</description></item>
-/// </list>
+/// OpenTelemetry counters and gauges, as Python's soak instruments; built only by
+/// <see cref="Create"/>, which creates the <see cref="Meter"/> only once an exporting provider
+/// exists, never a meter nothing listens to.
 /// </summary>
 internal sealed class OtelSink : ISoakTelemetrySink
 {
-    /// <summary>Meter / instrumentation-scope name, as it appears in the export.</summary>
     internal const string Scope = "confluent.kafka.soak.rust";
 
-    /// <summary>
-    /// Cap on the final flush. An unreachable collector otherwise retries for the SDK's
-    /// default per-call timeout and stretches every shutdown, which eats into the
-    /// shutdown watchdog's budget.
-    /// </summary>
+    // Caps the final flush, which an unreachable collector would otherwise stretch into the
+    // shutdown watchdog's budget.
     internal const int ShutdownTimeoutMs = 5000;
 
     private readonly object _lock = new object();
@@ -88,20 +53,15 @@ internal sealed class OtelSink : ISoakTelemetrySink
         _baseTags = baseTags;
     }
 
-    /// <summary>
-    /// Returns a working sink, or <see langword="null"/> with the reason logged. Never
-    /// throws: telemetry must not be able to stop the soak.
-    /// </summary>
+    // Never throws. Unlike Python, no check for an installed provider (none is installed here) and
+    // no grpc/http failover (one package carries both).
     internal static OtelSink? Create(IReadOnlyDictionary<string, string> baseTags, SoakLogger logger)
     {
         IReadOnlyList<string> requested = RequestedExporters();
         if (requested.Count == 0)
         {
-            // THE ONE BEHAVIOUR THAT MUST PORT EXACTLY (PLAN D12): unset or "none" means
-            // no telemetry, and it must SAY SO and return null — never a Meter nothing
-            // listens to. Note the plain .NET OTel SDK does not read OTEL_METRICS_EXPORTER
-            // itself (that is an auto-instrumentation variable), so the soak reads it,
-            // exactly as Python does.
+            // The soak reads OTEL_METRICS_EXPORTER itself, as Python (the .NET SDK does not), and
+            // says so when it turns telemetry off.
             logger.Info("telemetry: OTEL_METRICS_EXPORTER is unset or 'none'; metrics go to the JSONL file only");
             return null;
         }
@@ -114,9 +74,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
                 .AddMeter(Scope)
                 .ConfigureResource(resource =>
                 {
-                    // The SDK reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES itself; only
-                    // supply a default service name when the operator did not set one, so an
-                    // operator-provided name always wins.
                     if (SoakEnv.GetStringOrNull("OTEL_SERVICE_NAME") is null)
                     {
                         resource.AddService("kafka-client-soak-rust");
@@ -154,10 +111,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
         }
     }
 
-    /// <summary>
-    /// <c>OTEL_METRICS_EXPORTER</c> as a list, lower-cased and trimmed; empty when
-    /// telemetry is off (unset, empty, or <c>none</c>).
-    /// </summary>
     internal static IReadOnlyList<string> RequestedExporters()
     {
         string raw = SoakEnv.GetString("OTEL_METRICS_EXPORTER", string.Empty).Trim();
@@ -172,10 +125,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
             .ToList();
     }
 
-    /// <summary>
-    /// The OTLP transport, from the metrics-specific env var if set, otherwise the
-    /// general one, otherwise gRPC (the spec's default).
-    /// </summary>
     internal static OtlpExportProtocol ResolveProtocol()
     {
         string protocol = (SoakEnv.GetStringOrNull("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL")
@@ -185,10 +134,8 @@ internal sealed class OtelSink : ISoakTelemetrySink
             : OtlpExportProtocol.Grpc;
     }
 
-    /// <summary>The periodic export interval in ms (<c>OTEL_METRIC_EXPORT_INTERVAL</c>, default 60000).</summary>
     internal static int ExportIntervalMs() => SoakEnv.GetInt("OTEL_METRIC_EXPORT_INTERVAL", 60000);
 
-    /// <inheritdoc/>
     public void IncrCounter(string fullName, long increment, IReadOnlyDictionary<string, string> tags)
     {
         Counter<long>? counter;
@@ -209,7 +156,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
         counter.Add(increment, Merge(tags));
     }
 
-    /// <inheritdoc/>
     public void SetGauge(string fullName, double value, IReadOnlyDictionary<string, string> tags)
     {
         IReadOnlyDictionary<string, string> merged = MergeDictionary(tags);
@@ -222,14 +168,10 @@ internal sealed class OtelSink : ISoakTelemetrySink
                 return;
             }
 
-            // An OBSERVABLE gauge whose callback re-yields the retained last value for
-            // every tag-set (see LastValueGauges): an event-driven series must not vanish
-            // from the backend between updates.
             _meter.CreateObservableGauge(fullName, () => ObserveGauge(fullName), unit: null, description: fullName);
         }
     }
 
-    /// <inheritdoc/>
     public void Shutdown()
     {
         // Best-effort: a collector that is down at shutdown must not turn a clean exit
@@ -253,7 +195,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
         }
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         lock (_lock)
@@ -289,9 +230,6 @@ internal sealed class OtelSink : ISoakTelemetrySink
         OtlpExportProtocol protocol = ResolveProtocol();
         return builder.AddOtlpExporter((exporterOptions, readerOptions) =>
         {
-            // The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS / _CERTIFICATE
-            // itself; do not second-guess it. Only the protocol is resolved here, because
-            // .NET selects it by enum rather than by which package is installed.
             exporterOptions.Protocol = protocol;
             readerOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = intervalMs;
         });
@@ -299,9 +237,7 @@ internal sealed class OtelSink : ISoakTelemetrySink
 
     private IEnumerable<Measurement<double>> ObserveGauge(string fullName)
     {
-        // Snapshot under the store's lock (inside Snapshot), then yield outside it: a
-        // generator holding a lock across yields would keep it for as long as the SDK
-        // takes to consume.
+        // Snapshot under the store's lock and yield outside it, so the SDK never holds the lock.
         foreach ((double value, IReadOnlyDictionary<string, string> tags) in _gaugeValues.Snapshot(fullName))
         {
             yield return new Measurement<double>(value, ToTagArray(tags));

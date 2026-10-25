@@ -22,8 +22,7 @@ namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
 /// Hands one record's delivery from the binding's <see cref="IDeliveryCallback"/> to the engine's
-/// <see cref="IPerfDeliveryCallback"/>, with the send's start time. One per measured send: the binding's
-/// callback carries no per-send state of its own.
+/// <see cref="IPerfDeliveryCallback"/>, with the send's start time; one per measured send.
 /// </summary>
 internal sealed class V3Delivery : IDeliveryCallback
 {
@@ -46,11 +45,6 @@ internal sealed class V3Delivery : IDeliveryCallback
 /// <summary>Producer-metric prints shared by the two v3 producer backends.</summary>
 internal static class V3ProducerMetrics
 {
-    /// <summary>
-    /// Prints the producer's own <c>compression-rate-avg</c>, as the Rust harness does before closing its
-    /// producer, so a compression run's wire-bytes estimate (achieved MiB/s / compression rate) can be
-    /// cross-checked against a network-counter measurement. Must run before the producer is closed.
-    /// </summary>
     internal static void PrintCompressionRateAvg(Func<IReadOnlyDictionary<MetricName, IMetric>> metrics)
     {
         try
@@ -84,11 +78,9 @@ internal static class V3ProducerMetrics
 }
 
 /// <summary>
-/// Adapts our binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>.
-/// The measured send is Java's <c>send(record, callback)</c>, so the engine records each delivery in the
-/// binding's callback; the warmup send hands back the <see cref="KafkaFuture{T}"/> in a
-/// <see cref="PerfSendHandle"/> (Java <c>future.get()</c>). Bytes go over <c>&lt;byte[], byte[]&gt;</c> +
-/// <see cref="Serdes.ByteArray"/> (generic-only surface, M11/P5).
+/// Adapts this binding's <see cref="KafkaProducer{TKey, TValue}"/> to the sync <see cref="IProducerBackend"/>: the
+/// measured send is Java's <c>send(record, callback)</c>, and the warmup send's handle waits on its
+/// <see cref="KafkaFuture{T}"/>, as Java's <c>future.get()</c>.
 /// </summary>
 internal sealed class V3SyncProducerBackend : IProducerBackend
 {
@@ -109,11 +101,9 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
         new PerfSendHandle(s_get, _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key)));
 
-    // The future is not needed: the callback reports the delivery.
     public void Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs) =>
         _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
 
-    // The sync producer's Flush takes no token.
     public void Flush(CancellationToken cancellationToken) => _producer.Flush();
 
     internal void PrintCompressionRateAvg() => V3ProducerMetrics.PrintCompressionRateAvg(_producer.Metrics);
@@ -124,10 +114,9 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 }
 
 /// <summary>
-/// Adapts our binding's <see cref="AsyncKafkaProducer{TKey, TValue}"/> to the async (pipelined)
-/// <see cref="IAsyncProducerBackend"/>. Each send completes when the producer has accepted the record. The
-/// measured send reports the delivery to the binding's callback; the warmup send hands back the delivery
-/// <see cref="Task"/>.
+/// Adapts this binding's <see cref="AsyncKafkaProducer{TKey, TValue}"/> to the async
+/// <see cref="IAsyncProducerBackend"/>: a send completes when the producer has accepted the record; the measured send
+/// reports to the binding's callback, and the warmup send returns the delivery <see cref="Task"/>.
 /// </summary>
 internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 {
@@ -140,8 +129,8 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
     {
-        // The Send call hands the record to the producer synchronously (preserving send order). Its first
-        // stage is usually complete when it returns, so the common path builds no state machine for it.
+        // Send hands the record over synchronously, preserving send order; its first stage is usually complete on
+        // return, so the common path builds no state machine.
         ValueTask<AsyncKafkaFuture<RecordMetadata>> send = _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key));
         return send.IsCompletedSuccessfully
             ? new ValueTask<Task<PerfRecordMetadata>>(Deliver(send.Result.Get()))
@@ -159,8 +148,7 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 
     public ValueTask Send(string topic, byte[]? key, byte[]? value, IPerfDeliveryCallback callback, long sendStartMs)
     {
-        // As the warmup send: usually accepted on return, so the common path builds no state machine. The
-        // future is consumed (a ValueTask must be) and dropped: the callback reports the delivery.
+        // The ValueTask is consumed, as it must be, and dropped: the callback reports the delivery.
         ValueTask<AsyncKafkaFuture<RecordMetadata>> send =
             _producer.Send(new ProducerRecord<byte[], byte[]>(topic, value, key), new V3Delivery(callback, sendStartMs));
         if (send.IsCompletedSuccessfully)
@@ -227,7 +215,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
         return list;
     }
 
-    // POLL_SINGLE has no single-message API in the binding — delegate to the batch poll (documented parity).
+    // The binding has no single-message poll, so POLL_SINGLE uses the batch poll, as Python's does.
     public IReadOnlyList<PolledRecord> PollSingle() => PollBatch();
 
     public void Close() => _consumer.Close();
@@ -239,9 +227,8 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 }
 
 /// <summary>
-/// Adapts our binding's <see cref="AsyncKafkaConsumer{TKey, TValue}"/> to the async
-/// <see cref="IAsyncConsumerBackend"/>. The blocking-in-Java ops are tasks; <see cref="Assigned"/> stays sync
-/// (<c>Assignment()</c> is a non-blocking read on both flavors).
+/// Adapts this binding's <see cref="AsyncKafkaConsumer{TKey, TValue}"/> to the async
+/// <see cref="IAsyncConsumerBackend"/>: subscribe, poll and close are tasks; the assignment read is sync.
 /// </summary>
 internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 {
@@ -282,7 +269,6 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 
     public Task<IReadOnlyList<PolledRecord>> PollSingle() => PollBatch();
 
-    // The async consumer's Close takes only a CancellationToken (no timed variant, CLAUDE.md §1).
     public Task Close() => _consumer.Close();
 
     public void Dispose() => _consumer.Dispose();

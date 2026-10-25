@@ -22,7 +22,7 @@ using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>The producer benchmark outcome the per-client exe needs for cooldown / VERIFY_CONSUMED / exit code.</summary>
+/// <summary>The producer benchmark's outcome, which drives the exe's cooldown, verification and exit code.</summary>
 public sealed class ProducerBenchmarkResult
 {
     internal ProducerBenchmarkResult(long warmupSent, long measuredSent, bool latencyBudgetExceeded, bool warmupFailed, bool runFailed)
@@ -34,53 +34,28 @@ public sealed class ProducerBenchmarkResult
         RunFailed = runFailed;
     }
 
-    /// <summary>Records sent (and awaited) during warmup — excluded from the measurement, counted for VERIFY_CONSUMED.</summary>
     public long WarmupSent { get; }
 
-    /// <summary>Records sent during the measured interval (Python <c>measured_sent</c>).</summary>
     public long MeasuredSent { get; }
 
-    /// <summary>Whether the measured p99 exceeded <c>P99_LIMIT_MS</c> (the run must exit non-zero).</summary>
     public bool LatencyBudgetExceeded { get; }
 
-    /// <summary>Whether warmup aborted on a send or delivery error (no measured interval ran).</summary>
     public bool WarmupFailed { get; }
 
-    /// <summary>
-    /// Whether the run must exit non-zero for a reason other than the latency budget (Python
-    /// <c>run_failed</c>): the warmup failed, the results file could not be written, or — unless the run was
-    /// interrupted — not every completed record verified, or not every requested record completed. The
-    /// summary and the results file are still produced in the last two cases.
-    /// </summary>
     public bool RunFailed { get; }
 }
 
 /// <summary>
-/// The client-agnostic producer measured-loop engine — the C# analog of <c>producer_performance_test.py</c>'s
-/// <c>main</c> (sync) and <c>async_main</c> (async), driven through <see cref="IProducerBackend"/> /
-/// <see cref="IAsyncProducerBackend"/> so it runs identically over any client.
+/// The client-free producer engine, Python's <c>main</c> and <c>async_main</c>: each measured send reports to a
+/// delivery callback that stamps its latency at the ack; after the loop the engine flushes, waits up to 30 s for the
+/// remaining callbacks, checks the counts and writes the summary.
 /// </summary>
-/// <remarks>
-/// Both paths send each measured record with a delivery callback and record it there, when the client
-/// reports the acknowledgement, as every other producer harness does (Python, Rust, C, Java). The latency is
-/// stamped at the ack, so it never includes the time a recorder took to reach the record. A failed record
-/// counts as completed but adds no latency or throughput. When the send loop ends the engine flushes the
-/// producer and waits up to 30 s for the remaining callbacks, then checks the counts, prints the summary and
-/// writes the results file. Both paths share the accounting, the checks and the summary, so they report
-/// identically.
-/// </remarks>
 public static class ProducerBenchmark
 {
-    // How long the engine waits, after the flush, for the remaining delivery callbacks (Python: 30 s).
     private static readonly TimeSpan s_drainTimeout = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_drainPollInterval = TimeSpan.FromMilliseconds(10);
 
-    /// <summary>
-    /// Runs the sync producer benchmark, a port of Python's <c>main</c>. Warmup sends are waited inline and
-    /// never recorded. Each measured send registers a delivery callback that records the record. If the run
-    /// was not interrupted, the loop's end is followed by a flush and a wait for the remaining callbacks.
-    /// </summary>
     public static ProducerBenchmarkResult RunSync(
         IProducerBackend backend,
         ProducerBenchmarkConfig config,
@@ -90,13 +65,12 @@ public static class ProducerBenchmark
     {
         long warmupSent = 0;
 
-        // Warmup — each send waited inline, then a 0.1 s sleep; never recorded (Python).
         if (config.WarmupSeconds > 0)
         {
             Console.WriteLine($"Warming up for {config.WarmupSeconds} seconds ...");
             long warmupEnd = Stopwatch.GetTimestamp() + SecondsToTicks(config.WarmupSeconds);
             int i = 0;
-            while (Stopwatch.GetTimestamp() < warmupEnd && !cancellationToken.IsCancellationRequested)
+            while (Stopwatch.GetTimestamp() < warmupEnd)
             {
                 PerfMessage message = messages[i % messages.Length];
                 try
@@ -133,8 +107,7 @@ public static class ProducerBenchmark
             }
             catch (Exception ex)
             {
-                // A send the client never accepted is not counted, and no callback will come for it (Python's
-                // loop swallows the RuntimeError such a send raises; the Rust harness logs it).
+                // Never accepted: not counted, and no callback will come for it.
                 ReportSendError(ex, cancellationToken);
                 if (DurationExceeded(config, firstTicks))
                 {
@@ -153,7 +126,7 @@ public static class ProducerBenchmark
             }
         }
 
-        // Python's main flushes and waits for the callbacks only when it was not interrupted.
+        // Only when not interrupted, as Python's main.
         if (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -162,7 +135,6 @@ public static class ProducerBenchmark
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // Interrupted during the flush: report what has completed.
             }
             catch (Exception e)
             {
@@ -181,19 +153,6 @@ public static class ProducerBenchmark
         return Finish(deliveries, metrics, config, warmupSent, messagesSent, firstTicks, afterTicks, afterMs, cancellationToken);
     }
 
-    /// <summary>
-    /// Runs the <b>async (pipelined)</b> producer benchmark (Python <c>async_main</c>): each measured send
-    /// registers a delivery callback that records the record, and the loop waits only for the client to
-    /// accept a record (or not even that, with <c>AWAIT_ACCEPTED=False</c>) before sending the next.
-    /// </summary>
-    /// <remarks>
-    /// <b>Cancellation is handled here, not propagated.</b> Two awaits are wired to
-    /// <paramref name="cancellationToken"/> and throw on Ctrl-C: the warmup delay and the pacing delay. Both
-    /// are caught, so the caller's tail (cooldown, Final CPU / RSS, "Done", the optional verification, the
-    /// exit code) still runs, mirroring Python's <c>except CancelledError</c> in <c>async_main</c>. Like
-    /// Python's <c>async_main</c>, and unlike the sync path, the flush and the wait for the remaining
-    /// callbacks run even when the run was interrupted.
-    /// </remarks>
     public static async Task<ProducerBenchmarkResult> RunAsync(
         IAsyncProducerBackend backend,
         ProducerBenchmarkConfig config,
@@ -208,12 +167,11 @@ public static class ProducerBenchmark
             Console.WriteLine($"Warming up for {config.WarmupSeconds} seconds ...");
             long warmupEnd = Stopwatch.GetTimestamp() + SecondsToTicks(config.WarmupSeconds);
             int i = 0;
-            while (Stopwatch.GetTimestamp() < warmupEnd && !cancellationToken.IsCancellationRequested)
+            while (Stopwatch.GetTimestamp() < warmupEnd)
             {
                 PerfMessage message = messages[i % messages.Length];
                 try
                 {
-                    // Both stages: the accepted stage, then the delivery it yields.
                     Task<PerfRecordMetadata> delivery = await backend.Send(config.TopicName, message.Key, message.Value).ConfigureAwait(false);
                     PerfRecordMetadata meta = await delivery.ConfigureAwait(false);
                     Verify(meta, config);
@@ -225,16 +183,7 @@ public static class ProducerBenchmark
                     return WarmupFailed(warmupSent);
                 }
 
-                try
-                {
-                    await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Ctrl-C during warmup: leave the warmup loop, do NOT propagate (see the
-                    // cancellation note on this method).
-                    break;
-                }
+                await Task.Delay(100).ConfigureAwait(false);
 
                 i++;
             }
@@ -263,21 +212,18 @@ public static class ProducerBenchmark
                     ValueTask accepted = backend.Send(config.TopicName, message.Key, message.Value, deliveries, startMs);
                     if (config.AwaitAccepted)
                     {
-                        // Awaits ACCEPTANCE only (where the client applies its backpressure, as Java's send()
-                        // blocks); the delivery is reported to the callback.
+                        // Waits for acceptance only, where the client applies its backpressure.
                         await accepted.ConfigureAwait(false);
                     }
                     else if (!accepted.IsCompletedSuccessfully)
                     {
-                        // AWAIT_ACCEPTED=False: send the next record at once. This one is counted as sent
-                        // below, so if its acceptance later fails it is reported as a failed delivery.
+                        // Counted as sent: a later acceptance failure is a failed delivery.
                         _ = ReportFailedAcceptance(accepted, deliveries, startMs);
                     }
                 }
                 catch (Exception ex)
                 {
-                    // A send the client never accepted is not counted, and no callback will come for it. The
-                    // backend takes no token, so this is never the run's own cancellation.
+                    // Never accepted: not counted, and no callback will come for it.
                     ReportSendError(ex, cancellationToken);
                     if (DurationExceeded(config, firstTicks))
                     {
@@ -303,9 +249,7 @@ public static class ProducerBenchmark
         }
         catch (OperationCanceledException)
         {
-            // Ctrl-C during a pacing delay. Python's async_main catches CancelledError and still reports;
-            // falling through to the flush and the summary below does the same.
-            Console.WriteLine("Main cancelled");
+            // Ctrl-C ends the loop, as Python's terminating flag does; the summary still runs.
         }
 
         try
@@ -323,7 +267,7 @@ public static class ProducerBenchmark
             await Task.Delay(s_drainPollInterval).ConfigureAwait(false);
         }
 
-        // QUEUE_FULL deliveries were never sent, so they are subtracted from the measured sent count.
+        // QUEUE_FULL records were never sent, so they are subtracted from the sent count.
         long queueFull = deliveries.QueueFull;
         long measuredSent = messagesSent - queueFull;
         if (queueFull > 0)
@@ -336,16 +280,6 @@ public static class ProducerBenchmark
         return Finish(deliveries, metrics, config, warmupSent, measuredSent, firstTicks, afterTicks, afterMs, cancellationToken);
     }
 
-    /// <summary>
-    /// Seconds the sender sleeps after its <paramref name="messagesSent"/>th measured send, or a value
-    /// <c>&lt;= 0</c> for none (Python <c>pacing_wait_s</c>). At every
-    /// <see cref="ProducerBenchmarkConfig.PacingCheckpoint"/>th send it is the time left until
-    /// <c>messagesSent / LIMIT_RPS</c> seconds after the first send; there is no wait between checkpoints,
-    /// nor without a rate limit.
-    /// </summary>
-    /// <param name="config">The run's config; only its rate limit is read.</param>
-    /// <param name="messagesSent">Measured sends so far, the current one included.</param>
-    /// <param name="elapsedSeconds">Seconds since the first measured send.</param>
     public static double PacingWaitSeconds(ProducerBenchmarkConfig config, long messagesSent, double elapsedSeconds)
     {
         if (config.LimitRps is not int rps || messagesSent % config.PacingCheckpoint != 0)
@@ -377,8 +311,6 @@ public static class ProducerBenchmark
         }
     }
 
-    // A send counted as sent whose acceptance stage later failed: no callback will come for it, so it is
-    // reported as a failed delivery, which keeps the drain's count converging.
     private static async Task ReportFailedAcceptance(ValueTask accepted, IPerfDeliveryCallback deliveries, long startMs)
     {
         try
@@ -398,8 +330,7 @@ public static class ProducerBenchmark
             return true;
         }
 
-        // Python's verify_message (v2/ckd) requires timestamp > 0; verify_record_metadata (v3) requires
-        // timestamp >= 0. Preserved rather than smoothed to one shared bound.
+        // As Python: verify_message (v2) wants a timestamp > 0, verify_record_metadata (v3) >= 0.
         bool timestampOk = config.ClientVersion == "2" ? meta.Timestamp > 0 : meta.Timestamp >= 0;
         return meta.Offset >= 0 && meta.Partition >= 0 && meta.Topic == config.TopicName && timestampOk;
     }
@@ -422,8 +353,6 @@ public static class ProducerBenchmark
         return new ProducerBenchmarkResult(warmupSent, measuredSent, budgetExceeded, warmupFailed: false, runFailed: countsFailed || !resultsWritten);
     }
 
-    // Python check_completion: unless interrupted, every completed record must have verified and, with a
-    // message target, every requested record must have completed. The summary is printed either way.
     private static bool CheckCompletion(DeliverySnapshot snapshot, ProducerBenchmarkConfig config, CancellationToken token)
     {
         if (token.IsCancellationRequested)
@@ -498,8 +427,6 @@ public static class ProducerBenchmark
         Console.WriteLine($"p99 latency: {p99} ms");
         Console.WriteLine($"p999 latency: {p999} ms");
 
-        // The machine-readable summary: the same file name, keys and latency_ms shape as every other producer
-        // harness (and the consumer harness's latency_ms); "client" names the implementation that wrote it.
         long min = 0;
         for (int ms = 0; ms < hist.Length; ms++)
         {
@@ -546,8 +473,7 @@ public static class ProducerBenchmark
         return (false, resultsWritten);
     }
 
-    // The results file is the run's primary artifact, so failing to write it fails the run rather than letting
-    // it exit 0 without one (Python).
+    // Failing to write the results file fails the run, as in Python.
     private static bool TryWriteResults(string path, string contents)
     {
         try
@@ -576,7 +502,6 @@ public static class ProducerBenchmark
 
     private static bool DurationExceeded(ProducerBenchmarkConfig config, long firstTicks)
     {
-        // exceeded_seconds: 10 when bounded by a message count, 1 otherwise (Python).
         int exceededSeconds = config.NumMessages > 0 ? 10 : 1;
         return ElapsedSeconds(firstTicks) > config.TestDurationSeconds + exceededSeconds;
     }
@@ -603,7 +528,7 @@ public static class ProducerBenchmark
         }
         catch (Exception)
         {
-            // A delivery callback must not throw; a console that cannot be written to loses the line.
+            // A delivery callback must not throw: a line the console cannot take is lost.
         }
     }
 
@@ -632,8 +557,8 @@ public static class ProducerBenchmark
 
     /// <summary>
     /// The measured interval's accounting, fed by the delivery callbacks (Python's <c>record_delivery</c> and
-    /// <c>record_delivery_async</c>). The callbacks run on the client's own threads, and for some clients on
-    /// more than one at once, so every counter is updated under one lock.
+    /// <c>record_completion_async</c>); some clients report on several threads at once, so the counters share one
+    /// lock.
     /// </summary>
     private sealed class DeliveryStats : IPerfDeliveryCallback
     {
@@ -648,8 +573,7 @@ public static class ProducerBenchmark
         private long _maxLatencyMs;
         private long _totalLatencyMs;
 
-        // countQueueFull: whether a QUEUE_FULL failure is kept out of the completed count (async only, as in
-        // Python, where the sync path counts every failure as completed).
+        // Only the async path keeps QUEUE_FULL out of the completed count, as in Python.
         internal DeliveryStats(Metrics metrics, ProducerBenchmarkConfig config, bool countQueueFull)
         {
             _metrics = metrics;
@@ -657,7 +581,6 @@ public static class ProducerBenchmark
             _countQueueFull = countQueueFull;
         }
 
-        /// <summary>Records reported so far, completed or QUEUE_FULL: what the drain waits on.</summary>
         internal long Settled
         {
             get
@@ -682,7 +605,7 @@ public static class ProducerBenchmark
 
         public void OnCompletion(long sendStartMs, PerfRecordMetadata metadata, Exception? exception)
         {
-            // Stamped first, so the latency is the time to the ack and not to this record's turn at the lock.
+            // Stamped before the lock, so the latency is the time to the ack.
             long latencyMs = Metrics.NowMs() - sendStartMs;
             string? line = null;
             lock (_lock)
@@ -691,16 +614,14 @@ public static class ProducerBenchmark
                 {
                     if (exception is not null)
                     {
-                        // QUEUE_FULL is the one outcome kept out of the completed count: the record was never
-                        // sent, so it is subtracted from the sent count instead. Not logged, since it can occur
-                        // tens of thousands of times.
+                        // Never sent, so subtracted from the sent count; too frequent to log.
                         if (_countQueueFull && IsQueueFull(exception))
                         {
                             _queueFull++;
                             return;
                         }
 
-                        // A failed record counts as completed (below) but adds no latency or throughput.
+                        // A failed record counts as completed but adds no latency or throughput.
                         line = $"Produce call resulted in exception: {exception.Message}";
                     }
                     else
@@ -718,8 +639,7 @@ public static class ProducerBenchmark
                         _totalLatencyMs += latencyMs;
                     }
 
-                    // Counted last and even if the accounting above throws, so every record settles exactly once
-                    // and the drain never waits out its deadline for a record that was reported.
+                    // Counted last, and in the catch too: every reported record settles once.
                     _completed++;
                 }
                 catch (Exception e)

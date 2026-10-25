@@ -20,10 +20,7 @@ using System.Threading;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>
-/// Aggregations over the measured interval — the C# analog of Python's
-/// <c>external_metrics_aggregations()</c>.
-/// </summary>
+/// <summary>The measured interval's CPU and RSS aggregations, Python's <c>external_metrics_aggregations</c>.</summary>
 public readonly struct ExternalMetricsAggregations
 {
     internal ExternalMetricsAggregations(long totalWindows, double totalCpu, double totalRss)
@@ -35,34 +32,23 @@ public readonly struct ExternalMetricsAggregations
         AverageRss = totalWindows > 0 ? totalRss / totalWindows : 0.0;
     }
 
-    /// <summary>Number of measured-interval windows that contributed to the averages.</summary>
     public long TotalExternalMetrics { get; }
 
-    /// <summary>Sum of the per-window average CPU (%).</summary>
     public double TotalCpu { get; }
 
-    /// <summary>Sum of the per-window average RSS (bytes).</summary>
     public double TotalRss { get; }
 
-    /// <summary>Mean CPU (%) over the measured interval, or <c>0</c> if no window contributed.</summary>
     public double AverageCpu { get; }
 
-    /// <summary>Mean RSS (bytes) over the measured interval, or <c>0</c> if no window contributed.</summary>
     public double AverageRss { get; }
 }
 
 /// <summary>
-/// The shared metrics harness — the C# analog of <c>performance_common.py</c>'s <see cref="Metrics"/>.
-/// Owns the per-window accumulators (RSS / CPU / latency / bytes / messages), a background sampler
-/// thread that rolls them over once per interval and appends one JSON object per line to
-/// <c>metrics.jsonl</c>, and the measured-interval bounds that gate which windows feed the CPU/RSS
-/// averages. The <c>metrics.jsonl</c> schema is kept byte-compatible with the Python / Rust siblings
-/// (see <see cref="PerfFormat"/>) so <c>tools/performance_metrics_plot</c> parses every language's
-/// output identically.
+/// The shared metrics harness, Python's <c>Metrics</c>: per-window buckets that a background sampler rolls over each
+/// interval into one <c>metrics.jsonl</c> line in Python's schema, and the measured interval's CPU and RSS averages.
 /// </summary>
 public sealed class Metrics : IDisposable
 {
-    /// <summary>Sentinel for an unset measurement bound — serialized as the <c>"-inf"</c> string.</summary>
     private const long UnsetMs = long.MinValue;
 
     private readonly MemorySampler _memorySampler = new MemorySampler();
@@ -90,49 +76,31 @@ public sealed class Metrics : IDisposable
     private Thread? _thread;
     private volatile bool _running;
 
-    /// <summary>Creates the harness and truncates / opens <c>metrics.jsonl</c> in the current directory.</summary>
     public Metrics()
         : this(new StreamWriter("metrics.jsonl", append: false))
     {
     }
 
-    /// <summary>Creates the harness writing JSONL lines to <paramref name="writer"/> (used by tests).</summary>
     internal Metrics(TextWriter writer)
     {
         _fd = writer;
         _windowStartMs = NowMs();
     }
 
-    /// <summary>Wall-clock epoch milliseconds (Python's <c>int(time.time() * 1000)</c>).</summary>
     public static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-    /// <summary>Records a per-record latency (ms) into the current window's latency bucket.</summary>
     public void AddLatency(double latencyMs) => Volatile.Read(ref _latency).AddMeasurement(latencyMs);
 
-    /// <summary>Records <paramref name="count"/> bytes into the current window's bytes bucket.</summary>
     public void AddBytes(double count) => Volatile.Read(ref _bytes).AddMeasurement(count);
 
-    /// <summary>Records <paramref name="count"/> messages into the current window's messages bucket.</summary>
     public void AddMessages(double count) => Volatile.Read(ref _messages).AddMeasurement(count);
 
-    /// <summary>
-    /// Restarts the CPU sampler's span at "now", so the next CPU sample covers only time from here (Python's
-    /// consumer <c>_reset_cpu_baseline</c>). Call it where the measured interval begins, so the first
-    /// measured sample neither includes warmup CPU nor reads <c>0.0</c> for lack of a baseline.
-    /// </summary>
     public void ResetCpuBaseline() => _cpuSampler.ResetBaseline();
 
-    /// <summary>Marks the start of the measured interval (epoch ms); windows from here feed the averages.</summary>
     public void SetMeasurementStart(long epochMs) => Volatile.Write(ref _measurementStartMs, epochMs);
 
-    /// <summary>Marks the end of the measured interval (epoch ms); later windows are cooldown and excluded.</summary>
     public void SetMeasurementEnd(long epochMs) => Volatile.Write(ref _measurementEndMs, epochMs);
 
-    /// <summary>
-    /// Starts the background sampler thread (Python <c>start_collecting</c>). Idempotent. The thread is a
-    /// background thread so a crash before <see cref="StopCollecting"/> still lets the process exit
-    /// (mirroring Python's <c>daemon=True</c>); a normal shutdown joins it via <see cref="StopCollecting"/>.
-    /// </summary>
     public void StartCollecting(int intervalSeconds = 1)
     {
         if (_running)
@@ -149,7 +117,6 @@ public sealed class Metrics : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Stops the sampler thread and joins it (Python <c>stop_collecting</c>).</summary>
     public void StopCollecting()
     {
         _running = false;
@@ -161,7 +128,6 @@ public sealed class Metrics : IDisposable
         }
     }
 
-    /// <summary>Returns the last window's CPU / RSS averages (Python <c>external_metrics_last_values</c>).</summary>
     public (double LastCpu, double LastRss) ExternalMetricsLastValues()
     {
         lock (_writeLock)
@@ -170,7 +136,6 @@ public sealed class Metrics : IDisposable
         }
     }
 
-    /// <summary>Returns the measured-interval CPU / RSS aggregations (Python <c>external_metrics_aggregations</c>).</summary>
     public ExternalMetricsAggregations ExternalMetricsAggregations()
     {
         lock (_writeLock)
@@ -179,7 +144,6 @@ public sealed class Metrics : IDisposable
         }
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         StopCollecting();
@@ -195,9 +159,6 @@ public sealed class Metrics : IDisposable
             Thread.Sleep(intervalMs);
             string line = Rollover(out double cpuAverage, out double rssAverage);
 
-            // Average CPU/RSS only over the measured interval — exclude warmup (measurement not
-            // started) and post-test cooldown (measurement ended), matching the C/Rust/Java/Python
-            // perf tests.
             long start = Volatile.Read(ref _measurementStartMs);
             long end = Volatile.Read(ref _measurementEndMs);
             bool inMeasured = start != UnsetMs && end == UnsetMs;
@@ -225,8 +186,8 @@ public sealed class Metrics : IDisposable
         long windowStart = _windowStartMs;
         _windowStartMs = NowMs();
 
-        // Swap latency/bytes/messages so the sampler rolls a detached bucket (Python's swap-then-rollover);
-        // RSS/CPU are only touched here on the sampler thread, so they need no swap.
+        // Swapped, as in Python, so new measurements go to a fresh bucket; RSS and CPU are touched
+        // only on this thread.
         Bucket latency = Interlocked.Exchange(ref _latency, new Bucket(withHistogram: true));
         Bucket bytes = Interlocked.Exchange(ref _bytes, new Bucket());
         Bucket messages = Interlocked.Exchange(ref _messages, new Bucket());
@@ -289,8 +250,7 @@ public sealed class Metrics : IDisposable
     {
         sb.Append(", \"").Append(key).Append("\": {");
         AppendCoreBucketFields(sb, b);
-        // The latency object additionally carries p50/p90/p99/p999 (NOT p95 — the consumer summary
-        // computes p95 separately; the JSONL schema omits it, §3.2).
+        // No p95, as Python's LatencyBucket.
         sb.Append(", \"p50\": \"").Append(PerfFormat.Num(b.P50)).Append('"');
         sb.Append(", \"p90\": \"").Append(PerfFormat.Num(b.P90)).Append('"');
         sb.Append(", \"p99\": \"").Append(PerfFormat.Num(b.P99)).Append('"');

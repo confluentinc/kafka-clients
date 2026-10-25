@@ -26,60 +26,15 @@ using Microsoft.Extensions.Hosting;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Entry point for the .NET gRPC backend used by the Rust multilanguage integration-test
-/// harness. Hosts a producer, a consumer and an admin servicer (admin on both flavours since
-/// M15/P14) on Kestrel serving h2c (HTTP/2 cleartext, no TLS) — the Rust client dials
-/// <c>http://</c>.
+/// Entry point of the .NET gRPC test server: hosts the producer, consumer, admin and chaos servicers on
+/// <c>GRPC_HOST:GRPC_PORT</c> over h2c, the sync servicers by default and the async ones when
+/// <c>CONSUMER_FLAVOR=async</c>. The host defaults to 127.0.0.1 because the server is unauthenticated.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Flavor selector (M8/P2; producer M12/P1; chaos M18/P1; admin M15/P14).</b>
-/// <c>CONSUMER_FLAVOR=async</c> hosts the asynchronous servicers
-/// (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c> +
-/// <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c> +
-/// <see cref="AsyncAdminServiceImpl"/> over <c>IAsyncAdmin</c>); anything else (including unset,
-/// the sync default) hosts the synchronous servicers (<see cref="ProducerServiceImpl"/> +
-/// <see cref="ConsumerServiceImpl"/> + <see cref="AdminServiceImpl"/> over <c>IAdmin</c>).
-/// Admin was sync-only until M15/P14 split it into <c>IAdmin</c> and <c>IAsyncAdmin</c>
-/// (M15/P12 D1 had no async surface to host). The chaos-harness service
-/// follows the flavor too: the sync flavor hosts <see cref="ChaosWorkloadServiceImpl"/> over the
-/// synchronous clients (the <c>dotnet</c> workload backend), and the async flavor hosts
-/// <see cref="AsyncChaosWorkloadServiceImpl"/> over the asynchronous ones (the
-/// <c>dotnet-async</c> workload backend). Each image bakes its
-/// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
-/// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair; in native mode
-/// the harness sets it explicitly for each backend kind instead (backend_pool.rs
-/// <c>native_command</c>). One server per flavor hosts the producer and consumer services
-/// together, and admin with them (Python-parity — <c>grpc_server.py</c> registers them in one
-/// server, admin in both of its servers too); the env name stays <c>CONSUMER_FLAVOR</c> to
-/// avoid Dockerfile churn.
-/// </para>
-/// <para>
-/// <b>Listen address and readiness line (M17/P1)</b> — the same contract as the Python and C
-/// servers. The server binds <c>GRPC_HOST:GRPC_PORT</c>. <c>GRPC_HOST</c> defaults to
-/// <c>127.0.0.1</c> because the server is unauthenticated; it accepts an IP literal
-/// (<c>0.0.0.0</c> binds every IPv4 interface) or <c>localhost</c> (the IPv4 loopback). Both
-/// images set <c>GRPC_HOST=0.0.0.0</c> so the server is reachable through the container's
-/// published port. <c>GRPC_PORT</c> defaults to 50053 and must be an integer in 0–65535; 0 binds
-/// an ephemeral port, which is how the harness's native mode starts it. An invalid value of
-/// either is reported on STDERR and the process exits non-zero before binding. After startup the
-/// server writes <c>listening on {host}:{port}</c> to STDERR, where <c>port</c> is the port
-/// Kestrel actually bound (not the requested 0). The harness waits for that line and parses the
-/// port from its last <c>:</c>-separated field (backend_pool.rs <c>parse_listening_port</c>),
-/// so keep its format and stream stable.
-/// </para>
-/// </remarks>
 internal static class Program
 {
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 50053;
 
-    /// <summary>
-    /// Validates <c>GRPC_HOST</c> / <c>GRPC_PORT</c>, binds, reports the bound port on STDERR
-    /// (see the type remarks for the contract), then serves until shutdown.
-    /// </summary>
-    /// <returns>0 after a clean shutdown; 1 when <c>GRPC_HOST</c> or <c>GRPC_PORT</c> is
-    /// invalid, or when the bound port cannot be read after startup.</returns>
     internal static int Main(string[] args)
     {
         if (!TryResolveHost(out string host, out IPAddress? address) || !TryResolvePort(out int port))
@@ -91,9 +46,7 @@ internal static class Program
 
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-        // h2c: no TLS. Grpc.AspNetCore defaults to negotiating HTTP/2 over TLS, so the
-        // endpoint's protocol is pinned to HTTP/2 without HTTPS to match the harness'
-        // plaintext http:// dial (backend_pool.rs Endpoint::from_shared).
+        // h2c: HTTP/2 without TLS, for the harness's plaintext http:// dial.
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.Listen(address, port, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
@@ -101,23 +54,16 @@ internal static class Program
 
         builder.Services.AddGrpc();
 
-        // Each servicer MUST be a singleton: it owns the id -> producer/consumer map that every
-        // RPC shares (a CreateProducer/CreateConsumer id must be resolvable by the following
-        // Send/Poll/... calls). ASP.NET Core gRPC otherwise activates a fresh servicer per
-        // request, so the map would be empty on every call after Create* (Python registers one
-        // servicer instance per service — grpc_server.py). Registering them here makes
-        // MapGrpcService resolve those single instances. The CONSUMER_FLAVOR selector (see the
-        // type remarks) picks the sync or async servicers; both flavors host the producer,
-        // consumer and admin services.
+        // Singletons: each servicer owns the id map or workload registry that every RPC shares, and
+        // ASP.NET Core would otherwise create a servicer per request.
+        builder.Services.AddSingleton<GroupMetadataStore>();
         if (useAsync)
         {
             builder.Services.AddSingleton<AsyncProducerServiceImpl>();
             builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
 
-            // Admin over IAsyncAdmin (M15/P14), a singleton for its admin_id -> client map.
             builder.Services.AddSingleton<AsyncAdminServiceImpl>();
 
-            // The chaos service (M18/P1), a singleton for its workload registry (see below).
             builder.Services.AddSingleton<AsyncChaosWorkloadServiceImpl>();
         }
         else
@@ -125,13 +71,8 @@ internal static class Program
             builder.Services.AddSingleton<ProducerServiceImpl>();
             builder.Services.AddSingleton<ConsumerServiceImpl>();
 
-            // Admin over IAdmin, the blocking flavour (M15/P14; the async twin is registered
-            // above). Until M15/P14 this was the only admin servicer: .NET had no IAsyncAdmin
-            // (M15/P12 D1).
             builder.Services.AddSingleton<AdminServiceImpl>();
 
-            // The chaos service (M18/P1) is a singleton for the same reason: its workload
-            // registry is how StopWorkload / MarkWorkload find a running RunProducer / RunConsumer.
             builder.Services.AddSingleton<ChaosWorkloadServiceImpl>();
         }
 
@@ -153,19 +94,12 @@ internal static class Program
 
         app.Start();
 
-        // The Rust BackendPool waits for a "listening" line on STDERR and parses the bound port
-        // from its last ':'-separated field (backend_pool.rs start_native / parse_listening_port;
-        // the container mode waits for the same substring). Kestrel logs its own
-        // "Now listening on ..." to STDOUT via ILogger, which the harness does not use, so emit
-        // our own line to STDERR after startup. The port is read back from the server rather
-        // than echoed from GRPC_PORT, because GRPC_PORT=0 asks Kestrel for an ephemeral port.
-        // Keep this line + stream stable.
+        // The harness waits for this STDERR line and parses the port from its last ':'-separated
+        // field, so keep its format and stream. The port is the one Kestrel bound: GRPC_PORT=0 asks
+        // for an ephemeral one.
         int boundPort = ResolveBoundPort(app);
         if (boundPort == 0)
         {
-            // Unreachable while Kestrel reports its bound endpoints: a failed bind makes Start()
-            // throw instead. Shut down cleanly (the drain below still runs) and fail, as the C
-            // server does when its selected port stays 0.
             Console.Error.WriteLine($"dotnet server: could not determine the port bound for {host}:{port}");
             app.Lifetime.StopApplication();
         }
@@ -181,41 +115,16 @@ internal static class Program
         }
         finally
         {
-            // Registry drain (M9/P4 M5; producers added M11/P8). The servicers hold a
-            // consumer_id -> consumer and a producer_id -> producer map that only the Close RPC
-            // ever empties, so any scenario that skips Close leaves a live native client (a
-            // consumer's tokio runtime + ConsumerNetworkThread + dispatcher thread; a producer's
-            // runtime + Sender task + send-pump thread) in it — and this backend process is SHARED
-            // across scenarios, so they accumulate.
-            //
-            // Resolved and disposed EXPLICITLY rather than left to DI: this host is torn down
-            // by WaitForShutdown() alone, with no app.Dispose()/DisposeAsync(), so DI has
-            // nothing to call. Implementing IDisposable on the servicers without a path that
-            // actually invokes it would fix nothing (plan §8.2). In a `finally` so the sweep
-            // still runs if WaitForShutdown throws.
+            // Disposed explicitly: WaitForShutdown alone tears this host down, so DI never disposes
+            // the servicers, and a scenario that skips Close leaves its client in a registry.
             DrainServicer(app, useAsync);
         }
 
         return boundPort == 0 ? 1 : 0;
     }
 
-    /// <summary>
-    /// Disposes the singleton servicers so their consumer, producer and admin registries are
-    /// drained at shutdown (M9/P4 M5; producers added in M11/P8, Minor 14; admin on both
-    /// flavours since M15/P14). Resolves from the host's own
-    /// service provider — the same singletons every RPC used. Best-effort: a shutdown-time failure
-    /// must not turn a passing harness run into a non-zero exit, so it is logged to STDERR and
-    /// swallowed.
-    /// </summary>
-    /// <remarks>
-    /// Uses the <b>synchronous</b> <see cref="IDisposable.Dispose"/> on both flavors, including
-    /// the async servicer (which implements both). <see cref="Main"/> is synchronous, so
-    /// awaiting <c>DisposeAsync</c> here would mean
-    /// <c>.AsTask().GetAwaiter().GetResult()</c> — the sync-over-async footgun
-    /// ffi-marshalling.md §B7 forbids. The async servicer's <c>Dispose</c> is the documented
-    /// blocking fallback and drains the same registry via each consumer's blocking
-    /// <c>Dispose</c>.
-    /// </remarks>
+    // The sync Dispose on both flavours: Main is synchronous, and awaiting DisposeAsync here would
+    // be sync-over-async. A failure is logged, not thrown, so a passing run does not exit non-zero.
     private static void DrainServicer(WebApplication app, bool useAsync)
     {
         try
@@ -226,7 +135,6 @@ internal static class Program
                 app.Services.GetRequiredService<AsyncProducerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<AsyncAdminServiceImpl>().Dispose();
 
-                // Stops every chaos workload and waits, bounded, for their drains (PLAN §5.8).
                 app.Services.GetRequiredService<AsyncChaosWorkloadServiceImpl>().Dispose();
             }
             else
@@ -235,7 +143,6 @@ internal static class Program
                 app.Services.GetRequiredService<ProducerServiceImpl>().Dispose();
                 app.Services.GetRequiredService<AdminServiceImpl>().Dispose();
 
-                // Stops every chaos workload and waits, bounded, for their drains (PLAN §5.8).
                 app.Services.GetRequiredService<ChaosWorkloadServiceImpl>().Dispose();
             }
         }
@@ -245,12 +152,6 @@ internal static class Program
         }
     }
 
-    /// <summary>
-    /// Reads <c>GRPC_HOST</c>: unset selects <see cref="DefaultHost"/>; <c>localhost</c> selects
-    /// the IPv4 loopback; anything else must be an IP literal. An invalid value is reported on
-    /// STDERR and returns <see langword="false"/>, so the server exits non-zero before binding
-    /// (the C server's GRPC_PORT check, applied to the host too).
-    /// </summary>
     private static bool TryResolveHost(out string host, [NotNullWhen(true)] out IPAddress? address)
     {
         host = Environment.GetEnvironmentVariable("GRPC_HOST") ?? DefaultHost;
@@ -270,13 +171,6 @@ internal static class Program
         return false;
     }
 
-    /// <summary>
-    /// Reads <c>GRPC_PORT</c>: unset selects <see cref="DefaultPort"/>; otherwise it must be a
-    /// plain decimal integer in 0–65535, where 0 asks for an ephemeral port. An invalid value
-    /// (including an empty one) is reported on STDERR and returns <see langword="false"/>, so the
-    /// server exits non-zero instead of silently binding the default — the C server's
-    /// <c>strtol</c> check and the Python server's <c>int()</c>.
-    /// </summary>
     private static bool TryResolvePort(out int port)
     {
         string? value = Environment.GetEnvironmentVariable("GRPC_PORT");
@@ -296,11 +190,6 @@ internal static class Program
         return false;
     }
 
-    /// <summary>
-    /// The port Kestrel actually bound, read from the server's addresses feature
-    /// (<see cref="WebApplication.Urls"/>) after <c>Start()</c>; 0 when none is reported. With
-    /// <c>GRPC_PORT=0</c> this is the ephemeral port the OS assigned.
-    /// </summary>
     private static int ResolveBoundPort(WebApplication app)
     {
         foreach (string url in app.Urls)
@@ -314,13 +203,6 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>
-    /// Reads <c>CONSUMER_FLAVOR</c>: <c>async</c> (case-insensitive) selects the async
-    /// servicers; anything else (including unset) selects the sync servicers (the M8/P1
-    /// default). Container mode: the flavor is baked per image (<c>ENV CONSUMER_FLAVOR</c> in
-    /// Dockerfile.grpc / Dockerfile.grpc.async). Native mode (M17/P1): the harness sets it
-    /// explicitly per backend kind (<c>rust/tests/common/backend_pool.rs</c> <c>native_command</c>).
-    /// </summary>
     private static bool ResolveAsyncFlavor()
     {
         string? value = Environment.GetEnvironmentVariable("CONSUMER_FLAVOR");

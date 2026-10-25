@@ -18,18 +18,9 @@ using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance.V2;
 
-// ckd's types (IConsumer, ConsumerBuilder, ConsumeResult, ...) live in the `Confluent.Kafka` namespace,
-// an ANCESTOR of this file's `Confluent.Kafka.Performance.V2` namespace, so they are in scope with no
-// `using Confluent.Kafka;` (same as the V2 producer backends / the PerfV3 precedent).
-
 /// <summary>
-/// Adapts ckd's <see cref="IConsumer{TKey, TValue}"/> to the sync <see cref="IConsumerBackend"/> — the .NET
-/// analog of Python's <c>_LibrdkafkaConsumer</c>. ckd's <c>Consume(timeout)</c> returns <b>one</b> message
-/// per call (there is no many-at-once batch consume in ckd), so <see cref="PollBatch"/> <b>loops</b>
-/// <c>Consume</c> up to the batch size to approximate v3's batch <c>Poll</c> (documented adapter difference
-/// — PLAN §1.2). The first <c>Consume</c> blocks up to the poll timeout; the rest drain non-blocking
-/// (<c>TimeSpan.Zero</c>) so a batch never costs <c>batchSize × timeout</c>. Bytes flow over ckd's built-in
-/// <c>Deserializers.ByteArray</c> (ckd auto-selects it for <c>&lt;byte[], byte[]&gt;</c>).
+/// Adapts ckd's consumer to the sync <see cref="IConsumerBackend"/>, as Python's <c>_LibrdkafkaConsumer</c>: ckd
+/// consumes one message per call, so <see cref="PollBatch"/> blocks for the first and drains the rest without blocking.
 /// </summary>
 internal sealed class V2SyncConsumerBackend : IConsumerBackend
 {
@@ -62,9 +53,6 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
     {
         var list = new List<PolledRecord>();
 
-        // Approximate v3's batch Poll: the first Consume blocks up to the poll timeout for a record; the
-        // rest drain whatever is already buffered without blocking, up to the batch size. ckd has no
-        // many-at-once consume, so this loop-Consume is the closest equivalent.
         TimeSpan timeout = _timeout;
         for (int i = 0; i < _batch; i++)
         {
@@ -75,21 +63,15 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
             }
             catch (ConsumeException)
             {
-                // A consume error carries no record — skip it and keep draining, mirroring Python's
-                // `if msg is None or msg.error(): continue` (ckd throws a ConsumeException where Python
-                // surfaces an error-carrying message). Do NOT abort the batch.
+                // A consume error carries no record: skip it and keep draining, as Python skips an error message.
                 continue;
             }
             finally
             {
-                // Only the first Consume blocks up to the poll timeout; the rest drain non-blocking.
-                // Reset here (not after Consume) so the "first blocks, rest drain" semantics hold even
-                // across the skip path above.
+                // In the finally, so only the first Consume blocks, on the skip path too.
                 timeout = TimeSpan.Zero;
             }
 
-            // A null result (nothing within the timeout) or a partition-EOF marker carries no record —
-            // stop draining this batch (Python skips None / error results).
             if (result is null || result.IsPartitionEOF || result.Message is null)
             {
                 break;
@@ -103,7 +85,6 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
         return list;
     }
 
-    // POLL_SINGLE: consume one message at a time (Python _LibrdkafkaConsumer.poll_single).
     public IReadOnlyList<PolledRecord> PollSingle()
     {
         ConsumeResult<byte[], byte[]> result;
@@ -113,9 +94,7 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
         }
         catch (ConsumeException)
         {
-            // A consume error carries no record — skip it, mirroring Python's `poll_single`, which
-            // returns on `msg is None or msg.error()` (ckd throws a ConsumeException where Python
-            // surfaces an error-carrying message).
+            // A consume error carries no record: skip it, as Python's poll_single does.
             return Array.Empty<PolledRecord>();
         }
 
@@ -135,13 +114,8 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
 }
 
 /// <summary>
-/// Adapts ckd's sync <see cref="IConsumer{TKey, TValue}"/> to the async <see cref="IAsyncConsumerBackend"/>.
-/// ckd has <b>no</b> async consumer (no <c>AIOConsumer</c> analog — Python's async v2 wraps
-/// <c>confluent_kafka.aio.AIOConsumer</c>), so the async v2 consumer backend wraps the sync
-/// <see cref="V2SyncConsumerBackend"/>, offloading each blocking poll to a worker thread via
-/// <see cref="Task.Run{TResult}(Func{TResult})"/> (documented deviation — the manual-comparison async v2
-/// baseline, analogous to the producer's ProduceAsync-as-async note). The assignment read stays sync
-/// (a non-blocking local read).
+/// Adapts ckd's consumer to the async <see cref="IAsyncConsumerBackend"/>: ckd has no async consumer (Python's v2
+/// wraps <c>AIOConsumer</c>), so each poll runs the sync backend's on a worker thread, a deliberate deviation.
 /// </summary>
 internal sealed class V2AsyncConsumerBackend : IAsyncConsumerBackend
 {

@@ -24,13 +24,12 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// Real library values a test cannot construct itself: <see cref="RecordMetadata"/> and a coded
-/// <see cref="KafkaException"/> have internal constructors, so they are obtained from a real
-/// <see cref="MockProducer{TKey, TValue}"/> round-trip, exactly as the servicer receives them.
+/// Library values obtained from a real <see cref="MockProducer{TKey, TValue}"/> round-trip, exactly as
+/// the servicer receives them: a delivery's <see cref="RecordMetadata"/> and a coded
+/// <see cref="KafkaException"/>.
 /// </summary>
 internal static class TestValues
 {
-    /// <summary>A real delivery's metadata.</summary>
     internal static RecordMetadata Metadata()
     {
         using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -39,7 +38,6 @@ internal static class TestValues
         return metadata;
     }
 
-    /// <summary>The <see cref="KafkaException"/> a delivery callback receives for a record failed with <c>ErrorNext(code, message)</c>.</summary>
     internal static KafkaException Coded(int code, string message)
     {
         using MockProducer<byte[], byte[]> producer =
@@ -55,6 +53,7 @@ internal static class TestValues
             ?? throw new InvalidOperationException($"ErrorNext delivered {error?.GetType().Name ?? "a success"}");
     }
 
+    /// <summary>A delivery callback that captures the outcome of the one send it is given.</summary>
     private sealed class CapturingCallback : IDeliveryCallback
     {
         private readonly TaskCompletionSource<Exception?> _outcome =
@@ -69,7 +68,6 @@ internal static class TestValues
 /// <summary>Assertions over a recorded event stream.</summary>
 internal static class EventAssert
 {
-    /// <summary>The position of the first event matching <paramref name="predicate"/>; fails when there is none.</summary>
     internal static int IndexOf(IReadOnlyList<Proto.WorkloadEvent> events, Func<Proto.WorkloadEvent, bool> predicate, string what)
     {
         for (int i = 0; i < events.Count; i++)
@@ -84,11 +82,9 @@ internal static class EventAssert
         return -1;
     }
 
-    /// <summary>The events of one kind.</summary>
     internal static IReadOnlyList<Proto.WorkloadEvent> OfKind(IEnumerable<Proto.WorkloadEvent> events, Proto.WorkloadEvent.EventOneofCase kind) =>
         events.Where(e => e.EventCase == kind).ToList();
 
-    /// <summary>The stream ended with exactly one terminal event, <c>Finished</c>, last.</summary>
     internal static void EndsFinished(IReadOnlyList<Proto.WorkloadEvent> events)
     {
         Assert.NotEmpty(events);
@@ -99,7 +95,6 @@ internal static class EventAssert
         Assert.Empty(OfKind(events, Proto.WorkloadEvent.EventOneofCase.Failed));
     }
 
-    /// <summary>The order of the named consumer events in the stream, as kind names.</summary>
     internal static IReadOnlyList<string> Kinds(IEnumerable<Proto.WorkloadEvent> events) =>
         events.Select(e => e.EventCase.ToString()).ToList();
 }

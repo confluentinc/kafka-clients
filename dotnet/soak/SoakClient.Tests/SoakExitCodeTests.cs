@@ -52,10 +52,6 @@ public sealed class SoakExitCodeTests
         Assert.Equal(codes.Count, new HashSet<int>(codes).Count);
     }
 
-    /// <summary>
-    /// <c>run.sh</c> keys "never restart" off this exact number; drift would silently
-    /// restore the crash loop.
-    /// </summary>
     [Fact]
     public void RunShAgreesOnTheFatalExitCode()
     {
@@ -66,12 +62,6 @@ public sealed class SoakExitCodeTests
         Assert.Equal(SoakExitCodes.Fatal, int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
     }
 
-    /// <summary>
-    /// A wedged shutdown (backpressure during a broker roll) is transient: <c>run.sh</c>
-    /// must see <see cref="SoakExitCodes.ConsumerWedged"/>, not
-    /// <see cref="SoakExitCodes.Fatal"/>, or a real broker roll gets treated as permanent
-    /// and the soak never comes back on its own.
-    /// </summary>
     [Fact]
     public void ShutdownWatchdogHardExitsWithConsumerWedgedNotFatal()
     {
@@ -79,7 +69,7 @@ public sealed class SoakExitCodeTests
         using var shutdownStarted = new ManualResetEventSlim(false);
         using var exited = new ManualResetEventSlim(false);
 
-        shutdownStarted.Set();      // shutdown already underway
+        shutdownStarted.Set();
         // `exited` is deliberately never set: the shutdown is wedged.
         ShutdownWatchdog.Run(shutdownStarted, exited, 0.05, exitCodes.Add);
 
@@ -95,7 +85,7 @@ public sealed class SoakExitCodeTests
         using var exited = new ManualResetEventSlim(false);
 
         shutdownStarted.Set();
-        exited.Set();               // shutdown finished well within the timeout
+        exited.Set();
         ShutdownWatchdog.Run(shutdownStarted, exited, 5.0, exitCodes.Add);
 
         Assert.Empty(exitCodes);
@@ -105,12 +95,6 @@ public sealed class SoakExitCodeTests
 /// <summary>Locates the checked-in soak directory from the test assembly's output path.</summary>
 internal static class SoakTestPaths
 {
-    /// <summary>
-    /// Walks up from the test binaries until a directory containing <c>run.sh</c> is
-    /// found. Deliberately structural rather than a hard-coded relative depth, so moving
-    /// the output one level does not silently turn the run.sh contract test into a
-    /// file-not-found.
-    /// </summary>
     internal static string SoakDirectory()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

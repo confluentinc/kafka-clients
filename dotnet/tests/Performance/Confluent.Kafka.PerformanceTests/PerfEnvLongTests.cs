@@ -20,10 +20,8 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// Regression guards for the 64-bit message count (M13/P3 item C). Python computes
-/// <c>num_messages = limit_rps * test_duration_s</c> in arbitrary precision; the .NET port did it in
-/// 32 bits, so an extreme-but-legal setting overflowed to a NEGATIVE value — which
-/// <c>ProducerBenchmark.ContinueSending</c> reads as "no cap", silently changing what was measured.
+/// Guards the 64-bit message count: Python computes <c>limit_rps * test_duration_s</c> in arbitrary precision, and a
+/// 32-bit count would overflow to a negative value that <c>ProducerBenchmark.ContinueSending</c> reads as "no cap".
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class PerfEnvLongTests
@@ -37,7 +35,6 @@ public sealed class PerfEnvLongTests
             ["NUM_MESSAGES"] = "3000000000",
         });
 
-        // int.Parse would throw OverflowException here, where Python accepts the value.
         Assert.Equal(Beyond, PerfEnv.GetLong("NUM_MESSAGES", 0));
         Assert.Equal(Beyond, ProducerBenchmarkConfig.FromEnv().NumMessages);
         Assert.Equal(Beyond, ConsumerBenchmarkConfig.FromEnv().NumMessages);
@@ -64,8 +61,6 @@ public sealed class PerfEnvLongTests
 
         ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
 
-        // 5_000_000 * 600 = 3e9. In 32 bits this wrapped to -1_294_967_296, which ContinueSending reads
-        // as "no cap, run until the clock runs out".
         Assert.Equal(3_000_000_000L, config.NumMessages);
         Assert.True(config.NumMessages > 0, "an overflowed count goes negative and disables the cap");
     }

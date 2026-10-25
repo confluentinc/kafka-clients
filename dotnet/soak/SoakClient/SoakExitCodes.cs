@@ -17,47 +17,22 @@ using System;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// The process exit codes. <b>This is a hard contract with <c>run.sh</c></b>, which keys
-/// its restart policy off these numbers verbatim: only <see cref="Fatal"/> means "a
-/// restart cannot possibly help", and it is the only one that stops the supervisor dead.
-/// <c>SoakExitCodeTests</c> pins every value, and additionally reads <c>run.sh</c> to
-/// confirm the two agree on <see cref="Fatal"/>.
+/// The process exit codes, as Python's soak: a contract with <c>run.sh</c>, whose restart policy
+/// stops only on <see cref="Fatal"/> (<c>SoakExitCodeTests</c> checks <c>run.sh</c> agrees).
 /// </summary>
 internal static class SoakExitCodes
 {
-    /// <summary>Clean shutdown.</summary>
     internal const int Ok = 0;
 
-    /// <summary>Ran fine, but detected a gap — the headline failure this soak exists to catch.</summary>
     internal const int MessageLoss = 1;
 
-    /// <summary>Config rejected, assembly/native missing, authentication failed. NEVER restarted.</summary>
     internal const int Fatal = 2;
 
-    /// <summary>Broker unreachable at startup — worth retrying.</summary>
     internal const int TransientStartup = 3;
 
-    /// <summary>
-    /// Consumer wedged: poll failed past its bound, or shutdown wedged. A restart
-    /// re-authenticates and re-joins the group, so the supervisor should retry (bounded).
-    /// </summary>
     internal const int ConsumerWedged = 4;
 
-    /// <summary>
-    /// The run's verdict as an exit code.
-    /// <para>
-    /// Message loss outranks everything else — it is the result the soak exists to
-    /// report — so it is checked <b>before</b> the fatal reason, matching Python's
-    /// <c>main()</c>. A wedged loop exits distinctly so the supervisor can restart it and
-    /// a human can see why in one line.
-    /// </para>
-    /// <para>
-    /// Extracted so the teardown path in <c>Program.Main</c> is a single call over a
-    /// tested function (74.1): the guard that keeps a throwing shutdown inside this
-    /// contract is worth nothing if the verdict it protects is computed by untested
-    /// inline branches.
-    /// </para>
-    /// </summary>
+    // Message loss outranks a wedged loop, as Python's main().
     internal static int ExitCodeFor(long missedCount, string? fatalReason)
     {
         if (missedCount > 0)
@@ -80,18 +55,15 @@ internal static class SoakExitCodes
 /// </summary>
 internal sealed class SoakFatalStartupException : Exception
 {
-    /// <summary>Creates the exception with no message.</summary>
     internal SoakFatalStartupException()
     {
     }
 
-    /// <summary>Creates the exception with <paramref name="message"/>.</summary>
     internal SoakFatalStartupException(string? message)
         : base(message)
     {
     }
 
-    /// <summary>Creates the exception with <paramref name="message"/> and <paramref name="innerException"/>.</summary>
     internal SoakFatalStartupException(string? message, Exception? innerException)
         : base(message, innerException)
     {
@@ -105,18 +77,15 @@ internal sealed class SoakFatalStartupException : Exception
 /// </summary>
 internal sealed class SoakTransientStartupException : Exception
 {
-    /// <summary>Creates the exception with no message.</summary>
     internal SoakTransientStartupException()
     {
     }
 
-    /// <summary>Creates the exception with <paramref name="message"/>.</summary>
     internal SoakTransientStartupException(string? message)
         : base(message)
     {
     }
 
-    /// <summary>Creates the exception with <paramref name="message"/> and <paramref name="innerException"/>.</summary>
     internal SoakTransientStartupException(string? message, Exception? innerException)
         : base(message, innerException)
     {

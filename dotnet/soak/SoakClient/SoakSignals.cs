@@ -11,11 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
-// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/PerfSignals.cs
-// (see MetricPrimitives.cs's header for why the soak forks rather than references), with a
-// callback added: the soak's SIGINT/SIGTERM handler must also drive the shutdown watchdog
-// and the client's own stop path, which the perf harness's flag-only shape cannot express.
 
 using System;
 using System.Threading;
@@ -23,9 +18,8 @@ using System.Threading;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// Process-wide termination signal — the analog of <c>soakclient.py</c>'s
-/// <c>signal_handler</c>. Ctrl-C or SIGTERM flips <see cref="Terminating"/> and runs the
-/// installed callback exactly once.
+/// Process-wide termination signal, as Python's soak <c>signal_handler</c>: Ctrl-C or SIGTERM sets
+/// <see cref="Terminating"/> and runs the installed callback once.
 /// </summary>
 internal static class SoakSignals
 {
@@ -33,14 +27,9 @@ internal static class SoakSignals
     private static int s_fired;
     private static Action? s_onSignal;
 
-    /// <summary>Whether termination has been requested.</summary>
     internal static bool Terminating => Volatile.Read(ref s_fired) != 0;
 
-    /// <summary>
-    /// Installs the Ctrl-C / SIGTERM handler. <paramref name="onSignal"/> runs on the
-    /// signalling thread and must be non-blocking (Python's handler only writes one line
-    /// and sets two flags, for the same reason).
-    /// </summary>
+    // onSignal runs on the signalling thread and must not block; Python's handler only sets flags.
     internal static void Install(Action onSignal)
     {
         lock (s_lock)
@@ -50,21 +39,15 @@ internal static class SoakSignals
 
         Console.CancelKeyPress += (_, e) =>
         {
-            // Shut down gracefully rather than aborting immediately.
             e.Cancel = true;
             RequestTermination();
         };
 
-        // SIGTERM — run.sh's stop_child() sends one, and this is how .NET surfaces it.
-        // ⚠ This handler is deliberately the ONLY ProcessExit handler the soak installs,
-        // and it does nothing but set a flag and invoke a non-blocking callback. That is
-        // what makes the shutdown watchdog's Environment.Exit safe (Environment.Exit runs
-        // ProcessExit handlers on the calling thread, so a blocking one would wedge the
-        // very path that exists to un-wedge a wedged shutdown).
+        // SIGTERM. The soak's only ProcessExit handler, and non-blocking: the shutdown watchdog's
+        // Environment.Exit runs it on the watchdog's thread, where blocking would wedge the exit.
         AppDomain.CurrentDomain.ProcessExit += (_, _) => RequestTermination();
     }
 
-    /// <summary>Requests termination; the callback runs at most once per process.</summary>
     internal static void RequestTermination()
     {
         if (Interlocked.Exchange(ref s_fired, 1) != 0)

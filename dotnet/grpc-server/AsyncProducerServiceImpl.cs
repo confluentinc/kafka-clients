@@ -25,82 +25,24 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 8
-/// <c>ProducerService</c> RPCs onto the binding's <em>asynchronous</em>
-/// <see cref="AsyncKafkaProducer{TKey, TValue}"/> / <see cref="AsyncMockProducer{TKey, TValue}"/>
-/// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET analog of
-/// <c>python</c> vs <c>python_async</c>. Selected at process start by <c>CONSUMER_FLAVOR=async</c>
-/// (Program.cs). Each RPC resolves a server-local <c>producer_id</c>, <b>awaits</b> the matching
-/// asynchronous binding method on the gRPC handler task (both stages of the two-stage <c>Send</c>),
-/// and maps the result into the proto response, translating any operational <see cref="KafkaException"/> via
-/// <see cref="Translate"/> (reused verbatim from the sync backend). Bridging through
-/// <c>&lt;byte[], byte[]&gt;</c> + <see cref="Serdes.ByteArray"/> exercises the shipped generic
-/// serialize path end-to-end over the wire.
+/// The async twin of <see cref="ProducerServiceImpl"/>: serves <c>ProducerService</c> over
+/// <see cref="AsyncKafkaProducer{TKey, TValue}"/> and <see cref="AsyncMockProducer{TKey, TValue}"/>
+/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>), the C# port of the producer half of
+/// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks and take no per-id lock.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Value over the sync backend.</b> The sync <see cref="ProducerServiceImpl"/> blocks in the
-/// binding's <c>Send(record).Get()</c>. Both servicers' futures are resolved by the same send-completion
-/// pump, but only this async servicer drives the rest of the .NET completion bridge end-to-end — the
-/// send accumulator and the <c>TaskCompletionSource</c>-backed <c>Task&lt;RecordMetadata&gt;</c> the
-/// pump completes (ffi-marshalling.md §A7) — the machinery the sync path never covers.
-/// </para>
-/// <para>
-/// <b>No per-id gate (PLAN §4 — divergence from the consumer).</b> The producer is thread-safe:
-/// the core's internal <c>Mutex</c> serializes concurrent <c>Send</c> (<c>ffi-marshalling.md §A1</c>).
-/// So this servicer needs ONLY a thread-safe <see cref="ConcurrentDictionary{TKey, TValue}"/>
-/// id -&gt; producer map (plus an <see cref="Interlocked"/> id counter) for <c>CreateProducer</c> /
-/// <c>Close</c> races — and NO per-op gate / <see cref="SemaphoreSlim"/>.
-/// </para>
-/// <para>
-/// <b>No sync-over-async.</b> Handlers <c>await</c> the binding's <see cref="Task"/> directly —
-/// never <c>Task.Run</c> / <c>.Result</c> / <c>.GetAwaiter().GetResult()</c> (ffi-marshalling.md §A7).
-/// </para>
-/// <para>
-/// <b><c>CloseTimeout</c> ignores <c>timeout_ms</c> (PLAN §2/§5).</b> <see cref="AsyncKafkaProducer{TKey, TValue}"/>
-/// has no timed close (only <c>Close(CancellationToken)</c>), so <see cref="CloseTimeout"/> delegates to
-/// <c>await Close()</c> — a faithful port of the Python server, behaviorally invisible to the harness
-/// (no scenario exercises <c>close_timeout</c>).
-/// </para>
-/// </remarks>
 internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerServiceBase, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>> _producers =
         new ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>>();
 
-    /// <summary>
-    /// The per-producer-id delivery-callback log served by <see cref="GetCallbackLog"/> (M14/P2).
-    /// Owned by the SERVICER, never by the <c>id -&gt; producer</c> entry: <see cref="Close"/>
-    /// <c>TryRemove</c>s that entry, so a log hung off it would vanish exactly when the proto's
-    /// "entries survive Close" contract needs it (<c>CallbackLog</c> remarks). Its own lock is
-    /// what synchronizes the producer's send-completion pump thread — which is where the delivery
-    /// callback fires on this servicer — against the gRPC thread serving a log read.
-    /// </summary>
     private readonly CallbackLog _callbackLog = new CallbackLog();
+
+    private readonly TimeSpan _sendTimeout = TimeSpan.FromSeconds(120);
 
     private long _nextId;
 
-    /// <summary>
-    /// The bound on the <c>Send</c> wait — 120 s, matching <c>grpc_server.py</c>'s
-    /// <c>future.result(timeout=120)</c>. Only the ASYNC servicer bounds it; the sync one stays
-    /// unbounded by decision (see <see cref="ProducerServiceImpl.Send"/>).
-    /// </summary>
-    private static readonly TimeSpan s_sendTimeout = TimeSpan.FromSeconds(120);
-
-    /// <summary>
-    /// Drains the producer registry: remove each remaining entry and dispose its producer
-    /// (M11/P8, Minor 14 — the producer twin of <c>ConsumerServiceImpl.Dispose</c>). The
-    /// <c>id -&gt; producer</c> map is emptied only by the <c>Close</c> RPC, and this backend
-    /// process is SHARED across scenarios, so any scenario that skips <c>Close</c> leaves a live
-    /// native producer (tokio runtime + Sender task + send-pump thread) behind for the rest of the
-    /// run. Each teardown is individually guarded so one failing producer cannot abort the sweep
-    /// and strand the rest. Idempotent and safe on an empty registry.
-    /// </summary>
     public void Dispose()
     {
-        // Remove-then-dispose per entry so a concurrent Close RPC and this sweep cannot both claim
-        // the same producer (Dispose is itself idempotent, but the sweep should not have to rely on
-        // that).
         foreach (KeyValuePair<ulong, IAsyncProducer<byte[], byte[]>> pair in _producers)
         {
             if (!_producers.TryRemove(pair.Key, out IAsyncProducer<byte[], byte[]>? producer))
@@ -110,29 +52,22 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 
             try
             {
-                // Dispose, not Close: it swallows the close error, which is what a best-effort
-                // shutdown sweep wants. It still routes through the graceful Producer_close before
-                // Producer_destroy. (The triage said "Close() each entry"; the consumer template
-                // deliberately uses Dispose and says why — mirror the template.)
                 producer.Dispose();
             }
             catch (Exception)
             {
-                // One failing producer must not abort the sweep — the remaining entries still hold
-                // live native handles.
+                // One failing producer must not abort the sweep.
             }
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
     {
         Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IAsyncProducer<byte[], byte[]> producer;
         try
         {
-            // Empty (or all-blank) config selects a broker-free AsyncMockProducer (Python parity,
-            // grpc_server_async.py). Otherwise a real AsyncKafkaProducer.
+            // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
             if (IsEmptyConfig(config))
             {
                 producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -152,7 +87,6 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         return Task.FromResult(new Proto.CreateProducerResponse { ProducerId = id });
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.SendResponse> Send(Proto.SendRequest request, ServerCallContext context)
     {
         IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
@@ -161,51 +95,26 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             return new Proto.SendResponse { Error = Translate.UnknownProducer(request.ProducerId) };
         }
 
-        // with_callback => register a REAL delivery callback through the binding's own second
-        // Send overload (Java's send(record, Callback); M14/P1), and record each invocation in
-        // _callbackLog for GetCallbackLog to read. That is what the flag is FOR
-        // (producer_service.proto:31-37): the closure the Rust client passes its own producer can
-        // only prove the client-side plumbing, so the assertion has to read what THIS binding's
-        // callback delivered. Python does exactly this (grpc_server.py:136-139 -> on_delivery=).
-        //
-        // (This comment used to read "with_callback is a hint only ... Nothing to do here", which
-        // is what left test_delivery_callback_logs_metadata__grpc_dotnet_async red: the RPC below
-        // was implemented but the flag was dropped on the floor.)
+        Task<RecordMetadata>? send = null;
         try
         {
             ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
 
-            // On the ASYNC surface the delivery callback fires on the producer's send-completion
-            // pump thread, immediately BEFORE the delivery Task is completed (M14/P1) — so the entry
-            // is already in _callbackLog by the time the await below resumes.
-            //
-            // Send is two-stage (M11/P3.5: accepted, then delivered); Delivered awaits both, so the
-            // 120 s bound below covers a record still waiting to be accepted as well as one waiting
-            // for its ack.
-            Task<RecordMetadata> send = Delivered(request.WithCallback
+            // The delivery callback runs before the record's future completes, so its entry is
+            // logged before the await below resumes. The 120 s bound covers both stages of the
+            // send, so a stuck send fails the RPC instead of hanging the scenario.
+            send = Delivered(request.WithCallback
                 ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
                 : producer.Send(record));
 
-            // Bounded at 120 s for Python parity (grpc_server.py's future.result(timeout=120)):
-            // a stuck future must fail the harness DIAGNOSABLY instead of hanging the unary RPC and
-            // therefore the whole scenario. Task.WaitAsync is available because this project targets
-            // net8.0. Never .Result / .GetAwaiter().GetResult() — that would be sync-over-async.
-            RecordMetadata metadata = await send.WaitAsync(s_sendTimeout).ConfigureAwait(false);
+            RecordMetadata metadata = await send.WaitAsync(_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
-        catch (TimeoutException)
+        catch (TimeoutException) when (send is { IsCompleted: false })
         {
-            // Structured TIMEOUT, matching Python's shape (grpc_server.py: code=REQUEST_TIMED_OUT).
-            // `code` is the sole discriminator post-redesign (Translate.cs remarks) — `variant` /
-            // `is_retriable` / `is_fatal` are reserved, not settable.
-            return new Proto.SendResponse
-            {
-                Error = new Proto.KafkaError
-                {
-                    Code = 7, // kafka_common_ErrorCode_REQUEST_TIMED_OUT
-                    Message = "dotnet server: producer future timed out after 120s",
-                },
-            };
+            // Only the server's own bound is code 7: a send that failed with a TimeoutException
+            // (the core's -5) is completed, and goes out through ToProto.
+            return new Proto.SendResponse { Error = Translate.SendTimedOut() };
         }
         catch (Exception ex)
         {
@@ -213,14 +122,12 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    // Both stages of a send: the accepted stage, then the delivery task (Get()) of the future it yields.
     private static async Task<RecordMetadata> Delivered(ValueTask<AsyncKafkaFuture<RecordMetadata>> send)
     {
         AsyncKafkaFuture<RecordMetadata> future = await send.ConfigureAwait(false);
         return await future.Get().ConfigureAwait(false);
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> Flush(Proto.FlushRequest request, ServerCallContext context)
     {
         IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
@@ -240,7 +147,6 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.PartitionsForResponse> PartitionsFor(Proto.PartitionsForRequest request, ServerCallContext context)
     {
         IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
@@ -266,13 +172,6 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    /// <summary>
-    /// The <c>Metrics</c> RPC — the producer's <c>metrics()</c> snapshot as a proto
-    /// <c>MetricList</c> (Python <c>grpc_server.py</c> / C++ <c>server.cc</c> parity). Mirrors
-    /// <see cref="AsyncConsumerServiceImpl.Metrics"/> but WITHOUT its <c>lock (entry.Gate)</c>: the
-    /// producer is thread-safe (the core's <c>Mutex</c> serializes; ffi §A1 "don't add your own
-    /// lock"), so this servicer deliberately has no per-id gate to take.
-    /// </summary>
     public override Task<Proto.MetricsResponse> Metrics(Proto.MetricsRequest request, ServerCallContext context)
     {
         IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
@@ -285,7 +184,6 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         {
             Proto.MetricList list = new Proto.MetricList();
 
-            // Metrics() is a SYNCHRONOUS state read on IAsyncProducer too (it does not block in Java, CLAUDE.md §4) — call it directly.
             foreach (KeyValuePair<MetricName, IMetric> pair in producer.Metrics())
             {
                 list.Metrics.Add(Translate.MetricToProto(pair.Key, pair.Value));
@@ -299,21 +197,23 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    /// <inheritdoc/>
-    public override async Task<Proto.StatusResponse> Close(Proto.CloseRequest request, ServerCallContext context)
+    public override Task<Proto.StatusResponse> Close(Proto.CloseRequest request, ServerCallContext context) =>
+        CloseProducer(request.ProducerId, null);
+
+    public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
+        CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs));
+
+    private async Task<Proto.StatusResponse> CloseProducer(ulong producerId, TimeSpan? timeout)
     {
-        if (!_producers.TryRemove(request.ProducerId, out IAsyncProducer<byte[], byte[]>? producer))
+        if (!_producers.TryRemove(producerId, out IAsyncProducer<byte[], byte[]>? producer))
         {
-            // Close is idempotent — silent success on an unknown id (Python / Java parity).
+            // An unknown id closes silently, as in Python.
             return new Proto.StatusResponse();
         }
 
         try
         {
-            // The binding's Close() gracefully closes AND releases the native handle
-            // (Producer_close_async -> Producer_destroy). timeout_ms is not modeled on the async
-            // Close (only Close(CancellationToken)); the timed RPC is CloseTimeout below.
-            await producer.Close().ConfigureAwait(false);
+            await (timeout.HasValue ? producer.Close(timeout.Value) : producer.Close()).ConfigureAwait(false);
             return new Proto.StatusResponse();
         }
         catch (Exception ex)
@@ -322,39 +222,6 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    /// <inheritdoc/>
-    public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
-        // The async producer has no timed close (PLAN §2/§5): ignore timeout_ms and delegate to
-        // await Close() — a faithful port of grpc_server.py's CloseTimeout, behaviorally invisible
-        // to the harness (no scenario exercises close_timeout).
-        Close(new Proto.CloseRequest { ProducerId = request.ProducerId }, context);
-
-    /// <summary>
-    /// Reads (without clearing) the producer's delivery-callback log (M14/P2) — the async mirror
-    /// of <c>ProducerServiceImpl.GetCallbackLog</c>, and the RPC whose absence made both
-    /// <c>test_delivery_callback_logs_metadata__grpc_dotnet[_async]</c> fail with
-    /// <c>Unimplemented</c>: <c>ProducerService</c> declares it
-    /// (<c>producer_service.proto:71</c>) but neither .NET producer servicer overrode it, so the
-    /// generated base answered.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Takes no lock, because this servicer has none to take</b> — no per-id gate exists here
-    /// (the producer is thread-safe; see the type remarks, ffi-marshalling.md §A1).
-    /// <see cref="CallbackLog"/>'s own lock is the only synchronization this read needs, and here
-    /// it is load-bearing across threads: the appends come from the producer's send-completion
-    /// pump thread while this read is served on a gRPC worker thread.
-    /// </para>
-    /// <para>
-    /// <b>Readable AFTER <see cref="Close"/>, on purpose</b> — the log outlives the producer
-    /// (owned by the servicer, not by the <c>id -&gt; producer</c> entry <see cref="Close"/>
-    /// removes), and the entry a delivery callback appends while a close flushes is exactly the
-    /// interesting one; Python states the same reason at its own handler
-    /// (<c>grpc_server.py:223-227</c>). An unknown or closed <c>producer_id</c> yields an empty
-    /// response, not an error.
-    /// </para>
-    /// </remarks>
-    /// <inheritdoc/>
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.ProducerCallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ProducerId));
 

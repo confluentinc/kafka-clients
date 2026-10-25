@@ -19,18 +19,11 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// Self-check for the <see cref="Crc32"/> port against the exact
-/// <c>built_in_partitioner.rs::test_crc32_golden_vectors</c> /
-/// <c>test_crc32_key_to_partition_table</c> vectors (also carried by
-/// <c>python/test/performance/partitioner.py</c>'s <c>__main__</c> self-check). This is the
-/// Slice-1 automated gate — it needs no broker and no client, and stays a plain
-/// <see cref="FactAttribute"/>/<see cref="TheoryAttribute"/> class (not <c>[SkippableFact]</c> — M13/P3
-/// D-8 kept this class un-skippable since it needs no broker; the same applies here).
+/// Checks the <see cref="Crc32"/> port against the Rust core's <c>test_crc32_golden_vectors</c> and
+/// <c>test_crc32_key_to_partition_table</c> vectors, which Python's partitioner self-check also carries; no broker.
 /// </summary>
 public sealed class Crc32Test
 {
-    // built_in_partitioner.rs::test_crc32_golden_vectors, cross-checked against zlib.crc32 /
-    // crc32fast::hash. Returned unsigned — no Java-style sign-bit masking anywhere in this path.
     [Theory]
     [InlineData("", 0x00000000u)]
     [InlineData("a", 0xE8B7BE43u)]
@@ -46,9 +39,7 @@ public sealed class Crc32Test
         Assert.Equal(expected, actual);
     }
 
-    // built_in_partitioner.rs::test_crc32_key_to_partition_table: partition_for_key =
-    // crc32(key) % numPartitions, unsigned, no to_positive masking (that step belongs only to the
-    // murmur2/Java formula — deliberately NOT applied here, see design/current/partitioner.md).
+    // Unsigned modulo with no to_positive masking: that step belongs only to Java's murmur2 formula.
     [Theory]
     [InlineData("a", 3, 0)]
     [InlineData("abc", 7, 5)]
@@ -64,10 +55,7 @@ public sealed class Crc32Test
         Assert.Equal(expected, actual);
     }
 
-    // Production never routes a present-but-empty key through this formula (KeyHasher::Crc32 treats an
-    // empty key as unhashed, falling through to the sticky partitioner instead), and the perf harness
-    // itself never generates that input either. This is therefore a pure math sanity check on the public
-    // helper — it does not throw and stays in range — not a claim that it matches production behavior.
+    // The core treats an empty key as unhashed (sticky partitioner), so this only checks the helper stays in range.
     [Fact]
     public void PartitionForKey_EmptyKey_IsInRangeButNotProductionMeaningful()
     {

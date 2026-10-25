@@ -19,30 +19,14 @@ using System.Text;
 namespace Confluent.Kafka.Performance;
 
 /// <summary>
-/// Numeric formatting for the shared <c>metrics.jsonl</c> schema, kept byte-compatible with the
-/// Python (<c>performance_common.py</c>) and Rust (<c>rust/tests/performance/producer_perf_test.rs</c>)
-/// siblings so <c>tools/performance_metrics_plot</c> parses every language's output identically.
+/// The text forms of <c>metrics.jsonl</c> and <c>results.json</c> that Python's and Rust's perf tests write and
+/// <c>tools/performance_metrics_plot</c> parses: <c>"-inf"</c> for an unset bound, invariant-culture numbers, and
+/// Python's <c>json</c> float and string forms.
 /// </summary>
-/// <remarks>
-/// <para>
-/// The plot tool floats every numeric field (<c>_to_float</c> / <c>float(...)</c>) and only special-cases
-/// the string <c>"-inf"</c>, so the hard contract is: emit <c>"-inf"</c> for an unset maximum / measurement
-/// bound, and an integer-parseable string for the window / measurement millisecond bounds. Both siblings
-/// already diverge on int-vs-float text (Python's <c>str(total/count)</c> yields <c>"2048.0"</c>; Rust's
-/// <c>f64::to_string</c> yields <c>"2048"</c>) and both parse fine — so this uses invariant-culture numeric
-/// text and never a locale-specific separator.
-/// </para>
-/// </remarks>
 internal static class PerfFormat
 {
-    /// <summary>The <c>-inf</c> sentinel emitted for an unset max / measurement bound (Python <c>str(-math.inf)</c>).</summary>
     internal const string NegInf = "-inf";
 
-    /// <summary>
-    /// Formats a metric value as its <c>metrics.jsonl</c> string: <c>"-inf"</c> for negative infinity
-    /// (the unset sentinel), <c>"inf"</c> / <c>"nan"</c> for the other non-finite forms, otherwise the
-    /// round-trippable invariant-culture text (an integral value renders without a trailing <c>.0</c>).
-    /// </summary>
     internal static string Num(double value)
     {
         if (double.IsNegativeInfinity(value))
@@ -63,14 +47,8 @@ internal static class PerfFormat
         return value.ToString("R", CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Formats a long as invariant-culture decimal text (the window / count fields).</summary>
     internal static string Num(long value) => value.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>
-    /// Formats a <c>results.json</c> float: rounded to 2 decimals with banker's rounding (Python
-    /// <c>round(x, 2)</c>) and rendered as Python's <c>json</c> renders a float, so an integral value keeps a
-    /// trailing <c>.0</c> (<c>round(10.0, 2)</c> → <c>10.0</c>).
-    /// </summary>
     internal static string JsonFloat(double value)
     {
         double rounded = Math.Round(value, 2, MidpointRounding.ToEven);
@@ -82,10 +60,6 @@ internal static class PerfFormat
         return rounded.ToString("0.##", CultureInfo.InvariantCulture);
     }
 
-    /// <summary>
-    /// Formats a <c>results.json</c> string as a quoted JSON literal, escaping as Python's <c>json</c> does
-    /// by default (<c>ensure_ascii</c>): quotes, backslashes, control and non-ASCII characters.
-    /// </summary>
     internal static string JsonString(string value)
     {
         var sb = new StringBuilder(value.Length + 2);

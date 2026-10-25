@@ -14,6 +14,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -22,14 +24,9 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// Regression guards for <c>ProducerBenchmark.RunAsync</c>'s interrupt handling (M13/P3 item D). Before
-/// the fix, a cancellation raised at one of the method's token-wired awaits escaped RunAsync and then Main,
-/// skipping the drain and the caller's whole reporting tail. Two awaits are token-wired now: the warmup
-/// delay and the rate limiter's pacing delay.
-/// These drive the CancellationToken directly, which is what makes them a usable guard at all: exercising
-/// a real OS signal would need a subprocess-plus-kill test, and PerfSignals' handlers
-/// (<c>Console.CancelKeyPress</c> plus a <c>PosixSignalRegistration</c> pair for SIGINT/SIGTERM) are
-/// themselves untested by that shape — driving the token directly is the mock-testable substitute.
+/// Guards <c>ProducerBenchmark.RunAsync</c>'s interrupt handling by cancelling its token directly: the warmup runs to
+/// its end whatever the token, as Python's ignores its termination flag, and a cancellation at the pacing delay ends
+/// the loop; either way the run reaches the drain and the report, not escaping <c>RunAsync</c>.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class ProducerCancellationTests
@@ -38,61 +35,55 @@ public sealed class ProducerCancellationTests
     private static readonly TimeSpan s_returnBudget = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public Task RunAsync_WithPreCancelledToken_ReturnsWithoutThrowing() =>
-        PreCancelledTokenReturnsAsync();
+    public Task RunAsync_WithPreCancelledToken_RunsTheWarmupThenSendsNothing() =>
+        PreCancelledTokenRunsTheWarmupAsync();
 
     [Fact]
-    public Task RunAsync_CancelledDuringWarmup_ReturnsWithoutThrowing() =>
-        CancelledDuringWarmupReturnsAsync();
+    public Task RunAsync_CancelledDuringWarmup_RunsTheWarmupToItsEnd() =>
+        CancelledDuringWarmupRunsToItsEndAsync();
 
     [Fact]
     public Task RunAsync_CancelledMidRun_CountsTheAcceptedSends() =>
         CancelledMidRunCountsAcceptedSendsAsync();
 
     [Fact]
-    public Task RunAsync_CancelledDuringAPacingWait_ReturnsWithoutThrowing() =>
-        CancelledDuringPacingReturnsAsync();
+    public Task RunAsync_CancelledDuringAPacingWait_FlushesAndReports() =>
+        CancelledDuringPacingFlushesAndReportsAsync();
 
-    // ---- cases -------------------------------------------------------------------------------------
-
-    private static async Task PreCancelledTokenReturnsAsync()
+    private static async Task PreCancelledTokenRunsTheWarmupAsync()
     {
-        // A token already cancelled on entry: both loop guards refuse the first iteration, so nothing is
-        // sent and nothing throws. Documents the contract rather than the bug (this path was already
-        // safe) — the two cases below are the ones that used to escape.
-        Apply(warmupSeconds: 5);
+        // Each warmup send waits 0.1 s after it, so a 1 s warmup makes about ten sends.
+        Apply(warmupSeconds: 1);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         var backend = new ScriptedProducerBackend();
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        Assert.Equal(0, result.WarmupSent);
+        Assert.InRange(result.WarmupSent, 2, 15);
         Assert.Equal(0, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
-        Assert.Equal(0, backend.SendCount);
+        Assert.Equal(result.WarmupSent, backend.SendCount);
     }
 
-    private static async Task CancelledDuringWarmupReturnsAsync()
+    private static async Task CancelledDuringWarmupRunsToItsEndAsync()
     {
-        // Cancelled inside warmup, so the interrupt lands on `await Task.Delay(100, cancellationToken)`.
-        // That is the FIRST guarded region; before the fix this threw straight out of RunAsync.
-        Apply(warmupSeconds: 30);
+        // Cancelled on the first warmup send; the warmup still runs its whole second.
+        Apply(warmupSeconds: 1);
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 1);
 
         ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
 
-        Assert.Equal(1, result.WarmupSent);
+        Assert.InRange(result.WarmupSent, 2, 15);
         Assert.Equal(0, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
-        Assert.Equal(1, backend.SendCount);
+        Assert.Equal(result.WarmupSent, backend.SendCount);
     }
 
     private static async Task CancelledMidRunCountsAcceptedSendsAsync()
     {
-        // Cancelled during the measured loop, with no rate limit: the loop sees the token before its next
-        // send. The 5th send was accepted before that, so it is counted, as Python's async_main counts it.
+        // Cancelled in the measured loop, unpaced; the 5th send was accepted first, so it counts, as in Python.
         Apply(warmupSeconds: 0);
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 5);
@@ -103,29 +94,26 @@ public sealed class ProducerCancellationTests
         Assert.Equal(5, result.MeasuredSent);
         Assert.False(result.WarmupFailed);
 
-        // Interrupted, so the count checks are skipped: the run does not fail.
         Assert.False(result.RunFailed);
     }
 
-    private static async Task CancelledDuringPacingReturnsAsync()
+    private static async Task CancelledDuringPacingFlushesAndReportsAsync()
     {
-        // LIMIT_RPS=1 makes every send a checkpoint and asks for a 1 s wait after the first, so the interrupt
-        // lands on `await Task.Delay(wait, cancellationToken)`. That is the SECOND guarded region, and the
-        // important one: falling through must still flush, wait for the callbacks and report what was
-        // measured. s_returnBudget turns a regression into a failure instead of a hung suite.
+        // LIMIT_RPS=1 makes every send a checkpoint with a 1 s wait, so the interrupt lands on the pacing delay;
+        // s_returnBudget turns a regression into a failure, not a hung suite.
         Apply(warmupSeconds: 0, limitRps: "1");
         using var cts = new CancellationTokenSource();
         var backend = new ScriptedProducerBackend(cts, cancelOnSend: 1);
 
-        ProducerBenchmarkResult result = await RunAsync(backend, cts.Token).ConfigureAwait(false);
+        (ProducerBenchmarkResult result, string output) = await RunAsyncCapturingOutput(backend, cts.Token).ConfigureAwait(false);
 
         Assert.Equal(1, backend.SendCount);
         Assert.Equal(1, result.MeasuredSent);
         Assert.Equal(1, backend.FlushCount);
         Assert.False(result.RunFailed);
+        Assert.Contains("p99 latency: ", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Main cancelled", output, StringComparison.Ordinal);
     }
-
-    // ---- harness -----------------------------------------------------------------------------------
 
     private static void Apply(int warmupSeconds, string? limitRps = null)
     {
@@ -161,6 +149,24 @@ public sealed class ProducerCancellationTests
             $"ProducerBenchmark.RunAsync did not return within {s_returnBudget.TotalSeconds} s after cancellation.");
 
         return await run.ConfigureAwait(false);
+    }
+
+    private static async Task<(ProducerBenchmarkResult Result, string Output)> RunAsyncCapturingOutput(
+        IAsyncProducerBackend backend,
+        CancellationToken token)
+    {
+        using var output = new StringWriter(CultureInfo.InvariantCulture);
+        TextWriter original = Console.Out;
+        Console.SetOut(TextWriter.Synchronized(output));
+        try
+        {
+            ProducerBenchmarkResult result = await RunAsync(backend, token).ConfigureAwait(false);
+            return (result, output.ToString());
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
     }
 
     /// <summary>

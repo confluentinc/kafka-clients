@@ -18,53 +18,35 @@ using System.Threading;
 
 namespace Confluent.Kafka.Soak;
 
-/// <summary>Log severities, mirroring <c>soakclient.py</c>'s <c>--log-level</c> values.</summary>
+/// <summary>Log severities, as the Python soak's <c>--log-level</c> values.</summary>
 internal enum SoakLogLevel
 {
-    /// <summary>Per-record detail; off by default.</summary>
     Debug = 0,
 
-    /// <summary>The default level: lifecycle, status lines, the SUMMARY verdict.</summary>
     Info = 1,
 
-    /// <summary>Something a run should survive but an operator should see (a disconnect, a duplicate).</summary>
     Warning = 2,
 
-    /// <summary>A failure that was counted rather than fatal.</summary>
     Error = 3,
 
-    /// <summary>A failure that ends the run.</summary>
     Fatal = 4,
 }
 
 /// <summary>
-/// The soak's stdout logger. Deliberately dependency-free — an operational tool whose
-/// output is read by <c>tail -f</c> on an EC2 box needs one line format and nothing else,
-/// and adding a logging framework here would be a second external dependency beyond the
-/// OpenTelemetry one PLAN D12 already calls out.
-/// <para>
-/// The line format mirrors the Python soak's
-/// <c>'%(asctime)-15s %(levelname)-8s [%(threadName)s] %(message)s'</c>, so the two
-/// clients' logs read identically side by side. Writes are serialized on one lock:
-/// the producer loop, the consumer loop, the delivery continuations and the sampler all
-/// log, and interleaved partial lines would be unreadable.
-/// </para>
+/// The soak's dependency-free stdout logger, in the Python soak's line format
+/// (<c>%(asctime)-15s %(levelname)-8s [%(threadName)s] %(message)s</c>); one lock keeps
+/// lines whole.
 /// </summary>
 internal sealed class SoakLogger
 {
     private readonly object _lock = new object();
     private readonly SoakLogLevel _minimumLevel;
 
-    /// <summary>Creates a logger emitting <paramref name="minimumLevel"/> and above.</summary>
     internal SoakLogger(SoakLogLevel minimumLevel)
     {
         _minimumLevel = minimumLevel;
     }
 
-    /// <summary>
-    /// Parses a level name (case-insensitive), falling back to <see cref="SoakLogLevel.Info"/>
-    /// — a log level is never worth failing a two-week run over.
-    /// </summary>
     internal static SoakLogLevel ParseLevel(string? name)
     {
         if (string.IsNullOrEmpty(name))
@@ -83,19 +65,14 @@ internal sealed class SoakLogger
         };
     }
 
-    /// <summary>Logs at <see cref="SoakLogLevel.Debug"/>.</summary>
     internal void Debug(string message) => Log(SoakLogLevel.Debug, message);
 
-    /// <summary>Logs at <see cref="SoakLogLevel.Info"/>.</summary>
     internal void Info(string message) => Log(SoakLogLevel.Info, message);
 
-    /// <summary>Logs at <see cref="SoakLogLevel.Warning"/>.</summary>
     internal void Warning(string message) => Log(SoakLogLevel.Warning, message);
 
-    /// <summary>Logs at <see cref="SoakLogLevel.Error"/>.</summary>
     internal void Error(string message) => Log(SoakLogLevel.Error, message);
 
-    /// <summary>Logs at <see cref="SoakLogLevel.Fatal"/>.</summary>
     internal void Fatal(string message) => Log(SoakLogLevel.Fatal, message);
 
     private void Log(SoakLogLevel level, string message)

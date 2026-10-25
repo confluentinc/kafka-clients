@@ -19,35 +19,16 @@ using System.Text;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// A private record type carrying its own metadata in the value payload:
-/// <c>{msgid}|{send_time_ms}|{txcnt}|</c> + padding, ASCII decimal, byte-identical to
-/// the Python soak's format.
-/// <para>
-/// The reference librdkafka soak stamps msgid / time / txcnt as record <b>headers</b>.
-/// Neither this binding nor the Python one can: <c>ProducerRecord</c> carries only
-/// <c>{topic, value, key, partition, timestamp}</c> and the underlying
-/// <c>kafka_producer_ProducerRecord_t</c> has no headers field at all. Producing headers
-/// is a client-side gap tracked separately; the soak therefore carries the same three
-/// fields inside the value, which costs nothing and keeps the end-to-end latency
-/// measurement intact.
-/// </para>
-/// <para>
-/// A malformed payload is represented as a <see cref="IsMalformed"/> instance rather
-/// than an exception — see <see cref="SoakRecordDeserializer"/> for why that is load-bearing.
-/// </para>
+/// A private record type carrying its metadata in the value (<c>{msgid}|{send_time_ms}|{txcnt}|</c>
+/// plus padding), byte-identical to the Python soak's so runs stay comparable; a malformed payload
+/// decodes to an <see cref="IsMalformed"/> instance.
 /// </summary>
 internal sealed class SoakRecord
 {
-    /// <summary>
-    /// The reason recorded for an absent value. The deserializer is never called for one
-    /// (the binding returns <c>default(TValue)</c> for an absent value without invoking
-    /// it), so the consume loop applies this text itself — the Python soak's
-    /// <c>deserialize(None)</c> raises <c>ValueError("empty payload (None)")</c> and is
-    /// counted the same way.
-    /// </summary>
+    // Applied by the consume loop, as the deserializer is not called for a null value; Python's
+    // deserialize(None) raises the same reason.
     internal const string EmptyPayloadReason = "empty payload (null)";
 
-    /// <summary>Creates a well-formed record.</summary>
     internal SoakRecord(long msgId, long sendTimeMs, long txCnt)
     {
         MsgId = msgId;
@@ -61,25 +42,18 @@ internal sealed class SoakRecord
         MalformedReason = malformedReason;
     }
 
-    /// <summary>The monotonically increasing message id the producer assigned.</summary>
     internal long MsgId { get; }
 
-    /// <summary>Wall-clock epoch milliseconds at which the send was attempted.</summary>
     internal long SendTimeMs { get; }
 
-    /// <summary>Send ATTEMPTS for this message id (1 on the first attempt), not a retry count.</summary>
     internal long TxCnt { get; }
 
-    /// <summary>Whether this instance stands in for a payload that could not be parsed.</summary>
     internal bool IsMalformed { get; }
 
-    /// <summary>Why the payload could not be parsed; <see langword="null"/> for a well-formed record.</summary>
     internal string? MalformedReason { get; }
 
-    /// <summary>Builds the marked instance a malformed payload decodes to.</summary>
     internal static SoakRecord Malformed(string reason) => new SoakRecord(reason);
 
-    /// <inheritdoc/>
     public override string ToString() =>
         IsMalformed
             ? string.Format(CultureInfo.InvariantCulture, "SoakRecord(malformed: {0})", MalformedReason)
@@ -92,16 +66,8 @@ internal sealed class SoakRecord
 }
 
 /// <summary>
-/// Encodes a <see cref="SoakRecord"/> to its wire bytes, padded to the profile's target
-/// serialized size so <c>848-hi-throughput-*</c> exercises ~10 KB records at the same
-/// message rate. Records whose prefix already exceeds the target are emitted unpadded.
-/// <para>
-/// ⚠ RECORDED DEVIATION from the Python original, which holds the target size as
-/// <b>class</b> state (<c>SoakRecord.configure_padding</c>) because it has no serializer
-/// object to hang it on. .NET does: <c>ISerializer&lt;T&gt;</c> is exactly where the
-/// encoding's configuration belongs, and per-instance state also keeps the unit tests
-/// independent without the reset fixture the Python suite needs.
-/// </para>
+/// Encodes a <see cref="SoakRecord"/>, padded to the profile's target size (a longer record stays
+/// unpadded); the target is per-instance state, where Python keeps it on the class.
 /// </summary>
 internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 {
@@ -110,14 +76,11 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
     private readonly byte[] _padSource;
     private readonly int _targetSize;
 
-    /// <summary>Creates a serializer padding every record to <paramref name="targetSize"/> bytes.</summary>
     internal SoakRecordSerializer(int targetSize)
     {
         _targetSize = Math.Max(0, targetSize);
 
-        // One pad buffer per serializer, sized once: the send path must not allocate a
-        // padding buffer per record (root CLAUDE.md §13 — this is the soak's own hot path
-        // even though the binding's allocation budget does not cover it).
+        // One pad buffer per serializer, so the send path allocates no padding per record.
         int repetitions = (_targetSize / s_padUnit.Length) + 1;
         var pad = new byte[repetitions * s_padUnit.Length];
         for (int i = 0; i < repetitions; i++)
@@ -128,12 +91,9 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
         _padSource = pad;
     }
 
-    /// <inheritdoc/>
     public byte[]? Serialize(string topic, SoakRecord data)
     {
-        // Java-faithful invoke-on-null (dotnet/CLAUDE.md §4): the producer calls
-        // the serializer even for a null value, and a null return is the tombstone
-        // sentinel. The soak never sends one; handling it keeps this total.
+        // The producer calls the serializer for a null value too, as Java; the soak sends none.
         if (data is null)
         {
             return null;
@@ -161,46 +121,26 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 }
 
 /// <summary>
-/// Decodes a <see cref="SoakRecord"/> from the fetch batch. <b>This deserializer is
-/// TOTAL: it never throws.</b>
-/// <para>
-/// ⚠ That is the single highest-risk contract in this client, and it is not an
-/// optimization. <c>dotnet/CLAUDE.md §4</c>: any <c>IDeserializer&lt;T&gt;</c>
-/// throw is wrapped in a <c>SerializationException</c> and <b>faults the whole
-/// <c>Poll</c></b>. The Python soak catches its <c>ValueError</c> <i>per record</i>,
-/// counts <c>consumer.msgerr</c> and continues with the rest of the batch — so a
-/// throwing implementation here would convert "one corrupt payload" into "the entire
-/// fetch batch is lost and the poll failed", corrupting the very accounting the soak
-/// exists to produce. On any malformed input it returns a marked
-/// <see cref="SoakRecord"/> instead, which the consume loop counts and — exactly as
-/// Python does — keeps out of the high-water-mark / duplicate / gap accounting, because
-/// a bad payload is not a gap.
-/// </para>
-/// <para>
-/// REJECTED ALTERNATIVE: deserialize the value as <c>byte[]</c> (<c>Serdes.ByteArray</c>)
-/// and parse in the consume loop, which is the most literal port and sidesteps the
-/// problem entirely. Rejected because it reintroduces a per-record <c>byte[]</c> copy
-/// that the span-based <c>IDeserializer</c> hook exists to avoid, while the total-
-/// deserializer shape preserves Python's semantics exactly.
-/// </para>
+/// Decodes a <see cref="SoakRecord"/> from the fetch batch and never throws: a malformed payload
+/// decodes to a marked record, which the consume loop counts and keeps out of the duplicate and gap
+/// accounting, as Python's soak counts its per-record <c>ValueError</c>.
 /// </summary>
 internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>
 {
     private const int PreviewBytes = 64;
 
-    /// <inheritdoc/>
+    // Total, where Python parses a memoryview in the loop: a throw would make Poll seek back to
+    // this record and throw on it on every poll, and a byte[] value would copy every record.
     public SoakRecord Deserialize(string topic, ReadOnlySpan<byte> data)
     {
-        // Python splits with a maxsplit of 3, so a payload whose PADDING contains '|' is
-        // still well-formed: everything after the third separator is one field.
+        // As Python's split with maxsplit 3: a '|' in the padding belongs to the fourth field.
         int first = data.IndexOf((byte)'|');
         int second = first < 0 ? -1 : IndexOfFrom(data, first + 1);
         int third = second < 0 ? -1 : IndexOfFrom(data, second + 1);
 
         if (third < 0)
         {
-            // Python reports the SPLIT COUNT, which is one more than the number of
-            // separators found — `b""` is 1 field, `b"1|2"` is 2, `b"1|2|3"` is 3.
+            // Python's split count: one more than the separators found.
             int fields = second >= 0 ? 3 : (first >= 0 ? 2 : 1);
             return SoakRecord.Malformed(string.Format(
                 CultureInfo.InvariantCulture,
@@ -233,13 +173,8 @@ internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>
         return relative < 0 ? -1 : start + relative;
     }
 
-    /// <summary>
-    /// Parses an ASCII decimal integer with an optional leading sign. Deliberately
-    /// stricter than Python's <c>int()</c>, which also tolerates surrounding whitespace:
-    /// nothing this soak produces carries any, and a stricter parse can only turn a
-    /// payload Python would have accepted into a counted <c>consumer.msgerr</c>, never
-    /// the reverse.
-    /// </summary>
+    // Stricter than Python's int(), which allows surrounding whitespace: it can only turn a payload
+    // Python accepts into a counted consumer.msgerr.
     private static bool TryParseAsciiInteger(ReadOnlySpan<byte> field, out long value)
     {
         value = 0;
@@ -269,8 +204,6 @@ internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>
                 return false;
             }
 
-            // A payload long enough to overflow is corrupt by definition; report it the
-            // same way as any other unparseable field rather than wrapping silently.
             if (accumulated > (long.MaxValue - (digit - (byte)'0')) / 10)
             {
                 return false;
@@ -283,11 +216,6 @@ internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>
         return true;
     }
 
-    /// <summary>
-    /// The first <see cref="PreviewBytes"/> bytes rendered for a log line, approximating
-    /// Python's <c>{!r}</c> bytes repr: printable ASCII verbatim, everything else as
-    /// <c>\xNN</c>.
-    /// </summary>
     private static string Preview(ReadOnlySpan<byte> data)
     {
         int length = Math.Min(data.Length, PreviewBytes);

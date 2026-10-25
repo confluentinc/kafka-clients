@@ -35,12 +35,15 @@ namespace Confluent.Kafka;
 /// </para>
 /// <para>
 /// <b>Which records fire it.</b> Every record the producer accepted fires it exactly once, on success or
-/// failure, also when the wait on its future was abandoned. A record refused before it was appended fires
-/// nothing: the synchronous <c>Send</c> throws, and the asynchronous <c>Send</c>'s first stage faults. An
-/// error from <c>Send</c> does not prove that the callback will not fire: a record that reached the
-/// accumulator before the send failed (a transactional producer's send outside a transaction) still fires
-/// it once. A record that <c>Close</c> fails while it waits for metadata or buffer memory ("Producer closed
-/// while send in progress") fires nothing, as in Java.
+/// failure, also when the wait on its future was abandoned, with one case left out, as in Java and Python:
+/// a record whose batch a produce response did not complete, still in flight when a graceful <c>Close</c>
+/// ends, is dropped by the producer without a delivery, so it fires nothing and its future never completes.
+/// A record refused before it was appended fires nothing: the synchronous <c>Send</c> throws, and the
+/// asynchronous <c>Send</c>'s first stage faults. An error from <c>Send</c> does not prove that the
+/// callback will not fire: a record that reached the accumulator before the send failed (a transactional
+/// producer's send outside a transaction) still fires it once. A record that <c>Close</c> fails while it
+/// waits for metadata or buffer memory ("Producer closed while send in progress") fires nothing, as in
+/// Java.
 /// </para>
 /// <para>
 /// <b>Inside it.</b> Sending again is supported. <c>Get()</c> on the record's own future never returns, as

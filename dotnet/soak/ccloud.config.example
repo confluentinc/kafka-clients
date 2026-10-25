@@ -22,9 +22,11 @@
 # client knows (e.g. `group.id`) are routed automatically.
 #
 # The soak REFUSES TO START on a key neither client recognises, and says so from
-# `--check` before anything is created. That is deliberate: the Rust client only
-# logs a warning for unknown configuration keys (rust/src/producer/producer_config.rs,
-# rust/src/consumer/consumer_config.rs), so a typo would otherwise start a two-week
+# `--check` before anything is created. That is deliberate: unknown config keys
+# are silently accepted by the client - it only lists them in one INFO line when it
+# is built ("These configurations '[..]' were supplied but are not used yet.") and
+# uses the default (rust/src/producer/producer_config.rs,
+# rust/src/consumer/consumer_config.rs). A typo would therefore start a two-week
 # run against the default value.
 
 bootstrap.servers=pkc-xxxxx.us-west-2.aws.confluent.cloud:9092

@@ -20,10 +20,8 @@ using Xunit;
 namespace Confluent.Kafka.Soak.Tests;
 
 /// <summary>
-/// The startup configuration handling that stands in for the Rust client's silent
-/// acceptance of unknown keys. Error MESSAGES are asserted, not merely the throw:
-/// <c>definition-of-done.md §3</c> — the message names the offending keys and the
-/// accepted set, and that is what an operator acts on.
+/// The startup configuration routing, validation and JAAS parsing, which refuse an unlisted key
+/// (the core would accept it with one INFO line and use the default); the messages are asserted.
 /// </summary>
 public sealed class SoakConfigTests
 {
@@ -55,7 +53,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void ValidateAcceptsSslPrefix()
     {
-        // Both Rust configs route every `ssl.*` key to apply_ssl_config_key().
         SoakConfig.ValidateConfig(Conf(("ssl.truststore.location", "/x")), SoakConfig.ProducerConfigKeys, "producer");
         SoakConfig.ValidateConfig(Conf(("ssl.keystore.password", "x")), SoakConfig.ConsumerConfigKeys, "consumer");
     }
@@ -82,8 +79,6 @@ public sealed class SoakConfigTests
         Assert.Contains("sasl.password", ex.Message, StringComparison.Ordinal);
         Assert.Contains("lingerr.ms", ex.Message, StringComparison.Ordinal);
 
-        // A key that IS accepted must not appear in the rejection list (it still appears
-        // later, in the "Accepted ... keys" catalog).
         string rejected = ex.Message.Split("Accepted", StringSplitOptions.None)[0];
         Assert.DoesNotContain("bootstrap.servers", rejected, StringComparison.Ordinal);
     }
@@ -96,11 +91,23 @@ public sealed class SoakConfigTests
         Assert.Contains("group.protocoll", ex.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Every profile must set <c>group.protocol=consumer</c>: the client defaults to
-    /// `classic` and construction fails for it (KIP-848 only). If the key were not
-    /// accepted, every soak config would be rejected at startup.
-    /// </summary>
+    [Fact]
+    public void ValidateAcceptsAKeyTheKafka44CoreAdded()
+    {
+        SoakConfig.ValidateConfig(Conf(("partitioner.rack.aware", "true")), SoakConfig.ProducerConfigKeys, "producer");
+        SoakConfig.ValidateConfig(Conf(("metadata.cluster.check.enable", "true")), SoakConfig.ConsumerConfigKeys, "consumer");
+    }
+
+    [Fact]
+    public void ValidateRejectsAConsumerKeyTheCoreDoesNotDefine()
+    {
+        ArgumentException ex = Assert.Throws<ArgumentException>(
+            () => SoakConfig.ValidateConfig(Conf(("interceptor.classes", "x")), SoakConfig.ConsumerConfigKeys, "consumer"));
+
+        Assert.StartsWith("unknown consumer configuration key(s): interceptor.classes. ", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("only logs a warning for unrecognised keys", ex.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void GroupProtocolIsAnAcceptedConsumerKey()
     {
@@ -120,7 +127,6 @@ public sealed class SoakConfigTests
         Assert.Equal("x", kept["bootstrap.servers"]);
         Assert.Equal("5", kept["linger.ms"]);
 
-        // And the kept half now validates, which is the whole point of routing.
         SoakConfig.ValidateConfig(kept, SoakConfig.ProducerConfigKeys, "producer");
     }
 
@@ -187,8 +193,6 @@ public sealed class SoakConfigTests
 
         Assert.Equal("host:9092", conf["bootstrap.servers"]);
 
-        // Values may contain '=' — only the FIRST one separates, so a JAAS string needs
-        // no escaping.
         Assert.EndsWith("password=\"p=q\";", conf["sasl.jaas.config"], StringComparison.Ordinal);
     }
 
@@ -207,10 +211,6 @@ public sealed class SoakConfigTests
         using var reader = new StringReader("=value\n");
         Assert.Throws<ArgumentException>(() => SoakConfig.ParseConfigFile(reader));
     }
-
-    // -----------------------------------------------------------------------------------
-    // JAAS field / credential parsing + the startup credential check.
-    // -----------------------------------------------------------------------------------
 
     [Fact]
     public void JaasCredentialsExtraction()
@@ -234,7 +234,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void JaasCredentialsDoesNotMatchALongerFieldName()
     {
-        // `serviceName=` / `foo.username=` must not be mistaken for `username=`.
         string jaas = "required serviceName=\"wrong\" username=\"right\";";
         Assert.Equal("right", SoakConfig.JaasField(jaas, "username"));
     }
@@ -242,10 +241,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void JaasCredentialsDoesNotMatchAKeyInsideAQuotedValue()
     {
-        // A `username=` sequence embedded in another option's quoted value must not be
-        // picked up. The real `username` option must win, matching the Rust parser, so
-        // the fast-fail cannot be fooled into passing a config whose real username is
-        // absent.
         const string Jaas = "PlainLoginModule required password=\"username=x\" username=\"right\";";
         (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
         Assert.Equal("right", username);
@@ -255,9 +250,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void JaasCredentialsHandlesEscapedQuoteInValue()
     {
-        // An escaped quote inside a value must not terminate it or misalign later
-        // options; `username` after it still resolves. Value is returned raw (escapes
-        // not expanded), matching the Rust parser.
         const string Jaas = "PlainLoginModule required password=\"a\\\"b\" username=\"right\";";
         (string? username, string? password) = SoakConfig.JaasCredentials(Jaas);
         Assert.Equal("right", username);
@@ -284,9 +276,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsRefusesSaslWithoutCredentials()
     {
-        // A SASL config whose credentials cannot be recovered must fail loudly at
-        // startup — the one outcome worth refusing turns a typo into an opaque broker
-        // auth error minutes later, or a two-week soak against the wrong thing.
         SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
             Conf(
                 ("bootstrap.servers", "host:9092"),
@@ -314,7 +303,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsTriggersOnSaslMechanismAlone()
     {
-        // SASL implied by sasl.mechanism even when security.protocol is unset.
         Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
             Conf(("bootstrap.servers", "host:9092"), ("sasl.mechanism", "PLAIN"))));
     }
@@ -322,9 +310,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsRefusesSaslMechanismWithPlaintextProtocol()
     {
-        // SASL is configured (mechanism set) but security.protocol=PLAINTEXT, so the
-        // client would connect unauthenticated — refuse, even though credentials happen
-        // to be present, because the protocol would not use them.
         SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
             Conf(
                 ("bootstrap.servers", "host:9092"),
@@ -340,8 +325,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsRefusesSaslMechanismWithoutProtocol()
     {
-        // sasl.mechanism set but security.protocol absent: the Rust default is
-        // PLAINTEXT, so this too would connect unauthenticated and must be refused.
         SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
             Conf(("bootstrap.servers", "host:9092"), ("sasl.mechanism", "PLAIN"))));
 
@@ -351,8 +334,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsRefusesJaasCredsWithPlaintextProtocol()
     {
-        // Credentials via sasl.jaas.config but security.protocol=PLAINTEXT (no
-        // mechanism): still a SASL-configured-but-PLAINTEXT mismatch to refuse.
         SoakFatalStartupException ex = Assert.Throws<SoakFatalStartupException>(() => SoakConfig.CheckAdminCredentials(
             Conf(
                 ("bootstrap.servers", "host:9092"),
@@ -366,7 +347,6 @@ public sealed class SoakConfigTests
     [Fact]
     public void CheckAdminCredentialsAllowsPlaintextWithoutCredentials()
     {
-        // The common case: no SASL configured at all — must pass untouched.
         SoakConfig.CheckAdminCredentials(Conf(("bootstrap.servers", "host:9092")));
         SoakConfig.CheckAdminCredentials(Conf(
             ("bootstrap.servers", "host:9092"), ("security.protocol", "PLAINTEXT")));

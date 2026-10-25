@@ -26,40 +26,24 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Admin-direction translation helpers for <see cref="AdminServiceImpl"/> and
-/// <see cref="AsyncAdminServiceImpl"/> — the C# port of
-/// <c>grpc_translate.py</c>'s <c>_admin_*</c> family. Kept out of <see cref="Translate"/>
-/// (producer/consumer) so the admin slices can grow additively.
+/// <see cref="AsyncAdminServiceImpl"/>, the C# port of Python's <c>_admin_*</c> helpers in
+/// <c>grpc_translate.py</c>.
 /// </summary>
 internal static class TranslateAdmin
 {
-    /// <summary>
-    /// <c>kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT</c>, the code the proto's
-    /// constructor-rejection rule mandates (<c>_error_code.py:168</c>).
-    /// </summary>
     private const int LocalIllegalArgumentCode = -3;
 
-    /// <summary>Java's <c>NAME_TO_ENUM</c>, keyed by the <c>toString()</c> spelling.</summary>
     private static readonly Dictionary<string, TransactionState> s_transactionStatesByName =
         BuildTransactionStateTable();
 
-    /// <summary>
-    /// Java's <c>GroupState.NAME_TO_ENUM</c>. Case-<b>insensitive</b>, unlike
-    /// <see cref="s_transactionStatesByName"/>: <c>GroupState.parse</c> lower-cases its input,
-    /// <c>TransactionState.parse</c> does not.
-    /// </summary>
+    // Case-insensitive, unlike s_transactionStatesByName: GroupState.parse lower-cases its input,
+    // TransactionState.parse does not.
     private static readonly Dictionary<string, GroupState> s_groupStatesByName =
         BuildNameTable<GroupState>();
 
-    /// <summary>Java's <c>GroupType.NAME_TO_ENUM</c>, also case-insensitive.</summary>
     private static readonly Dictionary<string, GroupType> s_groupTypesByName =
         BuildNameTable<GroupType>();
 
-    /// <summary>
-    /// The normative mock-selection rule of <c>admin_service.proto</c>'s
-    /// <c>CreateAdminRequest</c>: an empty config, or one whose every value is empty, selects
-    /// the flavour's mock (<see cref="MockAdminClient"/> / <see cref="AsyncMockAdminClient"/>).
-    /// Port of <c>_admin_selects_mock</c>.
-    /// </summary>
     internal static bool SelectsMock(IReadOnlyDictionary<string, string> config)
     {
         foreach (string value in config.Values)
@@ -73,13 +57,6 @@ internal static class TranslateAdmin
         return true;
     }
 
-    /// <summary>
-    /// Translates a <em>constructor</em> failure for <c>CreateAdminResponse.error</c> — port of
-    /// <c>_admin_constructor_error</c>. A genuine <see cref="KafkaException"/> is forwarded
-    /// verbatim; anything else (the mock's <c>numBrokers &lt; 1</c>) is the proto's
-    /// constructor-rejection variant and crosses as <c>LOCAL_ILLEGAL_ARGUMENT</c>, matching
-    /// Java's <c>IllegalArgumentException</c>.
-    /// </summary>
     internal static Proto.KafkaError ConstructorError(Exception error) =>
         error is KafkaException
             ? Translate.ToProto(error)
@@ -89,84 +66,50 @@ internal static class TranslateAdmin
                 Message = $"dotnet server: {error.GetType().Name}: {error.Message}",
             };
 
-    /// <summary><c>optional int32 timeout_ms</c> -&gt; an options object's <c>TimeoutMs</c>.</summary>
     internal static int? Timeout(bool hasTimeoutMs, int timeoutMs) => hasTimeoutMs ? timeoutMs : (int?)null;
 
-    /// <summary>
-    /// <c>optional bool retry_on_quota_violation</c> -&gt; Java's default of <c>true</c> when
-    /// absent (port of <c>_admin_retry_on_quota</c>).
-    /// </summary>
     internal static bool RetryOnQuota(bool hasRetryOnQuotaViolation, bool retryOnQuotaViolation) =>
         !hasRetryOnQuotaViolation || retryOnQuotaViolation;
 
-    /// <summary>A <c>name</c>-keyed <c>ResultKey</c> (<c>_admin_name_key</c>).</summary>
     internal static Proto.ResultKey NameKey(string name) => new Proto.ResultKey { Name = name };
 
-    /// <summary>A <c>topic_id</c>-keyed <c>ResultKey</c> (<c>_admin_topic_id_key</c>).</summary>
     internal static Proto.ResultKey TopicIdKey(Uuid topicId) => new Proto.ResultKey { TopicId = topicId.ToString() };
 
-    /// <summary>A <c>partition</c>-keyed <c>ResultKey</c> (<c>_admin_partition_key</c>).</summary>
     internal static Proto.ResultKey PartitionKey(TopicPartition partition) =>
         new Proto.ResultKey { Partition = Translate.TpToProto(partition) };
 
-    /// <summary>A <c>broker_id</c>-keyed <c>ResultKey</c>.</summary>
     internal static Proto.ResultKey BrokerIdKey(int brokerId) => new Proto.ResultKey { BrokerId = brokerId };
 
-    /// <summary>
-    /// A <c>config_resource</c>-keyed <c>ResultKey</c> (<c>_admin_config_resource_key</c>).
-    /// </summary>
     internal static Proto.ResultKey ConfigResourceKey(ConfigResource resource) =>
         new Proto.ResultKey { ConfigResource = ConfigResourceToProto(resource) };
 
-    /// <summary>A <c>replica</c>-keyed <c>ResultKey</c> (<c>_admin_replica_key</c>).</summary>
     internal static Proto.ResultKey ReplicaKey(TopicPartitionReplica replica) =>
         new Proto.ResultKey { Replica = ReplicaToProto(replica) };
 
-    /// <summary>
-    /// Awaits one per-key future — the C# shape of <c>_resolve_admin_futures</c>. A
-    /// <see cref="KafkaException"/> is <em>that key's</em> outcome; any other exception
-    /// propagates to the handler's whole-call <c>catch</c>, which is where a failure with no
-    /// per-key future belongs.
-    /// </summary>
-    /// <remarks>
-    /// The async flavour's helper (<see cref="AsyncAdminServiceImpl"/>). Each of the three
-    /// future helpers has a sync twin over <see cref="KafkaFuture{T}"/> / <see cref="KafkaFuture"/>
-    /// for <see cref="AdminServiceImpl"/> (M15/P14), which blocks in <c>Get()</c> on the calling
-    /// thread instead of awaiting; the two differ only in how they wait.
-    /// </remarks>
     internal static async Task<(TValue Value, Proto.KafkaError? Error)> Resolve<TValue>(AsyncKafkaFuture<TValue> future)
     {
         try
         {
             return (await future.Get().ConfigureAwait(false), null);
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
             return (default!, Translate.ToProto(ex));
         }
     }
 
-    /// <summary>
-    /// The sync twin of <see cref="Resolve{TValue}(AsyncKafkaFuture{TValue})"/>: blocks in
-    /// <see cref="KafkaFuture{T}.Get"/> on the calling thread.
-    /// </summary>
     internal static (TValue Value, Proto.KafkaError? Error) Resolve<TValue>(KafkaFuture<TValue> future)
     {
         try
         {
             return (future.Get(), null);
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
             return (default!, Translate.ToProto(ex));
         }
     }
 
-    /// <summary>
-    /// The void-valued twin of <see cref="Resolve{TValue}(AsyncKafkaFuture{TValue})"/>:
-    /// <see langword="null"/> means that key succeeded, there being no value to distinguish
-    /// success by.
-    /// </summary>
     internal static async Task<Proto.KafkaError?> ResolveVoid(AsyncKafkaFuture future)
     {
         try
@@ -174,16 +117,12 @@ internal static class TranslateAdmin
             await future.Get().ConfigureAwait(false);
             return null;
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
             return Translate.ToProto(ex);
         }
     }
 
-    /// <summary>
-    /// The sync twin of <see cref="ResolveVoid(AsyncKafkaFuture)"/>: blocks in
-    /// <see cref="KafkaFuture.Get"/> on the calling thread.
-    /// </summary>
     internal static Proto.KafkaError? ResolveVoid(KafkaFuture future)
     {
         try
@@ -191,16 +130,12 @@ internal static class TranslateAdmin
             future.Get();
             return null;
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
             return Translate.ToProto(ex);
         }
     }
 
-    /// <summary>
-    /// <c>{key: future}</c> -&gt; <c>VoidKeyedResponse</c>, the response every per-key-void admin
-    /// RPC answers with (port of <c>_admin_void_response</c>).
-    /// </summary>
     internal static async Task<Proto.VoidKeyedResponse> VoidResponse<TKey>(
         IReadOnlyDictionary<TKey, AsyncKafkaFuture> futures, Func<TKey, Proto.ResultKey> keyFn)
     {
@@ -214,11 +149,6 @@ internal static class TranslateAdmin
         return response;
     }
 
-    /// <summary>
-    /// The sync twin of
-    /// <see cref="VoidResponse{TKey}(IReadOnlyDictionary{TKey, AsyncKafkaFuture}, Func{TKey, Proto.ResultKey})"/>:
-    /// resolves each key's future in turn with <see cref="ResolveVoid(KafkaFuture)"/>.
-    /// </summary>
     internal static Proto.VoidKeyedResponse VoidResponse<TKey>(
         IReadOnlyDictionary<TKey, KafkaFuture> futures, Func<TKey, Proto.ResultKey> keyFn)
     {
@@ -232,10 +162,6 @@ internal static class TranslateAdmin
         return response;
     }
 
-    /// <summary>
-    /// One <c>VoidResultEntry</c>, shared by both <c>VoidResponse</c> flavours: the key, plus the
-    /// error only when that key failed.
-    /// </summary>
     private static Proto.VoidResultEntry VoidEntry(Proto.ResultKey key, Proto.KafkaError? error)
     {
         Proto.VoidResultEntry entry = new Proto.VoidResultEntry { Key = key };
@@ -247,11 +173,8 @@ internal static class TranslateAdmin
         return entry;
     }
 
-    /// <summary>
-    /// Java's <c>TopicCollection</c> from a request's <c>oneof topics</c>. An unset oneof is an
-    /// empty name collection — proto3 in Python reads an unset message field as a default
-    /// instance, where C# reads <see langword="null"/>.
-    /// </summary>
+    // An unset oneof is an empty name collection, as Python reads an unset message field as a
+    // default instance.
     internal static TopicCollection TopicCollectionOf(bool byIds, Proto.StringList? names, Proto.StringList? topicIds)
     {
         if (byIds)
@@ -272,12 +195,6 @@ internal static class TranslateAdmin
             names is null ? Array.Empty<string>() : (IEnumerable<string>)names.Values);
     }
 
-    /// <summary>
-    /// Proto <c>NewTopic</c>s -&gt; binding <see cref="NewTopic"/>s (port of
-    /// <c>_admin_new_topics</c>). <c>-1</c> is the wire's "absent" for
-    /// <c>num_partitions</c> / <c>replication_factor</c>; a non-empty
-    /// <c>replicas_assignments</c> selects Java's assignment constructor.
-    /// </summary>
     internal static List<NewTopic> NewTopics(IEnumerable<Proto.NewTopic> protos)
     {
         List<NewTopic> topics = new List<NewTopic>();
@@ -309,12 +226,8 @@ internal static class TranslateAdmin
         return topics;
     }
 
-    /// <summary>
-    /// Proto <c>NewPartitions</c> -&gt; <c>{topic: NewPartitions}</c> (port of
-    /// <c>_admin_new_partitions</c>). Presence of <c>new_assignments</c>, NOT its length, is the
-    /// discriminant: <c>increaseTo(n)</c> and <c>increaseTo(n, [])</c> are different broker
-    /// requests.
-    /// </summary>
+    // Presence of new_assignments, not its length, is the discriminant: increaseTo(n) and
+    // increaseTo(n, []) are different broker requests.
     internal static Dictionary<string, NewPartitions> NewPartitionsMap(IEnumerable<Proto.NewPartitions> protos)
     {
         Dictionary<string, NewPartitions> map = new Dictionary<string, NewPartitions>(StringComparer.Ordinal);
@@ -338,10 +251,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Proto <c>RecordsToDelete</c>s -&gt; the map <see cref="IAdmin.DeleteRecords"/> takes
-    /// (port of <c>_admin_records_to_delete</c>).
-    /// </summary>
     internal static Dictionary<TopicPartition, RecordsToDelete> RecordsToDeleteMap(
         IEnumerable<Proto.RecordsToDelete> protos)
     {
@@ -354,13 +263,7 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Binding <see cref="ConfigEntry"/> -&gt; proto <c>ConfigEntry</c>, <b>five fields only</b>
-    /// (port of <c>_admin_config_entry_to_proto</c>). Fields 6-9 (<c>source</c> /
-    /// <c>config_type</c> / <c>documentation</c> / <c>synonyms</c>) belong to
-    /// <c>describeConfigs</c>: <c>createTopics</c>' broker response carries none of them, and
-    /// emitting them here would let a <c>createTopics</c> entry claim a source it never carried.
-    /// </summary>
+    // Five fields only: createTopics' response carries no source, type, documentation or synonyms.
     internal static Proto.ConfigEntry ConfigEntryToProto(ConfigEntry entry)
     {
         Proto.ConfigEntry proto = new Proto.ConfigEntry
@@ -378,14 +281,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    // -- Cluster, configs & log dirs (slice G2) -------------------------------------------
-
-    /// <summary>
-    /// Binding <see cref="ConfigEntry"/> -&gt; proto <c>ConfigEntry</c>, <b>all nine fields</b>
-    /// (port of <c>_admin_full_config_entry_to_proto</c>). The <c>describeConfigs</c> twin of
-    /// <see cref="ConfigEntryToProto"/>. <c>source</c> / <c>config_type</c> cross as Java's
-    /// enum constant names — neither enum has a numeric id.
-    /// </summary>
     internal static Proto.ConfigEntry FullConfigEntryToProto(ConfigEntry entry)
     {
         Proto.ConfigEntry proto = ConfigEntryToProto(entry);
@@ -415,7 +310,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>Binding <see cref="Config"/> -&gt; proto <c>AdminConfig</c>.</summary>
     internal static Proto.AdminConfig ConfigToProto(Config config)
     {
         Proto.AdminConfig proto = new Proto.AdminConfig();
@@ -427,14 +321,9 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="ConfigResource"/> -&gt; proto <c>ConfigResource</c>. The enum's values
-    /// <em>are</em> Java's <c>ConfigResource.Type.id()</c>, which is what the wire carries.
-    /// </summary>
     internal static Proto.ConfigResource ConfigResourceToProto(ConfigResource resource) =>
         new Proto.ConfigResource { ResourceType = (int)resource.Type, Name = resource.Name };
 
-    /// <summary>Proto <c>ConfigResource</c>s -&gt; binding ones (<c>_admin_config_resources</c>).</summary>
     internal static List<ConfigResource> ConfigResources(IEnumerable<Proto.ConfigResource> protos)
     {
         List<ConfigResource> resources = new List<ConfigResource>();
@@ -446,11 +335,6 @@ internal static class TranslateAdmin
         return resources;
     }
 
-    /// <summary>
-    /// Proto <c>ConfigResourceOps</c>s -&gt; the map <see cref="IAdmin.IncrementalAlterConfigs"/>
-    /// takes (port of <c>_admin_alter_configs</c>). An absent op value is Java's null, which is
-    /// what a DELETE carries.
-    /// </summary>
     internal static Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> AlterConfigsMap(
         IEnumerable<Proto.ConfigResourceOps> protos)
     {
@@ -472,11 +356,7 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Proto <c>resource_types</c> (Java <c>Type.id()</c> codes) -&gt; the filter
-    /// <see cref="IAdmin.ListConfigResources"/> takes. An empty list is Java's empty set —
-    /// "every supported type" — and is passed through, not turned into a rejection.
-    /// </summary>
+    // An empty list is Java's empty set ("every supported type"): passed through, not rejected.
     internal static List<ConfigResourceType> ConfigResourceTypes(IEnumerable<int> ids)
     {
         List<ConfigResourceType> types = new List<ConfigResourceType>();
@@ -488,7 +368,6 @@ internal static class TranslateAdmin
         return types;
     }
 
-    /// <summary>Binding <see cref="TopicPartitionReplica"/> -&gt; proto (<c>_admin_replica_to_proto</c>).</summary>
     internal static Proto.TopicPartitionReplica ReplicaToProto(TopicPartitionReplica replica) =>
         new Proto.TopicPartitionReplica
         {
@@ -497,7 +376,6 @@ internal static class TranslateAdmin
             BrokerId = replica.BrokerId,
         };
 
-    /// <summary>Proto <c>TopicPartitionReplica</c>s -&gt; binding ones (<c>_admin_replicas</c>).</summary>
     internal static List<TopicPartitionReplica> Replicas(IEnumerable<Proto.TopicPartitionReplica> protos)
     {
         List<TopicPartitionReplica> replicas = new List<TopicPartitionReplica>();
@@ -509,11 +387,6 @@ internal static class TranslateAdmin
         return replicas;
     }
 
-    /// <summary>
-    /// Proto <c>ReplicaLogDirAssignment</c>s -&gt; the map
-    /// <see cref="IAdmin.AlterReplicaLogDirs"/> takes
-    /// (<c>_admin_replica_log_dir_assignments</c>).
-    /// </summary>
     internal static Dictionary<TopicPartitionReplica, string> ReplicaLogDirAssignments(
         IEnumerable<Proto.ReplicaLogDirAssignment> protos)
     {
@@ -527,12 +400,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Binding <see cref="LogDirDescription"/> -&gt; proto (port of
-    /// <c>_admin_log_dir_description_to_proto</c>). <c>error</c> is this <em>directory's</em>
-    /// own error (offline / unreadable) — envelope exception 3 — never the per-broker error,
-    /// which arrives as the entry's error arm instead of a value.
-    /// </summary>
     internal static Proto.LogDirDescription LogDirDescriptionToProto(LogDirDescription description)
     {
         Proto.LogDirDescription proto = new Proto.LogDirDescription { IsCordoned = description.IsCordoned };
@@ -541,7 +408,6 @@ internal static class TranslateAdmin
             proto.Error = Translate.ToProto(description.Error);
         }
 
-        // OptionalLong in Java: absent means the broker did not report it.
         if (description.TotalBytes.HasValue)
         {
             proto.TotalBytes = description.TotalBytes.Value;
@@ -566,10 +432,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Java's <c>ConfigEntry.ConfigSource</c> constant name. The enum has no numeric id, so the
-    /// name is the contract at the C boundary.
-    /// </summary>
     internal static string ConfigSourceName(ConfigEntry.ConfigSource source) => source switch
     {
         ConfigEntry.ConfigSource.DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
@@ -583,8 +445,6 @@ internal static class TranslateAdmin
         _ => "UNKNOWN",
     };
 
-    /// <summary>Java's <c>ConfigEntry.ConfigType</c> constant name. Same reasoning as
-    /// <see cref="ConfigSourceName"/>.</summary>
     internal static string ConfigTypeName(ConfigEntry.ConfigType type) => type switch
     {
         ConfigEntry.ConfigType.Boolean => "BOOLEAN",
@@ -599,7 +459,6 @@ internal static class TranslateAdmin
         _ => "UNKNOWN",
     };
 
-    /// <summary>Binding <see cref="TopicPartitionInfo"/> -&gt; proto <c>TopicPartitionInfo</c>.</summary>
     internal static Proto.TopicPartitionInfo PartitionInfoToProto(TopicPartitionInfo info)
     {
         Proto.TopicPartitionInfo proto = new Proto.TopicPartitionInfo { Partition = info.Partition };
@@ -618,8 +477,7 @@ internal static class TranslateAdmin
             proto.Isr.Add(Translate.NodeToProto(node));
         }
 
-        // elr / last_known_elr are nullable in Java, hence the NodeList wrapper: absent is not
-        // the same as reported-empty.
+        // Absent (not reported) is not the same as reported-empty.
         if (info.Elr is not null)
         {
             proto.Elr = NodeListToProto(info.Elr);
@@ -633,7 +491,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>Binding <see cref="TopicDescription"/> -&gt; proto <c>TopicDescription</c>.</summary>
     internal static Proto.TopicDescription DescriptionToProto(TopicDescription description)
     {
         Proto.TopicDescription proto = new Proto.TopicDescription
@@ -647,8 +504,7 @@ internal static class TranslateAdmin
             proto.Partitions.Add(PartitionInfoToProto(info));
         }
 
-        // Nullable: absent means the broker did not report the operations, which is not the same
-        // as reporting that none are authorized.
+        // Absent (not reported) is not the same as reported-empty.
         if (description.AuthorizedOperations is not null)
         {
             proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
@@ -657,7 +513,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>Binding <see cref="TopicListing"/> -&gt; proto <c>AdminTopicListing</c>.</summary>
     internal static Proto.AdminTopicListing ListingToProto(TopicListing listing) => new Proto.AdminTopicListing
     {
         Name = listing.Name,
@@ -665,26 +520,12 @@ internal static class TranslateAdmin
         IsInternal = listing.IsInternal,
     };
 
-    // -- Elections, reassignments & offsets (slice G3) -------------------------------------
-
-    /// <summary>
-    /// A malformed <em>request</em> error — Python's <c>AdminRequestError</c>, which crosses as
-    /// <c>LOCAL_ILLEGAL_ARGUMENT</c> rather than the generic branch's
-    /// <c>LOCAL_ILLEGAL_STATE</c>: <c>code</c> is the field the Rust client matches on.
-    /// </summary>
     internal static Proto.KafkaError RequestError(string message) => new Proto.KafkaError
     {
         Code = LocalIllegalArgumentCode,
         Message = $"dotnet server: AdminRequestError: {message}",
     };
 
-    /// <summary>
-    /// <c>optional TopicPartitionList partitions</c> -&gt; Java's <b>nullable</b>
-    /// <c>Set&lt;TopicPartition&gt;</c> (port of <c>_admin_optional_partitions</c>). An absent
-    /// message is null — every partition in the cluster; present-but-empty is an empty
-    /// selection, a different broker request. Emptiness of the repeated field must not be the
-    /// discriminant.
-    /// </summary>
     internal static IReadOnlyCollection<TopicPartition>? OptionalPartitions(Proto.TopicPartitionList? partitions)
     {
         if (partitions is null)
@@ -701,13 +542,6 @@ internal static class TranslateAdmin
         return selection;
     }
 
-    /// <summary>
-    /// Proto <c>PartitionReassignmentSpec</c>s -&gt; the map
-    /// <see cref="IAdmin.AlterPartitionReassignments"/> takes (<c>_admin_reassignments</c>). An
-    /// absent <c>reassignment</c> is Java's empty <c>Optional</c>, which <em>cancels</em> the
-    /// partition's ongoing move; it must not become a present wrapper over an empty replica
-    /// list, which Java rejects outright.
-    /// </summary>
     internal static Dictionary<TopicPartition, NewPartitionReassignment?> Reassignments(
         IEnumerable<Proto.PartitionReassignmentSpec> protos)
     {
@@ -723,7 +557,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>Binding <see cref="PartitionReassignment"/> -&gt; proto.</summary>
     internal static Proto.PartitionReassignment ReassignmentToProto(PartitionReassignment reassignment)
     {
         Proto.PartitionReassignment proto = new Proto.PartitionReassignment();
@@ -733,18 +566,8 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Proto <c>OffsetSpecEntry</c>s -&gt; the map <see cref="IAdmin.ListOffsets"/> takes (port
-    /// of <c>_admin_offset_specs</c>). Each variant is reached through the binding's <b>named
-    /// factory</b>, so the six <c>ListOffsets</c> sentinels come from this binding's own table
-    /// rather than from one written in the harness.
-    /// </summary>
-    /// <returns>
-    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set.
-    /// <c>KIND_UNSPECIFIED</c> and <c>FOR_TIMESTAMP</c> without a timestamp are protocol
-    /// errors, never a defaulted variant: a dropped <c>kind</c> must fail the call rather than
-    /// silently become <c>earliest()</c> and pass.
-    /// </returns>
+    // KIND_UNSPECIFIED, or FOR_TIMESTAMP without a timestamp, fails the call: a dropped kind must
+    // not silently become earliest().
     internal static Dictionary<TopicPartition, OffsetSpec>? OffsetSpecs(
         IEnumerable<Proto.OffsetSpecEntry> protos, out string? invalid)
     {
@@ -792,11 +615,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Binding <see cref="ListOffsetsResult.ListOffsetsResultInfo"/> -&gt; proto. Java reports
-    /// <c>-1</c> for a timestamp the broker did not send, and that sentinel crosses as-is;
-    /// <c>leaderEpoch</c> is a real <c>Optional</c>, so absent is not epoch 0.
-    /// </summary>
     internal static Proto.ListOffsetsResultInfo OffsetInfoToProto(ListOffsetsResult.ListOffsetsResultInfo info)
     {
         Proto.ListOffsetsResultInfo proto = new Proto.ListOffsetsResultInfo
@@ -812,13 +630,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    // -- Producers & transactions (slice G6) ----------------------------------------------
-
-    /// <summary>
-    /// Binding <see cref="ProducerState"/> -&gt; proto. Both <c>Optional</c> columns stay
-    /// absent when null: every <see langword="long"/> / <see langword="int"/> — 0 and -1
-    /// included — is a legal coordinator epoch or transaction start offset.
-    /// </summary>
     internal static Proto.ProducerState ProducerStateToProto(ProducerState state)
     {
         Proto.ProducerState proto = new Proto.ProducerState
@@ -841,11 +652,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// One partition's <c>activeProducers()</c> -&gt; proto. An <b>empty</b> list is a
-    /// successful description of a partition with no producer state — not an error and not an
-    /// absent value.
-    /// </summary>
     internal static Proto.PartitionProducerState PartitionProducerStateToProto(
         DescribeProducersResult.PartitionProducerState value)
     {
@@ -858,12 +664,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="TransactionDescription"/> -&gt; proto. <c>state</c> crosses as Java's
-    /// <c>toString()</c> spelling (<see cref="TransactionStateName"/>);
-    /// <c>transactionStartTimeMs</c> stays absent for a transaction that is not in progress,
-    /// which is not start time 0.
-    /// </summary>
     internal static Proto.TransactionDescription TransactionDescriptionToProto(TransactionDescription description)
     {
         Proto.TransactionDescription proto = new Proto.TransactionDescription
@@ -887,7 +687,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>Binding <see cref="TransactionListing"/> -&gt; proto.</summary>
     internal static Proto.TransactionListing TransactionListingToProto(TransactionListing listing) =>
         new Proto.TransactionListing
         {
@@ -896,13 +695,6 @@ internal static class TranslateAdmin
             State = TransactionStateName(listing.State),
         };
 
-    /// <summary>
-    /// <c>repeated string states</c> -&gt; <see cref="ListTransactionsOptions.FilteredStates"/>
-    /// (port of <c>_admin_transaction_states</c>). Java's own default is an empty set meaning
-    /// "every state", so an empty list needs no null form. Matching is <b>case-sensitive</b> and
-    /// an unrecognised name decodes to <see cref="TransactionState.Unknown"/>, exactly as Java's
-    /// <c>TransactionState.parse</c> does.
-    /// </summary>
     internal static List<TransactionState> TransactionStates(IEnumerable<string> names)
     {
         List<TransactionState> states = new List<TransactionState>();
@@ -916,16 +708,6 @@ internal static class TranslateAdmin
         return states;
     }
 
-    /// <summary>
-    /// <c>AbortTransactionRequest</c> -&gt; <see cref="AbortTransactionSpec"/> (port of
-    /// <c>_admin_abort_transaction_spec</c>).
-    /// </summary>
-    /// <returns>
-    /// The spec, or <see langword="null"/> with <paramref name="invalid"/> set. The partition is
-    /// required — Java's <c>TopicPartition</c> has no null-topic form — and a
-    /// <c>producer_epoch</c> outside <see langword="short"/> is a protocol error rather than
-    /// something to truncate.
-    /// </returns>
     internal static AbortTransactionSpec? AbortSpec(Proto.AbortTransactionRequest request, out string? invalid)
     {
         if (request.TopicPartition is null)
@@ -948,12 +730,6 @@ internal static class TranslateAdmin
             request.CoordinatorEpoch);
     }
 
-    // -- Groups (slice G4) ----------------------------------------------------------------
-
-    /// <summary>
-    /// A nullable <c>authorizedOperations</c> -&gt; proto <c>AclOperationList</c>. The enum's
-    /// values <em>are</em> Java's <c>AclOperation.code()</c>, which is what the wire carries.
-    /// </summary>
     internal static Proto.AclOperationList AclOperationsToProto(IEnumerable<AclOperation> operations)
     {
         Proto.AclOperationList list = new Proto.AclOperationList();
@@ -965,28 +741,12 @@ internal static class TranslateAdmin
         return list;
     }
 
-    /// <summary>
-    /// <c>repeated string group_states</c> -&gt; the filter the list options take. Matching is
-    /// <b>case-insensitive</b> and an unrecognised name decodes to
-    /// <see cref="GroupState.Unknown"/>, exactly as Java's <c>GroupState.parse</c>. An empty
-    /// list is Java's empty set — the filter left unset — and needs no null form.
-    /// </summary>
     internal static List<GroupState> GroupStates(IEnumerable<string> names) =>
         ParseNames(names, s_groupStatesByName, GroupState.Unknown);
 
-    /// <summary>
-    /// <c>repeated string types</c> -&gt; the group-type filter, on the same terms as
-    /// <see cref="GroupStates"/> (Java's <c>GroupType.parse</c>).
-    /// </summary>
     internal static List<GroupType> GroupTypes(IEnumerable<string> names) =>
         ParseNames(names, s_groupTypesByName, GroupType.Unknown);
 
-    /// <summary>
-    /// Binding <see cref="GroupListing"/> -&gt; proto. <c>group_type</c> / <c>group_state</c>
-    /// are Java <c>Optional</c>s and stay absent when null — "the broker did not report a
-    /// state" is not the empty string. <c>protocol</c> is the lower-case wire protocol-type
-    /// string, unrelated to the type.
-    /// </summary>
     internal static Proto.GroupListing GroupListingToProto(GroupListing listing)
     {
         Proto.GroupListing proto = new Proto.GroupListing
@@ -1008,7 +768,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>Binding <see cref="MemberAssignment"/> -&gt; proto.</summary>
     internal static Proto.MemberAssignment MemberAssignmentToProto(MemberAssignment assignment)
     {
         Proto.MemberAssignment proto = new Proto.MemberAssignment();
@@ -1020,17 +779,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="MemberDescription"/> -&gt; proto. <c>group_instance_id</c> /
-    /// <c>rack_id</c> / <c>target_assignment</c> / <c>member_epoch</c> / <c>upgraded</c> are
-    /// Java <c>Optional</c>s and stay absent when null: a static member with an empty instance
-    /// id is not a dynamic member, and an absent epoch is not epoch 0.
-    /// </summary>
-    /// <remarks>
-    /// <c>assignment</c> is never absent here. Java's constructor coalesces a null assignment
-    /// to an empty one (<c>MemberDescription.java:55</c>) and this binding mirrors that, so
-    /// there is no null to leave absent — unlike Python, whose holder can carry one.
-    /// </remarks>
     internal static Proto.MemberDescription MemberDescriptionToProto(MemberDescription member)
     {
         Proto.MemberDescription proto = new Proto.MemberDescription
@@ -1068,11 +816,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="ConsumerGroupDescription"/> -&gt; proto. The coordinator must carry
-    /// the broker's real host and port, not a placeholder — the field this milestone exists
-    /// for; a null coordinator stays absent.
-    /// </summary>
     internal static Proto.ConsumerGroupDescription ConsumerGroupDescriptionToProto(
         ConsumerGroupDescription description)
     {
@@ -1094,8 +837,7 @@ internal static class TranslateAdmin
             proto.Coordinator = Translate.NodeToProto(description.Coordinator);
         }
 
-        // Absent means the broker did not report the operations at all, which is not the same
-        // as reporting that none are authorized.
+        // Absent (not reported) is not the same as reported-empty.
         if (description.AuthorizedOperations is not null)
         {
             proto.AuthorizedOperations = AclOperationsToProto(description.AuthorizedOperations);
@@ -1114,17 +856,8 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="ClassicGroupDescription"/> -&gt; proto. <c>protocol</c> (the
-    /// protocol type) and <c>protocol_data</c> (the selected assignment strategy) are two
-    /// different response fields; both cross so a transposition is detectable.
-    /// </summary>
-    /// <remarks>
-    /// Java's <c>protocol()</c> is nullable and <c>isSimpleConsumerGroup()</c> dereferences it
-    /// without a guard, so a null faults into the handler's whole-call <c>catch</c> rather
-    /// than being invented as <c>""</c> — which is what the Python server does for the same
-    /// input.
-    /// </remarks>
+    // A null protocol faults into the whole-call catch, as Java's isSimpleConsumerGroup does;
+    // Python sends "" instead.
     internal static Proto.ClassicGroupDescription ClassicGroupDescriptionToProto(
         ClassicGroupDescription description)
     {
@@ -1154,19 +887,7 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Proto <c>ListConsumerGroupOffsetsSpec</c>s -&gt; the map
-    /// <see cref="IAdmin.ListConsumerGroupOffsets(IReadOnlyDictionary{string, ListConsumerGroupOffsetsSpec}, ListConsumerGroupOffsetsOptions)"/>
-    /// takes (port of <c>_admin_group_offset_specs</c>). An absent <c>topic_partitions</c> is
-    /// Java's <b>unset</b> collection — every partition the group has committed offsets for —
-    /// and present-but-empty selects nothing; emptiness is never the discriminant.
-    /// </summary>
-    /// <returns>
-    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set. A repeated
-    /// <c>group_id</c> is <b>rejected</b>, not silently de-duplicated: keying a dictionary by
-    /// the wire field would let a second entry replace the first, which is exactly what the C
-    /// entry point refuses.
-    /// </returns>
+    // A repeated group_id is rejected, not de-duplicated, as the C entry point refuses it.
     internal static Dictionary<string, ListConsumerGroupOffsetsSpec>? GroupOffsetSpecs(
         IEnumerable<Proto.ListConsumerGroupOffsetsSpec> protos, out string? invalid)
     {
@@ -1190,12 +911,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Proto <c>GroupOffsetCommit</c>s -&gt; the map
-    /// <see cref="IAdmin.AlterConsumerGroupOffsets"/> takes (port of
-    /// <c>_admin_group_offset_commits</c>). An absent <c>leader_epoch</c> is Java's empty
-    /// <c>Optional</c> and must not become 0.
-    /// </summary>
     internal static Dictionary<TopicPartition, OffsetAndMetadata> GroupOffsetCommits(
         IEnumerable<Proto.GroupOffsetCommit> protos)
     {
@@ -1210,17 +925,6 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// <c>optional MemberToRemoveList members</c> -&gt; the selection
-    /// <see cref="RemoveMembersFromConsumerGroupOptions"/> takes (port of
-    /// <c>_admin_members_to_remove</c>).
-    /// </summary>
-    /// <returns>
-    /// <see langword="null"/> for an absent list — Java's no-argument constructor, i.e.
-    /// removeAll — and otherwise the (de-duplicated) selection, <b>including an empty one</b>,
-    /// which is the collection constructor Java rejects. Presence is the discriminant, never
-    /// emptiness.
-    /// </returns>
     internal static List<MemberToRemove>? MembersToRemove(Proto.MemberToRemoveList? members)
     {
         if (members is null)
@@ -1239,11 +943,6 @@ internal static class TranslateAdmin
         return DistinctKeys(selection);
     }
 
-    /// <summary>
-    /// The de-duplicated request keys, in request order: the per-key result accessors
-    /// (<c>PartitionResult</c> / <c>Description</c>) are keyed lookups, so a duplicated request
-    /// key would otherwise emit a duplicated entry where Python's resolved map emits one.
-    /// </summary>
     internal static List<T> DistinctKeys<T>(IEnumerable<T> keys)
     {
         List<T> ordered = new List<T>();
@@ -1259,24 +958,15 @@ internal static class TranslateAdmin
         return ordered;
     }
 
-    // -- ACLs, quotas, SCRAM, tokens & features (slice G5) --------------------------------
-
-    /// <summary>An <c>acl_binding</c>-keyed <c>ResultKey</c>.</summary>
     internal static Proto.ResultKey AclBindingKey(AclBinding binding) =>
         new Proto.ResultKey { AclBinding = AclBindingToProto(binding) };
 
-    /// <summary>An <c>acl_binding_filter</c>-keyed <c>ResultKey</c>.</summary>
     internal static Proto.ResultKey AclFilterKey(AclBindingFilter filter) =>
         new Proto.ResultKey { AclBindingFilter = AclFilterToProto(filter) };
 
-    /// <summary>A <c>client_quota_entity</c>-keyed <c>ResultKey</c>.</summary>
     internal static Proto.ResultKey QuotaEntityKey(ClientQuotaEntity entity) =>
         new Proto.ResultKey { ClientQuotaEntity = QuotaEntityToProto(entity) };
 
-    /// <summary>
-    /// Proto <c>AclBinding</c>s -&gt; binding ones. Every field is required: an ACL to be
-    /// <em>created</em> has no match-any state and no nullable string.
-    /// </summary>
     internal static List<AclBinding> AclBindings(IEnumerable<Proto.AclBinding> protos)
     {
         List<AclBinding> bindings = new List<AclBinding>();
@@ -1295,11 +985,6 @@ internal static class TranslateAdmin
         return bindings;
     }
 
-    /// <summary>
-    /// Proto <c>AclBindingFilter</c> -&gt; binding one. The three nullable strings are read
-    /// through presence, never through an emptiness test: absent is Java's match-any and
-    /// <c>""</c> is a literal name.
-    /// </summary>
     internal static AclBindingFilter AclFilter(Proto.AclBindingFilter proto) =>
         new AclBindingFilter(
             new ResourcePatternFilter(
@@ -1312,7 +997,6 @@ internal static class TranslateAdmin
                 (AclOperation)proto.Operation,
                 (AclPermissionType)proto.PermissionType));
 
-    /// <summary>Proto <c>AclBindingFilter</c>s -&gt; binding ones.</summary>
     internal static List<AclBindingFilter> AclFilters(IEnumerable<Proto.AclBindingFilter> protos)
     {
         List<AclBindingFilter> filters = new List<AclBindingFilter>();
@@ -1324,7 +1008,6 @@ internal static class TranslateAdmin
         return filters;
     }
 
-    /// <summary>Binding <see cref="AclBinding"/> -&gt; proto.</summary>
     internal static Proto.AclBinding AclBindingToProto(AclBinding binding) => new Proto.AclBinding
     {
         ResourceType = (int)binding.Pattern.ResourceType,
@@ -1336,10 +1019,6 @@ internal static class TranslateAdmin
         PermissionType = (int)binding.Entry.PermissionType,
     };
 
-    /// <summary>
-    /// Binding <see cref="AclBindingFilter"/> -&gt; proto, keeping each of the three nullable
-    /// strings absent when it is <see langword="null"/>.
-    /// </summary>
     internal static Proto.AclBindingFilter AclFilterToProto(AclBindingFilter filter)
     {
         Proto.AclBindingFilter proto = new Proto.AclBindingFilter
@@ -1367,10 +1046,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Binding <see cref="ClientQuotaEntity"/> -&gt; proto, keeping a null entity name absent —
-    /// that is the built-in default entity of its type, not the entity named <c>""</c>.
-    /// </summary>
     internal static Proto.ClientQuotaEntity QuotaEntityToProto(ClientQuotaEntity entity)
     {
         Proto.ClientQuotaEntity proto = new Proto.ClientQuotaEntity();
@@ -1388,10 +1063,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Proto <c>ClientQuotaEntity</c> -&gt; binding one. An unset submessage is the empty entity,
-    /// which is what Python reads from its default instance.
-    /// </summary>
     internal static ClientQuotaEntity QuotaEntity(Proto.ClientQuotaEntity? proto)
     {
         Dictionary<string, string?> entries = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -1406,16 +1077,8 @@ internal static class TranslateAdmin
         return new ClientQuotaEntity(entries);
     }
 
-    /// <summary>
-    /// <c>DescribeClientQuotasRequest</c> -&gt; <see cref="ClientQuotaFilter"/>. The named kind is
-    /// resolved through the binding's own public factories rather than through a
-    /// <c>MATCH_TYPE_*</c> table written here, so a disagreement between backends is a finding.
-    /// </summary>
-    /// <returns>
-    /// The filter, or <see langword="null"/> with <paramref name="invalid"/> set.
-    /// <c>MATCH_KIND_UNSPECIFIED</c> is never sent and is rejected rather than defaulted: a
-    /// defaulted EXACT would turn a dropped field into a silently valid filter.
-    /// </returns>
+    // MATCH_KIND_UNSPECIFIED is rejected, not defaulted: a defaulted EXACT would make a dropped
+    // field a valid filter.
     internal static ClientQuotaFilter? QuotaFilter(
         Proto.DescribeClientQuotasRequest request, out string? invalid)
     {
@@ -1451,11 +1114,6 @@ internal static class TranslateAdmin
             : ClientQuotaFilter.Contains(components);
     }
 
-    /// <summary>
-    /// Proto <c>ClientQuotaAlteration</c>s -&gt; binding ones. An op with no <c>value</c> is
-    /// Java's null <see langword="double"/>, which <b>removes</b> the quota; presence is the
-    /// discriminant, since every finite double including 0 is a legal quota.
-    /// </summary>
     internal static List<ClientQuotaAlteration> QuotaAlterations(
         IEnumerable<Proto.ClientQuotaAlteration> protos)
     {
@@ -1474,7 +1132,6 @@ internal static class TranslateAdmin
         return alterations;
     }
 
-    /// <summary>Binding <see cref="ScramCredentialInfo"/> -&gt; proto.</summary>
     internal static Proto.ScramCredentialInfo ScramInfoToProto(ScramCredentialInfo info) =>
         new Proto.ScramCredentialInfo
         {
@@ -1482,7 +1139,6 @@ internal static class TranslateAdmin
             Iterations = info.Iterations,
         };
 
-    /// <summary>Binding <see cref="UserScramCredentialsDescription"/> -&gt; proto.</summary>
     internal static Proto.UserScramCredentialsDescription ScramDescriptionToProto(
         UserScramCredentialsDescription description)
     {
@@ -1496,13 +1152,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// Proto <c>UserScramCredentialAlteration</c>s -&gt; the binding's upsertion / deletion
-    /// objects. <c>is_deletion</c> is the discriminant and cannot be inferred — both forms carry
-    /// a user and a mechanism. An absent salt selects the salt-<em>generating</em> constructor
-    /// while a present-but-empty one selects the salt-supplying constructor with a zero-length
-    /// salt, so presence is the test, not emptiness.
-    /// </summary>
     internal static List<UserScramCredentialAlteration> ScramAlterations(
         IEnumerable<Proto.UserScramCredentialAlteration> protos)
     {
@@ -1525,7 +1174,6 @@ internal static class TranslateAdmin
         return alterations;
     }
 
-    /// <summary>Proto <c>KafkaPrincipal</c>s -&gt; binding ones.</summary>
     internal static List<KafkaPrincipal> Principals(IEnumerable<Proto.KafkaPrincipal> protos)
     {
         List<KafkaPrincipal> principals = new List<KafkaPrincipal>();
@@ -1537,11 +1185,6 @@ internal static class TranslateAdmin
         return principals;
     }
 
-    /// <summary>
-    /// Binding <see cref="KafkaPrincipal"/> -&gt; proto. <c>token_authenticated</c> crosses even
-    /// though the request messages do not carry it: the broker and the mock report it back, and
-    /// Java's <c>equals</c> ignores it, so it has to be asserted explicitly.
-    /// </summary>
     internal static Proto.KafkaPrincipal PrincipalToProto(KafkaPrincipal principal) =>
         new Proto.KafkaPrincipal
         {
@@ -1550,19 +1193,9 @@ internal static class TranslateAdmin
             TokenAuthenticated = principal.TokenAuthenticated,
         };
 
-    /// <summary>
-    /// <c>optional KafkaPrincipalList owners</c> -&gt; the filter
-    /// <see cref="DescribeDelegationTokenOptions"/> takes. Absent is Java's <b>unset</b> filter
-    /// and present-but-empty is an explicit empty one, so an empty list must stay a list.
-    /// </summary>
     internal static IReadOnlyList<KafkaPrincipal>? TokenOwners(Proto.KafkaPrincipalList? owners) =>
         owners is null ? null : Principals(owners.Principals);
 
-    /// <summary>
-    /// Binding <see cref="DelegationToken"/> -&gt; proto. The three timestamps go into the fields
-    /// Java's <em>constructor</em> names, not the C tuple's order; <c>hmac_as_base64</c> is
-    /// derived from <c>hmac</c> and the Rust client re-derives it and fails on a mismatch.
-    /// </summary>
     internal static Proto.DelegationToken DelegationTokenToProto(DelegationToken token)
     {
         TokenInformation info = token.TokenInfo;
@@ -1588,11 +1221,6 @@ internal static class TranslateAdmin
         };
     }
 
-    /// <summary>
-    /// Binding <see cref="FeatureMetadata"/> -&gt; proto. The two maps are independent and need
-    /// not agree in size or keys; an absent epoch is Java's empty <c>Optional</c> and must not
-    /// become 0.
-    /// </summary>
     internal static Proto.FeatureMetadata FeatureMetadataToProto(FeatureMetadata metadata)
     {
         Proto.FeatureMetadata proto = new Proto.FeatureMetadata();
@@ -1622,16 +1250,6 @@ internal static class TranslateAdmin
         return proto;
     }
 
-    /// <summary>
-    /// <c>map&lt;string, FeatureUpdate&gt;</c> -&gt; the map <see cref="IAdmin.UpdateFeatures"/>
-    /// takes. An empty map is forwarded as such — a real client rejects it synchronously and a
-    /// mock yields an empty result, and both are faithful.
-    /// </summary>
-    /// <returns>
-    /// The map, or <see langword="null"/> with <paramref name="invalid"/> set: a
-    /// <c>max_version_level</c> outside <see langword="short"/> is a protocol error rather than
-    /// something to truncate.
-    /// </returns>
     internal static Dictionary<string, FeatureUpdate>? FeatureUpdates(
         IDictionary<string, Proto.FeatureUpdate> updates, out string? invalid)
     {
@@ -1653,10 +1271,7 @@ internal static class TranslateAdmin
         return map;
     }
 
-    /// <summary>
-    /// Java's <c>TransactionState.toString()</c> display spelling, which is the wire value. The
-    /// enum members are spelled to match, so <see cref="Enum.ToString()"/> is that table.
-    /// </summary>
+    // The enum members are spelled as Java's toString(), so Enum.ToString() is the wire spelling.
     private static string TransactionStateName(TransactionState state) => state.ToString();
 
     private static Dictionary<string, TransactionState> BuildTransactionStateTable()
@@ -1671,10 +1286,6 @@ internal static class TranslateAdmin
         return table;
     }
 
-    /// <summary>
-    /// The <c>toString()</c>-spelling lookup for an enum whose members are spelled to match
-    /// Java's display names, keyed case-insensitively (Java's <c>parse</c> lower-cases).
-    /// </summary>
     private static Dictionary<string, TEnum> BuildNameTable<TEnum>()
         where TEnum : struct, Enum
     {
@@ -1687,10 +1298,6 @@ internal static class TranslateAdmin
         return table;
     }
 
-    /// <summary>
-    /// Java's <c>parse</c> over a list of names: an unrecognised name becomes
-    /// <paramref name="fallback"/> (the enum's <c>UNKNOWN</c>) rather than failing the call.
-    /// </summary>
     private static List<TEnum> ParseNames<TEnum>(
         IEnumerable<string> names, Dictionary<string, TEnum> table, TEnum fallback)
         where TEnum : struct, Enum

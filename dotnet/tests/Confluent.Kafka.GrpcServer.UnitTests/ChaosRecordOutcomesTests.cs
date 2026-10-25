@@ -29,14 +29,12 @@ namespace Confluent.Kafka.GrpcServer.UnitTests;
 [CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class ConsoleCollection
 {
-    /// <summary>The collection name.</summary>
     public const string Name = "Console.Error capture";
 }
 
 /// <summary>
-/// <see cref="ChaosRecordOutcomes"/>' settle-once state machine (PLAN §5.5.3, D5; §7.1 T10),
-/// driven directly: each record is settled exactly once against a <c>Send</c> that threw, and
-/// whatever is not reported is logged.
+/// <see cref="ChaosRecordOutcomes"/>' settle-once state machine, driven directly: each record is settled
+/// exactly once against a <c>Send</c> that threw, and whatever is not reported is logged.
 /// </summary>
 [Collection(ConsoleCollection.Name)]
 public sealed class ChaosRecordOutcomesTests
@@ -59,11 +57,10 @@ public sealed class ChaosRecordOutcomesTests
         Assert.Equal(Proto.WorkloadEvent.EventOneofCase.SendFailed, failed.EventCase);
         Assert.Equal(3UL, failed.SendFailed.Index);
         Assert.Equal(-4, failed.SendFailed.Error.Code);
-        Assert.Equal("dotnet server: InvalidOperationException: x", failed.SendFailed.Error.Message);
+        Assert.Equal("x", failed.SendFailed.Error.Message);
         Assert.Equal(
-            "dotnet server: chaos producer w-absorb: WARNING: record 3 settled by its failed Send(); its callback " +
-            "fired afterwards with metadata. The binding's contract that a throwing Send never fires its callback " +
-            "(PLAN D5) was violated." + Environment.NewLine,
+            "dotnet server: chaos producer w-absorb: record 3 settled by its failed Send(); its callback " +
+            "fired afterwards with metadata" + Environment.NewLine,
             log);
     }
 

@@ -17,21 +17,15 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// Drives the consumer behind the factory seam, stated once for every flavour: the test queues
-/// mock steps here and each flavour's double (<see cref="SyncScriptedConsumer"/> and
-/// <see cref="AsyncScriptedConsumer"/>) applies them <b>on the workload's own loop</b>, at the start of its next poll.
+/// Drives the consumer behind the factory seam for every flavour: the test queues mock steps here, each
+/// flavour's double applies them on the workload's own loop at the start of its next poll, as a
+/// broker-driven rebalance arrives during a real poll, and the script records what the double observed.
 /// </summary>
-/// <remarks>
-/// The consumer is single-owner: the core rejects a <c>Rebalance</c> / <c>AddRecord</c> issued
-/// from the test thread while the loop is inside <c>Poll</c> (ConcurrentModification). Applying
-/// the steps from inside the loop's own call keeps every mock call on the owning thread, exactly
-/// as a broker-driven rebalance arrives during a real poll. The script also records what the
-/// double observed, for the close-sequence and cancellation tests.
-/// </remarks>
 internal sealed class ConsumerScript
 {
     private readonly ConcurrentQueue<Step> _steps = new ConcurrentQueue<Step>();
@@ -40,32 +34,22 @@ internal sealed class ConsumerScript
     private int _polls;
     private bool _disposedAsync;
 
-    /// <summary>The config the factory was called with.</summary>
     internal IReadOnlyDictionary<string, string>? Config { get; set; }
 
-    /// <summary>The reentrancy handle the double handed the servicer.</summary>
     internal ConsumerHandle? Handle { get; set; }
 
-    /// <summary>Whether that handle still worked when <c>Close</c> was entered (null = not closed yet).</summary>
-    internal bool? HandleUsableAtClose { get; set; }
-
-    /// <summary>Whether the consumer was disposed through <c>DisposeAsync</c> (the async flavour's close sequence).</summary>
     internal bool DisposedAsync
     {
         get => Volatile.Read(ref _disposedAsync);
         set => Volatile.Write(ref _disposedAsync, value);
     }
 
-    /// <summary>The tokens the async servicer passed to the consumer (T12).</summary>
     internal TokenLog Tokens { get; } = new TokenLog();
 
-    /// <summary>How many polls the loop has made.</summary>
     internal int Polls => Volatile.Read(ref _polls);
 
-    /// <summary>Steps that threw when applied; a test asserts this stays empty.</summary>
     internal IReadOnlyList<Exception> StepFailures => _stepFailures.ToList();
 
-    /// <summary>The servicer-facing calls the double saw, in order (Commit, CommitAsync, Committed, Close, Dispose).</summary>
     internal IReadOnlyList<string> Calls
     {
         get
@@ -77,22 +61,23 @@ internal sealed class ConsumerScript
         }
     }
 
-    /// <summary>Queues a mock rebalance onto <paramref name="partitions"/> (seeding each beginning offset to 0).</summary>
     internal void Rebalance(params TopicPartition[] partitions) => _steps.Enqueue(new Step(StepKind.Rebalance, partitions, null));
 
-    /// <summary>Queues a record onto an assigned partition.</summary>
     internal void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _steps.Enqueue(new Step(StepKind.AddRecord, null, new MockRecord(topic, partition, offset, key, value)));
 
-    /// <summary>Queues a poll error: the next poll throws it.</summary>
     internal void SetPollError(string message) =>
         _steps.Enqueue(new Step(StepKind.PollError, null, new MockRecord(message, 0, 0, null, null)));
 
-    /// <summary>Applies every queued step through the flavour's mock operations; called by the double inside its poll.</summary>
-    internal void ApplyPending(IMockConsumerOperations mock)
+    // Called by the double inside its poll: from the test thread a mock call would wait for the
+    // running poll, or be refused while AsyncMockConsumer.Rebalance runs. Only the steps queued
+    // before the call are applied, each after the one before it ended; a step queued meanwhile
+    // waits for the next poll.
+    internal async Task ApplyPendingAsync(IMockConsumerOperations mock)
     {
         Interlocked.Increment(ref _polls);
-        while (_steps.TryDequeue(out Step? step))
+        int queued = _steps.Count;
+        for (int i = 0; i < queued && _steps.TryDequeue(out Step? step); i++)
         {
             try
             {
@@ -104,7 +89,7 @@ internal sealed class ConsumerScript
                             mock.UpdateBeginningOffset(partition.Topic, partition.Partition, 0);
                         }
 
-                        mock.Rebalance(step.Partitions!);
+                        await mock.Rebalance(step.Partitions!).ConfigureAwait(false);
                         break;
                     case StepKind.AddRecord:
                         MockRecord record = step.Record!;
@@ -122,7 +107,6 @@ internal sealed class ConsumerScript
         }
     }
 
-    /// <summary>Records a servicer-facing call.</summary>
     internal void OnCall(string name)
     {
         lock (_calls)
@@ -131,6 +115,7 @@ internal sealed class ConsumerScript
         }
     }
 
+    /// <summary>What a queued step does to the mock consumer.</summary>
     private enum StepKind
     {
         Rebalance,
@@ -138,8 +123,10 @@ internal sealed class ConsumerScript
         PollError,
     }
 
+    /// <summary>One queued step: a rebalance's partitions, or the record a record or poll-error step carries.</summary>
     private sealed record Step(StepKind Kind, TopicPartition[]? Partitions, MockRecord? Record);
 
+    /// <summary>A queued record's fields; a poll-error step carries its message in <c>Topic</c>.</summary>
     private sealed record MockRecord(string Topic, int Partition, long Offset, byte[]? Key, byte[]? Value);
 }
 
@@ -148,7 +135,7 @@ internal interface IMockConsumerOperations
 {
     void UpdateBeginningOffset(string topic, int partition, long offset);
 
-    void Rebalance(IReadOnlyCollection<TopicPartition> partitions);
+    Task Rebalance(IReadOnlyCollection<TopicPartition> partitions);
 
     void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
 

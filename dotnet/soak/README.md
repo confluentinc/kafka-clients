@@ -278,12 +278,14 @@ client knows (e.g. `group.id`, `linger.ms`) is **routed automatically** to that
 one rather than rejected.
 
 **The soak refuses to start on a key neither client recognises**, naming every
-offending key and printing the accepted set. That is deliberate: the Rust client
-only *warns* on an unknown configuration key
-(`rust/src/producer/producer_config.rs`, `rust/src/consumer/consumer_config.rs`), so a typo
-would otherwise start a multi-day run on the default value — e.g. an
-unauthenticated PLAINTEXT connection. `run.sh` runs this validation in its
-`--check` preflight, before anything is created.
+offending key and printing the accepted set. That is deliberate: unknown config
+keys are silently accepted by the client — it only lists them in one INFO line
+when it is built ("These configurations '[..]' were supplied but are not used
+yet.") and uses the default (`rust/src/producer/producer_config.rs`,
+`rust/src/consumer/consumer_config.rs`). A typo would therefore start a multi-day
+run on the default value — e.g. an unauthenticated PLAINTEXT connection.
+`run.sh` runs this validation in its `--check` preflight, before anything is
+created.
 
 Two settings are mandatory and the example file explains why:
 `consumer.group.protocol=consumer` (the client implements KIP-848 only, and
@@ -318,10 +320,13 @@ the high-water-mark accounting — a bad payload is not a gap.
 
 * One `Task` running the producer loop, one running the consumer loop, joined
   with `Task.WhenAll` at shutdown.
-* Both drive the **async** facade (`AsyncKafkaProducer` / `AsyncKafkaConsumer`).
-  The sync `Send` blocks until the broker acks, which at 1000 msg/s would
-  serialise the whole send path; the Python soak's `send()` likewise returns a
-  future without blocking on the ack.
+* Both drive the **async** facade (`AsyncKafkaProducer` / `AsyncKafkaConsumer`),
+  where the Python soak runs the sync `KafkaProducer` / `KafkaConsumer`, one
+  thread each ([Differences](#differences-from-the-python-soak), row 16). The
+  sync `Send` would not serialise the send path either: it returns a
+  `KafkaFuture` once the record is registered (blocking only while the core waits
+  for metadata or buffer memory, up to `max.block.ms`), and only its `Get()` waits
+  for the broker's ack, as Python's `send()` returns its future.
 * Delivery accounting awaits each send's acceptance stage, then a continuation on its
   delivery `Task<RecordMetadata>`. That
   continuation is also what **observes** the `Task`'s exception — a
@@ -389,6 +394,11 @@ right and that no broker can verify for us:
 * **`OtelSinkTests`** — exporter/protocol parsing, and that an unrequested or
   unbuildable pipeline yields `null` rather than a silent no-op meter.
 * **`SoakErrorClassificationTests`** — the two-tier poll-failure bound.
+* **`TopicSetupTests`** — topic creation and `SOAK_RECREATE_TOPIC` over
+  `AsyncMockAdminClient`: topic-exists is fine, an auth code is fatal, any other
+  failure transient, and the admin is closed on every path.
+* **`DeliveryReportTests`** — the delivery accounting of a completed and of a
+  failed send future (`AsyncMockProducer`), the failure tagged with its code.
 * **`SoakExitCodeTests`** — the exit-code constants, the watchdog's code, and
   `run.sh` agreement.
 
@@ -411,8 +421,8 @@ Each of these is deliberate; the reason is what matters.
 | # | Difference | Why |
 |---|---|---|
 | 1 | **The metric primitives are forked**, not shared with the perf harness. | Five of them are `internal` to `PerformanceCommon` and its `Metrics` has no path/append constructor; and a two-week run must not break because a perf-test refactor changed a shared helper. Same choice the Python sibling made, for the same stated reason. The **JSONL schema stays identical** — that is what makes the numbers comparable. |
-| 2 | **The deserializer is total** (returns a marked record, never throws). | A throwing `IDeserializer<T>` faults the whole `Poll`; Python counts the bad record and continues. |
-| 3 | **No JAAS translation layer.** | `AsyncKafkaAdminClient` takes the same Java-shaped config as the producer and consumer, so `sasl.jaas.config` flows through untouched. Python needed ~85 lines of translation because its topic creation goes through librdkafka's AdminClient. |
+| 2 | **The deserializer is total** (returns a marked record, never throws). | A throwing `IDeserializer<T>` stalls the consumer on the bad record: `Poll` returns the records before it, then throws `RecordDeserializationException` with the position left on the bad record, so every later `Poll` throws again. Python decodes each value after the poll (its deserializer is `memoryview_deserializer`), counts the bad record and continues. |
+| 3 | **No JAAS translation layer.** | `AsyncKafkaAdminClient` takes the same Java-shaped config as the producer and consumer, so `sasl.jaas.config` flows through untouched. Python's soak does the same since its topic creation goes through `confluent_kafka.admin`; both parse the JAAS string only to fail fast when SASL is set without credentials (`SoakConfig.CheckAdminCredentials`, Python's `check_admin_credentials`). |
 | 4 | **One `CancellationTokenSource`; no `_wakeup_sent` guard.** | A token is idempotent by construction. Python's guard existed only because each `wakeup()` re-arms the token and shutdown routinely delivers two signals. `_is_wakeup`'s message sniff becomes `catch (OperationCanceledException)`. |
 | 5 | **`memory.tracemalloc*` → `memory.gc_heap*`.** | `GC.GetTotalMemory(false)` is the direct analog, but naming a .NET gauge `tracemalloc` would assert a Python mechanism that is not running. Map one onto the other in dashboards. |
 | 6 | **`memory.rss.max` is a running max of sampled RSS**, not a kernel peak. | `Process.PeakWorkingSet64` **returns 0** on this platform (measured: .NET 10.0.302, macOS — `WorkingSet64` 38780928, `PeakWorkingSet64` 0), so the gauge would read a flat 0. The consequence is stated honestly: it is the peak of the soak's own per-window samples, so a spike entirely between two samples is invisible to it. |
@@ -421,10 +431,11 @@ Each of these is deliberate; the reason is what matters.
 | 9 | **The payload's target size lives on the serializer**, not on class state. | .NET has an `ISerializer<T>` to hang it on, which also keeps the unit tests independent without Python's reset fixture. |
 | 10 | **`SoakClient.CreateAsync`, not a constructor.** | Topic creation awaits, and a C# constructor cannot. The startup ordering contract is unchanged. |
 | 11 | **No `--no-tracemalloc` switch.** | `GC.GetTotalMemory(false)` is a cheap read with no instrumentation to enable or disable, unlike `tracemalloc`, which must be started and costs a bookkeeping entry per allocation. |
-| 12 | **The assignment is polled, not registered via `IConsumerRebalanceListener`.** | Matching the Python original. The listener exists in this binding and would be a genuine improvement, but its methods are sync `void`, fire on the core's callback-dispatcher thread with a no-throw obligation, and block the rebalance until they return — a foreign-thread surface the Python original never had. Polling also doubles as a liveness probe on `Assignment()` itself. **Recorded as a candidate follow-up.** |
+| 12 | **The assignment is polled, not registered via `IConsumerRebalanceListener`.** | Matching the Python original, which polls `assignment()` too. The listener exists in this binding, sync (`IConsumerRebalanceListener`) or async (`IAsyncConsumerRebalanceListener`), and would be a genuine improvement; on `AsyncKafkaConsumer` it runs on the consumer's drain thread, an exception it throws comes back from the call that ran it, and the rebalance does not advance until it reports. Polling also doubles as a liveness probe on `Assignment()` itself. **Recorded as a candidate follow-up.** |
 | 13 | **No OTel provider-reuse check, and no grpc↔http failover.** | .NET has no `opentelemetry-instrument` wrapper installing a provider before `Main`, and both OTLP protocols ship in one package selected by an enum, so there is nothing to fail over to. |
 | 14 | **`OpenTelemetry` 1.18.0 is a new external dependency.** | Scoped to `SoakClient.csproj` only; it never reaches `src/Confluent.Kafka`. The Python sibling took the equivalent dependency for the same reason. |
 | 15 | **The two bash-driving pytest suites are NOT ported.** | See below. |
+| 16 | **The async clients, not the sync ones.** | The soak was built on `AsyncKafkaProducer` / `AsyncKafkaConsumer`, one `Task` each; Python's runs `KafkaProducer` / `KafkaConsumer`, one thread each. Neither waits for the ack on the send path (the `Send` first stage, then a continuation on `Get()`; Python's `send()` future and its `when_complete` action). Moving to the sync clients would change what a two-week run measures, so it is **recorded as a follow-up**. |
 
 ### Deferred: the bash-driving test suites
 

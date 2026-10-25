@@ -19,17 +19,14 @@ using System.Globalization;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// Builds the <b>Java-form</b> client config dictionaries for our binding — the v3 half of Python's
-/// <c>configuration_from_env(v2=False)</c> (producer) and <c>_RustConsumer</c> config (consumer). Every
-/// value is a string (the binding takes <c>IReadOnlyDictionary&lt;string,string&gt;</c>); SASL keys are
-/// Java-form (<c>sasl.jaas.config</c>), never the librdkafka <c>sasl.username</c>/<c>sasl.password</c> form.
+/// Builds this binding's Java-form producer and consumer configs, the v3 half of Python's <c>configuration_from_env</c>
+/// and <c>_RustConsumer</c>; SASL goes as <c>sasl.jaas.config</c>.
 /// </summary>
 internal static class V3Config
 {
     private const int DefaultBatchSize = 1024 * 1024;
     private const int MaxRequestSizeCap = 8 * 1024 * 1024;
 
-    /// <summary>Builds the producer config (Java form) from the environment (§5.2).</summary>
     internal static Dictionary<string, string> BuildProducerConfig()
     {
         var conf = new Dictionary<string, string>
@@ -50,14 +47,13 @@ internal static class V3Config
         bool useDefaults = PerfEnv.GetBool("USE_DEFAULTS", false);
         if (!useDefaults)
         {
-            // acks=all, hardcoded like the C/Java perf tests (D7).
             conf["acks"] = "all";
 
-            int batchSize = PerfEnv.Has("BATCH_SIZE") ? PerfEnv.GetInt("BATCH_SIZE", 0) * 1024 : DefaultBatchSize;
+            int batchSize = PerfEnv.Has("BATCH_SIZE") ? PerfEnv.ParseInt("BATCH_SIZE") * 1024 : DefaultBatchSize;
             conf["batch.size"] = Str(batchSize);
 
             int maxRequestSize = PerfEnv.Has("MAX_REQUEST_SIZE")
-                ? PerfEnv.GetInt("MAX_REQUEST_SIZE", 0) * 1024
+                ? PerfEnv.ParseInt("MAX_REQUEST_SIZE") * 1024
                 : Math.Min(batchSize * 64, MaxRequestSizeCap);
             conf["max.request.size"] = Str(maxRequestSize);
 
@@ -71,7 +67,7 @@ internal static class V3Config
 
             if (PerfEnv.Has("BUFFER_MEMORY"))
             {
-                long bufferMemory = (long)PerfEnv.GetInt("BUFFER_MEMORY", 0) * 1024 * 1024;
+                long bufferMemory = (long)PerfEnv.ParseInt("BUFFER_MEMORY") * 1024 * 1024;
                 conf["buffer.memory"] = bufferMemory.ToString(CultureInfo.InvariantCulture);
             }
 
@@ -81,7 +77,6 @@ internal static class V3Config
         return conf;
     }
 
-    /// <summary>Builds the consumer config (Java form) from a parsed <see cref="ConsumerBenchmarkConfig"/> (§6.2).</summary>
     internal static Dictionary<string, string> BuildConsumerConfig(ConsumerBenchmarkConfig cfg)
     {
         var conf = new Dictionary<string, string>
@@ -100,8 +95,7 @@ internal static class V3Config
             conf["max.partition.fetch.bytes"] = Str(cfg.MaxPartitionFetchBytes);
             conf["max.poll.records"] = Str(cfg.BatchSize + 500);
 
-            // No check.crcs override: the Rust client keeps its default true, matching the Java client and
-            // the Python harness, which sets check.crcs=false for the v2 (librdkafka) consumer only.
+            // No check.crcs override: the core keeps Java's default true; Python sets false for the v2 consumer only.
         }
 
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))
@@ -112,7 +106,6 @@ internal static class V3Config
         return conf;
     }
 
-    /// <summary>Prints the producer configuration, hiding secrets (Python <c>print_configuration</c>).</summary>
     internal static void PrintProducerConfiguration(IReadOnlyDictionary<string, string> conf, int keySize, int valueSize, bool doVerify)
     {
         Console.WriteLine($"Key size: {keySize} bytes");

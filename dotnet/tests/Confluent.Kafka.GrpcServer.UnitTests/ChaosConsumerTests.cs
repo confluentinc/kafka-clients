@@ -28,19 +28,16 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The consumer workload (PLAN §3.4, §5.6; §7.1 T12, T14–T16, T18–T20) over the flavour's mock
-/// consumer behind the factory seam, driven by steps applied on the workload's own loop.
+/// The consumer workload over the flavour's mock consumer behind the factory seam, driven by steps
+/// applied on the workload's own loop.
 /// </summary>
 public sealed class ChaosConsumerTests
 {
     private const uint MsgSize = 16;
     private const string Topic = ChaosHarness.Topic;
 
-    /// <summary>The exact text a mock-derived handle's async operations fail with (core behaviour, ffi §B5).</summary>
     private const string MockHandleUnsupported =
         "ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer directly.";
-
-    // ---- T14 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -82,7 +79,7 @@ public sealed class ChaosConsumerTests
             {
                 (1L, "key is 3 byte(s), expected the 8-byte index"),
 
-                // T14c: an absent key and an empty key are different records end to end.
+                // An absent key and an empty key are different records end to end.
                 (2L, "key is missing (expected the 8-byte index)"),
                 (3L, "key is 0 byte(s), expected the 8-byte index"),
                 (4L, "value of 15 byte(s) does not match the producer's encoding of index 4 (16 byte(s))"),
@@ -102,11 +99,9 @@ public sealed class ChaosConsumerTests
         Assert.Equal(0, pollError.ConsumerError.Error.Code);
     }
 
-    // ---- T15 ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
-    public async Task ListenerEvents_PrecedeThatPollsRecords_AndARevokeCommitsThroughTheHandle(ChaosFlavour flavour)
+    public async Task ListenerEvents_PrecedeThatPollsRecords_AndARevokeCommitsThroughItsConsumer(ChaosFlavour flavour)
     {
         using ChaosHarness harness = ChaosHarness.Create(flavour);
         TopicPartition p0 = new TopicPartition(Topic, 0);
@@ -121,8 +116,8 @@ public sealed class ChaosConsumerTests
 
         harness.Consumer.Rebalance(p1);
         call.Stream.WaitFor(
-            e => e.Any(x => x.ConsumerError?.Op == Proto.ConsumerOp.RevokeCommit),
-            "the revoke-time commit's error");
+            e => e.Any(x => x.ConsumerError?.Op == Proto.ConsumerOp.ReadCommitted),
+            "the revoke-time read-back's error");
         await harness.Stop("c-listen");
         IReadOnlyList<Proto.WorkloadEvent> events = await call.Completed();
 
@@ -143,23 +138,20 @@ public sealed class ChaosConsumerTests
         Assert.Equal(new[] { (Topic, 0) }, revoked.Partitions.Select(p => (p.Topic, p.Partition)));
         Assert.Equal(Proto.RebalanceKind.Assigned, rebalances[2].Rebalance.Kind);
 
-        // The revoke committed through the handle, which on a mock-derived handle is core
-        // behaviour: a NotSupportedException with this exact text, which the server sends as -4.
-        // Being an error, it ends that callback before any read-back.
+        // The revoke's commit goes to the consumer's handle inside the callback: a mock-derived
+        // handle commits, so there is no RevokeCommit error, and fails the read-back with this
+        // text, sent as -31.
         int revokedAt = events.ToList().IndexOf(rebalances[1]);
-        Proto.WorkloadEvent revokeCommit = events[revokedAt + 1];
-        Assert.Equal(Proto.ConsumerOp.RevokeCommit, revokeCommit.ConsumerError?.Op);
-        Assert.Equal(-4, revokeCommit.ConsumerError!.Error.Code);
-        Assert.Equal(
-            "dotnet server: NotSupportedException: " + MockHandleUnsupported, revokeCommit.ConsumerError.Error.Message);
-        Assert.DoesNotContain(events, e => e.ConsumerError?.Op == Proto.ConsumerOp.ReadCommitted);
+        Proto.WorkloadEvent readBack = events[revokedAt + 1];
+        Assert.Equal(Proto.ConsumerOp.ReadCommitted, readBack.ConsumerError?.Op);
+        Assert.Equal(-31, readBack.ConsumerError!.Error.Code);
+        Assert.Equal(MockHandleUnsupported, readBack.ConsumerError.Error.Message);
+        Assert.DoesNotContain(events, e => e.ConsumerError?.Op == Proto.ConsumerOp.RevokeCommit);
     }
-
-    // ---- T16 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
-    public async Task TheDrain_CommitsReadsBackClosesThenDisposesTheHandleBeforeTheConsumer(ChaosFlavour flavour)
+    public async Task TheDrain_CommitsReadsBackClosesThenDisposes(ChaosFlavour flavour)
     {
         using ChaosHarness harness = ChaosHarness.Create(flavour);
         using RunningCall call = harness.RunConsumer(ChaosHarness.ConsumerRequest("c-close", commitCheckIntervalMs: 60_000));
@@ -182,14 +174,10 @@ public sealed class ChaosConsumerTests
         Assert.Equal(new[] { "Commit", "Commit", "Committed", "Close", "Dispose" }, harness.Consumer.Calls);
         Assert.Equal(flavour == ChaosFlavour.Async, harness.Consumer.DisposedAsync);
 
-        // The handle outlived the close (the close-time revoke may still commit through it) and
-        // was disposed once the workload ended.
-        Assert.True(harness.Consumer.HandleUsableAtClose);
-        Assert.Throws<ObjectDisposedException>(() => harness.Consumer.Handle!.Assignment());
+        // The listener calls its consumer, so the workload never takes a handle.
+        Assert.Null(harness.Consumer.Handle);
         Assert.DoesNotContain(events, e => e.ConsumerError is not null);
     }
-
-    // ---- T18 ----
 
     [Fact]
     public void TheCommitCallback_ReportsAFailedCommit_WithItsCodeAndMessage_AndIsSilentOnSuccess()
@@ -213,8 +201,6 @@ public sealed class ChaosConsumerTests
         Assert.Equal(failure.Message, error.ConsumerError.Error.Message);
         Assert.Equal("rebalance in progress", failure.Message);
     }
-
-    // ---- T19 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -296,15 +282,13 @@ public sealed class ChaosConsumerTests
         Assert.DoesNotContain("Committed", harness.Consumer.Calls);
     }
 
-    // ---- T12 (async: at runtime, consumer side) ----
-
     [Fact]
     public async Task Async_NoTokenThatCanFireReachesTheConsumer_AtRuntime()
     {
-        // D7: no token that can fire on Subscribe / Poll / Commit / Committed / Close. A sync-commit
+        // No token that can fire reaches Subscribe, Poll, Commit, Committed or Close. A sync-commit
         // workload with a read-back interval reaches all five, and the poll-error and revoke paths
-        // too. One workload ends through StopWorkload and one through the call's cancellation; the
-        // double records each token by whether it CAN fire (T12).
+        // too; one workload ends through StopWorkload and one through the call's cancellation, and
+        // the double records each token by whether it can fire.
         using ChaosHarness stopped = ChaosHarness.Create(ChaosFlavour.Async);
         using RunningCall stoppedCall = RunToCommittedReadBack(stopped, "c-tokens-stop");
         await stopped.Stop("c-tokens-stop");
@@ -330,19 +314,17 @@ public sealed class ChaosConsumerTests
             RunningCall call = harness.RunConsumer(ChaosHarness.ConsumerRequest(id, commitCheckIntervalMs: 1));
             harness.Consumer.Rebalance(new TopicPartition(Topic, 0));
 
-            // The record comes a poll later, so the read-back interval has elapsed by its commit (T19).
+            // The record comes a poll later, so the read-back interval has elapsed by its commit.
             call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Rebalance, 1);
             harness.Consumer.AddRecord(Topic, 0, 0, ChaosEvents.Key(0), ChaosEvents.Value(0, MsgSize));
             call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Committed, 1);
             harness.Consumer.SetPollError("injected poll failure");
             call.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.ConsumerError, 1);
             harness.Consumer.Rebalance(new TopicPartition(Topic, 1));
-            call.Stream.WaitFor(e => e.Any(x => x.ConsumerError?.Op == Proto.ConsumerOp.RevokeCommit), "the revoke-time commit's error");
+            call.Stream.WaitFor(e => e.Any(x => x.ConsumerError?.Op == Proto.ConsumerOp.ReadCommitted), "the revoke-time read-back's error");
             return call;
         }
     }
-
-    // ---- T20 (consumer side) ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]

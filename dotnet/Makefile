@@ -19,7 +19,8 @@ GRPC_NATIVE_DIR = $(RUST_PROJECT_ROOT)/target/grpc-native
 # .NET tooling knobs. `dotnet` is resolved from PATH (the CI job provisions it
 # via .semaphore/install-dotnet.sh; local dev uses its own install). Operations
 # target the SOLUTION explicitly — Confluent.Kafka.sln holds only the library
-# (Confluent.Kafka) and its unit tests (Confluent.Kafka.UnitTests). The
+# (Confluent.Kafka), its unit tests (Confluent.Kafka.UnitTests) and its
+# broker-backed integration tests (Confluent.Kafka.IntegrationTests). The
 # grpc-server project is deliberately NOT in the solution (it needs protoc and is
 # built only by the gRPC Docker images and by `grpc-native` below), so
 # building/formatting/testing the .sln never drags it in.
@@ -125,7 +126,8 @@ test-integration:
 # invoked here or via the root Makefile.
 #
 # The `dotnet build` compiles the full TFM matrix: the library
-# (netstandard2.0;net8.0;net10.0) and the test project (net462;net8.0;net10.0).
+# (netstandard2.0;net8.0;net10.0), the unit-test project (net462;net8.0;net10.0)
+# and the integration-test project (net8.0;net10.0).
 # The net462 leg is BUILD-VERIFIED here (cross-platform via
 # Microsoft.NETFramework.ReferenceAssemblies, Decision 2a) but never RUN — net462
 # cannot execute on Linux; test execution is net8.0 + net10.0 only (see
@@ -134,8 +136,10 @@ build-dotnet:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) build
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(SOLUTION)
 
-# build + format-check + unit tests, no broker (Mock* tests only). Mirrors the
-# python/c per-binding `test` target. Format is dotnet-specific (no Python
+# build + format-check + the solution's tests: the unit tests (Mock* tests, no
+# broker) and the integration tests (a Testcontainers broker; they skip without
+# Docker, as python/test/integration does). Mirrors the python/c per-binding
+# `test` target. Format is dotnet-specific (no Python
 # analog): `dotnet format --verify-no-changes` enforces the checked-in
 # .editorconfig, and Directory.Build.props already makes analyzer/style
 # violations hard build errors (TreatWarningsAsErrors, EnforceCodeStyleInBuild).
@@ -143,10 +147,16 @@ build-dotnet:
 # Tests RUN on net8.0 AND net10.0 (Decision 2): SDK 10 runs net10.0 natively; the
 # net8.0 leg needs the .NET 8 base runtime present (provisioned in CI by
 # install-dotnet.sh). net462 is build-verified by build-dotnet, not run here.
+#
+# DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
+# both test lines. The root's test-dotnet-macos-docker sets it to leave the
+# integration tests out, as Python's macOS job runs only its unit tests.
+DOTNET_TEST_FILTER ?=
+
 test-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION)
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION)
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION) $(if $(DOTNET_TEST_FILTER),--filter '$(DOTNET_TEST_FILTER)')
 	$(MAKE) test-soak-dotnet
 
 # ---------------------------------------------------------------------------
@@ -234,14 +244,16 @@ CLIENT_VERSION ?= 3
 
 # The perf suite's Docker-free automated gate: the CRC-32 self-check
 # (built_in_partitioner.rs golden vectors) plus the engine-level tests (readiness gate,
-# async-producer cancellation, 64-bit message count). No broker, no Docker, no
-# client — runs on net8.0 AND net10.0. (The Docker in-suite smoke is the separate
-# test-integration-perf-dotnet target below.)
+# async-producer cancellation, 64-bit message count, PerfEnv's empty-value check). No
+# broker, no Docker, no client — runs on net8.0 AND net10.0. The empty-value check runs
+# the PerfV3 exe as a child process that stops in its configuration, before it makes a
+# client, so this target builds PerfV3 first, as the Docker target does. (The Docker
+# in-suite smoke is the separate test-integration-perf-dotnet target below.)
 #
 # The --filter is what makes that true (M13/P3 item F, D-6 Option 1).
 # Confluent.Kafka.PerformanceTests holds BOTH the Docker-free tests and the four
 # Docker-backed broker smokes, so an unfiltered `dotnet test` here started a Kafka
-# container — and, since this target never builds the PerfV3 exe the smokes launch,
+# container — and, since this target did not build the PerfV3 exe the smokes launch,
 # on a clean tree each smoke spun up that container and only THEN failed on a
 # missing-file assertion. Slow, surprising, and the opposite of what the comment
 # promises. Scope is a local-developer papercut: no root Makefile target and no CI
@@ -250,7 +262,8 @@ CLIENT_VERSION ?= 3
 # The predicate EXCLUDES the one Docker-backed class rather than naming the
 # Docker-free ones, so a new Docker-free test file is covered here automatically
 # instead of silently running nowhere but the Docker target.
-perf-unit-test-dotnet:
+perf-unit-test-dotnet: build-dotnet
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS) --filter 'FullyQualifiedName!~PerfV3SmokeTests'
 

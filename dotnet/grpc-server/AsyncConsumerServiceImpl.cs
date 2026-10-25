@@ -25,94 +25,27 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ConsumerServiceImpl"/> (M8/P2): maps all 26
-/// <c>ConsumerService</c> RPCs onto the binding's <em>asynchronous</em>
-/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> / <see cref="AsyncMockConsumer{TKey, TValue}"/>
-/// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET
-/// analog of <c>python</c> vs <c>python_async</c>. Selected at process start by
-/// <c>CONSUMER_FLAVOR=async</c> (Program.cs). Each RPC resolves a server-local
-/// <c>consumer_id</c>, <b>awaits</b> the matching <see cref="Task"/>-returning binding
-/// method on the gRPC handler task, and maps the result into the proto response,
-/// translating any operational <see cref="KafkaException"/> via <see cref="Translate"/>
-/// (reused verbatim from the sync backend).
+/// The async twin of <see cref="ConsumerServiceImpl"/>: serves <c>ConsumerService</c> over
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and <see cref="AsyncMockConsumer{TKey, TValue}"/>
+/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray"/>), the C# port of the consumer half of
+/// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Value over the sync backend.</b> The sync <see cref="ConsumerServiceImpl"/> calls the
-/// sync C ABI (<c>block_on</c> inside the core). This async servicer drives the .NET
-/// completion bridge end-to-end — <c>TaskCompletionSource</c>, the foreign
-/// callback-dispatcher thread, <c>RunContinuationsAsynchronously</c>
-/// (ffi-marshalling.md §B6/§B7) — the exact machinery the sync path never covers.
-/// </para>
-/// <para>
-/// <b>Per-id serialization — async gate (PLAN §4).</b> The native consumer is single-owner /
-/// not thread-safe; a concurrent op faults the core. The harness drives one op in flight
-/// sequentially, but as cheap defense-in-depth every op that touches a consumer takes that
-/// consumer's per-id gate so a stray concurrent RPC queues instead of faulting. The gate is
-/// a <see cref="SemaphoreSlim"/> (not a monitor <c>lock</c>): a monitor cannot be held across
-/// an <c>await</c>, so we <c>await gate.WaitAsync()</c> / <c>gate.Release()</c> around the
-/// awaited op.
-/// </para>
-/// <para>
-/// <b>Two RPCs are gate-exempt.</b> <see cref="Wakeup"/> is the original exemption: it is the
-/// one cross-thread member (it interrupts a blocked <see cref="Poll"/> on another task), so
-/// gating it would deadlock behind the very poll it must wake.
-/// <see cref="GetCallbackLog"/> is the second (M9/P9): it touches only the servicer's
-/// <see cref="CallbackLog"/> — never the consumer — and the harness's <c>poll_until_kind</c>
-/// loop alternates <c>Poll</c> and <c>GetCallbackLog</c> while waiting for a callback, so
-/// gating it would serialise a log read behind a multi-second poll and defeat the loop. The
-/// log carries its own lock for exactly this reason (see <see cref="CallbackLog"/>), which is
-/// what both reference servers do.
-/// </para>
-/// <para>
-/// <b>Close is untimed.</b> The close request carries only the consumer id (its former
-/// <c>timeout_ms</c> carried Java's deprecated <c>close(Duration)</c>, which is not translated,
-/// and the proto reserves the field), so the async <see cref="Close"/> RPC awaits
-/// <c>Close()</c>, as the sync servicer and the Python server do.
-/// </para>
-/// <para>
-/// <b>No sync-over-async.</b> Handlers <c>await</c> the binding's <see cref="Task"/> directly —
-/// never <c>Task.Run</c> / <c>.Result</c> / <c>.GetAwaiter().GetResult()</c>
-/// (ffi-marshalling.md §B7). The genuinely synchronous members (<c>Seek</c> both overloads,
-/// <c>Wakeup</c>, <c>Assignment</c>, <c>Subscription</c>, <c>Paused</c>) are called directly,
-/// with no <c>await</c>.
-/// </para>
-/// <para>
-/// <b>Registry drain at shutdown (M9/P4 M5).</b> Same problem and same fix as the sync
-/// servicer: <see cref="Close"/> was the only thing that removed an entry, so a scenario that
-/// never sent <c>Close</c> leaked a live native consumer for the shared backend process's whole
-/// lifetime. This type is now <see cref="IAsyncDisposable"/> (primary) plus
-/// <see cref="IDisposable"/> (sync fallback), and <c>Program</c> calls it explicitly on
-/// shutdown. The drain releases the <em>consumer</em> only — see
-/// <see cref="ConsumerEntry.Gate"/> for why the per-entry gate is deliberately not disposed.
-/// </para>
-/// </remarks>
 internal sealed class AsyncConsumerServiceImpl
     : Proto.ConsumerService.ConsumerServiceBase, IAsyncDisposable, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, ConsumerEntry> _consumers = new ConcurrentDictionary<ulong, ConsumerEntry>();
 
-    /// <summary>
-    /// The user-callback log, keyed by consumer id (M9/P9).
-    /// </summary>
-    /// <remarks>
-    /// Held by the <b>servicer</b>, deliberately not by <see cref="ConsumerEntry"/>:
-    /// <see cref="Close"/> evicts the entry on both its success and failure paths, so a log
-    /// hung off the entry would vanish with the consumer and break the proto's "entries survive
-    /// <c>Close</c>" contract. Session-lifetime and never evicted — see
-    /// <see cref="CallbackLog"/> for the full reasoning, including why it is unbounded.
-    /// </remarks>
     private readonly CallbackLog _callbackLog = new CallbackLog();
+
+    private readonly GroupMetadataStore _groupMetadata;
 
     private long _nextId;
 
-    /// <summary>
-    /// Drains the consumer registry asynchronously (the primary path, M9/P4 M5): remove each
-    /// remaining entry and <c>await DisposeAsync()</c> its consumer. Each teardown is
-    /// individually guarded so one failing consumer cannot abort the sweep. Idempotent and safe
-    /// on an empty registry. The entry's gate is deliberately not disposed — see
-    /// <see cref="ConsumerEntry.Gate"/>.
-    /// </summary>
+    public AsyncConsumerServiceImpl(GroupMetadataStore groupMetadata)
+    {
+        _groupMetadata = groupMetadata;
+    }
+
     public async ValueTask DisposeAsync()
     {
         foreach (KeyValuePair<ulong, ConsumerEntry> pair in _consumers)
@@ -124,9 +57,6 @@ internal sealed class AsyncConsumerServiceImpl
 
             try
             {
-                // DisposeAsync, not Close: it swallows the close error, which is what a
-                // best-effort shutdown sweep wants, and it is the graceful async path
-                // (close_async joins the bg task) before Consumer_destroy.
                 await entry.Consumer.DisposeAsync().ConfigureAwait(false);
             }
             catch (Exception)
@@ -136,13 +66,7 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <summary>
-    /// Synchronous fallback drain (M9/P4 M5) for hosts that only call
-    /// <see cref="IDisposable.Dispose"/>. Uses the consumers' blocking
-    /// <see cref="IDisposable.Dispose"/> rather than blocking on
-    /// <see cref="DisposeAsync"/> — sync-over-async at shutdown would be the very footgun
-    /// ffi §B7 forbids.
-    /// </summary>
+    // The consumers' blocking Dispose, not DisposeAsync: blocking on that would be sync-over-async.
     public void Dispose()
     {
         foreach (KeyValuePair<ulong, ConsumerEntry> pair in _consumers)
@@ -163,15 +87,13 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
     {
         Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
         IAsyncConsumer<byte[], byte[]> consumer;
         try
         {
-            // Empty (or all-blank) config selects a broker-free AsyncMockConsumer (Python parity,
-            // grpc_server_async.py). Otherwise a real KIP-848 AsyncKafkaConsumer.
+            // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
             if (IsEmptyConfig(config))
             {
                 consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, "earliest");
@@ -191,24 +113,16 @@ internal sealed class AsyncConsumerServiceImpl
         return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
     }
 
-    /// <summary>
-    /// Subscribes, optionally registering a real <see cref="LoggingRebalanceListener"/> whose
-    /// invocations land in the callback log (M9/P9) — the async mirror of
-    /// <c>ConsumerServiceImpl.Subscribe</c>.
-    /// </summary>
-    /// <remarks>
-    /// <b>Registration is per-subscribe.</b> When <c>with_listener</c> is set this awaits the
-    /// listener-taking overload; when it is not, it awaits the plain <c>Subscribe(topics)</c> —
-    /// and that is not merely "the same thing without a listener", it is what <b>releases</b> a
-    /// previously registered one, because a listener is bound to a subscription and only a
-    /// <em>replacing</em> subscribe clears it (<c>Unsubscribe</c> does not). Python makes the
-    /// same distinction by passing <c>listener=None</c> explicitly
-    /// (<c>grpc_server_async.py:281-292</c>). The harness's rebalance test depends on this: it
-    /// re-subscribes <em>with</em> the listener to observe the revoke.
-    /// </remarks>
-    /// <inheritdoc/>
+    // Without with_listener the plain Subscribe(topics) replaces, and so releases, a listener an
+    // earlier subscribe registered, as in Python.
     public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
     {
+        // Pattern subscription is not ported: answer -31 rather than subscribe to no topic.
+        if (request.HasPattern)
+        {
+            return RunStatus(request.ConsumerId, _ => throw new NotSupportedException(Translate.PatternSubscribeUnsupported));
+        }
+
         List<string> topics = new List<string>(request.Topics);
         if (request.WithListener)
         {
@@ -219,15 +133,12 @@ internal sealed class AsyncConsumerServiceImpl
         return RunStatus(request.ConsumerId, c => c.Subscribe(topics));
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Unsubscribe(Proto.ConsumerIdRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.Unsubscribe());
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Assign(Proto.AssignRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.Assign(ToTopicPartitions(request.Partitions)));
 
-    /// <inheritdoc/>
     public override async Task<Proto.PollResponse> Poll(Proto.PollRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -262,52 +173,21 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> CommitSync(Proto.CommitSyncRequest request, ServerCallContext context) =>
-        RunStatus(request.ConsumerId, async c =>
+        RunStatus(request.ConsumerId, c =>
         {
+            TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
+
             // Empty offsets => commit the current consumed positions; otherwise commit these.
             if (request.Offsets.Count > 0)
             {
-                await c.Commit(Translate.ProtoOffsetsToDictionary(request.Offsets)).ConfigureAwait(false);
+                Dictionary<TopicPartition, OffsetAndMetadata> offsets = Translate.ProtoOffsetsToDictionary(request.Offsets);
+                return timeout.HasValue ? c.Commit(offsets, timeout.Value) : c.Commit(offsets);
             }
-            else
-            {
-                await c.Commit().ConfigureAwait(false);
-            }
+
+            return timeout.HasValue ? c.Commit(timeout.Value) : c.Commit();
         });
 
-    /// <summary>
-    /// Java's <c>commitAsync</c> — returns as soon as the commit is <em>initiated</em>,
-    /// optionally with a real <see cref="LoggingCommitCallback"/> (M9/P9).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>⚠ Not awaited, and identical to the sync servicer's body.</b> <c>CommitAsync</c> lives
-    /// on <see cref="IConsumerCommon"/> and is sync <c>void</c> on <em>both</em> consumer
-    /// flavors — Java's <c>commitAsync</c> is non-blocking, so the idiom map keeps it
-    /// synchronous (CLAUDE.md §4). So this handler calls it directly and returns
-    /// <see cref="Task.CompletedTask"/> to reuse the awaited gate helper, exactly as
-    /// <see cref="Seek"/> does for the other sync-on-the-async-consumer member. Python's async
-    /// server bypasses <c>_run_status</c>'s await for the same reason
-    /// (<c>grpc_server_async.py:324-341</c>).
-    /// </para>
-    /// <para>
-    /// <b>Four-way branch</b>, matching the ABI's overload set: <c>{empty, explicit} offsets</c>
-    /// x <c>{with, without} callback</c>. The offsets-taking overload accepts a
-    /// <see langword="null"/> callback (Java's legal <c>commitAsync(Map, null)</c>), but the
-    /// callback-only overload does <b>not</b> — it throws <see cref="ArgumentNullException"/> on
-    /// null (a recorded, deliberately-stricter-than-Java divergence, CLAUDE.md §4) — so the
-    /// no-offsets/no-callback case must route to the bare <c>CommitAsync()</c>.
-    /// </para>
-    /// <para>
-    /// <b>No <c>discard_commit_complete</c> analogue is needed here</b>, unlike the C server
-    /// (<c>server.cc:376-380</c>): M9/P7's binding absorbed the ABI's non-nullable-callback
-    /// problem internally (the discard trampoline lives inside <c>NativeConsumer</c>), so this
-    /// server passes <see langword="null"/> and the binding does the rest.
-    /// </para>
-    /// </remarks>
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> CommitAsync(Proto.CommitAsyncRequest request, ServerCallContext context)
     {
         IOffsetCommitCallback? callback = request.WithCallback
@@ -326,7 +206,6 @@ internal sealed class AsyncConsumerServiceImpl
         });
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.CommittedResponse> Committed(Proto.CommittedRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -337,12 +216,15 @@ internal sealed class AsyncConsumerServiceImpl
 
         try
         {
+            List<TopicPartition> partitions = ToTopicPartitions(request.Partitions);
+            TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
             Proto.OffsetMap map = new Proto.OffsetMap();
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result =
-                    await entry.Consumer.Committed(ToTopicPartitions(request.Partitions)).ConfigureAwait(false);
+                IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> result = await (timeout.HasValue
+                    ? entry.Consumer.Committed(partitions, timeout.Value)
+                    : entry.Consumer.Committed(partitions)).ConfigureAwait(false);
                 foreach (KeyValuePair<TopicPartition, OffsetAndMetadata?> pair in result)
                 {
                     if (pair.Value is not null)
@@ -364,7 +246,6 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.PositionResponse> Position(Proto.PositionRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -375,11 +256,15 @@ internal sealed class AsyncConsumerServiceImpl
 
         try
         {
+            TopicPartition partition = Translate.Tp(request.Partition);
+            TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
             long offset;
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                offset = await entry.Consumer.Position(Translate.Tp(request.Partition)).ConfigureAwait(false);
+                offset = await (timeout.HasValue
+                    ? entry.Consumer.Position(partition, timeout.Value)
+                    : entry.Consumer.Position(partition)).ConfigureAwait(false);
             }
             finally
             {
@@ -394,12 +279,10 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Seek(Proto.SeekRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c =>
         {
             TopicPartition partition = Translate.Tp(request.Partition);
-            // metadata / leader_epoch present => Seek(tp, OffsetAndMetadata); else Seek(tp, offset).
             if (request.HasMetadata || request.HasLeaderEpoch)
             {
                 int? leaderEpoch = request.HasLeaderEpoch ? request.LeaderEpoch : (int?)null;
@@ -410,31 +293,24 @@ internal sealed class AsyncConsumerServiceImpl
             return c.Seek(partition, request.Offset);
         });
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> SeekToBeginning(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.SeekToBeginning(ToTopicPartitions(request.Partitions)));
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> SeekToEnd(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.SeekToEnd(ToTopicPartitions(request.Partitions)));
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Pause(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.Pause(ToTopicPartitions(request.Partitions)));
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Resume(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
         RunStatus(request.ConsumerId, c => c.Resume(ToTopicPartitions(request.Partitions)));
 
-    /// <inheritdoc/>
     public override Task<Proto.LongOffsetsResponse> BeginningOffsets(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
-        LongOffsets(request.ConsumerId, request.Partitions, end: false);
+        LongOffsets(request, end: false);
 
-    /// <inheritdoc/>
     public override Task<Proto.LongOffsetsResponse> EndOffsets(Proto.TopicPartitionListRequest request, ServerCallContext context) =>
-        LongOffsets(request.ConsumerId, request.Partitions, end: true);
+        LongOffsets(request, end: true);
 
-    /// <inheritdoc/>
     public override async Task<Proto.OffsetAndTimestampResponse> OffsetsForTimes(Proto.OffsetsForTimesRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -451,12 +327,14 @@ internal sealed class AsyncConsumerServiceImpl
                 spec[Translate.Tp(entry2.Partition)] = entry2.Timestamp;
             }
 
+            TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
             Proto.OffsetAndTimestampMap map = new Proto.OffsetAndTimestampMap();
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> result =
-                    await entry.Consumer.OffsetsForTimes(spec).ConfigureAwait(false);
+                IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> result = await (timeout.HasValue
+                    ? entry.Consumer.OffsetsForTimes(spec, timeout.Value)
+                    : entry.Consumer.OffsetsForTimes(spec)).ConfigureAwait(false);
                 foreach (KeyValuePair<TopicPartition, OffsetAndTimestamp?> pair in result)
                 {
                     if (pair.Value is not null)
@@ -478,7 +356,6 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.PartitionsForResponse> PartitionsFor(Proto.ConsumerPartitionsForRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -512,7 +389,6 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.ListTopicsResponse> ListTopics(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -553,15 +429,12 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.TopicPartitionListResponse> Assignment(Proto.ConsumerIdRequest request, ServerCallContext context) =>
         TopicPartitionListRead(request.ConsumerId, c => c.Assignment());
 
-    /// <inheritdoc/>
     public override Task<Proto.TopicPartitionListResponse> Paused(Proto.ConsumerIdRequest request, ServerCallContext context) =>
         TopicPartitionListRead(request.ConsumerId, c => c.Paused());
 
-    /// <inheritdoc/>
     public override async Task<Proto.MetricsResponse> Metrics(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -576,8 +449,6 @@ internal sealed class AsyncConsumerServiceImpl
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                // Metrics() is a SYNCHRONOUS state read (IConsumerCommon, inherited by
-                // IAsyncConsumer) — call it directly (no await).
                 foreach (KeyValuePair<MetricName, IMetric> pair in entry.Consumer.Metrics())
                 {
                     list.Metrics.Add(Translate.MetricToProto(pair.Key, pair.Value));
@@ -596,7 +467,6 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.SubscriptionResponse> Subscription(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);
@@ -611,7 +481,6 @@ internal sealed class AsyncConsumerServiceImpl
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                // Subscription() is a SYNCHRONOUS state read (IConsumerCommon) — call it directly.
                 foreach (string topic in entry.Consumer.Subscription())
                 {
                     topics.Values.Add(topic);
@@ -630,59 +499,84 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <inheritdoc/>
-    public override Task<Proto.StatusResponse> Wakeup(Proto.ConsumerIdRequest request, ServerCallContext context)
+    public override async Task<Proto.GroupMetadataResponse> GroupMetadata(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
-        // Cross-thread interrupt of a blocked Poll — MUST NOT take the per-id gate (see the
-        // type remarks). Wakeup() is synchronous. Idempotent on an unknown id (Python parity).
-        Get(request.ConsumerId)?.Consumer.Wakeup();
-        return Task.FromResult(new Proto.StatusResponse());
-    }
-
-    /// <summary>
-    /// Closes and evicts a consumer. Ordering is <b>resolve → close → evict</b> (M9/P4 H2), the
-    /// async mirror of <c>ConsumerServiceImpl.Close</c>.
-    /// </summary>
-    /// <remarks>
-    /// The eviction-before-close shape and the orphaning <c>catch</c> were identical to the sync
-    /// servicer's, and the registry-drain sweep needs both servicers consistent. So the reorder
-    /// is applied symmetrically: evict only after the close ran, and on failure dispose then
-    /// evict so the native handle is never orphaned.
-    /// </remarks>
-    /// <inheritdoc/>
-    public override async Task<Proto.StatusResponse> Close(Proto.ConsumerCloseRequest request, ServerCallContext context)
-    {
-        // Non-destructive resolve, like every other RPC.
         ConsumerEntry? entry = Get(request.ConsumerId);
         if (entry is null)
         {
-            // Close is idempotent — silent success on an unknown id (Python / Java parity).
-            return new Proto.StatusResponse();
+            return new Proto.GroupMetadataResponse { Error = Translate.UnknownConsumer(request.ConsumerId) };
         }
 
         try
         {
-            // The binding's Close() gracefully closes AND releases the native handle
-            // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed here.
+            ConsumerGroupMetadata groupMetadata;
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                await entry.Consumer.Close().ConfigureAwait(false);
+                groupMetadata = entry.Consumer.GroupMetadata();
             }
             finally
             {
                 entry.Gate.Release();
             }
 
-            // Evict only after the close actually ran — eviction WITHOUT a close orphans the
-            // consumer (Close/DisposeAsync are idempotent, so a duplicate Close RPC is safe).
+            return new Proto.GroupMetadataResponse
+            {
+                GroupMetadataId = _groupMetadata.Add(groupMetadata),
+                GroupMetadata = Translate.GroupMetadataToProto(groupMetadata),
+            };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.GroupMetadataResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    public override Task<Proto.StatusResponse> ReleaseGroupMetadata(Proto.ReleaseGroupMetadataRequest request, ServerCallContext context)
+    {
+        _groupMetadata.Release(request.GroupMetadataId);
+        return Task.FromResult(new Proto.StatusResponse());
+    }
+
+    public override Task<Proto.StatusResponse> Wakeup(Proto.ConsumerIdRequest request, ServerCallContext context)
+    {
+        // No gate: it interrupts a Poll blocked on another thread. An unknown id is a no-op.
+        Get(request.ConsumerId)?.Consumer.Wakeup();
+        return Task.FromResult(new Proto.StatusResponse());
+    }
+
+    public override async Task<Proto.StatusResponse> Close(Proto.ConsumerCloseRequest request, ServerCallContext context)
+    {
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
+        {
+            // An unknown id closes silently, as in Python; the harness relies on it.
+            return new Proto.StatusResponse();
+        }
+
+        // An unknown operation name throws here, outside the handler's catch, so gRPC answers
+        // UNKNOWN, as Python's Close lets its KeyError escape.
+        CloseOptions? options = Translate.CloseOptionsFromProto(request);
+        try
+        {
+            await entry.Gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await (options is null ? entry.Consumer.Close() : entry.Consumer.Close(options)).ConfigureAwait(false);
+            }
+            finally
+            {
+                entry.Gate.Release();
+            }
+
+            // Evict only after the close ran: an eviction without a close would orphan the
+            // consumer.
             _consumers.TryRemove(request.ConsumerId, out _);
             return new Proto.StatusResponse();
         }
         catch (Exception ex)
         {
-            // Never orphan: dispose, then evict, so the native handle is released even when the
-            // close failed.
+            // Dispose, then evict, so a failed close never orphans the consumer.
             try
             {
                 await entry.Consumer.DisposeAsync().ConfigureAwait(false);
@@ -697,30 +591,37 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <summary>
-    /// Reads (without clearing) the consumer's user-callback log (M9/P9) — the async mirror of
-    /// <c>ConsumerServiceImpl.GetCallbackLog</c>.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Gate-exempt</b>, the second exemption after <see cref="Wakeup"/> (see the type
-    /// remarks): it touches only <see cref="_callbackLog"/>, which carries its own lock, and
-    /// gating it would serialise it behind a long <see cref="Poll"/> — precisely the two calls
-    /// the harness's <c>poll_until_kind</c> loop alternates.
-    /// </para>
-    /// <para>
-    /// <b>⚠ An unknown or closed <c>consumer_id</c> returns an EMPTY response, not an error</b>
-    /// — deliberately unlike every other handler here, which returns
-    /// <see cref="Translate.UnknownConsumer"/>. This inconsistency is load-bearing and must not
-    /// be "fixed": the log <em>outlives</em> its consumer by design, so once <see cref="Close"/>
-    /// has evicted the registry entry there is no consumer left to resolve, and an
-    /// unknown-consumer error would make every post-close read fail — breaking the proto's
-    /// "entries survive <c>Close</c>" contract for the callbacks a close itself drives. "Unknown
-    /// consumer" is simply not an error condition for this RPC. Python behaves identically and
-    /// for the same reason (<c>grpc_server_async.py:520-523</c>).
-    /// </para>
-    /// </remarks>
-    /// <inheritdoc/>
+    public override async Task<Proto.CurrentLagResponse> CurrentLag(Proto.CurrentLagRequest request, ServerCallContext context)
+    {
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
+        {
+            return new Proto.CurrentLagResponse { Error = Translate.UnknownConsumer(request.ConsumerId) };
+        }
+
+        try
+        {
+            long? lag;
+            await entry.Gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                lag = await entry.Consumer.CurrentLag(Translate.Tp(request.Partition)).ConfigureAwait(false);
+            }
+            finally
+            {
+                entry.Gate.Release();
+            }
+
+            return Translate.CurrentLagResponse(lag);
+        }
+        catch (Exception ex)
+        {
+            return new Proto.CurrentLagResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    // No gate, and an unknown or closed id reads an empty log, not an error: the entries outlive
+    // their consumer, as in Python.
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ConsumerId));
 
@@ -784,24 +685,25 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    private async Task<Proto.LongOffsetsResponse> LongOffsets(ulong consumerId, IEnumerable<Proto.TopicPartition> partitions, bool end)
+    private async Task<Proto.LongOffsetsResponse> LongOffsets(Proto.TopicPartitionListRequest request, bool end)
     {
-        ConsumerEntry? entry = Get(consumerId);
+        ConsumerEntry? entry = Get(request.ConsumerId);
         if (entry is null)
         {
-            return new Proto.LongOffsetsResponse { Error = Translate.UnknownConsumer(consumerId) };
+            return new Proto.LongOffsetsResponse { Error = Translate.UnknownConsumer(request.ConsumerId) };
         }
 
         try
         {
-            List<TopicPartition> parts = ToTopicPartitions(partitions);
+            List<TopicPartition> parts = ToTopicPartitions(request.Partitions);
+            TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
             Proto.LongOffsetMap map = new Proto.LongOffsetMap();
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                IReadOnlyDictionary<TopicPartition, long> result = end
-                    ? await entry.Consumer.EndOffsets(parts).ConfigureAwait(false)
-                    : await entry.Consumer.BeginningOffsets(parts).ConfigureAwait(false);
+                IReadOnlyDictionary<TopicPartition, long> result = await (timeout is TimeSpan t
+                    ? (end ? entry.Consumer.EndOffsets(parts, t) : entry.Consumer.BeginningOffsets(parts, t))
+                    : (end ? entry.Consumer.EndOffsets(parts) : entry.Consumer.BeginningOffsets(parts))).ConfigureAwait(false);
                 foreach (KeyValuePair<TopicPartition, long> pair in result)
                 {
                     map.Entries.Add(new Proto.LongOffsetMapEntry { Partition = Translate.TpToProto(pair.Key), Offset = pair.Value });
@@ -836,7 +738,6 @@ internal sealed class AsyncConsumerServiceImpl
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                // read (Assignment / Paused) is a SYNCHRONOUS state read (IConsumerCommon).
                 foreach (TopicPartition partition in read(entry.Consumer))
                 {
                     list.Partitions.Add(Translate.TpToProto(partition));
@@ -855,7 +756,7 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    /// <summary>A consumer plus its per-id async serialization gate (see the type remarks).</summary>
+    /// <summary>A consumer plus the async gate that serializes the RPCs on it.</summary>
     private sealed class ConsumerEntry
     {
         internal ConsumerEntry(IAsyncConsumer<byte[], byte[]> consumer)
@@ -865,26 +766,9 @@ internal sealed class AsyncConsumerServiceImpl
 
         internal IAsyncConsumer<byte[], byte[]> Consumer { get; }
 
-        /// <summary>
-        /// Async per-id gate (<see cref="SemaphoreSlim"/>, not a monitor <c>lock</c>): a monitor
-        /// cannot be held across an <c>await</c>, so ops <c>await Gate.WaitAsync()</c> /
-        /// <c>Gate.Release()</c>. <see cref="Wakeup"/> is gate-exempt.
-        /// </summary>
-        /// <remarks>
-        /// <b>Deliberately never disposed</b> (M9/P4, Critic 41 finding 1). A
-        /// <see cref="SemaphoreSlim"/> holds no OS handle unless
-        /// <see cref="SemaphoreSlim.AvailableWaitHandle"/> is read — which nothing in this
-        /// repository ever does — and it registers no finalizer, so dropping the entry reclaims
-        /// it by GC alone. Disposing it would buy no resource safety and would add two failure
-        /// modes for concurrent same-id RPCs: <c>Release()</c> on a disposed gate throws
-        /// <see cref="ObjectDisposedException"/> (breaking <see cref="Close"/>'s documented
-        /// idempotence), and <see cref="SemaphoreSlim.Dispose()"/> drops pending
-        /// <c>WaitAsync()</c> waiters without completing or faulting them, hanging that RPC to
-        /// the client deadline. Both need ≥2 (resp. ≥3) concurrent gated RPCs on one
-        /// <c>consumer_id</c>, so they were latent, not active — but the shape is the defect.
-        /// The sync servicer is symmetric by construction: its gate is a monitor over a plain
-        /// <c>object</c>, so there is nothing there to dispose either.
-        /// </remarks>
+        // A SemaphoreSlim, since a monitor cannot be held across an await. A stray concurrent RPC
+        // waits here instead of being refused by AsyncKafkaConsumer's owner check. Never disposed:
+        // it holds no OS handle, and a dispose would break a concurrent RPC's Release or WaitAsync.
         internal SemaphoreSlim Gate { get; } = new SemaphoreSlim(1, 1);
     }
 }

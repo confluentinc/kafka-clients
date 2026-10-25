@@ -26,47 +26,15 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// <c>ChaosWorkloadService</c> over the binding's <b>synchronous</b> clients
-/// (<see cref="KafkaProducer{TKey, TValue}"/> / <see cref="KafkaConsumer{TKey, TValue}"/>, both
-/// <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET twin of
-/// Python's sync <c>ChaosWorkloadService</c> (<c>python/grpc_chaos.py</c>
-/// <c>_run_producer_sync</c> / <c>_run_consumer_sync</c>), hosted by the sync flavour
-/// (<c>CONSUMER_FLAVOR</c> unset or <c>sync</c>, the <c>dotnet</c> harness backend; M18/P1).
+/// <c>ChaosWorkloadService</c> over the binding's synchronous clients, the .NET twin of Python's sync
+/// <c>ChaosWorkloadService</c>: each workload loop runs on its own thread; the RPC streams its events.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Each workload runs its loop on its own dedicated thread (D8, <see cref="ChaosStream.StartDedicatedThread"/>);
-/// the RPC handler is async and only streams the workload's events (<see cref="ChaosStream.Run"/>).
-/// The loops follow the anchor step for step (PLAN §3.3 / §3.4): the producer sends on an
-/// absolute schedule without waiting for each record and reports each outcome from its delivery
-/// callback; the consumer subscribes with <see cref="ChaosRebalanceListener"/>, reports each
-/// record, commits after every non-empty poll, and drains by committing, reading back, closing.
-/// </para>
-/// <para>
-/// <b>No stop token reaches the client</b> (D6 / D7): the sync surface takes none, and stop is
-/// checked between sends and between polls, so stop latency is at most one rate wait or one
-/// <c>poll_timeout_ms</c>, as in Python.
-/// </para>
-/// <para>
-/// <b>Test seam (D10, PLAN §5.1).</b> The <see langword="internal"/> constructor takes the two
-/// client factories so the gRPC-server unit tests can drive these same loops over
-/// <see cref="MockProducer{TKey, TValue}"/> / <see cref="MockConsumer{TKey, TValue}"/> (DoD §12:
-/// only construction is swapped). DI activates only public constructors, so production always
-/// gets the real clients, built from the request's <c>config</c> verbatim with no mock switch.
-/// </para>
-/// <para>
-/// <b>Singleton</b> (Program.cs): the registry is shared by every RPC, so a
-/// <c>StopWorkload</c> / <c>MarkWorkload</c> can find the workload a <c>Run*</c> registered.
-/// <see cref="Dispose"/> is the shutdown drain (PLAN §5.8).
-/// </para>
-/// </remarks>
 internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.ChaosWorkloadServiceBase, IDisposable
 {
     private readonly ChaosRegistry _registry = new ChaosRegistry();
     private readonly Func<IReadOnlyDictionary<string, string>, IProducer<byte[], byte[]>> _producerFactory;
     private readonly Func<IReadOnlyDictionary<string, string>, IConsumer<byte[], byte[]>> _consumerFactory;
 
-    /// <summary>The production constructor: real clients, built from each request's config.</summary>
     public ChaosWorkloadServiceImpl()
         : this(
             static config => new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray, Serdes.ByteArray),
@@ -74,7 +42,8 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
     {
     }
 
-    /// <summary>The test seam (see the type remarks): the loops are unchanged, only construction is swapped.</summary>
+    // The unit tests' seam: DI activates only the public constructor, so production always gets the
+    // real clients.
     internal ChaosWorkloadServiceImpl(
         Func<IReadOnlyDictionary<string, string>, IProducer<byte[], byte[]>> producerFactory,
         Func<IReadOnlyDictionary<string, string>, IConsumer<byte[], byte[]>> consumerFactory)
@@ -83,10 +52,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         _consumerFactory = consumerFactory;
     }
 
-    /// <summary>
-    /// The shutdown drain (PLAN §5.8): stop every running workload, then wait for their drains,
-    /// bounded by <see cref="ChaosStream.DrainTimeout"/>. Best-effort, like the other servicers'.
-    /// </summary>
     public void Dispose()
     {
         if (!ChaosStream.StopAllAndWait(_registry, ChaosStream.DrainTimeout))
@@ -95,7 +60,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
     }
 
-    /// <inheritdoc/>
     public override Task RunProducer(
         Proto.RunProducerRequest request,
         IServerStreamWriter<Proto.WorkloadEventBatch> responseStream,
@@ -107,7 +71,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             context,
             workload => ChaosStream.StartDedicatedThread(workload, w => RunProducerLoop(request, w)));
 
-    /// <inheritdoc/>
     public override Task RunConsumer(
         Proto.RunConsumerRequest request,
         IServerStreamWriter<Proto.WorkloadEventBatch> responseStream,
@@ -119,7 +82,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             context,
             workload => ChaosStream.StartDedicatedThread(workload, w => RunConsumerLoop(request, w)));
 
-    /// <inheritdoc/>
     public override Task<Proto.StatusResponse> StopWorkload(Proto.StopWorkloadRequest request, ServerCallContext context)
     {
         // Returns at once: it only signals the stop, and never waits for (or runs) the drain.
@@ -127,11 +89,9 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         return Task.FromResult(new Proto.StatusResponse());
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.MarkWorkloadResponse> MarkWorkload(Proto.MarkWorkloadRequest request, ServerCallContext context) =>
         Task.FromResult(new Proto.MarkWorkloadResponse { Found = _registry.Mark(request.WorkloadId, request.Marker) });
 
-    /// <summary>Python <c>_run_producer_sync</c>, on the workload's dedicated thread.</summary>
     private void RunProducerLoop(Proto.RunProducerRequest request, ChaosWorkload workload)
     {
         IProducer<byte[], byte[]> producer;
@@ -165,9 +125,8 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
                 ChaosRecordOutcomes.RecordCallback callback = outcomes.ForRecord(index);
                 try
                 {
-                    // The KafkaFuture is dropped: the outcome arrives through the callback, which
-                    // lets the binding batch and pipeline. Send returns once the record is
-                    // accepted, blocking only on metadata or buffer.memory (<= max.block.ms).
+                    // The returned future is not waited on: the outcome arrives through the
+                    // callback, which lets the binding batch and pipeline.
                     _ = producer.Send(record, callback);
                 }
                 catch (Exception e)
@@ -194,8 +153,7 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
 
         // Close waits for every buffered record's outcome, so every delivery callback has fired
-        // when it returns; Dispose then releases the native producer (a no-op after a clean
-        // close). A close error ends the workload with Failed.
+        // when it returns.
         Exception? closeError = null;
         try
         {
@@ -210,7 +168,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         workload.Emit(closeError is null ? ChaosEvents.Finished() : ChaosEvents.Failed(closeError));
     }
 
-    /// <summary>Python <c>_run_consumer_sync</c>, on the workload's dedicated thread.</summary>
     private void RunConsumerLoop(Proto.RunConsumerRequest request, ChaosWorkload workload)
     {
         IConsumer<byte[], byte[]> consumer;
@@ -226,19 +183,14 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
 
         bool checkCommits = request.CommitCheckIntervalMs > 0;
-        ConsumerHandle? handle = null;
-        ChaosRebalanceListener listener;
+        ChaosRebalanceListener listener = new ChaosRebalanceListener(workload.Emit, consumer, checkCommits);
         try
         {
-            // The handle before Subscribe: the listener commits through it, including during
-            // the close-time revoke, so it lives until after Close.
-            handle = consumer.Handle();
-            listener = new ChaosRebalanceListener(workload.Emit, handle, checkCommits);
             consumer.Subscribe(new List<string>(request.Topics), listener);
         }
         catch (Exception e)
         {
-            CloseQuietly(consumer, handle);
+            CloseQuietly(consumer);
             workload.Emit(ChaosEvents.Failed(e));
             return;
         }
@@ -249,18 +201,16 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
         catch (Exception e)
         {
-            // A server-side fault inside the loop (the client's own errors are all reported as
-            // ConsumerError above). Close the client so a shared server does not leak it. Python
-            // leaves its consumer open here. Closing first, as the drain does: the close-time
-            // revoke must not queue a read-back, which would wait out the API timeout.
+            // A server-side fault inside the loop: close the client so a shared server does not
+            // leak it (Python leaves its consumer open here). Closing is set first, as in the
+            // drain, so the close-time revoke queues no read-back.
             ChaosEvents.Log($"chaos consumer {workload.Id}: poll loop died: {e}");
             listener.Closing = true;
-            CloseQuietly(consumer, handle);
+            CloseQuietly(consumer);
             workload.Emit(ChaosEvents.Failed(e));
             return;
         }
 
-        // The drain: a final sync commit (in both commit modes), its read-back, then close.
         try
         {
             consumer.Commit();
@@ -278,7 +228,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         workload.Emit(ChaosEvents.Closing());
         try
         {
-            // The close-time OnPartitionsRevoked still commits through the live handle.
             consumer.Close();
         }
         catch (Exception e)
@@ -287,10 +236,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             workload.Emit(ChaosEvents.ConsumerError(Proto.ConsumerOp.Close, e));
         }
 
-        // Close, then the handle, then the consumer: the handle ref-counts its consumer, so this
-        // plain order is correct. Python's plain close() matches it since #187 removed its
-        // close-spec split, so PLAN §3.5 item 4 is no longer a difference.
-        DisposeQuietly(handle);
         DisposeQuietly(consumer);
         workload.Emit(ChaosEvents.Closed());
         workload.Emit(ChaosEvents.Finished());
@@ -361,7 +306,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
     }
 
-    /// <summary>The assignment's committed offsets as <c>Committed</c> events (Python <c>read_back</c>).</summary>
     private static void ReadBack(IConsumer<byte[], byte[]> consumer, ChaosWorkload workload)
     {
         try
@@ -374,7 +318,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         }
     }
 
-    /// <summary>Python <c>_close_quietly</c>, for the producer after a failed loop.</summary>
     private static void CloseQuietly(IProducer<byte[], byte[]> producer)
     {
         try
@@ -389,8 +332,7 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
         DisposeQuietly(producer);
     }
 
-    /// <summary>The consumer's close after a failed setup or loop: close, then the handle, then the consumer.</summary>
-    private static void CloseQuietly(IConsumer<byte[], byte[]> consumer, ConsumerHandle? handle)
+    private static void CloseQuietly(IConsumer<byte[], byte[]> consumer)
     {
         try
         {
@@ -401,7 +343,6 @@ internal sealed class ChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.Chao
             ChaosEvents.Log($"chaos: close after a failed loop threw: {e}");
         }
 
-        DisposeQuietly(handle);
         DisposeQuietly(consumer);
     }
 

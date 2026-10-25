@@ -243,7 +243,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every group id's future fails with that message.
+    /// so every group id's future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncDeleteConsumerGroupsResult DeleteConsumerGroups(
         IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options = null) =>
@@ -253,7 +253,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so the call's one future fails with that message.
+    /// so the call's one future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncRemoveMembersFromConsumerGroupResult RemoveMembersFromConsumerGroup(
         string groupId, RemoveMembersFromConsumerGroupOptions options) =>
@@ -263,7 +263,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every binding's future fails with that message.
+    /// so every binding's future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions? options = null) =>
         AsyncCreateAclsResult.OfClient(_native.CreateAcls(acls, options));
@@ -271,7 +271,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every filter's future fails with that message.
+    /// so every filter's future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncDeleteAclsResult DeleteAcls(
         IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options = null) =>
@@ -280,7 +280,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so <see cref="AsyncDescribeAclsResult.Values"/> fails with that message.
+    /// so <see cref="AsyncDescribeAclsResult.Values"/> fails with a <see cref="NotSupportedException"/>
+    /// carrying that message.
     /// </remarks>
     public AsyncDescribeAclsResult DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options = null) =>
@@ -289,7 +290,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
-    /// so <see cref="AsyncDescribeClientQuotasResult.Entities"/> fails with that message.
+    /// so <see cref="AsyncDescribeClientQuotasResult.Entities"/> fails with a <see cref="NotSupportedException"/>
+    /// carrying that message.
     /// </remarks>
     public AsyncDescribeClientQuotasResult DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options = null) =>
@@ -298,7 +300,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implement yet")</c> here, Java's own typo kept,
-    /// so every entity's future fails with that message.
+    /// so every entity's future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncAlterClientQuotasResult AlterClientQuotas(
         IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options = null) =>
@@ -307,7 +309,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every accessor fails with that message.
+    /// so every accessor fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
         IReadOnlyCollection<string>? users = null,
@@ -318,7 +320,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     /// <remarks>
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
-    /// so every user's future fails with that message.
+    /// so every user's future fails with a <see cref="NotSupportedException"/> carrying that message.
     /// </remarks>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
         IEnumerable<UserScramCredentialAlteration> alterations,

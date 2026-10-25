@@ -17,11 +17,8 @@ using System;
 namespace Confluent.Kafka.Performance;
 
 /// <summary>
-/// The immutable snapshot a <see cref="Bucket"/> yields at rollover — the numeric form of Python's
-/// <c>Bucket.rollover()</c> dict (<c>average</c> / <c>max</c> / <c>total</c> / <c>count</c>), plus the
-/// latency percentiles when the bucket tracks a histogram. Kept numeric (not pre-stringified) so
-/// <see cref="Metrics"/> can both build the JSON line and accumulate the CPU/RSS averages without a
-/// string round-trip (Python re-parses its own string; the result is identical).
+/// The numeric snapshot a <see cref="Bucket"/> yields at rollover, Python's <c>Bucket.rollover()</c> dict
+/// (average, max, total, count) plus the latency percentiles when the bucket tracks a histogram.
 /// </summary>
 internal readonly struct BucketRollover
 {
@@ -39,44 +36,30 @@ internal readonly struct BucketRollover
         P999 = p999;
     }
 
-    /// <summary>Mean of the window's measurements (<c>0</c> when the window had none — Python's int <c>0</c>).</summary>
     internal double Average { get; }
 
-    /// <summary>Maximum measurement (<see cref="double.NegativeInfinity"/> — the <c>"-inf"</c> sentinel — when the window had none).</summary>
     internal double Max { get; }
 
-    /// <summary>Sum of the window's measurements.</summary>
     internal double Total { get; }
 
-    /// <summary>Number of measurements in the window.</summary>
     internal long Count { get; }
 
-    /// <summary>Whether this bucket tracks a latency histogram (so the percentiles below are meaningful).</summary>
     internal bool HasHistogram { get; }
 
-    /// <summary>The window's 50th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P50 { get; }
 
-    /// <summary>The window's 90th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P90 { get; }
 
-    /// <summary>The window's 95th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P95 { get; }
 
-    /// <summary>The window's 99th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P99 { get; }
 
-    /// <summary>The window's 99.9th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P999 { get; }
 }
 
 /// <summary>
-/// A per-window accumulator (total / count / max) — the C# analog of Python's <c>Bucket</c>. When
-/// constructed with a histogram it additionally tracks the 1 ms latency histogram (the
-/// <c>LatencyBucket</c> role) and yields p50/p90/p95/p99/p999 at rollover. Thread-safe: measurements
-/// arrive on the client's delivery-callback thread while the sampler thread rolls the bucket over, so
-/// every mutation and the rollover take a lock (Python leans on the GIL; .NET must lock so a
-/// non-atomic <c>double</c> update is never torn).
+/// A per-window accumulator (total, count, max), Python's <c>Bucket</c>, or with a histogram its <c>LatencyBucket</c>.
+/// Measurements and the sampler's rollover run on different threads, so both take a lock.
 /// </summary>
 internal sealed class Bucket
 {
@@ -86,16 +69,11 @@ internal sealed class Bucket
     private long _count;
     private double _max = double.NegativeInfinity;
 
-    /// <summary>Creates a bucket, optionally tracking the 1 ms latency histogram (the latency bucket).</summary>
     internal Bucket(bool withHistogram = false)
     {
         _hist = withHistogram ? LatencyHistogram.New() : null;
     }
 
-    /// <summary>
-    /// Adds one measurement (Python <c>Bucket.add_measurement</c>): folds it into total / count / max and,
-    /// for the latency bucket, into the histogram.
-    /// </summary>
     internal void AddMeasurement(double measurement)
     {
         lock (_lock)
@@ -114,11 +92,6 @@ internal sealed class Bucket
         }
     }
 
-    /// <summary>
-    /// Snapshots the window and resets to empty (Python <c>Bucket.rollover</c> / <c>LatencyBucket.rollover</c>):
-    /// returns average / max / total / count (and, for the latency bucket, the percentiles), then clears
-    /// total / count / max (and the histogram) for the next window.
-    /// </summary>
     internal BucketRollover Rollover()
     {
         lock (_lock)

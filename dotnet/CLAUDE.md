@@ -1186,8 +1186,76 @@ touch the public Java shape (§3/§4).
 
 A port is not done until it builds on the TFM matrix, unit tests pass against
 `MockProducer` / `MockConsumer`, lint/format are clean, and the `ffi-marshalling.md` anti-patterns
-are satisfied (`definition-of-done.md`). Integration/multi-language suites are opt-in until
-CI-stable.
+are satisfied (`definition-of-done.md`).
+
+The gate is `make verify-dotnet`, run from the repository root. It runs format, the unit tests
+and the soak tests on net8.0 and net10.0, the `__grpc_dotnet` and `__grpc_dotnet_async`
+multilanguage arms over the two .NET gRPC images, and the perf stage. CI runs it on Linux, and
+runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make verify-dotnet-macos-docker`:
+the unit tests, then the arms with the gRPC server as a native process, with no perf stage. The
+arms skip only the tests named in `rust/Makefile`'s `DOTNET_GRPC_SKIPS`, each listed with its
+reason and its REMOVE condition. The gRPC server's own unit tests are a local gate, outside CI:
+`make -C dotnet test-grpc-server-dotnet`.
+
+### 7.6 The gRPC test server (`grpc-server/`)
+
+The multilanguage harness (`rust/tests/integration.rs`) reaches the binding through
+`grpc-server/`, on the protos in `rust/multilanguage-test-server/proto/`. The server is a
+translation of Python's:
+- the sync servicers translate `python/grpc_server.py` over the sync clients;
+- the async servicers translate `python/grpc_server_async.py` over the async clients;
+- `Translate` and `TranslateAdmin` translate `python/grpc_translate.py`.
+
+The server calls only the public API and adds no Kafka behaviour (`bindings.md` §1.2).
+
+**Errors.** A proto `KafkaError`'s `code` is the FFI code (`kafka_common_Error_e`). The code
+alone names the error's class (`producer_service.proto`, `KafkaError`). Every exception crosses
+through `Translate.ToProto`, as every Python error crosses through `_kafka_error_to_proto`:
+- A `KafkaException` is sent with its `Code` and its `Message`.
+- A .NET type that the error table gives a Java built-in (§3, the `KafkaException` hierarchy
+  row) is sent with the code of Python's class for that Java exception, and with the exception's
+  `Message`:
+  - `ArgumentException`: -3 (`IllegalArgumentError`);
+  - `InvalidOperationException`: -4 (`IllegalStateError`), `ObjectDisposedException` included;
+  - `System.TimeoutException`: -5 (`TimeoutError`);
+  - `NotSupportedException`: -31 (`UnsupportedOperationError`).
+
+  A core -2 goes out as -4, because .NET throws one type for -2 and -4 (decision 17); Python
+  sends -2.
+- An `ArgumentNullException`, and any other exception, is sent as -4 with the message
+  "dotnet server: <Type>: <message>". This is Python's fallback for a class with no FFI id,
+  `TypeError` included.
+- A request the server cannot translate is sent as -3 (`TranslateAdmin.RequestError`, Python's
+  `AdminRequestError`).
+- A client constructor's rejection that is not a `KafkaException` is sent as -3
+  (`TranslateAdmin.ConstructorError`, Python's `_admin_constructor_error`).
+- An unknown client id is sent as -4.
+
+The chaos events use the same helper.
+
+**Per-key results** (`admin_service.proto`, the per-key result envelope). Each per-key future
+is resolved on its own, as Python's `_collect` and `_per_key` do:
+- Whatever exception the future fails with is that key's entry `error`, translated as above, and
+  the other keys keep their outcomes.
+- A value-level error is kept per key the same way. `CreateTopicsResult`'s `TopicId`,
+  `NumPartitions`, `ReplicationFactor` and `Config` failing give the `TopicMetadataAndConfig`
+  error.
+- A failure that chooses another path also works with any exception type. The one such path is
+  the SCRAM `All()` fallback.
+
+The top-level `error` carries only a failure that comes before any per-key future exists: the RPC
+method throwing, an unknown `admin_id`, or a request the server cannot translate. When it is
+set, `entries` is empty.
+
+Tests (`GrpcServer.UnitTests`):
+- A mock RPC with a per-key future that fails with `NotSupportedException` returns that key's
+  -31 entry and the other keys' values: `DescribeConfigs` on a `BROKER_LOGGER` and a `TOPIC`
+  resource.
+- A mock RPC that Java's mock does not implement returns a -31 entry with "Not implemented yet"
+  for each key and no top-level error: the core mock fails each key's future at `Get()` (ledger
+  173, -31 since ledger 206), where Python's mock throws at the call and its server sends the
+  top-level -31 with no entries (`test_grpc_admin_translate.py`'s
+  `test_whole_call_failure_is_the_top_level_error`), a recorded difference (ledger 214).
 
 ---
 

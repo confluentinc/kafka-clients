@@ -29,6 +29,7 @@ public sealed class SoakMetricsTests
 {
     private const string Prefix = "kafka.client.soak.rust_dotnet.";
 
+    /// <summary>A telemetry sink that records every gauge and counter it is sent, and counts its shutdowns.</summary>
     private sealed class CapturingSink : ISoakTelemetrySink
     {
         internal List<(string Name, double Value)> Gauges { get; } = new List<(string, double)>();
@@ -53,18 +54,6 @@ public sealed class SoakMetricsTests
     private static SoakMetrics NewMetrics(StringWriter writer, ISoakTelemetrySink? sink) =>
         new SoakMetrics(writer, new Dictionary<string, string>(StringComparer.Ordinal) { ["host"] = "h" }, Prefix, sink);
 
-    /// <summary>
-    /// <c>SetGauge</c> records MILLISECONDS and exports SECONDS, in one place.
-    /// <para>
-    /// Guards the <c>SecondsOnExport</c> contract: callers hand <c>SetGauge</c>
-    /// milliseconds and it converts on the way out, so the 1 ms-wide latency bucket keeps
-    /// usable percentiles while dashboards still read seconds. It does NOT guard the call
-    /// sites — a caller that divides by 1000 itself reaches <c>SetGauge</c> with seconds,
-    /// lands every sample in bucket 0 and reports the percentiles as zero, which is
-    /// exactly what happened before this contract existed. The defence there is the
-    /// comment at the call site.
-    /// </para>
-    /// </summary>
     [Fact]
     public void LatencyGaugesRecordMsAndExportSeconds()
     {
@@ -72,12 +61,10 @@ public sealed class SoakMetricsTests
         var sink = new CapturingSink();
         using SoakMetrics metrics = NewMetrics(writer, sink);
 
-        // 17 ms, the order of magnitude a healthy soak actually reports.
         var partition = new Dictionary<string, string>(StringComparer.Ordinal) { ["partition"] = "0" };
         metrics.SetGauge("producer.latency", 17.0, partition);
         metrics.SetGauge("consumer.e2e_latency", 17.0, partition);
 
-        // Not in SecondsOnExport: its name asserts milliseconds.
         metrics.SetGauge("consumer.recovery_ms", 17.0);
 
         var exported = new Dictionary<string, double>(StringComparer.Ordinal);
@@ -90,7 +77,6 @@ public sealed class SoakMetricsTests
         Assert.Equal(0.017, exported[Prefix + "consumer.e2e_latency"], 6);
         Assert.Equal(17.0, exported[Prefix + "consumer.recovery_ms"], 6);
 
-        // The histogram kept milliseconds, so the percentiles are non-zero.
         using JsonDocument record = JsonDocument.Parse(metrics.Rollover());
         JsonElement gauges = record.RootElement.GetProperty("gauges");
         int latencySeriesChecked = 0;
@@ -132,11 +118,6 @@ public sealed class SoakMetricsTests
         Assert.Equal(5, rolled.GetProperty("delta").GetInt64());
     }
 
-    /// <summary>
-    /// The record schema must stay identical to the perf harness's — that is what makes
-    /// soak and perf numbers comparable across clients. Pin the blocks and the window
-    /// bounds so a refactor cannot quietly rename one.
-    /// </summary>
     [Fact]
     public void RecordCarriesTheSharedSchemaPlusTheSoakAdditions()
     {
@@ -156,7 +137,6 @@ public sealed class SoakMetricsTests
             }
         }
 
-        // Only the latency block carries percentiles (the perf harness's shape).
         foreach (string percentile in new[] { "p50", "p90", "p99", "p999" })
         {
             Assert.True(root.GetProperty("latency").TryGetProperty(percentile, out _));
@@ -168,7 +148,6 @@ public sealed class SoakMetricsTests
             Assert.Equal(JsonValueKind.String, root.GetProperty(field).ValueKind);
         }
 
-        // An unset measurement bound is the "-inf" sentinel the plot tool special-cases.
         Assert.Equal("-inf", root.GetProperty("measurement_start_ms").GetString());
 
         Assert.Equal(Prefix, root.GetProperty("prefix").GetString());
@@ -189,10 +168,6 @@ public sealed class SoakMetricsTests
         Assert.Equal("-inf", record.RootElement.GetProperty("measurement_end_ms").GetString());
     }
 
-    /// <summary>
-    /// Tag values are operator-chosen (a variant label, a topic), so a stray quote must
-    /// not make the whole two-week series unparseable.
-    /// </summary>
     [Fact]
     public void JsonStringsAreEscaped()
     {
@@ -215,7 +190,6 @@ public sealed class SoakMetricsTests
         Assert.Equal("m", SoakMetrics.MetricKey("m", new Dictionary<string, string>(StringComparer.Ordinal)));
     }
 
-    /// <summary>The file is APPENDED, never truncated: run.sh restarts the client repeatedly.</summary>
     [Fact]
     public void WritesAppendToTheMetricsFile()
     {
@@ -272,17 +246,6 @@ public sealed class SoakMetricsTests
         }
     }
 
-    /// <summary>
-    /// ⚠ REGRESSION GUARD. An unhandled exception on a background thread terminates the
-    /// whole .NET process, so an unguarded rollover loop would let a full disk — entirely
-    /// plausible on a two-week run — kill the soak from its own telemetry. The loop must
-    /// log the window and keep sampling.
-    /// <para>
-    /// Without the guard this test does not merely fail, it takes the test HOST down, so
-    /// <c>Attempts &gt;= 2</c> is the real assertion: the collector tried again after the
-    /// first failure rather than dying on it.
-    /// </para>
-    /// </summary>
     [Fact]
     public void CollectorSurvivesAWriteFailure()
     {
@@ -314,8 +277,6 @@ public sealed class SoakMetricsTests
         Assert.Contains("producer.latency", SoakMetrics.SecondsOnExport);
         Assert.Contains("consumer.e2e_latency", SoakMetrics.SecondsOnExport);
 
-        // Deliberately absent: its name asserts milliseconds and it has no
-        // reference-soak counterpart to match.
         Assert.DoesNotContain("consumer.recovery_ms", SoakMetrics.SecondsOnExport);
     }
 }

@@ -22,10 +22,7 @@ public sealed class HighWaterMarksTests
     private const string Key = "t-0";
 
     [Theory]
-    // (description, prior observations, next offset, expected duplicates, expected missed)
     [InlineData("first message at offset 0", new long[0], 0L, 0L, 0L)]
-    // The first offset seen only establishes the mark: consumption starts at an arbitrary
-    // committed position, which is not a gap.
     [InlineData("first message mid-partition", new long[0], 5L, 0L, 0L)]
     [InlineData("in-order", new long[] { 5 }, 6L, 0L, 0L)]
     [InlineData("in-order after a long run", new long[] { 1, 2, 3, 4 }, 5L, 0L, 0L)]
@@ -48,22 +45,7 @@ public sealed class HighWaterMarksTests
         Assert.NotEmpty(description);
     }
 
-    /// <summary>
-    /// Documents a defect inherited from the reference soak — it does NOT bless it.
-    /// <para>
-    /// The marks map defaults to <c>0</c>, so "never seen" and "last seen at offset 0" are
-    /// the same state, and the <c>hw &gt; 0</c> guard therefore skips the check for exactly
-    /// one transition per partition. A duplicate of offset 0, or a gap immediately after
-    /// it, is not counted.
-    /// </para>
-    /// <para>
-    /// This is a faithful port and is kept for fidelity; the blast radius is ~2 records,
-    /// at the start of the first run against a fresh topic only (every later restart
-    /// begins at a committed non-zero offset). The correct fix is a <c>-1</c> sentinel.
-    /// <b>If someone changes the sentinel, this test SHOULD fail — that is the point of
-    /// its name.</b>
-    /// </para>
-    /// </summary>
+    // Python's soak has the same blind spot: a mark of 0 also means "never seen".
     [Theory]
     [InlineData("a real duplicate of offset 0 is missed", 0L, 0L)]
     [InlineData("a real gap after offset 0 is missed", 0L, 7L)]
@@ -86,17 +68,11 @@ public sealed class HighWaterMarksTests
         hwmarks.Observe("t-0", 100);
         hwmarks.Observe("t-1", 5);
 
-        // A low offset on a different partition is not a duplicate.
         Assert.Equal((0L, 0L), hwmarks.Observe("t-1", 6));
         Assert.Equal((0L, 0L), hwmarks.Observe("t-0", 101));
         Assert.Equal(2, hwmarks.Count);
     }
 
-    /// <summary>
-    /// A rebalance replay must report the replayed records exactly once: the mark is set
-    /// unconditionally (not advance-only), so the single jump back accounts for the whole
-    /// replay and the records that follow are in order.
-    /// </summary>
     [Fact]
     public void ReplayCountsEachRecordOnce()
     {
@@ -130,12 +106,6 @@ public sealed class HighWaterMarksTests
         Assert.Equal((0L, 0L), hwmarks.Observe(Key, 11));
     }
 
-    /// <summary>
-    /// The counters the consume loop forwards must be the REAL counts, not a flat 1 — a
-    /// dashboard built on <c>consumer.msgdup</c> / <c>consumer.missedmsg</c> alone would
-    /// otherwise read as far fewer than actually occurred. The loop passes these values
-    /// through unmodified, so pinning them here pins the counter.
-    /// </summary>
     [Fact]
     public void ObserveReportsTheActualCounts()
     {

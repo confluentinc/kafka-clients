@@ -20,86 +20,46 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.Chaos;
 
 /// <summary>
-/// The rebalance listener every chaos consumer registers — the .NET twin of Python's
-/// <c>_ChaosRebalanceListener</c> (<c>python/grpc_chaos.py</c>), itself the Rust harness's
-/// <c>ChaosRebalanceListener</c> (<c>rust/tests/chaos/workload.rs</c>). Shared by both
-/// flavours (PLAN §3.4, §5.6).
+/// The rebalance listener of a sync chaos consumer, Python's <c>_ChaosRebalanceListener</c>: it reports
+/// each callback; on a revoke it commits and, unless <see cref="Closing"/>, reads the commit back, both
+/// calls routed by the binding to the consumer's <see cref="ConsumerHandle"/>. Failures are reported.
 /// </summary>
-/// <remarks>
-/// <para>
-/// It reports each callback, and in <see cref="OnPartitionsRevoked"/> commits through the
-/// consumer's <see cref="ConsumerHandle"/> — the reentrant path a listener has back into its
-/// consumer — then reads the commit back, unless the consumer is <see cref="Closing"/>: once
-/// closing, the client only drains commits, so an offset fetch queued from here would wait out
-/// the API timeout, and the workload's own read-back after its final commit already covers that
-/// state. Since #187 Python's listener calls <c>commit()</c> / <c>committed()</c> on the consumer
-/// itself, and the package routes those through the same core <c>ConsumerHandle</c>; .NET has no
-/// such routing, so it calls the handle directly.
-/// </para>
-/// <para>
-/// <see cref="OnPartitionsLost"/> is implemented, not inherited: this type implements
-/// <see cref="IConsumerRebalanceListener"/> directly (whose methods have no default), so a
-/// fenced member's callback is reported as lost and never commits.
-/// </para>
-/// <para>
-/// <b>Threading.</b> The methods are sync <c>void</c> in both flavours and run on the core's
-/// callback-dispatcher thread (CLAUDE.md §4, the rebalance-listener divergence); the handle's
-/// <c>Commit</c> / <c>Committed</c> are blocking calls meant for exactly that thread (ffi §B1).
-/// Since #187 Python's listener runs on the caller's thread instead (the workload's thread, or
-/// the event loop, where <c>on_partitions_revoked</c> is an <c>async def</c>). The events still
-/// arrive in the same order: the rebalance waits for the listener, so its events are queued
-/// before the records of the poll that ran it, and the dispatcher runs one callback at a time,
-/// so nothing else from this consumer lands between a revoke and its read-back.
-/// Each body only builds events and queues them, and is a catch-all: a failed commit is
-/// <b>reported, never raised</b>. A failure to build an event — a server-side fault, not the
-/// client's — is logged and reported as <c>Failed</c> rather than handed to the binding (which
-/// would turn it into a failed rebalance and blame the client); Python lets it propagate, but
-/// no event builder here can throw on the binding's inputs, so the two agree in practice.
-/// </para>
-/// <para>Test-server scaffolding with no Java class (DoD §7).</para>
-/// </remarks>
 internal sealed class ChaosRebalanceListener : IConsumerRebalanceListener
 {
     private readonly Action<Proto.WorkloadEvent> _emit;
-    private readonly ConsumerHandle _handle;
+    private readonly IConsumer<byte[], byte[]> _consumer;
     private readonly bool _checkCommits;
     private volatile bool _closing;
 
-    /// <param name="emit">Queues an event on the workload's stream.</param>
-    /// <param name="handle">The consumer's reentrancy handle; it must outlive the consumer's close.</param>
-    /// <param name="checkCommits">Whether to read a revoke-time commit back (Python <c>_check_commits</c>).</param>
-    internal ChaosRebalanceListener(Action<Proto.WorkloadEvent> emit, ConsumerHandle handle, bool checkCommits)
+    internal ChaosRebalanceListener(Action<Proto.WorkloadEvent> emit, IConsumer<byte[], byte[]> consumer, bool checkCommits)
     {
         _emit = emit;
-        _handle = handle;
+        _consumer = consumer;
         _checkCommits = checkCommits;
     }
 
-    /// <summary>
-    /// Set by the workload just before it closes the consumer (Python <c>listener.closing</c>);
-    /// read on the dispatcher thread, hence <see langword="volatile"/>.
-    /// </summary>
+    // Set just before the workload closes the consumer: once closing, the client only drains
+    // commits, so a revoke's read-back would wait out the API timeout; the workload's own read-back
+    // covers that state.
     internal bool Closing
     {
         get => _closing;
         set => _closing = value;
     }
 
-    /// <inheritdoc/>
     public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
     {
         long observedAt = ChaosEvents.UnixNanosNow();
-        EmitRebalance(Proto.RebalanceKind.Assigned, partitions, observedAt);
+        EmitRebalance(_emit, Proto.RebalanceKind.Assigned, partitions, observedAt);
     }
 
-    /// <inheritdoc/>
     public void OnPartitionsRevoked(IReadOnlyCollection<TopicPartition> partitions)
     {
         long observedAt = ChaosEvents.UnixNanosNow();
-        EmitRebalance(Proto.RebalanceKind.Revoked, partitions, observedAt);
+        EmitRebalance(_emit, Proto.RebalanceKind.Revoked, partitions, observedAt);
         try
         {
-            _handle.Commit();
+            _consumer.Commit();
         }
         catch (Exception e)
         {
@@ -111,7 +71,7 @@ internal sealed class ChaosRebalanceListener : IConsumerRebalanceListener
         {
             try
             {
-                ChaosEvents.EmitCommitted(_handle.Committed(partitions), _emit);
+                ChaosEvents.EmitCommitted(_consumer.Committed(partitions), _emit);
             }
             catch (Exception e)
             {
@@ -120,14 +80,19 @@ internal sealed class ChaosRebalanceListener : IConsumerRebalanceListener
         }
     }
 
-    /// <inheritdoc/>
     public void OnPartitionsLost(IReadOnlyCollection<TopicPartition> partitions)
     {
         long observedAt = ChaosEvents.UnixNanosNow();
-        EmitRebalance(Proto.RebalanceKind.Lost, partitions, observedAt);
+        EmitRebalance(_emit, Proto.RebalanceKind.Lost, partitions, observedAt);
     }
 
-    private void EmitRebalance(Proto.RebalanceKind kind, IReadOnlyCollection<TopicPartition> partitions, long observedAt)
+    // A failure to build the event, a server-side fault, is reported as Failed rather than thrown
+    // into the binding, which would fail the rebalance.
+    internal static void EmitRebalance(
+        Action<Proto.WorkloadEvent> emit,
+        Proto.RebalanceKind kind,
+        IReadOnlyCollection<TopicPartition> partitions,
+        long observedAt)
     {
         Proto.WorkloadEvent rebalance;
         try
@@ -140,15 +105,13 @@ internal sealed class ChaosRebalanceListener : IConsumerRebalanceListener
             rebalance = ChaosEvents.Failed(e);
         }
 
-        _emit(rebalance);
+        emit(rebalance);
     }
 }
 
 /// <summary>
-/// The <c>CommitAsync</c> completion callback (Python <c>_commit_callback</c>): reports a failed
-/// commit, which nobody would otherwise see — the call itself only initiates the commit. Runs
-/// on the core's dispatcher thread; the binding already makes it no-throw (ffi §B6), and it
-/// only queues an event.
+/// The <c>CommitAsync</c> callback of a chaos consumer, Python's <c>_commit_callback</c>: it reports a
+/// failed commit, which nobody would otherwise see, since <c>CommitAsync</c> only initiates the commit.
 /// </summary>
 internal sealed class ChaosCommitCallback : IOffsetCommitCallback
 {
@@ -159,7 +122,6 @@ internal sealed class ChaosCommitCallback : IOffsetCommitCallback
         _emit = emit;
     }
 
-    /// <inheritdoc/>
     public void OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception)
     {
         if (exception is not null)

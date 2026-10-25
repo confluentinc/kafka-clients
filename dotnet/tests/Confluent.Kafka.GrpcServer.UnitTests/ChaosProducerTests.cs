@@ -28,15 +28,11 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The producer workload (PLAN §3.3, §5.5; §7.1 T8, T9, T11, T12, T20) over the flavour's mock
-/// producer behind the factory seam.
+/// The producer workload over the flavour's mock producer behind the factory seam.
 /// </summary>
 public sealed class ChaosProducerTests
 {
-    /// <summary>How long to keep watching after the stream ended, before asserting "exactly once".</summary>
     private static readonly TimeSpan s_settleWindow = TimeSpan.FromMilliseconds(300);
-
-    // ---- T8 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -82,8 +78,6 @@ public sealed class ChaosProducerTests
         Assert.Equal(0, call.Stream.OverlappingWrites);
     }
 
-    // ---- T9 ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task ErrorNext_IsReportedAsSendFailedThroughTheCallback_SettledOnce(ChaosFlavour flavour)
@@ -115,8 +109,6 @@ public sealed class ChaosProducerTests
         Assert.Empty(harness.Producer.SendThrew);
     }
 
-    // ---- T11 ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task ASendThatThrows_IsOneSendFailed_AndNoCallbackEverFollows(ChaosFlavour flavour)
@@ -143,7 +135,7 @@ public sealed class ChaosProducerTests
             Exception thrown = harness.Producer.SendThrew[failure.SendFailed.Index];
             Assert.IsType<ObjectDisposedException>(thrown);
             Assert.Equal(-4, failure.SendFailed.Error.Code);
-            Assert.Equal($"dotnet server: ObjectDisposedException: {thrown.Message}", failure.SendFailed.Error.Message);
+            Assert.Equal(thrown.Message, failure.SendFailed.Error.Message);
         }
 
         // The healthy records' callbacks fired once each; a throwing Send's never did.
@@ -151,8 +143,6 @@ public sealed class ChaosProducerTests
         Assert.All(harness.Producer.CallbackFires, kv => Assert.Equal(1, kv.Value));
         Assert.Equal(sent.Count - Healthy, harness.Producer.SendThrew.Count);
     }
-
-    // ---- T6b ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -187,8 +177,6 @@ public sealed class ChaosProducerTests
         Assert.Equal(1, harness.Producer.CloseCalls);
     }
 
-    // ---- T17 (producer side) ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task CancellingTheCall_StopsTheWorkload_AndTheHandlerReturnsOnlyAfterTheClientIsClosed(ChaosFlavour flavour)
@@ -207,13 +195,11 @@ public sealed class ChaosProducerTests
         Assert.Empty(EventAssert.OfKind(call.Stream.Events, Proto.WorkloadEvent.EventOneofCase.Failed));
     }
 
-    // ---- T12 (sync: structural) ----
-
     [Fact]
     public void Sync_NoStopTokenCanReachTheClient_ByConstruction()
     {
-        // D6 / D7: the sync servicer holds no token to pass, and the sync client surface it calls
-        // accepts none, so a stop can only be observed between calls, never inside one.
+        // The sync servicer holds no token to pass, and the sync client surface it calls accepts
+        // none, so a stop can only be observed between calls, never inside one.
         const BindingFlags All = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
         Type servicer = typeof(ChaosWorkloadServiceImpl);
         Assert.DoesNotContain(servicer.GetFields(All), f => IsToken(f.FieldType));
@@ -223,16 +209,14 @@ public sealed class ChaosProducerTests
         Assert.DoesNotContain(surface.SelectMany(t => t.GetMethods()).SelectMany(m => m.GetParameters()), p => IsToken(p.ParameterType));
     }
 
-    // ---- T12 (async: at runtime) ----
-
     [Fact]
     public async Task Async_NoTokenThatCanFireReachesTheProducer_AtRuntime()
     {
-        // D6: the async client surface does take a token, so the check is what the servicer
-        // actually passed. The double records every token by whether it CAN fire, so the check does
-        // not depend on a stop happening to land inside a call. One workload ends through
-        // StopWorkload and one through the call's cancellation: neither path may reach the client.
-        // Flush is listed in D6 but the loop never calls it (Close flushes), so it is not asserted.
+        // The async client surface does take a token, so the check is what the servicer actually
+        // passed. The double records every token by whether it can fire, so the check does not
+        // depend on a stop landing inside a call. One workload ends through StopWorkload and one
+        // through the call's cancellation: neither path may reach the client. Flush is not
+        // asserted: the loop never calls it (Close flushes).
         using ChaosHarness stopped = ChaosHarness.Create(ChaosFlavour.Async);
         using RunningCall stoppedCall = stopped.RunProducer(ChaosHarness.ProducerRequest("p-tokens-stop"));
         stoppedCall.Stream.WaitForCount(Proto.WorkloadEvent.EventOneofCase.Delivered, 3);
@@ -257,13 +241,12 @@ public sealed class ChaosProducerTests
     [Fact]
     public async Task Async_AStopDuringAHeldAdmission_TakesEffectAfterIt_AndTheRecordSettlesOnceAsDelivered()
     {
-        // The behavioural half of T12. The real AsyncMockProducer cannot be held at admission from
-        // this project (its admission bound and batch-thread hooks are internal to the library), so
-        // the double holds the stage over a send the real mock has already accepted, with the real
-        // Send's contract: a token that fires while it is held ends the stage with an
-        // OperationCanceledException although the record is still sent (M11/P3.5 D2 (c)). Had the
-        // servicer passed a stop token, the stop below would surface the held record as SendFailed
-        // and its delivery would follow: the double settle D6 exists to prevent.
+        // The behavioural half of the token checks. The real AsyncMockProducer takes each record at
+        // once, so the double holds the first stage over a send the mock has already accepted, with
+        // the real Send's contract: a token that fires while it is held ends the stage with an
+        // OperationCanceledException although the record is still sent. Had the servicer passed a
+        // stop token, the stop below would surface the held record as SendFailed and its delivery
+        // would follow: a double settle.
         const ulong Held = 2;
         TaskCompletionSource gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using ChaosHarness harness = ChaosHarness.Create(
@@ -302,8 +285,6 @@ public sealed class ChaosProducerTests
         Assert.Empty(harness.Producer.Tokens.Cancelable);
         Assert.Equal(1, harness.Producer.CloseCalls);
     }
-
-    // ---- T20 (producer side) ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]

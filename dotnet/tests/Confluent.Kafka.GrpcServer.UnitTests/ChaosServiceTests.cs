@@ -26,13 +26,11 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The RPC lifecycle shared by every workload (PLAN §5.2–§5.4; §7.1 T4–T7, T17): the id registry,
-/// the response headers, stop and mark, and cancellation. Each runs on every flavour.
+/// The RPC lifecycle every workload shares: the id registry, the response headers, stop and mark, and
+/// cancellation, on every flavour.
 /// </summary>
 public sealed class ChaosServiceTests
 {
-    // ---- T4 ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task ADuplicateWorkloadId_GetsOneFailedBatch_AndTheFirstWorkloadIsUnaffected(ChaosFlavour flavour)
@@ -63,8 +61,6 @@ public sealed class ChaosServiceTests
         Assert.Empty(EventAssert.OfKind(events, Proto.WorkloadEvent.EventOneofCase.SendFailed));
     }
 
-    // ---- T5 ----
-
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
     public async Task StopAndMark_OnAnUnknownId_AreOk_AndNotFound(ChaosFlavour flavour)
@@ -77,8 +73,6 @@ public sealed class ChaosServiceTests
         Assert.Null(stopped.Error);
         Assert.False(found);
     }
-
-    // ---- T6 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -99,8 +93,6 @@ public sealed class ChaosServiceTests
             new[] { "ConsumerClosing", "ConsumerClosed", "Finished" },
             EventAssert.Kinds(events));
     }
-
-    // ---- T7 ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]
@@ -143,7 +135,7 @@ public sealed class ChaosServiceTests
     [Fact]
     public void Mark_IsQueuedFifoBehindTheEventsAlreadyEmitted()
     {
-        // The registry-level form of T7, read straight off the workload's channel.
+        // The registry-level form of the mark ordering, read straight off the workload's channel.
         ChaosRegistry registry = new ChaosRegistry();
         ChaosWorkload workload = new ChaosWorkload("fifo");
         Assert.True(registry.TryAdd(workload));
@@ -179,8 +171,6 @@ public sealed class ChaosServiceTests
         registry.Remove(owner);
         Assert.Null(registry.Get("id"));
     }
-
-    // ---- T17 (consumer side) ----
 
     [Theory]
     [MemberData(nameof(ChaosFlavours.All), MemberType = typeof(ChaosFlavours))]

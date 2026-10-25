@@ -15,8 +15,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.GrpcServer.Chaos;
+using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Xunit;
 
@@ -25,17 +27,14 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.UnitTests;
 
 /// <summary>
-/// The record encoding, the record check and the rebalance event (PLAN §7.1 T1–T3): the parts of
-/// <see cref="ChaosEvents"/> the verifier reads byte for byte and text for text, so they must
-/// match the Rust harness (<c>rust/tests/chaos/workload.rs</c> <c>build_value</c> /
-/// <c>check_record</c>) and the Python server exactly. Flavour-independent: both servicers share
-/// this code.
+/// The record encoding, the record check and the rebalance event: the parts of <see cref="ChaosEvents"/>
+/// the verifier reads byte for byte and text for text, so they match the Rust harness's
+/// <c>build_value</c> / <c>check_record</c> and the Python server exactly.
 /// </summary>
 public sealed class ChaosEventsTests
 {
     private const ulong TwoToThe40 = 1UL << 40;
 
-    /// <summary>The key of each T1 index, written out by hand (8 bytes, big-endian).</summary>
     public static TheoryData<ulong, byte[]> Keys => new TheoryData<ulong, byte[]>
     {
         { 0UL, new byte[] { 0, 0, 0, 0, 0, 0, 0, 0 } },
@@ -44,7 +43,6 @@ public sealed class ChaosEventsTests
         { (ulong)long.MaxValue, new byte[] { 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF } },
     };
 
-    /// <summary>Every T1 (index, msg_size) pair.</summary>
     public static TheoryData<ulong, uint> IndexAndSize
     {
         get
@@ -61,8 +59,6 @@ public sealed class ChaosEventsTests
             return data;
         }
     }
-
-    // ---- T1: Key / Value ----
 
     [Theory]
     [MemberData(nameof(Keys))]
@@ -104,8 +100,6 @@ public sealed class ChaosEventsTests
         Assert.NotSame(ChaosEvents.Value(7, 16), ChaosEvents.Value(7, 16));
     }
 
-    // ---- T2: CheckRecord, the four §3.6 texts verbatim ----
-
     [Fact]
     public void CheckRecord_MissingKey()
     {
@@ -140,7 +134,7 @@ public sealed class ChaosEventsTests
     [Fact]
     public void CheckRecord_EmptyValueWhereBytesWereExpected_IsAMismatch_NotMissing()
     {
-        // Absent and empty are different records (T14c): an empty value is "0 byte(s)".
+        // Absent and empty are different records: an empty value is "0 byte(s)".
         AssertCorrupted(
             ChaosEvents.Key(5),
             Array.Empty<byte>(),
@@ -192,8 +186,6 @@ public sealed class ChaosEventsTests
         AssertOk(ChaosEvents.Key(5), Array.Empty<byte>(), 0, 5);
     }
 
-    // ---- T3: the rebalance event ----
-
     [Fact]
     public void Rebalance_SortsByTopicOrdinalThenPartition_AndCarriesItsKind()
     {
@@ -220,9 +212,8 @@ public sealed class ChaosEventsTests
     public void Rebalance_FromTheListener_IsObservedBetweenBeforeAndAfter()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        using ConsumerHandle handle = consumer.Handle();
         List<Proto.WorkloadEvent> events = new List<Proto.WorkloadEvent>();
-        ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, handle, checkCommits: false);
+        ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, consumer, checkCommits: false);
 
         long before = UnixNanos();
         listener.OnPartitionsAssigned(new[] { new TopicPartition("t", 1), new TopicPartition("t", 0) });
@@ -234,26 +225,31 @@ public sealed class ChaosEventsTests
         Assert.Equal(new[] { 0, 1 }, rebalance.Rebalance.Partitions.Select(p => p.Partition).ToArray());
     }
 
-    // ---- T15 (the lost half, which MockConsumer.Rebalance never fires) ----
-
     [Fact]
     public void Listener_Lost_ReportsLost_AndNeverCommits()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        using ConsumerHandle handle = consumer.Handle();
+        ConsumerScript script = new ConsumerScript();
+        using SyncScriptedConsumer consumer = new SyncScriptedConsumer(script);
         List<Proto.WorkloadEvent> events = new List<Proto.WorkloadEvent>();
-        ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, handle, checkCommits: true);
+        ChaosRebalanceListener listener = new ChaosRebalanceListener(events.Add, consumer, checkCommits: true);
 
         listener.OnPartitionsLost(new[] { new TopicPartition("t", 3) });
 
-        // A commit through a mock-derived handle always fails (NotSupportedException), so a lost
-        // callback that committed would leave a ConsumerError behind: its absence proves none ran.
-        Proto.WorkloadEvent lost = Assert.Single(events);
-        Assert.Equal(Proto.RebalanceKind.Lost, lost.Rebalance.Kind);
-        Assert.Equal(("t", 3), (lost.Rebalance.Partitions[0].Topic, lost.Rebalance.Partitions[0].Partition));
+        AssertLostOnly(events, script);
     }
 
-    // ---- terminal detection ----
+    [Fact]
+    public async Task AsyncListener_Lost_ReportsLost_AndNeverCommits()
+    {
+        ConsumerScript script = new ConsumerScript();
+        await using AsyncScriptedConsumer consumer = new AsyncScriptedConsumer(script);
+        List<Proto.WorkloadEvent> events = new List<Proto.WorkloadEvent>();
+        AsyncChaosRebalanceListener listener = new AsyncChaosRebalanceListener(events.Add, consumer, checkCommits: true);
+
+        await listener.OnPartitionsLost(new[] { new TopicPartition("t", 3) });
+
+        AssertLostOnly(events, script);
+    }
 
     [Fact]
     public void IsTerminal_OnlyFinishedAndFailed()
@@ -272,7 +268,7 @@ public sealed class ChaosEventsTests
         Proto.WorkloadEvent failed = ChaosEvents.Failed(new InvalidOperationException("boom"));
 
         Assert.Equal(-4, failed.Failed.Error.Code);
-        Assert.Equal("dotnet server: InvalidOperationException: boom", failed.Failed.Error.Message);
+        Assert.Equal("boom", failed.Failed.Error.Message);
     }
 
     internal static long UnixNanos() => (DateTime.UtcNow - DateTime.UnixEpoch).Ticks * 100;
@@ -286,6 +282,15 @@ public sealed class ChaosEventsTests
         }
 
         return bytes;
+    }
+
+    private static void AssertLostOnly(IReadOnlyList<Proto.WorkloadEvent> events, ConsumerScript script)
+    {
+        // The double records every Commit and Committed the listener makes: none ran.
+        Assert.Empty(script.Calls);
+        Proto.WorkloadEvent lost = Assert.Single(events);
+        Assert.Equal(Proto.RebalanceKind.Lost, lost.Rebalance.Kind);
+        Assert.Equal(("t", 3), (lost.Rebalance.Partitions[0].Topic, lost.Rebalance.Partitions[0].Partition));
     }
 
     private static void AssertCorrupted(byte[]? key, byte[]? value, uint msgSize, string expected)

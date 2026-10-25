@@ -18,27 +18,25 @@ using System.Globalization;
 namespace Confluent.Kafka.Performance;
 
 /// <summary>
-/// Environment-variable parsing helpers, matching the Python perf suite's conventions exactly so the
-/// same env config drives every language (§7): booleans are the case-sensitive string <c>"True"</c>
-/// (Python's <c>os.getenv(name, "False") == "True"</c>), ints parse with invariant culture, and
-/// presence checks mirror Python's <c>'NAME' in os.environ</c>.
+/// Environment-variable parsing with the Python perf suite's conventions: a boolean is true only for the
+/// case-sensitive <c>"True"</c> (Python's <c>os.getenv(name, "False") == "True"</c>), and numbers parse invariantly.
 /// </summary>
 public static class PerfEnv
 {
-    /// <summary>Returns the value of <paramref name="name"/>, or <paramref name="fallback"/> when unset.</summary>
     public static string GetString(string name, string fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
         return value is null ? fallback : value;
     }
 
-    /// <summary>Returns the value of <paramref name="name"/>, or <see langword="null"/> when unset (Python's <c>os.getenv(name, None)</c>).</summary>
     public static string? GetStringOrNull(string name) => Environment.GetEnvironmentVariable(name);
 
-    /// <summary>Whether <paramref name="name"/> is set to a non-empty value (Python's <c>'NAME' in os.environ</c> for a set var).</summary>
-    public static bool Has(string name) => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name));
+    // Set, an empty value included, as Python's `name in os.environ`.
+    public static bool Has(string name) => Environment.GetEnvironmentVariable(name) is not null;
 
-    /// <summary>Parses <paramref name="name"/> as an int, or returns <paramref name="fallback"/> when unset / empty.</summary>
+    public static int ParseInt(string name) =>
+        int.Parse(Environment.GetEnvironmentVariable(name) ?? string.Empty, CultureInfo.InvariantCulture);
+
     public static int GetInt(string name, int fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
@@ -50,12 +48,6 @@ public static class PerfEnv
         return int.Parse(value, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>
-    /// Parses <paramref name="name"/> as a 64-bit int, or returns <paramref name="fallback"/> when unset
-    /// / empty. Python's ints are arbitrary-precision, so a message count it computes happily (rate ×
-    /// duration) can exceed <see cref="int.MaxValue"/>; parsing and carrying these as <see cref="long"/>
-    /// is the closest faithful equivalent.
-    /// </summary>
     public static long GetLong(string name, long fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
@@ -67,11 +59,6 @@ public static class PerfEnv
         return long.Parse(value, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>
-    /// Parses <paramref name="name"/> as the case-sensitive string <c>"True"</c> (Python
-    /// <c>os.getenv(name, default) == "True"</c>); any other value — including <c>"true"</c> or
-    /// <c>"1"</c> — is <see langword="false"/>, matching Python.
-    /// </summary>
     public static bool GetBool(string name, bool fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);

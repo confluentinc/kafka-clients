@@ -20,20 +20,10 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// The async flavour's producer behind the factory seam: an
-/// <see cref="AsyncMockProducer{TKey, TValue}"/> with the <see cref="TestProducerBehaviour"/>
-/// applied around it, every observation reported to a <see cref="ProducerProbe"/>, and every
-/// token the servicer passes recorded (T12). Every call reaches the real mock (DoD §12).
+/// The async flavour's producer behind the factory seam: an <see cref="AsyncMockProducer{TKey, TValue}"/>
+/// with the <see cref="TestProducerBehaviour"/> applied around it, every observation reported to a
+/// <see cref="ProducerProbe"/> and every token recorded; every call reaches the real mock.
 /// </summary>
-/// <remarks>
-/// The async <c>Send</c> is deferred: it appends to the binding's accumulator and returns, and
-/// the binding's send-batch thread hands the record to the native mock later. So two scenario
-/// steps that the sync double can take at once wait here for the mock to catch up, each with a
-/// bounded spin: driving <c>ErrorNext</c> (it fails only a record the mock already holds, so
-/// it is retried until it finds one), and disposing the mock for T11 (the healthy records'
-/// outcomes are awaited first, so the disposal cannot fault a record that had not yet reached
-/// the mock).
-/// </remarks>
 internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 {
     private static readonly TimeSpan s_mockTimeout = TimeSpan.FromSeconds(10);
@@ -50,14 +40,12 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         _inner = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
     }
 
-    /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<byte[], byte[]> record, CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Send), cancellationToken);
         return _inner.Send(record, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
         IDeliveryCallback callback,
@@ -66,6 +54,10 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         _probe.Tokens.Record(nameof(Send), cancellationToken);
         ulong index = ProducerProbe.IndexOf(record.Key);
         _sends++;
+
+        // Both scenario steps wait for the mock with a bounded spin: the disposal for the earlier
+        // records' delivery callbacks, which run later on the producer's pump, and ErrorNext, which
+        // fails only a record the mock holds.
         if (_behaviour.DisposeAfterSends is int disposeAfter && _sends == disposeAfter + 1)
         {
             if (!SpinWait.SpinUntil(() => _probe.CallbackFires.Count == disposeAfter, s_mockTimeout))
@@ -97,7 +89,6 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         }
     }
 
-    /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<byte[], byte[]> record,
         IAsyncDeliveryCallback callback,
@@ -107,40 +98,36 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         return _inner.Send(record, callback, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Flush), cancellationToken);
         return _inner.Flush(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(PartitionsFor), cancellationToken);
         return _inner.PartitionsFor(topic, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
-    /// <inheritdoc/>
     public async Task Close(CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(Close), cancellationToken);
         _probe.CloseEntered.Set();
 
-        // Blocks the calling thread rather than awaiting (TestProducerBehaviour.HoldClose): an
-        // async method runs synchronously up to its first await, so if a stop ever resumed the
-        // loop inline, the stopping call itself would be held here (T6b).
+        // Blocks the calling thread rather than awaiting: an async method runs synchronously up to
+        // its first await, so if a stop ever resumed the loop inline, the stopping call itself
+        // would be held here.
         _behaviour.HoldClose?.Wait();
         await _inner.Close(cancellationToken).ConfigureAwait(false);
         _probe.OnClosed();
     }
 
-    /// <inheritdoc/>
     public async Task Close(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
+        _probe.CloseTimeout = timeout;
         _probe.Tokens.Record(nameof(Close), cancellationToken);
         _probe.CloseEntered.Set();
         _behaviour.HoldClose?.Wait();
@@ -148,25 +135,20 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
         _probe.OnClosed();
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         _inner.Dispose();
         _probe.OnDisposed();
     }
 
-    /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
         await _inner.DisposeAsync().ConfigureAwait(false);
         _probe.OnDisposedAsync();
     }
 
-    /// <summary>
-    /// The held admission stage (<see cref="TestProducerBehaviour.HoldAdmissionOf"/>): the record
-    /// is already accepted, and the stage ends either when the gate opens, yielding the mock's
-    /// own future, or — as the real <c>Send</c>'s does — when the caller's token fires.
-    /// </summary>
+    // The record is already accepted; the stage ends when the gate opens, yielding the mock's own
+    // future, or, as the real Send's does, when the caller's token fires.
     private async ValueTask<AsyncKafkaFuture<RecordMetadata>> HoldAdmission(
         ValueTask<AsyncKafkaFuture<RecordMetadata>> admission,
         Task gate,

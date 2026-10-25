@@ -12,28 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/
-// (Bucket.cs, LatencyHistogram.cs, PerfFormat.cs) and DELIBERATELY DUPLICATED rather
-// than referenced. Two independent reasons, either sufficient:
-//
-//  1. Mechanical. Five of the seven primitives the compose plan named are `internal`
-//     to PerformanceCommon (Bucket, LatencyHistogram, PerfFormat, MemorySampler,
-//     CpuSampler), and its only public Metrics constructor is `Metrics()` — no path,
-//     no append mode, which are precisely the two things the soak needs. Reaching
-//     them would mean widening a TEST-harness assembly's surface to serve an
-//     operational tool.
-//  2. It is what the Python sibling deliberately did, for a stated reason
-//     (python/soak/soak_metrics.py's PROVENANCE header): a two-week run must
-//     not break because a performance-test refactor changed a shared helper, and the
-//     soak's own needs (append mode, a promptly-stoppable collector) must not distort
-//     code the perf tests depend on.
-//
-// ⚠ THE JSONL RECORD SCHEMA MUST STAY IDENTICAL TO THE PERF HARNESS'S. That schema is
-// what makes soak and perf numbers directly comparable across clients and languages
-// (tools/performance_metrics_plot parses every language's output identically). If you
-// change the shape of a record — the rss/cpu/latency/bytes/messages blocks, the window
-// timestamps, or the bucket fields — change PerformanceCommon/Metrics.cs the same way,
-// or say explicitly in the commit why the two are diverging.
+// Forked from PerformanceCommon, not referenced, as Python's soak forks its perf helpers; keep the
+// metrics.jsonl record schema identical to PerformanceCommon/Metrics.cs (one plot tool reads both).
 
 using System;
 using System.Globalization;
@@ -41,35 +21,23 @@ using System.Globalization;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// The shared 1 ms-resolution latency histogram + percentile, matching the C / Rust /
-/// Java / Python perf tests exactly (<c>performance_common.py</c>
-/// <c>percentile_from_hist</c>, and <c>soak_metrics.py</c>'s copy of it).
+/// The 1 ms-resolution latency histogram and percentile shared by the C, Rust, Java and Python
+/// perf tests (Python's <c>percentile_from_hist</c>).
 /// </summary>
 internal static class LatencyHistogram
 {
-    /// <summary>Latency histogram resolution ceiling in ms (1 ms buckets over <c>0..MaxLatencyMs</c>).</summary>
     internal const int MaxLatencyMs = 10000;
 
-    /// <summary>Histogram array length: <c>MaxLatencyMs + 2</c> (the <c>0..MAX</c> buckets plus one overflow).</summary>
     internal const int Length = MaxLatencyMs + 2;
 
-    /// <summary>Allocates a fresh zeroed histogram of length <see cref="Length"/>.</summary>
     internal static long[] New() => new long[Length];
 
-    /// <summary>
-    /// Records a latency measurement (ms), mirroring Python's
-    /// <c>idx = min(max(int(measurement), 0), MAX_LATENCY_MS + 1)</c> clamp.
-    /// </summary>
     internal static void Record(long[] hist, double measurementMs)
     {
         long idx = Math.Min(Math.Max((long)measurementMs, 0L), MaxLatencyMs + 1L);
         hist[idx]++;
     }
 
-    /// <summary>
-    /// Returns the smallest latency-ms bucket whose cumulative count reaches the
-    /// <paramref name="p"/>-th percentile (<c>0 &lt; p &lt;= 1</c>).
-    /// </summary>
     internal static long PercentileFromHist(long[] hist, double p)
     {
         long total = 0;
@@ -99,17 +67,13 @@ internal static class LatencyHistogram
 }
 
 /// <summary>
-/// Numeric formatting for the shared <c>metrics.jsonl</c> schema. The plot tool floats
-/// every numeric field and only special-cases the string <c>"-inf"</c>, so the hard
-/// contract is: emit <c>"-inf"</c> for an unset maximum / measurement bound, and
-/// invariant-culture numeric text everywhere else — never a locale-specific separator.
+/// Numeric text for <c>metrics.jsonl</c>: <c>"-inf"</c> for an unset maximum (the only string the
+/// plot tool special-cases), invariant-culture numbers everywhere else.
 /// </summary>
 internal static class SoakFormat
 {
-    /// <summary>The <c>-inf</c> sentinel emitted for an unset max / measurement bound.</summary>
     internal const string NegInf = "-inf";
 
-    /// <summary>Formats a metric value as its <c>metrics.jsonl</c> string.</summary>
     internal static string Num(double value)
     {
         if (double.IsNegativeInfinity(value))
@@ -130,14 +94,12 @@ internal static class SoakFormat
         return value.ToString("R", CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Formats a long as invariant-culture decimal text.</summary>
     internal static string Num(long value) => value.ToString(CultureInfo.InvariantCulture);
 }
 
 /// <summary>
-/// The immutable snapshot a <see cref="Bucket"/> yields at rollover — the numeric form
-/// of Python's <c>Bucket.rollover()</c> dict (average / max / total / count), plus the
-/// latency percentiles when the bucket tracks a histogram.
+/// What a <see cref="Bucket"/> yields at rollover, as Python's <c>Bucket.rollover()</c>: average,
+/// max, total, count, and the latency percentiles when the bucket tracks a histogram.
 /// </summary>
 internal readonly struct BucketRollover
 {
@@ -154,41 +116,29 @@ internal readonly struct BucketRollover
         P999 = p999;
     }
 
-    /// <summary>Mean of the window's measurements (<c>0</c> when the window had none).</summary>
     internal double Average { get; }
 
-    /// <summary>Maximum measurement (<see cref="double.NegativeInfinity"/> — the <c>"-inf"</c> sentinel — when the window had none).</summary>
     internal double Max { get; }
 
-    /// <summary>Sum of the window's measurements.</summary>
     internal double Total { get; }
 
-    /// <summary>Number of measurements in the window.</summary>
     internal long Count { get; }
 
-    /// <summary>Whether this bucket tracks a latency histogram (so the percentiles below are meaningful).</summary>
     internal bool HasHistogram { get; }
 
-    /// <summary>The window's 50th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P50 { get; }
 
-    /// <summary>The window's 90th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P90 { get; }
 
-    /// <summary>The window's 99th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P99 { get; }
 
-    /// <summary>The window's 99.9th-percentile latency (ms); <c>0</c> for a non-histogram bucket.</summary>
     internal long P999 { get; }
 }
 
 /// <summary>
-/// A per-window accumulator (total / count / max) — the C# analog of Python's
-/// <c>Bucket</c>. Constructed with a histogram it additionally tracks the 1 ms latency
-/// histogram (the <c>LatencyBucket</c> role) and yields p50/p90/p99/p999 at rollover.
-/// Thread-safe: measurements arrive on the producer / consumer / delivery-continuation
-/// threads while the sampler thread rolls the bucket over (Python leans on the GIL;
-/// .NET must lock so a non-atomic <c>double</c> update is never torn).
+/// A per-window accumulator (total, count, max), as Python's <c>Bucket</c>; with a histogram it
+/// also yields the latency percentiles, as <c>LatencyBucket</c>. Locked: measurements and the
+/// sampler's rollover run on different threads, where Python relies on the GIL.
 /// </summary>
 internal sealed class Bucket
 {
@@ -198,13 +148,11 @@ internal sealed class Bucket
     private long _count;
     private double _max = double.NegativeInfinity;
 
-    /// <summary>Creates a bucket, optionally tracking the 1 ms latency histogram.</summary>
     internal Bucket(bool withHistogram = false)
     {
         _hist = withHistogram ? LatencyHistogram.New() : null;
     }
 
-    /// <summary>Adds one measurement (Python <c>Bucket.add_measurement</c>).</summary>
     internal void AddMeasurement(double measurement)
     {
         lock (_lock)
@@ -223,10 +171,6 @@ internal sealed class Bucket
         }
     }
 
-    /// <summary>
-    /// Snapshots the window and resets to empty (Python <c>Bucket.rollover</c> /
-    /// <c>LatencyBucket.rollover</c>).
-    /// </summary>
     internal BucketRollover Rollover()
     {
         lock (_lock)

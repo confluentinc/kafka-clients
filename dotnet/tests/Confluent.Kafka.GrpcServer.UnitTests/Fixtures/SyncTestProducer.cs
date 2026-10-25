@@ -18,10 +18,9 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// The sync flavour's producer behind the factory seam: a <see cref="MockProducer{TKey, TValue}"/>
-/// with the <see cref="TestProducerBehaviour"/> applied around it, and every observation
-/// reported to a <see cref="ProducerProbe"/>. Every call the servicer makes reaches the real
-/// mock (DoD §12): the double only adds the scenario and the counting.
+/// The sync flavour's producer behind the factory seam: a <see cref="MockProducer{TKey, TValue}"/> with the
+/// <see cref="TestProducerBehaviour"/> applied around it and every observation reported to a
+/// <see cref="ProducerProbe"/>; every call the servicer makes reaches the real mock.
 /// </summary>
 internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
 {
@@ -37,10 +36,8 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
         _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: behaviour.FailEach is null);
     }
 
-    /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);
 
-    /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, IDeliveryCallback callback)
     {
         ulong index = ProducerProbe.IndexOf(record.Key);
@@ -67,16 +64,12 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
         }
     }
 
-    /// <inheritdoc/>
     public void Flush() => _inner.Flush();
 
-    /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _inner.PartitionsFor(topic);
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
-    /// <inheritdoc/>
     public void Close()
     {
         _probe.CloseEntered.Set();
@@ -85,16 +78,15 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
         _probe.OnClosed();
     }
 
-    /// <inheritdoc/>
     public void Close(TimeSpan timeout)
     {
+        _probe.CloseTimeout = timeout;
         _probe.CloseEntered.Set();
         _behaviour.HoldClose?.Wait();
         _inner.Close(timeout);
         _probe.OnClosed();
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         _inner.Dispose();

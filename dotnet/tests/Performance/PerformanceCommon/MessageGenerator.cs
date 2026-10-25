@@ -16,7 +16,7 @@ using System;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>One pre-generated key/value pair. <see cref="Key"/> is <see langword="null"/> when the key size is 0.</summary>
+/// <summary>One pre-generated key/value pair; the key is <see langword="null"/> when the key size is 0.</summary>
 public readonly struct PerfMessage
 {
     internal PerfMessage(byte[]? key, byte[] value)
@@ -25,33 +25,21 @@ public readonly struct PerfMessage
         Value = value;
     }
 
-    /// <summary>The record key, or <see langword="null"/> when the configured key size is 0 (no key).</summary>
     public byte[]? Key { get; }
 
-    /// <summary>The record value (never null; a constant prefix plus a per-message random suffix).</summary>
     public byte[] Value { get; }
 }
 
 /// <summary>
-/// Pre-generates the cycled message set — the C# analog of <c>message_generator</c> in
-/// <c>producer_performance_test.py</c>. Each message is a constant prefix plus a
-/// <see cref="Randomness"/>-fraction random suffix; <c>10000</c> messages are generated once and cycled
-/// round-robin by the send loop (default value size 2048 B, default key size 0 = no key).
+/// Pre-generates the cycled message set, Python's <c>message_generator</c>: each key and value is one shared constant
+/// prefix plus a per-message random suffix, a <see cref="Randomness"/> fraction of its size.
 /// </summary>
 public static class MessageGenerator
 {
-    /// <summary>Fraction of each key/value that is a per-message random suffix (the rest is a shared constant prefix).</summary>
     public const double Randomness = 0.5;
 
-    /// <summary>Number of distinct messages pre-generated and then cycled round-robin.</summary>
     public const int DefaultCount = 10000;
 
-    /// <summary>
-    /// Generates <paramref name="count"/> messages of <paramref name="valueSize"/> value bytes and
-    /// <paramref name="keySize"/> key bytes (0 = no key). Faithful to the Python generator: one constant
-    /// prefix is reused across all messages, with a fresh <see cref="Randomness"/>-fraction random suffix
-    /// per message.
-    /// </summary>
     public static PerfMessage[] Generate(int keySize, int valueSize, int count = DefaultCount)
     {
         if (keySize < 0)

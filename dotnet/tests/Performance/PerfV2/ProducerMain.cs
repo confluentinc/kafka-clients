@@ -21,18 +21,10 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Performance.V2;
 
 /// <summary>
-/// The <c>MODE=producer</c> entry for the v2 (ckd) baseline — the C# analog of
-/// <c>producer_performance_test.py</c>'s <c>__main__</c> with <c>CLIENT_VERSION=2</c>: generate the cycled
-/// messages, build the librdkafka-form producer config, start the metrics sampler, run the sync
-/// (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the ckd backend, cool down
-/// (GC + await), then return the exit code (non-zero if the p99 budget was exceeded or the run failed).
+/// The <c>MODE=producer</c> entry of the v2 (ckd) baseline, as Python's <c>__main__</c> with <c>CLIENT_VERSION=2</c>:
+/// it runs the sync or async engine over the ckd producer, cools down and returns the exit code; <c>VERIFY_CONSUMED</c>
+/// is skipped, as this exe has no consumer.
 /// </summary>
-/// <remarks>
-/// The v2 baseline is manual-comparison only (not the p99 gate — D10). <c>VERIFY_CONSUMED</c> is a v3
-/// correctness feature (PLAN deliverable #2/#3): it needs a consumer, and this exe references only ckd —
-/// so when it is requested the run logs that it is unsupported on the v2 baseline and skips it, rather
-/// than adding a second ckd client path.
-/// </remarks>
 internal static class ProducerMain
 {
     internal static async Task<int> Run()
@@ -40,8 +32,6 @@ internal static class ProducerMain
         ProducerBenchmarkConfig config = ProducerBenchmarkConfig.FromEnv();
         string bootstrapServers = PerfEnv.GetString("BOOTSTRAP_SERVERS", "localhost:9092");
 
-        // Optionally start from a clean topic before producing (Python's main(): recreate_topic runs
-        // regardless of CLIENT_VERSION, right at the top).
         if (config.CreateTopic)
         {
             TopicProvisioning.RecreateTopic(bootstrapServers, config.TopicName, config.Partitions);
@@ -64,8 +54,7 @@ internal static class ProducerMain
 
         ProducerBenchmarkResult result = await RunBenchmark(config, producerConfig, metrics, messages).ConfigureAwait(false);
 
-        // Cooldown — keep sampling through a short window so the post-test windows land in metrics.jsonl
-        // (excluded from the averages, since the measured interval has ended). Matches Python's __main__.
+        // The cooldown keeps sampling so the post-test windows reach metrics.jsonl, outside the averages, as Python.
         if (!PerfSignals.Terminating)
         {
             Console.WriteLine("Performing garbage collection...");
@@ -84,8 +73,6 @@ internal static class ProducerMain
         metrics.StopCollecting();
         Console.WriteLine("Done");
 
-        // A failed run (warmup, the count checks, the results file) fails the exit code, as the p99 budget
-        // does (Python's run_failed).
         return result.LatencyBudgetExceeded || result.RunFailed ? 1 : 0;
     }
 
@@ -124,14 +111,7 @@ internal static class ProducerMain
         }
     }
 
-    /// <summary>
-    /// Sizes the librdkafka send queue to the run — Python's <c>AsyncCompatibleProducer.__init__</c>
-    /// (v2-async only; the sync path has no such default and relies on <c>producer.poll()</c>-driven
-    /// backpressure instead). Without this, an unsized queue defaults to librdkafka's 100,000-message /
-    /// 1,048,576 KiB caps, hits <c>QUEUE_FULL</c> far sooner than Python's v2-async baseline does, making
-    /// the two not comparable. Skipped for a key already set by the <c>BUFFER_MEMORY</c> block above —
-    /// same precedence as Python's dict merge, where the explicit config overrides these defaults.
-    /// </summary>
+    // As Python's AsyncCompatibleProducer (v2 async): size the send queue to the run unless BUFFER_MEMORY set the key.
     private static void ApplyDefaultAsyncQueueSizing(Dictionary<string, string> producerConfig, ProducerBenchmarkConfig config)
     {
         if (!producerConfig.ContainsKey("queue.buffering.max.messages"))

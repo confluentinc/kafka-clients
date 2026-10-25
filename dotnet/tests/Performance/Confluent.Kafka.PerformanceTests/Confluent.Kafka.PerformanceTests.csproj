@@ -36,13 +36,12 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
-    <!-- Test-only broker provisioning (Slice 2). Confined to this smoke project (STANDING CONSTRAINT 2) —
-         NEVER added to the shipped src/Confluent.Kafka binding. -->
+    <!-- Test-only broker provisioning, used here and by Confluent.Kafka.IntegrationTests (which links this
+         project's KafkaBrokerFixture.cs) — NEVER added to the shipped src/Confluent.Kafka binding. -->
     <PackageReference Include="Testcontainers" Version="4.14.0" />
-    <!-- Dynamic test skipping (M13/P3 D-8 Option B, human-approved). Test-only, confined to THIS smoke
-         project (STANDING CONSTRAINT 2) — NEVER added to src/Confluent.Kafka or to
-         Confluent.Kafka.UnitTests, and it does not reach the shipped package. Latest stable at the time
-         of the phase; xunit.extensibility.execution resolves to the 2.9.3 already in this graph. -->
+    <!-- Dynamic test skipping (human-approved). Test-only, used here and by Confluent.Kafka.IntegrationTests —
+         NEVER added to src/Confluent.Kafka or to Confluent.Kafka.UnitTests, and it does not reach the
+         shipped package. xunit.extensibility.execution resolves to the 2.9.3 already in this graph. -->
     <PackageReference Include="Xunit.SkippableFact" Version="1.5.85" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

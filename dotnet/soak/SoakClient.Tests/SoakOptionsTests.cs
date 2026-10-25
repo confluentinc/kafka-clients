@@ -19,9 +19,8 @@ using Xunit;
 namespace Confluent.Kafka.Soak.Tests;
 
 /// <summary>
-/// The <c>SOAK_*</c> environment contract <c>run.sh</c> exports into. Defaults must match
-/// the Python soak's <c>argparse</c> declarations, because the profiles
-/// (<c>848-normal</c> / <c>848-hi-throughput</c>) were tuned against those numbers.
+/// The <c>SOAK_*</c> environment contract <c>run.sh</c> exports into; the defaults match the Python
+/// soak's <c>argparse</c> declarations, which the profiles were tuned against.
 /// </summary>
 [Collection(EnvironmentCollection.Name)]
 public sealed class SoakOptionsTests : IDisposable
@@ -38,7 +37,6 @@ public sealed class SoakOptionsTests : IDisposable
 
     private readonly Dictionary<string, string?> _saved = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-    /// <summary>Snapshots and clears the SOAK variables so each test starts from a known state.</summary>
     public SoakOptionsTests()
     {
         foreach (string name in s_variables)
@@ -48,7 +46,6 @@ public sealed class SoakOptionsTests : IDisposable
         }
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         foreach (KeyValuePair<string, string?> entry in _saved)
@@ -139,12 +136,6 @@ public sealed class SoakOptionsTests : IDisposable
         Assert.Contains("SOAK_RATE must be greater than zero", ex.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Booleans follow the perf suite's case-sensitive <c>"True"</c> convention (Python's
-    /// <c>os.getenv(name, default) == "True"</c>), so <c>true</c> / <c>1</c> are NOT
-    /// truthy — a mismatch here would silently make a destructive flag a no-op, or worse,
-    /// silently enable one.
-    /// </summary>
     [Theory]
     [InlineData("True", true)]
     [InlineData("true", false)]
@@ -159,9 +150,8 @@ public sealed class SoakOptionsTests : IDisposable
         Assert.Equal(expected, SoakOptions.FromEnvironment().RecreateTopic);
     }
 
-    // The expected level is passed as its NAME rather than as the enum: SoakLogLevel is
-    // internal to the soak assembly, and a public xunit test method cannot take an
-    // internal parameter type (CS0051).
+    // By name: SoakLogLevel is internal, and a public test method cannot take an internal parameter
+    // type (CS0051).
     [Theory]
     [InlineData("DEBUG", "Debug")]
     [InlineData("info", "Info")]
@@ -169,7 +159,6 @@ public sealed class SoakOptionsTests : IDisposable
     [InlineData("warn", "Warning")]
     [InlineData("ERROR", "Error")]
     [InlineData("FATAL", "Fatal")]
-    // A log level is never worth failing a two-week run over, so an unknown one falls back.
     [InlineData("nonsense", "Info")]
     public void LogLevelParsing(string value, string expected)
     {

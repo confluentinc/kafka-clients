@@ -22,12 +22,8 @@ using System.Text;
 namespace Confluent.Kafka.Performance;
 
 /// <summary>
-/// The optional in-container / local load driver for the consumer benchmark — the C# analog of
-/// <c>consumer_performance_test.py</c>'s <c>spawn_producer</c>. When <c>KAFKA_BIN</c> is set the consumer
-/// engine self-spawns <c>kafka-producer-perf-test.sh</c> to feed the topic with CreateTime-timestamped
-/// records; otherwise an external producer must feed it. The SASL config is written in Java form to a
-/// <c>.properties</c> file (a raw <c>--producer-props</c> token cannot carry the jaas value's multiple
-/// <c>=</c> signs).
+/// The consumer benchmark's optional load driver, Python's <c>spawn_producer</c>: with <c>KAFKA_BIN</c> set it runs
+/// <c>kafka-producer-perf-test.sh</c> to feed the topic; otherwise an external producer must feed it.
 /// </summary>
 public sealed class LoadDriver
 {
@@ -43,11 +39,6 @@ public sealed class LoadDriver
         _log = log;
     }
 
-    /// <summary>
-    /// Starts the load driver when <c>KAFKA_BIN</c> is set, else returns <see langword="null"/>. Sizes the
-    /// record count to cover warmup + measure + a 30 s pad (Python's <c>pad</c>), unless <c>NUM_MESSAGES</c>
-    /// bounds it.
-    /// </summary>
     public static LoadDriver? MaybeStart(ConsumerBenchmarkConfig config)
     {
         if (string.IsNullOrEmpty(config.KafkaBin))
@@ -63,6 +54,11 @@ public sealed class LoadDriver
             ["bootstrap.servers"] = config.BootstrapServers,
             ["acks"] = "1",
         };
+        if (config.CompressionType is not null)
+        {
+            props["compression.type"] = config.CompressionType;
+        }
+
         foreach (KeyValuePair<string, string> kv in SaslConfig.FromEnv(SaslForm.Java))
         {
             props[kv.Key] = kv.Value;
@@ -73,8 +69,7 @@ public sealed class LoadDriver
         {
             foreach (KeyValuePair<string, string> kv in props)
             {
-                // A Java .properties value must be one logical line; collapse whitespace runs (the jaas
-                // value carries cosmetic "\n\t" separators) to single spaces before writing.
+                // A .properties value must be one line; the jaas value carries "\n\t" separators.
                 string oneLine = CollapseWhitespace(kv.Value);
                 writer.WriteLine($"{kv.Key}={oneLine}");
             }
@@ -98,14 +93,10 @@ public sealed class LoadDriver
         startInfo.ArgumentList.Add("--producer.config");
         startInfo.ArgumentList.Add(propsPath);
 
-        Console.WriteLine($">>> Launching producer: throughput={config.Throughput} msg/s, {config.MessageSize} bytes, ~{total} records");
+        Console.WriteLine($">>> Launching producer: throughput={config.Throughput} msg/s, {config.MessageSize} bytes, ~{total} records, compression={config.CompressionType ?? "default"}");
 
-        // Capture the feeder's stdout+stderr to producer.log (cwd is the results dir) instead of leaving
-        // the pipes undrained — the C# analog of Python's spawn_producer opening "producer.log" and
-        // merging stderr into it. A silent producer failure looks identical to "no data" on the consumer
-        // side, so its output must remain inspectable; undrained, the OS pipe buffer (~64 KiB) fills once
-        // kafka-producer-perf-test.sh's periodic progress lines accumulate, and the feeder BLOCKS on the
-        // next write — starving the very consumer benchmark it exists to feed.
+        // Drained into producer.log, as Python's: an undrained pipe fills and blocks the feeder,
+        // and a feeder failure must stay inspectable.
         var log = new StreamWriter(Path.Combine(Environment.CurrentDirectory, "producer.log"), append: false)
         {
             AutoFlush = true,
@@ -138,7 +129,6 @@ public sealed class LoadDriver
         return driver;
     }
 
-    /// <summary>Kills the load-driver process and removes its temporary properties file (best-effort).</summary>
     public void Stop()
     {
         try
@@ -148,15 +138,13 @@ public sealed class LoadDriver
                 _process.Kill();
             }
 
-            // The parameterless overload additionally waits for the redirected-output event handlers to
-            // finish draining the pipes (MSDN: needed for that guarantee; the timed overload alone does
-            // not give it). Best-effort: a process Kill() should already have made this fast.
+            // Only the parameterless overload also waits for the output handlers to drain.
             _process.WaitForExit(5000);
             _process.WaitForExit();
         }
         catch (Exception)
         {
-            // Best-effort teardown (Python swallows the same).
+            // Best-effort teardown, as in Python.
         }
         finally
         {
@@ -173,7 +161,6 @@ public sealed class LoadDriver
             }
             catch (IOException)
             {
-                // Best-effort cleanup.
             }
         }
     }

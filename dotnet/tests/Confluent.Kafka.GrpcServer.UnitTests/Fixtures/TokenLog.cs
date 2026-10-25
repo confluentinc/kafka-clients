@@ -20,23 +20,18 @@ using System.Threading;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// Every <see cref="CancellationToken"/> the async servicer handed a client double, by operation
-/// (T12's async half, D6 / D7). A token is recorded by whether it <b>can</b> fire
-/// (<see cref="CancellationToken.CanBeCanceled"/>), not by whether it did: the rule is that no
-/// token that can fire reaches the client at all, so the check does not depend on a stop
-/// happening to land inside a call.
+/// Every <see cref="CancellationToken"/> the async servicer handed a client double, by operation. A
+/// token is recorded by whether it can fire, not by whether it did, so a check that no such token reaches
+/// the client does not depend on a stop landing inside a call.
 /// </summary>
 internal sealed class TokenLog
 {
     private readonly ConcurrentQueue<(string Operation, bool CanBeCanceled)> _calls =
         new ConcurrentQueue<(string Operation, bool CanBeCanceled)>();
 
-    /// <summary>Every operation that was handed a token, once each.</summary>
     internal IReadOnlyCollection<string> Operations => _calls.Select(c => c.Operation).Distinct().ToList();
 
-    /// <summary>The operations, one entry per call, that were handed a token that can fire.</summary>
     internal IReadOnlyList<string> Cancelable => _calls.Where(c => c.CanBeCanceled).Select(c => c.Operation).ToList();
 
-    /// <summary>Records the token one call received.</summary>
     internal void Record(string operation, CancellationToken token) => _calls.Enqueue((operation, token.CanBeCanceled));
 }

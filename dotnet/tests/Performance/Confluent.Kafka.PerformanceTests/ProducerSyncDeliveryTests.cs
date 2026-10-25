@@ -27,19 +27,15 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// <c>ProducerBenchmark.RunSync</c>, the port of Python's <c>main()</c>: each measured send registers a
-/// delivery callback that records the record when the client reports it (Python's <c>record_delivery</c>). A
-/// failed record counts as completed with no latency; a send that throws is not counted at all. After the loop
-/// the engine flushes and waits for the remaining callbacks, checks the counts, prints the summary and writes
-/// <c>results.json</c>. Warmup sends are waited inline. The fake backend scripts each send, so every case is
-/// deterministic.
+/// Covers <c>ProducerBenchmark.RunSync</c>, Python's <c>main</c>: each measured send's delivery callback records the
+/// record (a failed one with no latency, a send that throws not at all), and after the loop the engine flushes, waits
+/// for the callbacks, checks the counts and writes <c>results.json</c>.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class ProducerSyncDeliveryTests
 {
     private const string Topic = "sync-delivery-topic";
 
-    // Every wait here is bounded.
     private static readonly TimeSpan s_returnBudget = TimeSpan.FromSeconds(30);
 
     private static readonly Func<object, PerfRecordMetadata> s_invoke = static state => ((Func<PerfRecordMetadata>)state)();
@@ -67,6 +63,9 @@ public sealed class ProducerSyncDeliveryTests
     [Fact]
     public Task RunSync_WarmupFailure_FailsTheRun() => WarmupFailureAsync();
 
+    [Fact]
+    public Task RunSync_CancelledBeforeTheWarmup_RunsTheWarmupToItsEnd() => CancelledWarmupAsync();
+
     [Theory]
     [InlineData("3", "dotnet-rust")]
     [InlineData("2", "dotnet-librdkafka")]
@@ -79,8 +78,6 @@ public sealed class ProducerSyncDeliveryTests
     [Fact]
     public Task RunSync_UnwritableResultsFile_FailsTheRun() => UnwritableResultsAsync();
 
-    // ---- cases -------------------------------------------------------------------------------------
-
     private static async Task LateCallbacksAsync()
     {
         const int delayMs = 300;
@@ -90,8 +87,8 @@ public sealed class ProducerSyncDeliveryTests
             onSend: (n, callback, startMs) => pending.Enqueue((callback, startMs, n)),
             onFlush: () =>
             {
-                // Nothing is delivered until the flush, and then only after a delay and in reverse order, so the
-                // run reports every record only if it waits for the callbacks after the flush.
+                // Delivered only after the flush, late and in reverse order: the run reports every record only if it
+                // waits for them.
                 var deliverer = new Thread(() =>
                 {
                     Thread.Sleep(delayMs);
@@ -111,7 +108,6 @@ public sealed class ProducerSyncDeliveryTests
         Assert.False(result.RunFailed, output);
         Assert.DoesNotContain("does not match", output, StringComparison.Ordinal);
 
-        // Every record was reported, and its latency runs to the callback, not to the send's return.
         using JsonDocument results = ReadResults("results.json");
         Assert.Equal(5, results.RootElement.GetProperty("messages_measured").GetInt64());
         Assert.True(
@@ -136,8 +132,7 @@ public sealed class ProducerSyncDeliveryTests
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
-        // The failed third record is logged and counted as completed, so the counts match NUM_MESSAGES, but it
-        // did not verify: the run fails, and the summary is still printed.
+        // The failed third record counts as completed, so the counts match, but it did not verify: the run fails.
         Assert.Equal(5, result.MeasuredSent);
         Assert.Equal(1, Occurrences(output, "Produce call resulted in exception: delivery failed (fake)"));
         Assert.Equal(1, Occurrences(output, "Verified messages 4 does not match completed messages 5"));
@@ -164,8 +159,6 @@ public sealed class ProducerSyncDeliveryTests
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
-        // A send the client never accepted is logged and not counted: the loop makes a sixth send to reach
-        // NUM_MESSAGES, and the five it counted all completed and verified.
         Assert.Equal(6, backend.SendCount);
         Assert.Equal(5, result.MeasuredSent);
         Assert.Equal(1, Occurrences(output, "Send error: send rejected (fake)"));
@@ -197,26 +190,22 @@ public sealed class ProducerSyncDeliveryTests
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
-        // Each warmup iteration sleeps 0.1 s after its send, so a 1 s warmup makes about ten sends. Without the
-        // sleep the instant fake would make hundreds of thousands.
+        // Each warmup send sleeps 0.1 s after it, so a 1 s warmup makes about ten sends.
         int warmup = (int)result.WarmupSent;
         Assert.InRange(warmup, 1, 15);
         string[] log = events.ToArray();
         Assert.Equal((2 * warmup) + measured, log.Length);
 
-        // Each warmup send is waited before the next one is made.
         for (int i = 1; i <= warmup; i++)
         {
             Assert.Equal($"S{i}", log[(2 * i) - 2]);
             Assert.Equal($"G{i}", log[(2 * i) - 1]);
         }
 
-        // Then the measured sends, each with a delivery callback.
         Assert.Equal(Enumerable.Range(warmup + 1, measured).Select(n => $"C{n}").ToArray(), log.Skip(2 * warmup).ToArray());
         Assert.Equal(measured, result.MeasuredSent);
         Assert.Equal(warmup + measured, backend.SendCount);
 
-        // The warmup sends are not recorded: the counts match NUM_MESSAGES.
         Assert.Equal(1, Occurrences(output, "Warming up for 1 seconds ..."));
         Assert.DoesNotContain("does not match", output, StringComparison.Ordinal);
         Assert.False(result.RunFailed);
@@ -237,6 +226,25 @@ public sealed class ProducerSyncDeliveryTests
         Assert.Equal(0, result.MeasuredSent);
         Assert.Equal(1, backend.SendCount);
         Assert.Equal(1, Occurrences(output, "Warmup failed due to message verification error"));
+    }
+
+    private static async Task CancelledWarmupAsync()
+    {
+        // Each warmup send sleeps 0.1 s after it, so a 1 s warmup makes about ten sends.
+        Apply(numMessages: 0, warmupSeconds: 1);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var backend = new ScriptedProducerBackend(
+            onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null),
+            onWarmupSend: n => Handle(() => Delivered(n)));
+
+        (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend, cts.Token).ConfigureAwait(false);
+
+        Assert.InRange(result.WarmupSent, 2, 15);
+        Assert.Equal(result.WarmupSent, backend.SendCount);
+        Assert.Equal(0, result.MeasuredSent);
+        Assert.False(result.WarmupFailed);
+        Assert.Equal(1, Occurrences(output, "Warming up for 1 seconds ..."));
     }
 
     private static async Task ResultsJsonAsync(string clientVersion, string client)
@@ -264,8 +272,6 @@ public sealed class ProducerSyncDeliveryTests
 
     private static async Task NothingCompletedAsync()
     {
-        // A run interrupted before its first send still writes a parseable results.json, with zeros rather than
-        // a division by zero.
         Apply(numMessages: 5);
         var backend = new ScriptedProducerBackend(onSend: (n, callback, startMs) => callback.OnCompletion(startMs, Delivered(n), null));
         using var cts = new CancellationTokenSource();
@@ -277,7 +283,6 @@ public sealed class ProducerSyncDeliveryTests
         Assert.Equal(0, backend.FlushCount);
         Assert.Equal(0, result.MeasuredSent);
 
-        // Interrupted, so the count checks are skipped and the run does not fail.
         Assert.False(result.RunFailed, output);
         Assert.Contains("Average latency: 0.00 ms", output, StringComparison.Ordinal);
 
@@ -298,15 +303,11 @@ public sealed class ProducerSyncDeliveryTests
 
         (ProducerBenchmarkResult result, string output) = await RunSyncCapturingOutputAsync(backend).ConfigureAwait(false);
 
-        // The results file is the run's artifact: failing to write it fails the run although every record
-        // completed.
         Assert.Equal(3, result.MeasuredSent);
         Assert.Equal(1, Occurrences(output, $"Failed to write {path}: "));
         Assert.DoesNotContain("Results summary written to", output, StringComparison.Ordinal);
         Assert.True(result.RunFailed);
     }
-
-    // ---- harness -----------------------------------------------------------------------------------
 
     private static void Apply(
         long numMessages,

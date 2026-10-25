@@ -16,29 +16,23 @@ using System.Collections.Generic;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>The client-config form a SASL mapping targets (§1.2 / §7).</summary>
+/// <summary>
+/// The client-config form a SASL mapping targets: Java's <c>sasl.jaas.config</c> (this binding, v3) or librdkafka's
+/// <c>sasl.username</c> / <c>sasl.password</c> (confluent-kafka-dotnet, v2).
+/// </summary>
 public enum SaslForm
 {
-    /// <summary>Java form — <c>sasl.mechanism</c> + a <c>PlainLoginModule</c> <c>sasl.jaas.config</c> (our binding, v3).</summary>
     Java,
 
-    /// <summary>librdkafka form — <c>sasl.mechanism</c> + <c>sasl.username</c> / <c>sasl.password</c> (ckd, v2).</summary>
     Librdkafka,
 }
 
 /// <summary>
-/// SASL config from the environment, form-parameterized — the C# analog of
-/// <c>sasl_config_from_env(v2=...)</c> shared by the Python producer / consumer perf tests (§3.5 / §7).
-/// Enabled only when <c>SECURITY_PROTOCOL ∈ {SASL_PLAINTEXT, SASL_SSL}</c> and the mechanism + username +
-/// password are all set; otherwise it contributes no keys. The same env inputs map to Java-form or
-/// librdkafka-form keys per <paramref name="form"/>, so one config drives both clients.
+/// SASL config from the environment, Python's <c>sasl_config_from_env</c>: keys only for <c>SASL_PLAINTEXT</c> or
+/// <c>SASL_SSL</c> with a mechanism, username and password, in the requested <see cref="SaslForm"/>.
 /// </summary>
 public static class SaslConfig
 {
-    /// <summary>
-    /// Returns the SASL config keys for the requested <paramref name="form"/>, or an empty dictionary when
-    /// SASL is not enabled (PLAINTEXT/SSL, or incomplete credentials).
-    /// </summary>
     public static IReadOnlyDictionary<string, string> FromEnv(SaslForm form)
     {
         var result = new Dictionary<string, string>();
@@ -62,7 +56,7 @@ public static class SaslConfig
 
         if (form == SaslForm.Java)
         {
-            // Byte-identical to producer_performance_test.py's jaas string (cosmetic "\n\t" separators).
+            // Python's jaas string, its "\n\t" separators included.
             result["sasl.jaas.config"] =
                 "org.apache.kafka.common.security.plain.PlainLoginModule required \n\t"
                 + $"username=\"{username}\" \n\tpassword=\"{password}\";";

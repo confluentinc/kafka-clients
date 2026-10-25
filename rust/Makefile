@@ -204,10 +204,10 @@ test-integration-grpc-c-native:
 # python arms -- so one target covers both dotnet gRPC images. To run only the
 # sync backend, add `--skip __grpc_dotnet_async`.
 #
-# SIX TESTS ARE SKIPPED FOR .NET ONLY -- three producer transaction arms and three
-# admin unregisterController arms.
+# FIVE TESTS ARE SKIPPED FOR .NET ONLY, on both .NET arms -- three producer
+# transaction tests and two consumer pattern-subscribe tests.
 #
-# The producer transaction arms.
+# The producer transaction tests.
 # `multilanguage_test!` emits one arm per backend for every test it wraps, so the
 # three transaction tests in tests/integration/producer_transactions_test.rs
 # generate __grpc_dotnet / __grpc_dotnet_async arms like every other backend. The
@@ -215,55 +215,42 @@ test-integration-grpc-c-native:
 # AsyncProducerServiceImpl implement 8 RPCs and none of them are the five
 # transaction RPCs (InitTransactions, BeginTransaction, CommitTransaction,
 # AbortTransaction, SendOffsetsToTransaction) that producer_service.proto added,
-# so those arms return gRPC UNIMPLEMENTED. Nor do ConsumerServiceImpl /
-# AsyncConsumerServiceImpl implement the GroupMetadata / ReleaseGroupMetadata
-# RPCs that consumer_service.proto added, which
-# test_consume_transform_produce_with_offsets reaches through
-# Consumer::group_metadata(). test_ml_group_metadata_and_assignment_after_poll
-# (tests/integration/multilanguage_consumer_test.rs) reaches the GroupMetadata RPC
-# outside any transaction, so the consumer servicers need it for that test too,
-# independently of the transaction surface. The binding has no transaction surface at all yet
-# -- IAsyncProducer's own docs record it as deferred.
+# so those arms return gRPC UNIMPLEMENTED. The binding has no transaction surface
+# yet (dotnet/CLAUDE.md §1).
 #
-# The admin unregisterController arms. Apache Kafka 4.4 added
-# Admin.unregisterController (KAFKA-20395), and master's Milestone 17 (#232)
-# added the UnregisterController RPC to admin_service.proto and three
-# `multilanguage_admin_test!` tests in
-# tests/integration/admin_controllers_test.rs (all named
-# test_unregister_controller_*, so one --skip covers them). The .NET binding does
-# not have the method yet: neither AdminServiceImpl nor AsyncAdminServiceImpl
-# overrides the RPC, so those arms return gRPC UNIMPLEMENTED. This is a missing
-# Java 4.4 API, not a flaky test.
+# The consumer pattern-subscribe tests. test_ml_subscribe_pattern_and_consume and
+# test_ml_pattern_listener_logs_assigned_and_revoked
+# (tests/integration/multilanguage_consumer_test.rs) subscribe with a
+# SubscriptionPattern, which the .NET consumer does not have yet, so both
+# consumer servicers answer a pattern Subscribe with -31
+# (LOCAL_UNSUPPORTED_OPERATION) instead of subscribing to no topic.
 #
 # The skips are defined once, in DOTNET_GRPC_SKIPS, and used only by the two
 # dotnet targets below (test-integration-grpc-dotnet, which the root
 # test-integration-dotnet and its -ssl / -sasl-ssl variants reach through dotnet/'s
 # test-integration, and test-integration-grpc-dotnet-native), which only ever run
 # __grpc_dotnet*, so no other backend loses coverage: python / c / rust still run
-# all six.
+# all five.
 #
-# REMOVE the test_unregister_controller skip when the .NET admin client gains
-# UnregisterController (the two P/Invokes, UnregisterControllerOptions /
-# UnregisterControllerResult, the method on IAdmin / IAsyncAdmin and the four admin
-# client types, MockAdminClient's usingRaftController setter, and the RPC in both
-# admin servicers).
+# REMOVE the two pattern skips when pattern subscribe lands in the .NET binding
+# (ledger row 148: Subscribe(SubscriptionPattern), with and without a listener)
+# and both consumer servicers subscribe with it.
 #
 # REMOVE the three transaction skips when the
 # .NET producer reaches transaction parity with Python (the 10 transaction
 # P/Invokes, the public surface on IProducer/IAsyncProducer and the four producer
-# types, the three MockProducer transaction controls, and the five RPCs in both
-# producer servicers, plus the GroupMetadata / ReleaseGroupMetadata
-# ConsumerService RPCs in both consumer servicers -- ConsumerServiceImpl and
-# AsyncConsumerServiceImpl -- which test_consume_transform_produce_with_offsets
-# reaches through Consumer::group_metadata(), unless an earlier phase has added
-# them for test_ml_group_metadata_and_assignment_after_poll). Deleting them is the last step of
-# that phase, not a follow-up to it. With both gone, remove DOTNET_GRPC_SKIPS (the
-# definition below and its uses in test-integration-grpc-dotnet and
+# types, the MockProducer transaction controls, and the five RPCs in both
+# producer servicers, whose SendOffsetsToTransaction must read the group metadata
+# by id from the GroupMetadataStore that the consumer servicers' GroupMetadata
+# RPC fills, as Python's does). Deleting them is the last step of that phase, not
+# a follow-up to it. With all five gone, remove DOTNET_GRPC_SKIPS (the definition
+# below and its uses in test-integration-grpc-dotnet and
 # test-integration-grpc-dotnet-native).
 DOTNET_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
 	--skip test_aborted_transaction_records_are_discarded \
 	--skip test_consume_transform_produce_with_offsets \
-	--skip test_unregister_controller
+	--skip test_ml_subscribe_pattern_and_consume \
+	--skip test_ml_pattern_listener_logs_assigned_and_revoked
 
 test-integration-grpc-dotnet:
 	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet \

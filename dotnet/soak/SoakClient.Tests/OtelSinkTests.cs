@@ -26,7 +26,6 @@ namespace Confluent.Kafka.Soak.Tests;
 [CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class EnvironmentCollection
 {
-    /// <summary>The collection name.</summary>
     public const string Name = "environment";
 }
 
@@ -48,7 +47,6 @@ public sealed class OtelSinkTests : IDisposable
 
     private readonly Dictionary<string, string?> _saved = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-    /// <summary>Snapshots the OTEL variables so each test restores the ambient environment.</summary>
     public OtelSinkTests()
     {
         foreach (string name in s_variables)
@@ -58,7 +56,6 @@ public sealed class OtelSinkTests : IDisposable
         }
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         foreach (KeyValuePair<string, string?> entry in _saved)
@@ -88,12 +85,6 @@ public sealed class OtelSinkTests : IDisposable
         Assert.Empty(OtelSink.RequestedExporters());
     }
 
-    /// <summary>
-    /// ⚠ THE ONE BEHAVIOUR THAT MUST PORT EXACTLY (PLAN D12): no
-    /// <c>OTEL_METRICS_EXPORTER</c> means no telemetry, and <c>Create</c> must return
-    /// null rather than a <c>Meter</c> with no <c>MeterProvider</c> listening — which
-    /// would silently discard every measurement while the startup line claimed "otel on".
-    /// </summary>
     [Fact]
     public void CreateReturnsNullWhenNoExporterIsRequested()
     {
@@ -112,10 +103,6 @@ public sealed class OtelSinkTests : IDisposable
             new SoakLogger(SoakLogLevel.Fatal)));
     }
 
-    /// <summary>
-    /// An unsupported exporter name must DISABLE telemetry with a logged reason, never
-    /// throw: telemetry must not be able to stop the soak.
-    /// </summary>
     [Fact]
     public void CreateReturnsNullForAnUnsupportedExporter()
     {
@@ -130,7 +117,6 @@ public sealed class OtelSinkTests : IDisposable
     [InlineData("grpc", null, "Grpc")]
     [InlineData("http/protobuf", null, "HttpProtobuf")]
     [InlineData("HTTP/PROTOBUF", null, "HttpProtobuf")]
-    // The metrics-specific variable wins over the general one.
     [InlineData("grpc", "http/protobuf", "HttpProtobuf")]
     [InlineData("http/protobuf", "grpc", "Grpc")]
     public void ResolveProtocolHonoursTheSpecEnvVars(string? general, string? metrics, string expected)
@@ -152,11 +138,6 @@ public sealed class OtelSinkTests : IDisposable
         Assert.Equal(15000, OtelSink.ExportIntervalMs());
     }
 
-    /// <summary>
-    /// The console exporter builds without a collector, so this is the one place the full
-    /// pipeline — provider, meter, counter, observable gauge, shutdown — is exercised end
-    /// to end with no network.
-    /// </summary>
     [Fact]
     public void CreateBuildsAWorkingPipelineForTheConsoleExporter()
     {
@@ -175,8 +156,6 @@ public sealed class OtelSinkTests : IDisposable
             sink.IncrCounter("kafka.client.soak.rust_dotnet.producer.send", 1, tags);
             sink.SetGauge("kafka.client.soak.rust_dotnet.consumer.e2e_latency", 0.017, tags);
 
-            // Registering the same gauge twice must not register a duplicate instrument
-            // (the SDK drops one, silently losing a series).
             sink.SetGauge("kafka.client.soak.rust_dotnet.consumer.e2e_latency", 0.018, tags);
             sink.Shutdown();
         }

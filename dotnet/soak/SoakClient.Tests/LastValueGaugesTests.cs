@@ -34,12 +34,6 @@ public sealed class LastValueGaugesTests
         return tags;
     }
 
-    /// <summary>
-    /// The regression this pins: the reference callback yielded the buffered values then
-    /// CLEARED the buffer, so the <i>second</i> collection yielded nothing and the series
-    /// vanished from the backend rather than holding its last value. Observed against a
-    /// real collector as <c>consumer.assignment_size</c> missing entirely.
-    /// </summary>
     [Fact]
     public void RetainsAcrossCollections()
     {
@@ -69,7 +63,6 @@ public sealed class LastValueGaugesTests
         Assert.Equal(1, gauges.SeriesCount("g"));
     }
 
-    /// <summary>Retention is per tag-set: partitions are distinct series.</summary>
     [Fact]
     public void RetainsPerTagSet()
     {
@@ -104,10 +97,6 @@ public sealed class LastValueGaugesTests
         Assert.Equal(0, gauges.SeriesCount("never-recorded"));
     }
 
-    /// <summary>
-    /// The SDK collects on its own thread; the tag map handed back must not alias the
-    /// caller's, or a later mutation of that map would silently rewrite a retained series.
-    /// </summary>
     [Fact]
     public void RecordSnapshotsTheTagMap()
     {
@@ -119,11 +108,6 @@ public sealed class LastValueGaugesTests
         Assert.Equal("v", Assert.Single(gauges.Snapshot("g")).Tags["k"]);
     }
 
-    /// <summary>
-    /// Concurrent recorders must not lose or corrupt series. Four threads write in
-    /// production (the producer loop, the consumer loop, the delivery continuations and
-    /// the main thread's resource sampling) while the SDK collects from a fifth.
-    /// </summary>
     [Fact]
     public void IsThreadSafe()
     {

@@ -23,9 +23,8 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// Covers <c>ConsumerBenchmark</c>'s readiness gate (M13/P3 item A) against scripted backends — no broker,
-/// no Docker, no client. Every case runs BOTH engines, sync (<c>Run</c>) and async (<c>RunAsync</c>), so the
-/// two code paths cannot drift.
+/// Covers <c>ConsumerBenchmark</c>'s readiness gate against scripted backends, with no broker; every case runs both the
+/// sync (<c>Run</c>) and the async (<c>RunAsync</c>) engine.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class ConsumerReadinessGateTests
@@ -56,12 +55,9 @@ public sealed class ConsumerReadinessGateTests
     public Task Gate_CountsOnlyMeasurableRecords(bool asyncMode) =>
         GateCountsOnlyMeasurableRecordsAsync(asyncMode);
 
-    // ---- cases -------------------------------------------------------------------------------------
-
     private static async Task GateWhenEnoughMeasurableRecordsMeasuresAsync(bool asyncMode)
     {
-        // 20 measurable records satisfy the gate, then 5 more are measured (NUM_MESSAGES=5 ends the run).
-        // The gate's 20 are warmup and must NOT appear in MessagesMeasured — that assertion is the point.
+        // The gate's 20 records are warmup: they must not be counted in MessagesMeasured.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
@@ -81,8 +77,6 @@ public sealed class ConsumerReadinessGateTests
 
     private static async Task GateWhenNoMeasurableRecordsAsync(bool asyncMode)
     {
-        // Nothing ever arrives: the settle loop sees its two empty polls, then the gate waits out its
-        // budget. This is the "slow feeder" case the gate exists for.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
@@ -97,16 +91,12 @@ public sealed class ConsumerReadinessGateTests
         Assert.Equal(0, result.MessagesMeasured);
         Assert.Equal(0, result.P99);
 
-        // The early return must still close the backend — the run is over, not paused.
         Assert.Equal(1, driver.CloseCount);
     }
 
     private static async Task GateWhenTimestampsUnusableAsync(bool asyncMode)
     {
-        // Records DO flow, but none is measurable: 50 carry no CreateTime (-1) and 50 carry a timestamp
-        // 60 s in the future, which yields a NEGATIVE latency. That second shape is exactly the macOS
-        // cross-clock failure (item H) — the consumer drops every record and measures nothing — so this
-        // case doubles as executable documentation of H's root cause.
+        // 50 records carry no CreateTime (-1) and 50 a timestamp 60 s ahead, a negative latency: none is measurable.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
@@ -124,8 +114,6 @@ public sealed class ConsumerReadinessGateTests
 
     private static async Task GateCountsOnlyMeasurableRecordsAsync(bool asyncMode)
     {
-        // 219 records received, only 19 of them measurable, threshold 20. If the gate counted RECEIVED
-        // records it would open; it must count only measurable ones and time out instead.
         var script = new List<IReadOnlyList<PolledRecord>>
         {
             Array.Empty<PolledRecord>(),
@@ -140,8 +128,6 @@ public sealed class ConsumerReadinessGateTests
         Assert.True(result.SetupNotReady);
         Assert.Equal(0, result.MessagesMeasured);
     }
-
-    // ---- harness -----------------------------------------------------------------------------------
 
     private static async Task<(ConsumerBenchmarkResult Result, PollScript Driver)> RunEngineAsync(
         bool asyncMode,
@@ -181,7 +167,6 @@ public sealed class ConsumerReadinessGateTests
 
     private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-    /// <summary>A batch of <paramref name="count"/> records stamped now — measurable (latency >= 0).</summary>
     private static IReadOnlyList<PolledRecord> Fresh(int count) => WithTimestamp(count, NowMs());
 
     private static IReadOnlyList<PolledRecord> WithTimestamp(int count, long timestampMs)
@@ -210,8 +195,7 @@ public sealed class ConsumerReadinessGateTests
 
         internal IReadOnlyList<PolledRecord> Next()
         {
-            // A real poll blocks up to POLL_TIMEOUT_MS. Sleeping 1 ms keeps an exhausted script from
-            // spinning the readiness gate's deadline loop hot for its whole budget.
+            // A real poll blocks; the 1 ms sleep keeps an exhausted script from spinning the gate's deadline loop.
             Thread.Sleep(1);
             return _batches.Count > 0 ? _batches.Dequeue() : Array.Empty<PolledRecord>();
         }
@@ -219,6 +203,7 @@ public sealed class ConsumerReadinessGateTests
         internal void Close() => CloseCount++;
     }
 
+    /// <summary>A synchronous consumer backend that replays its <see cref="PollScript"/>.</summary>
     private sealed class ScriptedConsumerBackend : IConsumerBackend
     {
         private readonly PollScript _script;
@@ -242,6 +227,7 @@ public sealed class ConsumerReadinessGateTests
         }
     }
 
+    /// <summary>An asynchronous consumer backend that replays its <see cref="PollScript"/>.</summary>
     private sealed class ScriptedAsyncConsumerBackend : IAsyncConsumerBackend
     {
         private readonly PollScript _script;

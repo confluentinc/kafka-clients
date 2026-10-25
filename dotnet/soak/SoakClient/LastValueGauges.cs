@@ -19,28 +19,8 @@ using System.Linq;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// The most recent observation per <c>(metric, tag-set)</c>, retained — a direct port of
-/// <c>soakclient.py</c>'s <c>LastValueGauges</c>.
-/// <para>
-/// The reference soak buffers gauge observations in a list and <i>clears</i> it in the
-/// observable-gauge callback. That works only for gauges written on every interval: an
-/// event-driven gauge is exported once and then, on the next collection, the callback
-/// yields nothing — and a series that yields nothing is not reported as "unchanged", it
-/// <b>disappears from the backend entirely</b>. Observed against a real collector:
-/// <c>consumer.assignment_size</c> was absent from the export despite the assignment
-/// having changed at startup. That and <c>consumer.recovery_ms</c> are precisely the two
-/// metrics a run against a rolled cluster exists to produce.
-/// </para>
-/// <para>
-/// So the last value is retained and re-yielded on every subsequent collection, which is
-/// ordinary gauge semantics. Retention is <b>per tag-set</b>, not per metric name:
-/// <c>consumer.e2e_latency{partition=0}</c> and <c>{partition=1}</c> are distinct series
-/// and must not overwrite each other. Bounded: keys are (metric, tag-set) where tags are
-/// partitions, error codes and the fixed base tags — the same bounded cardinality as the
-/// JSONL counters, which also removes the unbounded-growth failure mode where a
-/// misconfigured exporter that never collected let a buffer grow inside the very process
-/// being watched for leaks.
-/// </para>
+/// The latest value per (metric, tag-set), re-yielded on every collection, as Python's soak
+/// <c>LastValueGauges</c>: a gauge callback that yields nothing makes the series vanish.
 /// </summary>
 internal sealed class LastValueGauges
 {
@@ -48,7 +28,6 @@ internal sealed class LastValueGauges
     private readonly Dictionary<string, Dictionary<string, (double Value, IReadOnlyDictionary<string, string> Tags)>> _latest =
         new Dictionary<string, Dictionary<string, (double, IReadOnlyDictionary<string, string>)>>(StringComparer.Ordinal);
 
-    /// <summary>Records (or overwrites) the latest value for <paramref name="name"/> at <paramref name="tags"/>.</summary>
     internal void Record(string name, double value, IReadOnlyDictionary<string, string> tags)
     {
         string key = TagKey(tags);
@@ -70,7 +49,6 @@ internal sealed class LastValueGauges
         }
     }
 
-    /// <summary>Every retained series for <paramref name="name"/>, as a fresh list.</summary>
     internal IReadOnlyList<(double Value, IReadOnlyDictionary<string, string> Tags)> Snapshot(string name)
     {
         lock (_lock)
@@ -84,7 +62,6 @@ internal sealed class LastValueGauges
         }
     }
 
-    /// <summary>Number of distinct tag-sets retained for <paramref name="name"/>.</summary>
     internal int SeriesCount(string name)
     {
         lock (_lock)

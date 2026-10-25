@@ -20,11 +20,8 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// The <c>MODE=producer</c> entry — the C# analog of <c>producer_performance_test.py</c>'s <c>__main__</c>:
-/// generate the cycled messages, (optionally) capture the VERIFY_CONSUMED baseline, start the metrics
-/// sampler, run the sync (Python <c>main</c>) or async (Python <c>async_main</c>) engine over the v3 backend,
-/// cool down (GC + await), then run the optional consume-all verification and return the exit code
-/// (non-zero if the p99 budget was exceeded or the run failed).
+/// The <c>MODE=producer</c> entry, as Python's <c>__main__</c>: it runs the sync or async engine over this binding's
+/// producer, cools down, runs the optional <c>VERIFY_CONSUMED</c> check and returns the exit code.
 /// </summary>
 internal static class ProducerMain
 {
@@ -34,8 +31,7 @@ internal static class ProducerMain
         bool verifyConsumed = PerfEnv.GetBool("VERIFY_CONSUMED", false);
         string bootstrapServers = PerfEnv.GetString("BOOTSTRAP_SERVERS", "localhost:9092");
 
-        // Optionally start from a clean topic before producing (Python's main(): recreate_topic before
-        // the baseline-offset capture below).
+        // Before the baseline-offset capture below, as in Python's main.
         if (config.CreateTopic)
         {
             TopicProvisioning.RecreateTopic(bootstrapServers, config.TopicName, config.Partitions);
@@ -74,8 +70,7 @@ internal static class ProducerMain
 
         ProducerBenchmarkResult result = await RunBenchmark(config, producerConfig, metrics, messages).ConfigureAwait(false);
 
-        // Cooldown — keep sampling through a short window so the post-test windows land in metrics.jsonl
-        // (excluded from the averages, since the measured interval has ended). Matches Python's __main__.
+        // The cooldown keeps sampling so the post-test windows reach metrics.jsonl, outside the averages, as Python.
         if (!PerfSignals.Terminating)
         {
             Console.WriteLine("Performing garbage collection...");
@@ -122,8 +117,6 @@ internal static class ProducerMain
             Console.WriteLine("Consumer verification skipped (baseline capture failed)");
         }
 
-        // A failed run (warmup, the count checks, the results file) fails the exit code, as the p99 budget
-        // does (Python's run_failed).
         if (result.LatencyBudgetExceeded || result.RunFailed)
         {
             exitCode = 1;
@@ -148,7 +141,7 @@ internal static class ProducerMain
             }
             finally
             {
-                // Before the close, which tears the metrics down with the producer (Rust harness).
+                // Before the close, which tears the metrics down with the producer.
                 backend.PrintCompressionRateAvg();
                 await CloseQuietlyAsync(backend).ConfigureAwait(false);
                 await backend.DisposeAsync().ConfigureAwait(false);

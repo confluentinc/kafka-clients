@@ -24,42 +24,14 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.Chaos;
 
 /// <summary>
-/// The body every <c>RunProducer</c> / <c>RunConsumer</c> RPC shares, in both flavours (PLAN
-/// §5.3) — the .NET twin of Python's <c>ChaosWorkloadService._run</c> / <c>_guarded</c>
-/// (<c>python/grpc_chaos.py</c>), plus the C server's wait for its worker.
+/// The body of every <c>RunProducer</c> / <c>RunConsumer</c> RPC in both flavours, Python's
+/// <c>ChaosWorkloadService._run</c> / <c>_guarded</c>: register, send the headers, stream the events in
+/// batches until a terminal one, then stop, deregister and await the loop. Only it writes to the stream.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>The lifecycle</b> (chaos_service.proto steps 1–4): register the id (a duplicate gets one
-/// <c>Failed</c> batch, written before any header, as in Python); send the response headers at
-/// once, so the harness's call resolves even for a consumer that never gets an assignment;
-/// make the RPC's cancellation stop the workload; start the loop; stream its events in batches
-/// of up to <see cref="ChaosEvents.MaxBatch"/> until a terminal one; and, in the
-/// <c>finally</c>, stop the workload, deregister it, and <b>await its completion with no
-/// token</b>. On a normal end that completion has already happened; after a cancellation the
-/// loop is draining — the producer closing, the consumer committing and closing — so the
-/// client is closed before the handler returns (C / Python-async parity; §3.5 item 6, which
-/// is a deliberate difference from Python sync, whose handler does not wait).
-/// </para>
-/// <para>
-/// <b>One write at a time</b>, as gRPC requires: only this method writes to the stream, and
-/// it awaits each write before reading the next batch. Test-server scaffolding with no Java
-/// class (DoD §7).
-/// </para>
-/// </remarks>
 internal static class ChaosStream
 {
-    /// <summary>
-    /// The bound on a servicer's shutdown wait for its workloads' drains (PLAN §5.8), matching
-    /// the clients' own close timeouts.
-    /// </summary>
     internal static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Runs one workload's RPC (see the type remarks). <paramref name="start"/> starts the loop
-    /// for the registered workload and returns its completion; it is called once, after the
-    /// headers are out and the cancellation hook is in place.
-    /// </summary>
     internal static async Task Run(
         ChaosRegistry registry,
         string workloadId,
@@ -78,12 +50,12 @@ internal static class ChaosStream
         Task? completion = null;
         try
         {
-            // Headers now, not with the first event (proto lifecycle step 1; backend_pool.rs
-            // streaming_channel() has no timeout because of this).
+            // Headers now, not with the first event, so the harness's call resolves even for a
+            // consumer that never gets an assignment.
             await context.WriteResponseHeadersAsync(new Metadata()).ConfigureAwait(false);
 
-            // The harness going away (a cancelled RPC) stops the workload, which then drains
-            // and closes its client. RequestStop never runs a waiter inline (ChaosWorkload).
+            // A cancelled RPC stops the workload, which then drains and closes its client.
+            // RequestStop never runs a waiter inline.
             using CancellationTokenRegistration onCancel =
                 cancellation.Register(static state => ((ChaosWorkload)state!).RequestStop(), workload);
 
@@ -103,26 +75,16 @@ internal static class ChaosStream
             registry.Remove(workload);
             if (completion is not null)
             {
-                // No token: the drain must finish (and the client close) before the handler
-                // returns. The completion never faults (Guarded).
+                // No token: the drain, and the client's close, finish before the handler returns,
+                // as in C and Python's async server (Python's sync handler does not wait). The
+                // completion never faults.
                 await completion.ConfigureAwait(false);
             }
         }
     }
 
-    /// <summary>
-    /// Starts <paramref name="loop"/> on a dedicated background thread named
-    /// <c>chaos-&lt;id&gt;</c> (the sync flavour, D8; PLAN §5.7) and returns its completion, a
-    /// <see cref="TaskCompletionSource"/> built with
-    /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> so the handler's
-    /// continuation never runs on the workload thread.
-    /// </summary>
-    /// <remarks>
-    /// A dedicated thread, not the pool: <c>Send</c> (on <c>buffer.memory</c>), <c>Poll</c> and
-    /// <c>Close</c> block, and parking pool threads would also starve Kestrel. There is no
-    /// worker cap (§3.5 item 1): one thread per workload, and the RPC handler holds none while
-    /// it waits on the channel.
-    /// </remarks>
+    // A dedicated thread, not the pool: Send, Poll and Close block, and parked pool threads would
+    // starve Kestrel. The completion's continuations run off the workload thread.
     internal static Task StartDedicatedThread(ChaosWorkload workload, Action<ChaosWorkload> loop)
     {
         TaskCompletionSource done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -145,19 +107,9 @@ internal static class ChaosStream
         return done.Task;
     }
 
-    /// <summary>
-    /// Starts <paramref name="loop"/> as one pool task (the async flavour, D8; PLAN §5.7) and
-    /// returns its completion, a <see cref="TaskCompletionSource"/> built with
-    /// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>, like the sync flavour's.
-    /// </summary>
-    /// <remarks>
-    /// The loop's last await can complete on a binding thread — a client's completion callback
-    /// runs on the producer's pump or the consumer's dispatcher — and the loop then finishes
-    /// there. Completing a plain <see cref="Task.Run(Func{Task})"/> proxy at that point would run
-    /// the handler's <c>finally</c> continuation inline on that thread; the source keeps it on the
-    /// pool. The task <see cref="Task.Run(Func{Task})"/> returns is not observed because it cannot
-    /// fault: <see cref="RunGuardedAsync"/> catches everything the loop throws.
-    /// </remarks>
+    // The loop's last await can complete on a client's callback thread, where completing a Task.Run
+    // proxy would run the handler's finally inline; the source keeps it on the pool. The Task.Run
+    // task cannot fault, so it is not observed.
     internal static Task StartTask(ChaosWorkload workload, Func<ChaosWorkload, Task> loop)
     {
         TaskCompletionSource done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -175,10 +127,6 @@ internal static class ChaosStream
         return done.Task;
     }
 
-    /// <summary>
-    /// The async form of <see cref="RunGuarded"/> (Python's async <c>_guarded</c>): awaits
-    /// <paramref name="loop"/>, and turns anything that escapes it into <c>Failed</c>.
-    /// </summary>
     internal static async Task RunGuardedAsync(ChaosWorkload workload, Func<ChaosWorkload, Task> loop)
     {
         try
@@ -192,10 +140,6 @@ internal static class ChaosStream
         }
     }
 
-    /// <summary>
-    /// Python <c>_guarded</c>: runs <paramref name="loop"/>, and turns anything that escapes it
-    /// into <c>Failed</c>, so a dying loop never leaves the stream open.
-    /// </summary>
     internal static void RunGuarded(ChaosWorkload workload, Action<ChaosWorkload> loop)
     {
         try
@@ -209,12 +153,6 @@ internal static class ChaosStream
         }
     }
 
-    /// <summary>
-    /// A servicer's shutdown drain (PLAN §5.8): stop every registered workload, then wait, up to
-    /// <paramref name="timeout"/>, for their loops to finish draining. Only container
-    /// <c>SIGTERM</c> reaches this — the native servers are SIGKILLed by <c>backend_pool</c>.
-    /// </summary>
-    /// <returns>Whether every drain finished within <paramref name="timeout"/>.</returns>
     internal static bool StopAllAndWait(ChaosRegistry registry, TimeSpan timeout)
     {
         IReadOnlyList<ChaosWorkload> workloads = registry.StopAll();
@@ -229,9 +167,9 @@ internal static class ChaosStream
             completions[i] = workloads[i].Completion;
         }
 
-        // A plain wait on completions that dedicated threads (sync) or pool tasks (async)
-        // complete — not a sync-over-async wrap of an async API — from the synchronous shutdown
-        // path, which has no synchronization context to deadlock.
+        // A plain wait on completions the loops' threads or tasks complete, not a sync-over-async
+        // wrap, from the synchronous shutdown path, which has no synchronization context to
+        // deadlock.
         return Task.WaitAll(completions, timeout);
     }
 

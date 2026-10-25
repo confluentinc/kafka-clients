@@ -22,18 +22,15 @@ using Xunit;
 namespace Confluent.Kafka.Performance.Tests;
 
 /// <summary>
-/// <c>AWAIT_ACCEPTED</c>: whether <c>ProducerBenchmark.RunAsync</c>'s send loop waits for a send's first
-/// stage (the client accepting the record) before the next send. Each mode has a test that fails under the
-/// other: by default every send finds the previous acceptance complete; with <c>False</c> the loop keeps
-/// sending while acceptances are still pending, and would hang here if it awaited them.
+/// Covers <c>AWAIT_ACCEPTED</c>: by default <c>ProducerBenchmark.RunAsync</c> waits for a send's acceptance before the
+/// next send, and with <c>False</c> it keeps sending while acceptances are pending; each mode fails the other's test.
 /// </summary>
 [Collection(PerfEngineCollection.Name)]
 public sealed class ProducerAcceptanceModeTests
 {
     private const string Topic = "acceptance-topic";
 
-    // A queue-full failure message. The engine recognizes QUEUE_FULL by the message text alone
-    // (ProducerBenchmark.IsQueueFull), so the exception type does not matter here.
+    // The engine recognizes QUEUE_FULL by the message alone (ProducerBenchmark.IsQueueFull), not by the exception type.
     private const string QueueFullMessage = "Local: Queue full";
 
     private static readonly TimeSpan s_returnBudget = TimeSpan.FromSeconds(30);
@@ -73,8 +70,6 @@ public sealed class ProducerAcceptanceModeTests
         Assert.Equal($"AWAIT_ACCEPTED must be True or False, not '{value}'", ex.Message);
     }
 
-    // ---- cases -------------------------------------------------------------------------------------
-
     private static async Task DefaultAwaitsAcceptanceAsync()
     {
         Apply(awaitAccepted: null);
@@ -103,8 +98,7 @@ public sealed class ProducerAcceptanceModeTests
         Assert.True(previousAcceptedAtEverySend, "a send started before the previous send was accepted");
         Assert.Equal(5, backend.SendCount);
 
-        // The 5th send cancels the run, but the client had accepted it, so it is counted, as Python's
-        // async_main counts the send that saw the termination flag.
+        // The 5th send was accepted before it cancelled the run, so it counts, as in Python's async_main.
         Assert.Equal(5, result.MeasuredSent);
     }
 
@@ -129,7 +123,6 @@ public sealed class ProducerAcceptanceModeTests
                     }
                 }
 
-                // Stop the run, then let every record be accepted and delivered so the drain completes.
                 cts.Cancel();
                 for (int i = 0; i < acceptances.Count; i++)
                 {
@@ -149,9 +142,8 @@ public sealed class ProducerAcceptanceModeTests
 
     private static async Task NotAwaitingCountsQueueFullAsync()
     {
-        // A failure reaches the loop in one of two shapes. A send whose acceptance is still pending can fail
-        // later: it was counted as sent, so a QUEUE_FULL there is subtracted from the sent count. Or the call
-        // itself throws: the client never accepted the record, so it is not counted as sent at all.
+        // A failure reaches the loop in two shapes: a pending acceptance that fails later (counted, then subtracted as
+        // QUEUE_FULL), or a call that throws (never counted).
         Apply(awaitAccepted: "False");
         using var cts = new CancellationTokenSource();
         TaskCompletionSource<Task<PerfRecordMetadata>>? second = null;
@@ -160,7 +152,6 @@ public sealed class ProducerAcceptanceModeTests
             switch (n)
             {
                 case 2:
-                    // Still pending when the loop moves on; fails at the next send.
                     second = new TaskCompletionSource<Task<PerfRecordMetadata>>(TaskCreationOptions.RunContinuationsAsynchronously);
                     return new ValueTask<Task<PerfRecordMetadata>>(second.Task);
                 case 3:
@@ -183,8 +174,6 @@ public sealed class ProducerAcceptanceModeTests
         Assert.Equal(6, backend.SendCount);
         Assert.Equal(4, result.MeasuredSent);
     }
-
-    // ---- harness -----------------------------------------------------------------------------------
 
     private static void Apply(string? awaitAccepted)
     {

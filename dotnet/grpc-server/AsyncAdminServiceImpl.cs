@@ -27,51 +27,16 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Maps the <c>AdminService</c> RPCs onto the binding's <see cref="AsyncKafkaAdminClient"/> /
-/// <see cref="AsyncMockAdminClient"/> — the .NET port of <c>grpc_server.py</c>'s
-/// <c>AdminService</c> (M15/P12). Slices G1 (topics &amp; partitions), G2 (cluster, configs,
-/// log dirs), G3 (elections, reassignments, offsets), G6 (producers &amp; transactions), G4
-/// (groups) and G5 (acls, quotas, scram, tokens, features) are all implemented here.
+/// The async-flavour <c>AdminService</c> over <see cref="IAsyncAdmin"/>, the .NET port of Python's
+/// async <c>AdminService</c>; each handler awaits its futures. Kept parallel to
+/// <see cref="AdminServiceImpl"/>.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>Flavour (M15/P14).</b> The async-flavour servicer, hosted when
-/// <c>CONSUMER_FLAVOR=async</c> (the <c>dotnet_async</c> harness backend). Its sync twin,
-/// <see cref="AdminServiceImpl"/>, covers the same RPCs over <see cref="IAdmin"/> with the same
-/// request, response and error translation; the two files are kept structurally parallel, so a
-/// change to one belongs in the other.
-/// </para>
-/// <para>
-/// <b>No per-op lock</b> — the producer precedent, not the consumer's. <see cref="IAsyncAdmin"/>
-/// permits concurrent operations (the admin ABI has no single-owner access guard), so the
-/// servicer needs only a thread-safe id map plus an <see cref="Interlocked"/> counter to make
-/// <c>CreateAdmin</c> / <c>Close</c> races safe.
-/// </para>
-/// <para>
-/// <b>Error placement.</b> A raised error is a whole-call failure and goes in the response's
-/// top-level <c>error</c>, leaving <c>entries</c> empty; per-key failures never raise and
-/// arrive in the keyed map (<c>admin_service.proto</c>'s envelope commentary). Each handler
-/// therefore wraps its whole body in one <c>catch</c>, and
-/// <see cref="TranslateAdmin.Resolve{TValue}(AsyncKafkaFuture{TValue})"/> peels off only the per-key
-/// <see cref="KafkaException"/>s.
-/// </para>
-/// <para>
-/// <b>Singleton</b> (<c>Program.cs</c>): it owns the <c>admin_id -&gt; IAsyncAdmin</c> map every RPC
-/// shares.
-/// </para>
-/// </remarks>
 internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBase, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, IAsyncAdmin> _admins = new ConcurrentDictionary<ulong, IAsyncAdmin>();
 
     private long _nextId;
 
-    /// <summary>
-    /// Drains the admin registry at shutdown — the admin twin of
-    /// <c>AsyncProducerServiceImpl.Dispose</c>. The map is emptied only by the <c>Close</c> RPC and
-    /// this backend process is shared across scenarios, so a scenario that skips <c>Close</c>
-    /// would otherwise leave a live native client behind. Each teardown is individually guarded.
-    /// </summary>
     public void Dispose()
     {
         foreach (KeyValuePair<ulong, IAsyncAdmin> pair in _admins)
@@ -92,7 +57,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override Task<Proto.CreateAdminResponse> CreateAdmin(Proto.CreateAdminRequest request, ServerCallContext context)
     {
         Dictionary<string, string> config = new Dictionary<string, string>(request.Config);
@@ -115,12 +79,11 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         return Task.FromResult(new Proto.CreateAdminResponse { AdminId = id });
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> Close(Proto.AdminCloseRequest request, ServerCallContext context)
     {
         if (!_admins.TryRemove(request.AdminId, out IAsyncAdmin? admin))
         {
-            // Close is idempotent — silent success on an unknown id (Python / Java parity).
+            // Close is idempotent: an unknown id is a silent success, as in Python.
             return new Proto.StatusResponse();
         }
 
@@ -132,11 +95,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             }
             else
             {
-                // Java's no-argument close() — wait indefinitely. IAsyncAdmin spells that
-                // DisposeAsync (IAsyncAdmin.Close(TimeSpan) has no "unset" spelling); the one
-                // divergence is that DisposeAsync swallows a close failure, so this path
-                // reports success where Python would forward the error.
-                await admin.DisposeAsync().ConfigureAwait(false);
+                await admin.Close().ConfigureAwait(false);
             }
 
             return new Proto.StatusResponse();
@@ -145,11 +104,13 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
+        finally
+        {
+            // A mock's Close does nothing, as Java's mock; DisposeAsync frees the removed client.
+            await admin.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
-    // -- Topics & partitions (slice G1) --------------------------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.CreateTopicsResponse> CreateTopics(Proto.CreateTopicsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -195,7 +156,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> DeleteTopics(Proto.DeleteTopicsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -216,7 +176,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                         TranslateAdmin.RetryOnQuota(request.HasRetryOnQuotaViolation, request.RetryOnQuotaViolation),
                 });
 
-            // Exactly one of the two views is non-null, following the request's oneof.
             return result.TopicIdValues is not null
                 ? await TranslateAdmin.VoidResponse(result.TopicIdValues, TranslateAdmin.TopicIdKey).ConfigureAwait(false)
                 : await TranslateAdmin.VoidResponse(result.TopicNameValues!, TranslateAdmin.NameKey).ConfigureAwait(false);
@@ -227,7 +186,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.AdminListTopicsResponse> ListTopics(Proto.AdminListTopicsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -238,8 +196,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // Whole-value response (envelope addendum (a)): one future over the entire map, so a
-            // failure has no key to land on and becomes the top-level error.
             AsyncListTopicsResult result = admin.ListTopics(new ListTopicsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
@@ -262,7 +218,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeTopicsResponse> DescribeTopics(Proto.DescribeTopicsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -313,7 +268,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> CreatePartitions(Proto.CreatePartitionsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -342,7 +296,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DeleteRecordsResponse> DeleteRecords(Proto.DeleteRecordsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -389,9 +342,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    // -- Cluster, configs & log dirs (slice G2) ------------------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeClusterResponse> DescribeCluster(Proto.DescribeClusterRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -409,15 +359,13 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 IncludeFencedBrokers = request.IncludeFencedBrokers,
             });
 
-            // Whole-value response: Java's four futures are over attributes of one cluster, so
-            // there is nothing to key. All four are awaited before any error is reported, so
-            // none is abandoned; when more than one failed the first in Java's declaration
-            // order wins.
+            // Java's four futures are over one cluster: all are awaited before any error is
+            // reported, and when more than one failed the first in Java's declaration order wins.
             (IReadOnlyCollection<Node> nodes, Proto.KafkaError? nodesError) =
                 await TranslateAdmin.Resolve(result.Nodes()).ConfigureAwait(false);
             (Node? controller, Proto.KafkaError? controllerError) =
                 await TranslateAdmin.Resolve(result.Controller()).ConfigureAwait(false);
-            (string? clusterId, Proto.KafkaError? clusterIdError) =
+            (string clusterId, Proto.KafkaError? clusterIdError) =
                 await TranslateAdmin.Resolve(result.ClusterId()).ConfigureAwait(false);
             (IReadOnlyCollection<AclOperation>? operations, Proto.KafkaError? operationsError) =
                 await TranslateAdmin.Resolve(result.AuthorizedOperations()).ConfigureAwait(false);
@@ -428,17 +376,12 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 return new Proto.DescribeClusterResponse { Error = error };
             }
 
-            // Java's clusterId() is null on the old-broker Metadata fallback, and a proto3
-            // string cannot be null, so it is sent as "" — as the C server sends it (its `cstr`
-            // maps NULL to "") (M15/P13.3 D15).
-            Proto.ClusterDescription description = new Proto.ClusterDescription { ClusterId = clusterId ?? "" };
+            Proto.ClusterDescription description = new Proto.ClusterDescription { ClusterId = clusterId };
             foreach (Node node in nodes)
             {
                 description.Nodes.Add(Translate.NodeToProto(node));
             }
 
-            // Both are nullable in Java: no current controller, and "the broker did not report
-            // the operations" — which is not the same as reporting that none are authorized.
             if (controller is not null)
             {
                 description.Controller = Translate.NodeToProto(controller);
@@ -463,7 +406,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeConfigsResponse> DescribeConfigs(Proto.DescribeConfigsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -512,7 +454,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> IncrementalAlterConfigs(Proto.IncrementalAlterConfigsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -540,7 +481,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.ListConfigResourcesResponse> ListConfigResources(Proto.ListConfigResourcesRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -551,8 +491,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // An empty repeated field is Java's empty Set: every supported type. It is passed
-            // through — the binding treats empty and absent alike.
             AsyncListConfigResourcesResult result = admin.ListConfigResources(
                 TranslateAdmin.ConfigResourceTypes(request.ResourceTypes),
                 new ListConfigResourcesOptions
@@ -575,7 +513,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeLogDirsResponse> DescribeLogDirs(Proto.DescribeLogDirsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -609,9 +546,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 }
                 else
                 {
-                    // The value is nested: one description per log-dir path, each with its own
-                    // error. Flattening broker and path into one key would make "the broker
-                    // answered with zero log dirs" unrepresentable.
+                    // Nested, not flattened into (broker, path) keys, so a broker with zero log
+                    // dirs stays representable.
                     Proto.LogDirDescriptionMap value = new Proto.LogDirDescriptionMap();
                     foreach (KeyValuePair<string, LogDirDescription> dir in descriptions)
                     {
@@ -632,7 +568,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> AlterReplicaLogDirs(Proto.AlterReplicaLogDirsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -659,7 +594,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeReplicaLogDirsResponse> DescribeReplicaLogDirs(Proto.DescribeReplicaLogDirsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -699,7 +633,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                         FutureReplicaOffsetLag = info.GetFutureReplicaOffsetLag(),
                     };
 
-                    // Both dirs are nullable: no replica hosted here, and no pending move.
                     if (info.GetCurrentReplicaLogDir() is string current)
                     {
                         value.CurrentReplicaLogDir = current;
@@ -724,9 +657,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    // -- Elections, reassignments & offsets (slice G3) ------------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> ElectLeaders(Proto.ElectLeadersRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -745,10 +675,9 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // Both error levels differ from the other void RPCs. Java holds a SINGLE future
-            // over the whole map, so its failure is a whole-call failure; the per-entry error
-            // is the Optional<Throwable> inside the resolved map, absent meaning that
-            // partition's election succeeded.
+            // Java holds one future over the whole map, so its failure is the whole-call error; a
+            // per-entry error is the Optional<Throwable> in the resolved map, absent meaning that
+            // election succeeded.
             (IReadOnlyDictionary<TopicPartition, KafkaException?> partitions, Proto.KafkaError? error) =
                 await TranslateAdmin.Resolve(result.Partitions()).ConfigureAwait(false);
             if (error is not null)
@@ -779,7 +708,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> AlterPartitionReassignments(Proto.AlterPartitionReassignmentsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -800,8 +728,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                         || request.AllowReplicationFactorChange,
                 });
 
-            // Genuinely per-key futures here, so the top-level error keeps its ordinary
-            // narrow meaning (unlike ElectLeaders above).
             return await TranslateAdmin.VoidResponse(result.Values, TranslateAdmin.PartitionKey)
                 .ConfigureAwait(false);
         }
@@ -811,7 +737,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.ListPartitionReassignmentsResponse> ListPartitionReassignments(Proto.ListPartitionReassignmentsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -822,8 +747,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // Whole-value response (envelope addendum (a)): one future over the entire map, so
-            // no individual reassignment carries an error.
             AsyncListPartitionReassignmentsResult result = admin.ListPartitionReassignments(
                 TranslateAdmin.OptionalPartitions(request.Partitions),
                 new ListPartitionReassignmentsOptions
@@ -851,7 +774,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.ListOffsetsResponse> ListOffsets(Proto.ListOffsetsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -862,9 +784,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // Inside the try: proto3 C# reads an unset submessage as null (Python reads a
-            // default instance), so a malformed request must fault the top-level error rather
-            // than escape as a gRPC status.
+            // Inside the try: C# reads an unset submessage as null (Python reads a default
+            // instance), so a malformed request must become the top-level error, not a gRPC status.
             Dictionary<TopicPartition, OffsetSpec>? specs =
                 TranslateAdmin.OffsetSpecs(request.Specs, out string? invalid);
             if (specs is null)
@@ -880,8 +801,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     IsolationLevel = (IsolationLevel)request.IsolationLevel,
                 });
 
-            // The result exposes no keyed future map, so the requested keys drive the walk —
-            // Java's own PartitionResult(tp) pattern. The Dictionary already de-duplicates.
+            // No keyed future map: the requested keys drive the walk, as Java's
+            // PartitionResult(tp).
             Proto.ListOffsetsResponse response = new Proto.ListOffsetsResponse();
             foreach (TopicPartition partition in specs.Keys)
             {
@@ -911,9 +832,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    // -- Producers & transactions (slice G6) ---------------------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeProducersResponse> DescribeProducers(Proto.DescribeProducersRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -930,8 +848,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
             };
 
-            // An absent broker_id is Java's empty OptionalInt (query each partition's leader);
-            // broker 0 is legal, so the presence flag carries the distinction.
             if (request.HasBrokerId)
             {
                 options.BrokerId = request.BrokerId;
@@ -968,7 +884,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeTransactionsResponse> DescribeTransactions(Proto.DescribeTransactionsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1016,7 +931,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> AbortTransaction(Proto.AbortTransactionRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1034,8 +948,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 return new Proto.StatusResponse { Error = TranslateAdmin.RequestError(invalid!) };
             }
 
-            // Java's AbortTransactionResult carries no data and no per-key granularity, so
-            // success is simply an absent error.
             await admin.AbortTransaction(
                 spec,
                 new AbortTransactionOptions
@@ -1051,7 +963,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> ForceTerminateTransaction(Proto.ForceTerminateTransactionRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1077,7 +988,31 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
+    public override async Task<Proto.StatusResponse> UnregisterController(Proto.UnregisterControllerRequest request, ServerCallContext context)
+    {
+        IAsyncAdmin? admin = Get(request.AdminId);
+        if (admin is null)
+        {
+            return new Proto.StatusResponse { Error = Translate.UnknownAdmin(request.AdminId) };
+        }
+
+        try
+        {
+            await admin.UnregisterController(
+                request.ControllerId,
+                new UnregisterControllerOptions
+                {
+                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+                }).All().Get().ConfigureAwait(false);
+
+            return new Proto.StatusResponse();
+        }
+        catch (Exception ex)
+        {
+            return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
     public override async Task<Proto.ListTransactionsResponse> ListTransactions(Proto.ListTransactionsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1091,19 +1026,15 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             AsyncListTransactionsResult result = admin.ListTransactions(new ListTransactionsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                // Java's default for both collections is an empty set meaning "no filter", so
-                // empty needs no null form.
                 FilteredStates = TranslateAdmin.TransactionStates(request.States),
                 FilteredProducerIds = new List<long>(request.ProducerIds),
-                // Java's own -1 sentinel: negative means no duration filter.
                 FilteredDuration = request.DurationMs,
                 FilteredTransactionalIdPattern =
                     request.HasTransactionalIdPattern ? request.TransactionalIdPattern : null,
             });
 
             // Keyed by broker: byBrokerId() is the only one of Java's three views that keeps a
-            // per-broker error, so a partial listing survives. Only the broker-DISCOVERY
-            // future's failure is a whole-call failure.
+            // per-broker error; only the broker-discovery future's failure is the whole-call error.
             (IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>> brokers,
                 Proto.KafkaError? error) =
                 await TranslateAdmin.Resolve(result.ByBrokerId()).ConfigureAwait(false);
@@ -1147,7 +1078,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.FenceProducersResponse> FenceProducers(Proto.FenceProducersRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1168,8 +1098,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
             Proto.FenceProducersResponse response = new Proto.FenceProducersResponse();
             foreach (string id in result.FencedProducers.Keys)
             {
-                // Both accessors project the same underlying per-id future, so they resolve
-                // identically; (-1, -1) is Java's ProducerIdAndEpoch.NONE, a legal value.
                 (long producerId, Proto.KafkaError? idError) =
                     await TranslateAdmin.Resolve(result.ProducerId(id)).ConfigureAwait(false);
                 (short epoch, Proto.KafkaError? epochError) =
@@ -1199,9 +1127,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    // -- Groups (slice G4) ---------------------------------------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.ListGroupsResponse> ListGroups(Proto.ListGroupsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1212,7 +1137,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // Empty filter lists are Java's empty sets, i.e. the filter left unset.
             AsyncListGroupsResult result = admin.ListGroups(new ListGroupsOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
@@ -1221,10 +1145,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 Types = TranslateAdmin.GroupTypes(request.Types_),
             });
 
-            // Whole-value response whose value is Java's valid()/errors() split: the two lists
-            // are independent and of unrelated length, so nothing may be zipped across them.
-            // A failure of the single underlying future faults both awaits and becomes the
-            // top-level error via the catch below.
+            // valid() and errors() are independent lists of unrelated length: never zip them.
             IReadOnlyCollection<GroupListing> valid = await result.Valid().Get().ConfigureAwait(false);
             IReadOnlyCollection<KafkaException> errors = await result.Errors().Get().ConfigureAwait(false);
 
@@ -1247,7 +1168,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeConsumerGroupsResponse> DescribeConsumerGroups(Proto.DescribeConsumerGroupsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1295,7 +1215,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeClassicGroupsResponse> DescribeClassicGroups(Proto.DescribeClassicGroupsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1343,7 +1262,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.ListConsumerGroupOffsetsResponse> ListConsumerGroupOffsets(Proto.ListConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1370,9 +1288,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     RequireStable = request.RequireStable,
                 });
 
-            // Two levels, like describeLogDirs: the per-group future carries a whole map, and
-            // an inner null is Java's null map value ("no committed offset for that
-            // partition"), which stays absent on the wire rather than becoming offset 0.
+            // An inner null is Java's null map value (no committed offset): it stays absent, not
+            // offset 0.
             Proto.ListConsumerGroupOffsetsResponse response = new Proto.ListConsumerGroupOffsetsResponse();
             foreach (string groupId in specs.Keys)
             {
@@ -1418,7 +1335,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> AlterConsumerGroupOffsets(Proto.AlterConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1439,17 +1355,9 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // The result exposes no keyed future map (Java holds one future over the whole
-            // per-partition map), so the requested keys drive the walk — Java's own
-            // partitionResult(tp) pattern. With an EMPTY request there is no per-partition
-            // slot at all and the response is simply empty; the RPC is still submitted.
-            // ⚠ That empty response DROPS a whole-call error. Java's all() is a thenApply over
-            // the one future, so it propagates a whole-call failure whatever the key count,
-            // and since M15/P13.1 (single-callback ABI) an empty request here waits for the
-            // core's real outcome too, so result.All() carries that error even at zero keys.
-            // This servicer does not await it. Python's servicer has the identical gap, so
-            // the behaviour change is deferred to a cross-binding harness item rather than
-            // made here alone.
+            // No keyed future map: the requested keys drive the walk, as Java's
+            // partitionResult(tp). An empty request gets an empty response, which drops a
+            // whole-call error that All() carries, as Python's servicer does.
             Dictionary<TopicPartition, AsyncKafkaFuture> futures = new Dictionary<TopicPartition, AsyncKafkaFuture>();
             foreach (TopicPartition partition in offsets.Keys)
             {
@@ -1465,7 +1373,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroupOffsets(Proto.DeleteConsumerGroupOffsetsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1485,8 +1392,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // Same single-future shape as AlterConsumerGroupOffsets above, empty case included —
-            // including the dropped whole-call error at zero keys and its deferral.
+            // Same shape as AlterConsumerGroupOffsets, the empty-request case included.
             Dictionary<TopicPartition, AsyncKafkaFuture> futures = new Dictionary<TopicPartition, AsyncKafkaFuture>();
             foreach (TopicPartition partition in partitions)
             {
@@ -1502,7 +1408,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> DeleteConsumerGroups(Proto.DeleteConsumerGroupsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1520,8 +1425,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // Genuinely per-key futures here (Map<String, KafkaFuture<Void>>), so the
-            // top-level error keeps its ordinary narrow meaning.
             return await TranslateAdmin.VoidResponse(result.DeletedGroups, TranslateAdmin.NameKey)
                 .ConfigureAwait(false);
         }
@@ -1531,7 +1434,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> RemoveMembersFromConsumerGroup(Proto.RemoveMembersFromConsumerGroupRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1542,9 +1444,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // Absent members selects Java's no-argument constructor (removeAll); a present
-            // list — including an empty one, which the collection constructor rejects with
-            // Java's exact message — selects the other. Presence is the discriminant.
+            // Presence, not emptiness, selects Java's constructor: absent is removeAll; a present
+            // list, even an empty one that Java's collection constructor rejects, is the other.
             List<MemberToRemove>? members = TranslateAdmin.MembersToRemove(request.Members);
             RemoveMembersFromConsumerGroupOptions options = members is null
                 ? new RemoveMembersFromConsumerGroupOptions()
@@ -1560,10 +1461,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             if (options.RemoveAll)
             {
-                // In removeAll mode Java's memberResult refuses, so all() is the only
-                // observable: its failure is the top-level error and its success reports no
-                // per-member entry at all. Awaiting it here runs the removal to completion
-                // before responding.
+                // In removeAll mode Java's memberResult refuses, so All() is the only observable;
+                // awaiting it runs the removal to completion before responding.
                 Proto.KafkaError? error = await TranslateAdmin.ResolveVoid(result.All()).ConfigureAwait(false);
                 return error is null
                     ? new Proto.VoidKeyedResponse()
@@ -1586,9 +1485,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    // -- ACLs, quotas, SCRAM, tokens & features (slice G5) -------------------------------
-
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> CreateAcls(Proto.CreateAclsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1615,7 +1511,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeAclsResponse> DescribeAcls(Proto.DescribeAclsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1641,8 +1536,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // Whole-value: one future for the whole call, so an empty list is a successful
-            // "nothing matched" rather than a per-binding error arm.
             Proto.DescribeAclsResponse response = new Proto.DescribeAclsResponse();
             foreach (AclBinding binding in await result.Values().Get().ConfigureAwait(false))
             {
@@ -1657,7 +1550,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DeleteAclsResponse> DeleteAcls(Proto.DeleteAclsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1704,7 +1596,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeClientQuotasResponse> DescribeClientQuotas(Proto.DescribeClientQuotasRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1731,8 +1622,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // A removed quota is absent from the inner map rather than reported as zero, which
-            // is the only observable separating a removal from a zero-valued set.
             Proto.DescribeClientQuotasResponse response = new Proto.DescribeClientQuotasResponse();
             IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>> entities =
                 await result.Entities().Get().ConfigureAwait(false);
@@ -1758,7 +1647,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> AlterClientQuotas(Proto.AlterClientQuotasRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1786,7 +1674,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeUserScramCredentialsResponse> DescribeUserScramCredentials(Proto.DescribeUserScramCredentialsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1800,7 +1687,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // An empty `users` is Java's no-argument overload: describe every user.
             AsyncDescribeUserScramCredentialsResult result = admin.DescribeUserScramCredentials(
                 new List<string>(request.Users),
                 new DescribeUserScramCredentialsOptions
@@ -1808,29 +1694,39 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                     TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
                 });
 
-            // RAW per-user rows, so the client can rebuild all three Java views. users()
-            // excludes RESOURCE_NOT_FOUND users, so all()'s keys supply those; all() itself
-            // faults on a hard per-user error, and then every non-RNF user is already listed.
-            List<string> candidates = new List<string>(await result.Users().Get().ConfigureAwait(false));
+            // Java's three views, composed as admin_service.proto specifies: all(); when it fails,
+            // users() plus description(user) per user, and all()'s error when no user is left.
+            IReadOnlyDictionary<string, UserScramCredentialsDescription> all;
             try
             {
-                foreach (string user in (await result.All().Get().ConfigureAwait(false)).Keys)
-                {
-                    if (!candidates.Contains(user))
-                    {
-                        candidates.Add(user);
-                    }
-                }
+                all = await result.All().Get().ConfigureAwait(false);
             }
-            catch (KafkaException)
+            catch (Exception)
             {
+                Proto.DescribeUserScramCredentialsResponse fallback =
+                    new Proto.DescribeUserScramCredentialsResponse();
+                foreach (string user in await result.Users().Get().ConfigureAwait(false))
+                {
+                    fallback.Entries.Add(await ScramCredentialsEntry(result, user).ConfigureAwait(false));
+                }
+
+                if (fallback.Entries.Count == 0)
+                {
+                    throw;
+                }
+
+                return fallback;
             }
 
             Proto.DescribeUserScramCredentialsResponse response =
                 new Proto.DescribeUserScramCredentialsResponse();
-            foreach (string user in candidates)
+            foreach (KeyValuePair<string, UserScramCredentialsDescription> pair in all)
             {
-                response.Entries.Add(await ScramCredentialsEntry(result, user).ConfigureAwait(false));
+                response.Entries.Add(new Proto.DescribeUserScramCredentialsEntry
+                {
+                    Key = TranslateAdmin.NameKey(pair.Key),
+                    Value = TranslateAdmin.ScramDescriptionToProto(pair.Value),
+                });
             }
 
             return response;
@@ -1841,7 +1737,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> AlterUserScramCredentials(Proto.AlterUserScramCredentialsRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1868,7 +1763,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.CreateDelegationTokenResponse> CreateDelegationToken(Proto.CreateDelegationTokenRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1879,8 +1773,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // An absent owner leaves Java's field unset, making the requesting principal the
-            // owner; both halves of the principal are absent together.
             CreateDelegationTokenOptions options = new CreateDelegationTokenOptions
             {
                 TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
@@ -1905,7 +1797,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DelegationTokenExpiryResponse> RenewDelegationToken(Proto.RenewDelegationTokenRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1935,7 +1826,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DelegationTokenExpiryResponse> ExpireDelegationToken(Proto.ExpireDelegationTokenRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1965,7 +1855,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeDelegationTokenResponse> DescribeDelegationToken(Proto.DescribeDelegationTokenRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -1997,7 +1886,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.DescribeFeaturesResponse> DescribeFeatures(Proto.DescribeFeaturesRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -2008,14 +1896,17 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
         try
         {
-            // An absent node_id is Java's empty OptionalInt; node 0 is a legal broker, so
-            // presence is what carries the absence.
-            AsyncDescribeFeaturesResult result = admin.DescribeFeatures(
-                new DescribeFeaturesOptions
-                {
-                    TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
-                    NodeId = request.HasNodeId ? request.NodeId : (int?)null,
-                });
+            DescribeFeaturesOptions options = new DescribeFeaturesOptions
+            {
+                TimeoutMs = TranslateAdmin.Timeout(request.HasTimeoutMs, request.TimeoutMs),
+            };
+
+            if (request.HasNodeId)
+            {
+                options.NodeId = request.NodeId;
+            }
+
+            AsyncDescribeFeaturesResult result = admin.DescribeFeatures(options);
 
             FeatureMetadata metadata = await result.FeatureMetadata().Get().ConfigureAwait(false);
             return new Proto.DescribeFeaturesResponse
@@ -2029,7 +1920,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <inheritdoc/>
     public override async Task<Proto.VoidKeyedResponse> UpdateFeatures(Proto.UpdateFeaturesRequest request, ServerCallContext context)
     {
         IAsyncAdmin? admin = Get(request.AdminId);
@@ -2047,9 +1937,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
                 return new Proto.VoidKeyedResponse { Error = TranslateAdmin.RequestError(invalid!) };
             }
 
-            // An empty map is forwarded as such: a real client rejects it synchronously, as Java
-            // does, and that throw is exactly what the top-level error is for; a mock, like
-            // Java's, returns an empty result.
+            // An empty map is forwarded: a real client throws (the top-level error) and a mock
+            // returns an empty result, both as in Java.
             AsyncUpdateFeaturesResult result = admin.UpdateFeatures(
                 updates,
                 new UpdateFeaturesOptions
@@ -2067,11 +1956,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <summary>
-    /// One <c>deleteAcls</c> filter's matched ACLs — envelope exception 3: the per-filter future
-    /// resolved, yet an individual matched ACL can still have failed to delete. Both halves are
-    /// written independently, so a backend that set neither or both stays visible.
-    /// </summary>
     private static Proto.FilterResults FilterResultsToProto(DeleteAclsResult.FilterResults results)
     {
         Proto.FilterResults proto = new Proto.FilterResults();
@@ -2094,10 +1978,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         return proto;
     }
 
-    /// <summary>
-    /// One RAW <c>describeUserScramCredentials</c> row: the user's key, plus either its
-    /// description or the error that <c>description(user)</c> faulted with.
-    /// </summary>
     private static async Task<Proto.DescribeUserScramCredentialsEntry> ScramCredentialsEntry(
         AsyncDescribeUserScramCredentialsResult result, string user)
     {
@@ -2116,7 +1996,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         return entry;
     }
 
-    /// <summary>Proto <c>TopicPartition</c>s -&gt; binding ones.</summary>
     private static IEnumerable<TopicPartition> PartitionsOf(IEnumerable<Proto.TopicPartition> protos)
     {
         foreach (Proto.TopicPartition proto in protos)
@@ -2125,9 +2004,6 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         }
     }
 
-    /// <summary>
-    /// One <c>describeTopics</c> entry: the key plus that key's own description or error.
-    /// </summary>
     private static async Task<Proto.DescribeTopicsEntry> DescribeTopicsEntry(
         Proto.ResultKey key, AsyncKafkaFuture<TopicDescription> future)
     {
@@ -2146,11 +2022,8 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         return entry;
     }
 
-    /// <summary>
-    /// One created topic's <c>TopicMetadataAndConfig</c> — envelope exception 3: the per-key
-    /// future resolved, but the four accessors rethrow when the broker created the topic without
-    /// returning its metadata, and that third state must cross as the value's own error arm.
-    /// </summary>
+    // The per-key future resolved, but the accessors throw when the broker created the topic
+    // without returning its metadata: that crosses as the value's own error arm.
     private static async Task<Proto.TopicMetadataAndConfig> MetadataAndConfig(AsyncCreateTopicsResult result, string topic)
     {
         try
@@ -2169,7 +2042,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
 
             return new Proto.TopicMetadataAndConfig { Metadata = metadata };
         }
-        catch (KafkaException ex)
+        catch (Exception ex)
         {
             return new Proto.TopicMetadataAndConfig { Error = Translate.ToProto(ex) };
         }

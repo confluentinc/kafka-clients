@@ -16,16 +16,11 @@ using System.Diagnostics;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>
-/// Resident-set-size sampler — the <c>psutil</c> <c>memory_info().rss</c> analog
-/// (<c>performance_common.py</c> <c>MemoryBucket</c>). Sampled once per rollover; the value is
-/// <see cref="Process.WorkingSet64"/> in bytes.
-/// </summary>
+/// <summary>Samples the process's resident set size in bytes, Python's <c>MemoryBucket</c>.</summary>
 internal sealed class MemorySampler
 {
     private readonly Process _process = Process.GetCurrentProcess();
 
-    /// <summary>Returns the current process resident set size in bytes.</summary>
     internal double Sample()
     {
         _process.Refresh();
@@ -34,23 +29,20 @@ internal sealed class MemorySampler
 }
 
 /// <summary>
-/// CPU-utilization sampler — the <c>psutil</c> <c>Process.cpu_percent()</c> analog
-/// (<c>performance_common.py</c> <c>CPUBucket</c>). Each sample returns utilization since the previous
-/// sample as <c>Δ(TotalProcessorTime) / Δ(wall-clock) * 100</c> — deliberately <b>not</b> divided by
-/// <c>ProcessorCount</c>, so (like psutil) it can exceed 100 % on a multi-core box. The first sample has
-/// no baseline and returns <c>0.0</c> (mirroring psutil's first-call behavior).
+/// Samples the process's CPU utilization since the previous sample, Python's <c>CPUBucket</c> (psutil's
+/// <c>cpu_percent</c>): not divided by the core count, so it can exceed 100 %; a first sample without a baseline is
+/// <c>0.0</c>.
 /// </summary>
 internal sealed class CpuSampler
 {
     private readonly Process _process = Process.GetCurrentProcess();
 
-    // Sample runs on the collector thread; ResetBaseline runs on the measuring thread.
+    // Sample runs on the collector thread, ResetBaseline on the measuring thread.
     private readonly object _lock = new object();
     private bool _hasBaseline;
     private double _lastCpuSeconds;
     private long _lastWallTimestamp;
 
-    /// <summary>Returns CPU utilization (%) since the previous call; the first call returns <c>0.0</c>.</summary>
     internal double Sample()
     {
         lock (_lock)
@@ -76,12 +68,6 @@ internal sealed class CpuSampler
         }
     }
 
-    /// <summary>
-    /// Restarts the span the next <see cref="Sample"/> covers at "now", and gives it a baseline, so that
-    /// sample reports CPU since this call rather than since the previous sample, or <c>0.0</c> for having
-    /// none. Python calls <c>cpu_percent()</c> for the same effect, so that a run's first measured sample
-    /// covers only measured time.
-    /// </summary>
     internal void ResetBaseline()
     {
         lock (_lock)

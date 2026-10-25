@@ -23,46 +23,27 @@ using System.Threading;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// The telemetry pipeline <see cref="SoakMetrics"/> drives <i>in addition</i> to the
-/// JSONL file. Injectable so the export-path contracts (notably the ms-recorded /
-/// seconds-exported conversion) can be asserted without a collector.
+/// The telemetry pipeline <see cref="SoakMetrics"/> drives besides the JSONL file; injectable, so
+/// the export-path contracts can be asserted without a collector.
 /// </summary>
 internal interface ISoakTelemetrySink : IDisposable
 {
-    /// <summary>Adds <paramref name="increment"/> to the counter <paramref name="fullName"/>.</summary>
     void IncrCounter(string fullName, long increment, IReadOnlyDictionary<string, string> tags);
 
-    /// <summary>Records the latest value of the gauge <paramref name="fullName"/>.</summary>
     void SetGauge(string fullName, double value, IReadOnlyDictionary<string, string> tags);
 
-    /// <summary>Flushes and stops the pipeline. Never throws, never blocks indefinitely.</summary>
     void Shutdown();
 }
 
 /// <summary>
-/// The soak's counters and gauges on top of the forked metric primitives
-/// (<see cref="Bucket"/> / <see cref="LatencyHistogram"/>), plus the per-window rollover
-/// thread that appends one JSON object per line to the metrics file.
-/// <para>
-/// The JSONL file is <b>always</b> written — it is the durable local record a two-week
-/// run is analysed from, and it is what makes the soak runnable whether or not the OTLP
-/// pipeline is up. An OpenTelemetry pipeline is driven in addition when
-/// <c>OTEL_METRICS_EXPORTER</c> requests one <i>and it could actually be built</i>; see
-/// <see cref="OtelSink.Create"/>, which logs loudly and falls back to JSONL rather than
-/// silently exporting into a meter nothing listens to.
-/// </para>
-/// <para>
-/// The file is <b>appended</b>, not truncated (<c>run.sh</c> restarts the client
-/// repeatedly and each restart must extend the series), and flushed on every write so a
-/// <c>kill -9</c> or a log-rotating supervisor cannot lose samples already collected.
-/// </para>
+/// The soak's counters and gauges over <see cref="Bucket"/> and <see cref="LatencyHistogram"/>: a
+/// rollover thread appends one JSON line per window to the metrics file (always written, appended
+/// across <c>run.sh</c> restarts, flushed per write), plus the OTLP pipeline when one is built.
 /// </summary>
 internal sealed class SoakMetrics : IDisposable
 {
-    /// <summary>Sentinel for an unset measurement bound — serialized as the <c>"-inf"</c> string.</summary>
     private const long UnsetMs = long.MinValue;
 
-    /// <summary>Gauges recorded through the 1 ms histogram rather than a plain bucket.</summary>
     internal static readonly IReadOnlyCollection<string> LatencyGauges = new HashSet<string>(StringComparer.Ordinal)
     {
         "producer.latency",
@@ -70,21 +51,8 @@ internal sealed class SoakMetrics : IDisposable
         "consumer.recovery_ms",
     };
 
-    /// <summary>
-    /// Gauges EXPORTED in seconds while still being RECORDED in milliseconds.
-    /// <para>
-    /// The reference soak reports both of these as a float in seconds, so dashboards
-    /// built against <c>kafka.client.soak.python.*</c> read ours on the same scale. The
-    /// conversion has to happen on the export path and nowhere else: the latency buckets
-    /// are 1 ms wide, so handing one seconds sends every sample to <c>(long)0.016 == 0</c>
-    /// and reports p50/p90/p99/p999 as zero — silently destroying the JSONL, which is the
-    /// artifact a two-week run is actually analysed from.
-    /// </para>
-    /// <para>
-    /// <c>consumer.recovery_ms</c> is deliberately absent: its name asserts milliseconds
-    /// and it has no reference-soak counterpart to match.
-    /// </para>
-    /// </summary>
+    // Recorded in ms, exported in seconds as Python's soak; converting on record would put every
+    // sample in the 0 ms bucket. consumer.recovery_ms stays in ms.
     internal static readonly IReadOnlyCollection<string> SecondsOnExport = new HashSet<string>(StringComparer.Ordinal)
     {
         "producer.latency",
@@ -106,9 +74,7 @@ internal sealed class SoakMetrics : IDisposable
     private readonly string _prefix;
     private readonly TextWriter _writer;
 
-    // The collector waits on this rather than sleeping, so Stop returns promptly instead
-    // of waiting out the current window. At the soak's 10 s interval a Thread.Sleep-based
-    // sampler would stall every shutdown by up to 10 s.
+    // Waited on instead of sleeping, so Stop returns without waiting out the window.
     private readonly ManualResetEventSlim _stop = new ManualResetEventSlim(false);
 
     private Bucket _latency = new Bucket(withHistogram: true);
@@ -124,9 +90,6 @@ internal sealed class SoakMetrics : IDisposable
     private Thread? _thread;
     private bool _closed;
 
-    /// <summary>
-    /// Creates the metrics harness, opening <paramref name="path"/> in APPEND mode.
-    /// </summary>
     internal SoakMetrics(
         string path,
         IReadOnlyDictionary<string, string> baseTags,
@@ -137,7 +100,6 @@ internal sealed class SoakMetrics : IDisposable
     {
     }
 
-    /// <summary>Creates the harness over an arbitrary writer (used by the unit tests).</summary>
     internal SoakMetrics(
         TextWriter writer,
         IReadOnlyDictionary<string, string> baseTags,
@@ -153,22 +115,16 @@ internal sealed class SoakMetrics : IDisposable
         _windowStartMs = NowMs();
     }
 
-    /// <summary>Whether a real exporting telemetry pipeline was established.</summary>
     internal bool OtelEnabled => _otel is not null;
 
-    /// <summary>The metric-name prefix every exported instrument carries.</summary>
     internal string Prefix => _prefix;
 
-    /// <summary>Wall-clock epoch milliseconds (Python's <c>int(time.time() * 1000)</c>).</summary>
     internal static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-    /// <summary>Marks the start of the measured interval; windows from here feed the CPU/RSS averages.</summary>
     internal void SetMeasurementStart(long epochMs) => Volatile.Write(ref _measurementStartMs, epochMs);
 
-    /// <summary>Marks the end of the measured interval; later windows are cooldown and excluded.</summary>
     internal void SetMeasurementEnd(long epochMs) => Volatile.Write(ref _measurementEndMs, epochMs);
 
-    /// <summary>Increments a counter, both in the JSONL record and (if enabled) on the export pipeline.</summary>
     internal void IncrCounter(string metricName, long increment, IReadOnlyDictionary<string, string>? tags = null)
     {
         string key = MetricKey(metricName, tags);
@@ -182,11 +138,6 @@ internal sealed class SoakMetrics : IDisposable
         sink?.IncrCounter(_prefix + metricName, increment, tags ?? s_emptyTags);
     }
 
-    /// <summary>
-    /// Records a gauge observation. Callers hand this MILLISECONDS for everything in
-    /// <see cref="SecondsOnExport"/>; the seconds conversion happens here, on the export
-    /// path only, so the 1 ms-wide histogram keeps usable percentiles.
-    /// </summary>
     internal void SetGauge(string metricName, double value, IReadOnlyDictionary<string, string>? tags = null)
     {
         string key = MetricKey(metricName, tags);
@@ -209,7 +160,6 @@ internal sealed class SoakMetrics : IDisposable
         }
     }
 
-    /// <summary>Feeds the throughput / latency buckets for one consumed message.</summary>
     internal void ObserveMessage(long sizeBytes, double? latencyMs)
     {
         lock (_lock)
@@ -223,11 +173,7 @@ internal sealed class SoakMetrics : IDisposable
         }
     }
 
-    /// <summary>
-    /// Starts the background rollover thread. Idempotent. The thread is a background
-    /// thread so a crash before <see cref="StopCollecting"/> still lets the process exit
-    /// (mirroring Python's <c>daemon=True</c>); a normal shutdown joins it.
-    /// </summary>
+    // A background thread, as Python's daemon=True; a normal shutdown joins it.
     internal void StartCollecting(double intervalSeconds)
     {
         if (_thread is not null)
@@ -240,12 +186,8 @@ internal sealed class SoakMetrics : IDisposable
         {
             while (!_stop.Wait(intervalMs))
             {
-                // ⚠ TOTAL BY CONSTRUCTION. An unhandled exception on a background thread
-                // terminates the whole .NET process, so without this guard a full disk
-                // (entirely plausible on a two-week run) or a transient Process.Refresh
-                // failure would kill the soak from its own telemetry. Log the window and
-                // keep sampling: losing one window is a data gap, losing the process is
-                // the run.
+                // Total: an unhandled exception here would end the process, so a full disk would
+                // kill the soak through its own telemetry; log and lose one window instead.
                 try
                 {
                     WriteRecord(Rollover());
@@ -263,7 +205,6 @@ internal sealed class SoakMetrics : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Stops the rollover thread and joins it.</summary>
     internal void StopCollecting()
     {
         _stop.Set();
@@ -275,10 +216,8 @@ internal sealed class SoakMetrics : IDisposable
         }
     }
 
-    /// <summary>Writes one last window before shutting down.</summary>
     internal void WriteFinal() => WriteRecord(Rollover());
 
-    /// <summary>Flushes and stops the telemetry pipeline, then closes the metrics file.</summary>
     internal void Close()
     {
         ISoakTelemetrySink? sink = Interlocked.Exchange(ref _otel, null);
@@ -301,7 +240,6 @@ internal sealed class SoakMetrics : IDisposable
         }
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         StopCollecting();
@@ -309,11 +247,6 @@ internal sealed class SoakMetrics : IDisposable
         Close();
     }
 
-    /// <summary>
-    /// Rolls every window accumulator over and returns the JSON line. Internal rather than
-    /// private so the tests can assert the ms-recorded / seconds-exported contract on the
-    /// resulting percentiles.
-    /// </summary>
     internal string Rollover()
     {
         lock (_lock)
@@ -362,10 +295,6 @@ internal sealed class SoakMetrics : IDisposable
         }
     }
 
-    /// <summary>
-    /// The JSONL key for a metric: the bare name, or <c>name{k=v,k2=v2}</c> with the tags
-    /// sorted, matching Python's <c>SoakMetrics._key</c>.
-    /// </summary>
     internal static string MetricKey(string name, IReadOnlyDictionary<string, string>? tags)
     {
         if (tags is null || tags.Count == 0)
@@ -519,12 +448,6 @@ internal sealed class SoakMetrics : IDisposable
         AppendJsonString(sb, value);
     }
 
-    /// <summary>
-    /// Appends a JSON string literal. Counter/gauge keys are built from metric names and
-    /// tag values — a topic or variant an operator chose — so they are escaped rather than
-    /// interpolated raw: one stray quote would otherwise make the whole two-week series
-    /// unparseable.
-    /// </summary>
     private static void AppendJsonString(StringBuilder sb, string value)
     {
         sb.Append('"');

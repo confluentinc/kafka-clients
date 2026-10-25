@@ -22,15 +22,9 @@ using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Performance;
 
-/// <summary>The consumer benchmark summary — the fields written to <c>results.json</c> and used for the exit code (§6.3).</summary>
+/// <summary>The consumer benchmark's outcome, from which the exe chooses its exit code.</summary>
 public sealed class ConsumerBenchmarkResult
 {
-    /// <summary>
-    /// Process exit code meaning "the setup never came up" — the pipeline was not live at the edge, so
-    /// nothing was measured and the run should be RETRIED rather than reported as a failure. The C# analog
-    /// of <c>consumer_performance_test.py</c>'s <c>SETUP_NOT_READY_RC</c>, shared so the two
-    /// <c>ConsumerMain</c>s and the in-suite smoke's retry loop all agree on the value.
-    /// </summary>
     public const int SetupNotReadyExitCode = 2;
 
     internal ConsumerBenchmarkResult(bool assignmentFailed, bool setupNotReady, long messagesMeasured, long p99)
@@ -41,56 +35,22 @@ public sealed class ConsumerBenchmarkResult
         P99 = p99;
     }
 
-    /// <summary>Whether the run aborted waiting for a partition assignment (Python returns <c>None</c> — exit 1).</summary>
     public bool AssignmentFailed { get; }
 
-    /// <summary>
-    /// Whether the readiness gate never saw enough measurable records (Python's <c>SETUP_NOT_READY</c>
-    /// sentinel — exit <see cref="SetupNotReadyExitCode"/>, retryable, NOT a benchmark failure).
-    /// </summary>
     public bool SetupNotReady { get; }
 
-    /// <summary>Number of measured (warmup-excluded) records (Python <c>messages_measured</c>).</summary>
     public long MessagesMeasured { get; }
 
-    /// <summary>The measured p99 latency in ms (for the <c>P99_LIMIT_MS</c> gate).</summary>
     public long P99 { get; }
 }
 
 /// <summary>
-/// The client-agnostic consumer end-to-end-latency engine — the C# analog of
-/// <c>consumer_performance_test.py</c>'s <c>run</c> (sync) / <c>run_async</c> (async), sharing one
-/// <see cref="Measurement"/> so the two paths compute identical stats. Per-record e2e latency is
-/// <c>now_ms - record.Timestamp</c>, recorded only when the record carries a positive timestamp and the
-/// latency is non-negative.
+/// The client-free consumer end-to-end latency engine, Python's <c>run</c> / <c>run_async</c> over one shared
+/// <see cref="Measurement"/>: a readiness gate waits for measurable records before the timed window, and a run whose
+/// pipeline never goes live returns <see cref="ConsumerBenchmarkResult.SetupNotReady"/>, to be retried.
 /// </summary>
-/// <remarks>
-/// <para>
-/// Topic (re)creation is <b>not</b> performed here — it runs in the calling exe's <c>ConsumerMain</c>
-/// (each exe's own <c>TopicProvisioning.RecreateTopic</c>, called when <see cref="ConsumerBenchmarkConfig.CreateTopic"/>
-/// is set) <b>before</b> this engine is invoked, since an AdminClient is unavoidably client-specific and
-/// this class carries no client dependency (M13/P1 D8) — see <c>PerfV3/TopicProvisioning.cs</c>'s remarks.
-/// When <c>KAFKA_BIN</c> is set this engine self-spawns <c>kafka-producer-perf-test.sh</c> as the load
-/// driver (mirroring Python's <c>spawn_producer</c>); otherwise an external producer must feed the topic.
-/// </para>
-/// <para>
-/// Before the timed window opens, a <b>readiness gate</b> waits for
-/// <see cref="ConsumerBenchmarkConfig.ReadinessMinRecords"/> records with a usable, non-negative latency
-/// to actually flow (Python's <c>_readiness_ok</c>). "Caught up to the live edge" is not the same as
-/// "data is flowing" — a feeder still starting up in a container leaves the measured window empty, which
-/// would be reported as a product failure. Records consumed by the gate are warmup and are NOT measured.
-/// When the gate expires the run returns <see cref="ConsumerBenchmarkResult.SetupNotReady"/> so the caller
-/// can exit <see cref="ConsumerBenchmarkResult.SetupNotReadyExitCode"/> and be retried.
-/// </para>
-/// <para>
-/// <b>Deliberate divergence from Python</b> (recorded per <c>definition-of-done.md</c> §7): the gate's
-/// early return also stops the load driver. Python leaks its <c>spawn_producer</c> subprocess on this path
-/// (its <c>finally</c> block lives inside the measurement <c>try</c> it never enters); in .NET that would
-/// be a real orphaned process, so <see cref="LoadDriver.Stop"/> is called before returning.
-/// </remarks>
 public static class ConsumerBenchmark
 {
-    /// <summary>Runs the <b>sync</b> consumer benchmark (Python <c>run</c>) and returns its stats.</summary>
     public static ConsumerBenchmarkResult Run(ConsumerBenchmarkConfig config, IConsumerBackend backend, Metrics metrics)
     {
         PrintHeader(config);
@@ -124,9 +84,7 @@ public static class ConsumerBenchmark
 
         if (!AwaitPipelineReady(config, poll))
         {
-            // Deliberate divergence from Python (see the type remarks): stop the load driver we started
-            // rather than leaking it. Metrics.StopCollecting is a no-op here — StartCollecting only runs
-            // in Measurement.Begin, which this early return precedes — so no sampler thread is stranded.
+            // Unlike Python, which leaks its spawn_producer process here, stop the load driver.
             loadDriver?.Stop();
             backend.Close();
             return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
@@ -151,7 +109,6 @@ public static class ConsumerBenchmark
         }
         catch (MeasurementDone)
         {
-            // num_messages reached.
         }
         finally
         {
@@ -165,7 +122,6 @@ public static class ConsumerBenchmark
         return Summarize(config, measurement, metrics);
     }
 
-    /// <summary>Runs the <b>async</b> consumer benchmark (Python <c>run_async</c>) and returns its stats.</summary>
     public static async Task<ConsumerBenchmarkResult> RunAsync(ConsumerBenchmarkConfig config, IAsyncConsumerBackend backend, Metrics metrics)
     {
         PrintHeader(config);
@@ -200,7 +156,7 @@ public static class ConsumerBenchmark
 
         if (!await AwaitPipelineReadyAsync(config, poll).ConfigureAwait(false))
         {
-            // Same deliberate divergence + StopCollecting note as the sync path above.
+            // Unlike Python, which leaks its spawn_producer process here, stop the load driver.
             loadDriver?.Stop();
             await backend.Close().ConfigureAwait(false);
             return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
@@ -225,7 +181,6 @@ public static class ConsumerBenchmark
         }
         catch (MeasurementDone)
         {
-            // num_messages reached.
         }
         finally
         {
@@ -239,11 +194,6 @@ public static class ConsumerBenchmark
         return Summarize(config, measurement, metrics);
     }
 
-    /// <summary>
-    /// Blocks until <see cref="ConsumerBenchmarkConfig.ReadinessMinRecords"/> measurable records have
-    /// flowed, or the readiness budget expires — Python's gate loop plus <c>_readiness_ok</c>. Returns
-    /// <see langword="false"/> when the pipeline never went live.
-    /// </summary>
     private static bool AwaitPipelineReady(ConsumerBenchmarkConfig config, Func<IReadOnlyList<PolledRecord>> poll)
     {
         double deadline = Monotonic() + config.ReadinessTimeoutSeconds;
@@ -264,7 +214,6 @@ public static class ConsumerBenchmark
         return ReadinessOk(config, measurable, received);
     }
 
-    /// <summary>Async counterpart of <see cref="AwaitPipelineReady"/> (Python's <c>run_async</c> gate).</summary>
     private static async Task<bool> AwaitPipelineReadyAsync(ConsumerBenchmarkConfig config, Func<Task<IReadOnlyList<PolledRecord>>> poll)
     {
         double deadline = Monotonic() + config.ReadinessTimeoutSeconds;
@@ -285,7 +234,6 @@ public static class ConsumerBenchmark
         return ReadinessOk(config, measurable, received);
     }
 
-    /// <summary>Logs and reports the gate outcome — Python's <c>_readiness_ok</c>, message-for-message.</summary>
     private static bool ReadinessOk(ConsumerBenchmarkConfig config, long measurable, long received)
     {
         if (measurable >= config.ReadinessMinRecords)
@@ -300,13 +248,6 @@ public static class ConsumerBenchmark
         return false;
     }
 
-    /// <summary>
-    /// The e2e latency in ms when the record carries a usable CreateTime and the latency is non-negative,
-    /// else <see langword="null"/> (Python's <c>_measurable_latency_ms</c>). Shared by the readiness gate
-    /// and <see cref="Measurement.ProcessRecord"/> so the two can never disagree about what "measurable"
-    /// means. A negative latency is what a cross-clock boundary (a container VM whose clock drifts from
-    /// the host) produces, and it is dropped rather than recorded.
-    /// </summary>
     private static long? MeasurableLatencyMs(long tsMs)
     {
         if (tsMs > 0)
@@ -371,9 +312,7 @@ public static class ConsumerBenchmark
         double thrMsg = duration > 0 ? m.MeasuredMessages / duration : 0.0;
         double thrMib = duration > 0 ? (m.MeasuredMessages * (double)config.MessageSize) / (1024.0 * 1024.0) / duration : 0.0;
 
-        // CPU / RSS averages over the measured interval, from the shared sampler: the same keys and units
-        // (rss_avg_mb, MB) as the other consumer harnesses' summaries; the producer harnesses' results.json
-        // use rss_avg_kib instead (Python _summarize).
+        // rss_avg_mb (MB), as Python's consumer summary; the producer harnesses report rss_avg_kib.
         ExternalMetricsAggregations agg = metrics.ExternalMetricsAggregations();
         (double Cpu, double RssMb)? external = agg.TotalExternalMetrics > 0
             ? (agg.AverageCpu, agg.AverageRss / (1024.0 * 1024.0))
@@ -451,22 +390,20 @@ public static class ConsumerBenchmark
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // Non-fatal: the summary is already on stdout (Python swallows the same OSError, which also
-            // covers the permission error .NET reports as UnauthorizedAccessException).
+            // Non-fatal, as in Python: the summary is already on stdout.
         }
     }
 
     private static double Monotonic() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
-    /// <summary>Raised when the measured-message cap is reached (Python's <c>_Done</c> control-flow exception).</summary>
+    /// <summary>Thrown when the measured-message cap is reached, Python's <c>_Done</c>.</summary>
     private sealed class MeasurementDone : Exception
     {
     }
 
     /// <summary>
-    /// Shared loop state for the sync <see cref="Run"/> and async <see cref="RunAsync"/> — the C# analog of
-    /// Python's <c>_Measurement</c>, so the warmup→measure transition, latency histogram, and
-    /// termination semantics live in one place.
+    /// The loop state <see cref="Run"/> and <see cref="RunAsync"/> share, Python's <c>_Measurement</c>: the warmup to
+    /// measure switch, the latency histogram and the stop conditions.
     /// </summary>
     private sealed class Measurement
     {
@@ -493,8 +430,7 @@ public static class ConsumerBenchmark
 
         internal void Begin()
         {
-            // Primed before the sampler starts, so there is no race with it: the first sample then covers
-            // time since here and is not psutil's meaningless first-call 0.0 (Python begin).
+            // Primed before the sampler starts, so its first sample covers only measured time.
             _metrics.ResetCpuBaseline();
             _metrics.StartCollecting(_cfg.IntervalSeconds);
             if (_warmupComplete)
@@ -518,7 +454,7 @@ public static class ConsumerBenchmark
                     _warmupComplete = true;
                     _measureStart = now;
 
-                    // Excludes warmup CPU from the first measured CPU sample (Python process_record).
+                    // Excludes the warmup's CPU from the first measured sample.
                     _metrics.ResetCpuBaseline();
                     _metrics.SetMeasurementStart(Metrics.NowMs());
                     Console.WriteLine($">>> warmup complete ({_cfg.WarmupSeconds}s); measuring");

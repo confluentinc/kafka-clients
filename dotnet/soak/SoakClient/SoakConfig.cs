@@ -21,58 +21,26 @@ using System.Linq;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// Client-configuration routing, validation and file parsing — the port of
-/// <c>soakclient.py</c>'s <c>filter_config</c> / <c>route_shared_config</c> /
-/// <c>validate_config</c> / <c>parse_config_file</c>.
-/// <para>
-/// ⚠ <c>stringify_config</c> is deliberately NOT ported. It exists in Python because the
-/// C extension raises <c>TypeError</c> on a non-string configuration value, so an int
-/// <c>linger.ms</c> from a profile would abort startup. Here the parsed configuration is
-/// <c>IReadOnlyDictionary&lt;string, string&gt;</c> by construction — both the file
-/// parser and <c>KafkaProducer</c>/<c>KafkaConsumer</c>/<c>AsyncKafkaAdminClient</c> take
-/// string values — so a coercion helper would have nothing to coerce.
-/// </para>
-/// <para>
-/// ⚠ <c>librdkafka_admin_config</c> (the config <i>translator</i>) is deliberately NOT
-/// ported (PLAN D6). It exists in Python only because its topic creation used to go
-/// through librdkafka's AdminClient, whose configuration namespace had no
-/// <c>sasl.jaas.config</c> and errored on unknown keys. This binding's
-/// <c>AsyncKafkaAdminClient</c> — like the Python soak's admin client today — takes the SAME
-/// Java-shaped config the producer and consumer take, so <c>sasl.jaas.config</c> flows
-/// through untouched and there is nothing to translate.
-/// </para>
-/// <para>
-/// <c>JaasField</c> / <c>JaasCredentials</c> / <c>CheckAdminCredentials</c>, by
-/// contrast, ARE ported: they don't translate anything, they <i>validate</i> that a
-/// SASL-configured admin config actually carries usable credentials — the same
-/// fail-fast the Python soak added once it moved onto the Rust-backed admin client,
-/// which silently defaults to PLAINTEXT on a protocol/credential mismatch rather than
-/// rejecting it.
-/// </para>
+/// Client-configuration routing, validation and file parsing: the Python soak's config helpers,
+/// except <c>stringify_config</c> (every value here is already a string).
 /// </summary>
 internal static class SoakConfig
 {
-    // -----------------------------------------------------------------------------
-    // Accepted client configuration keys.
-    //
-    // The Rust client only *warns* on an unknown configuration key
-    // (rust/src/producer/producer_config.rs, rust/src/consumer/consumer_config.rs, both end their
-    // new() match with a `warn!("Unknown ... key")` arm), so a typo would
-    // silently start a soak with the default value — e.g. an unauthenticated PLAINTEXT
-    // connection. A multi-day run must not begin that way, so the soak validates its own
-    // configuration up front and refuses to start on an unknown key.
-    //
-    // Keep these in sync with the two Rust files named above.
-    // -----------------------------------------------------------------------------
+    // The core accepts an unknown key with one INFO line and uses the default, so a typo would
+    // start the soak on a default; as Python's soak, it refuses an unlisted key at startup. Keep
+    // the lists in sync with the core's ProducerConfig and ConsumerConfig.
 
-    /// <summary>Configuration keys the Rust producer recognises.</summary>
     internal static readonly IReadOnlyCollection<string> ProducerConfigKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         "acks",
         "batch.size",
+        "bootstrap.resolve.timeout.ms",
         "bootstrap.servers",
         "buffer.memory",
+        "buffer.memory.allocation.strategy",
+        "client.dns.lookup",
         "client.id",
+        "client.rack",
         "compression.type",
         "connections.max.idle.ms",
         "delivery.timeout.ms",
@@ -81,11 +49,13 @@ internal static class SoakConfig
         "max.block.ms",
         "max.in.flight.requests.per.connection",
         "max.request.size",
+        "metadata.cluster.check.enable",
         "metadata.max.age.ms",
         "metadata.max.idle.ms",
         "partitioner.adaptive.partitioning.enable",
         "partitioner.availability.timeout.ms",
         "partitioner.ignore.keys",
+        "partitioner.rack.aware",
         "receive.buffer.bytes",
         "reconnect.backoff.max.ms",
         "reconnect.backoff.ms",
@@ -101,12 +71,12 @@ internal static class SoakConfig
         "transactional.id",
     };
 
-    /// <summary>Configuration keys the Rust consumer recognises.</summary>
     internal static readonly IReadOnlyCollection<string> ConsumerConfigKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         "allow.auto.create.topics",
         "auto.commit.interval.ms",
         "auto.offset.reset",
+        "bootstrap.resolve.timeout.ms",
         "bootstrap.servers",
         "check.crcs",
         "client.dns.lookup",
@@ -126,16 +96,15 @@ internal static class SoakConfig
         "group.protocol",
         "group.remote.assignor",
         "heartbeat.interval.ms",
-        "interceptor.classes",
         "internal.throw.on.fetch.stable.offset.unsupported",
         "isolation.level",
         "max.partition.fetch.bytes",
         "max.poll.interval.ms",
         "max.poll.records",
+        "metadata.cluster.check.enable",
         "metadata.max.age.ms",
         "metadata.recovery.rebootstrap.trigger.ms",
         "metadata.recovery.strategy",
-        "metric.reporters",
         "metrics.num.samples",
         "metrics.recording.level",
         "metrics.sample.window.ms",
@@ -158,17 +127,8 @@ internal static class SoakConfig
         "socket.connection.setup.timeout.ms",
     };
 
-    /// <summary>
-    /// Both configs route every <c>ssl.*</c> key to <c>apply_ssl_config_key()</c> rather
-    /// than listing them individually, so the validator accepts the prefix wholesale.
-    /// </summary>
     internal static readonly IReadOnlyList<string> AcceptedConfigPrefixes = new[] { "ssl." };
 
-    /// <summary>
-    /// Routes a flat config map to one client: drops every key starting with one of
-    /// <paramref name="filterOut"/>, and strips <paramref name="stripPrefix"/> from the
-    /// keys that carry it.
-    /// </summary>
     internal static Dictionary<string, string> FilterConfig(
         IReadOnlyDictionary<string, string> conf,
         IReadOnlyCollection<string> filterOut,
@@ -191,18 +151,8 @@ internal static class SoakConfig
         return result;
     }
 
-    /// <summary>
-    /// Drops unprefixed keys that belong to the <i>other</i> client.
-    /// <para>
-    /// A single shared config file naturally carries <c>group.id</c> (consumer-only)
-    /// alongside <c>linger.ms</c> (producer-only). The reference soak hands both to every
-    /// client and relies on librdkafka ignoring what it does not want; validating
-    /// strictly (see <see cref="ValidateConfig"/>) would instead reject them. So a key
-    /// unknown to this client but known to the other one is routed away rather than
-    /// rejected — anything unknown to <b>both</b> still fails startup.
-    /// </para>
-    /// </summary>
-    /// <returns>The kept configuration, and the sorted names routed away.</returns>
+    // A shared file's key known only to the other client is dropped, not rejected, as Python's
+    // soak; a key unknown to both still fails startup.
     internal static (Dictionary<string, string> Kept, IReadOnlyList<string> Routed) RouteSharedConfig(
         IReadOnlyDictionary<string, string> conf,
         IReadOnlyCollection<string> ownKeys,
@@ -225,11 +175,6 @@ internal static class SoakConfig
         return (kept, routed);
     }
 
-    /// <summary>
-    /// Throws <see cref="ArgumentException"/> naming every key the Rust client would
-    /// ignore. See the comment on <see cref="ProducerConfigKeys"/> for why silent
-    /// acceptance is not survivable on a multi-day run.
-    /// </summary>
     internal static void ValidateConfig(
         IReadOnlyDictionary<string, string> conf,
         IReadOnlyCollection<string> accepted,
@@ -258,8 +203,6 @@ internal static class SoakConfig
             string.Join(", ", accepted.OrderBy(key => key, StringComparer.Ordinal))));
     }
 
-    /// <summary>Parses a <c>key=value</c> client configuration file.</summary>
-    /// <exception cref="ArgumentException">A non-comment, non-blank line has no <c>=</c>.</exception>
     internal static Dictionary<string, string> ParseConfigFile(TextReader reader)
     {
         var conf = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -289,27 +232,8 @@ internal static class SoakConfig
         return conf;
     }
 
-    /// <summary>
-    /// Extracts one field's value from a Java JAAS login-module string.
-    /// <para>
-    /// Accepts the spacing and quoting variants a JAAS string legally carries:
-    /// <c>username="k"</c>, <c>username = "k"</c>, <c>username='k'</c> and bare
-    /// <c>username=k</c>. Returns <c>null</c> only when the field is genuinely absent.
-    /// </para>
-    /// <para>
-    /// This mirrors the Rust parser (<c>SaslConfig::parse_jaas_option</c>) byte for byte
-    /// so the client and this validator never disagree: the key is recognized only at
-    /// an <b>option start</b> (beginning of string or after whitespace), quoted regions
-    /// are skipped wholesale <b>honoring backslash escapes</b>, and the value may be
-    /// double-quoted, single-quoted, or bare. A <c>name=</c> sequence living inside
-    /// another option's quoted value is therefore never mistaken for the option (e.g.
-    /// <c>password="username=x" username="right"</c> resolves <c>username</c> to
-    /// <c>right</c>, not <c>x</c>) — a naive scan could make that mistake and let a
-    /// missing-username config pass the fast-fail. The returned value is the raw inner
-    /// content between the quotes (escapes are honored for boundary detection but not
-    /// expanded), matching the Rust parser.
-    /// </para>
-    /// </summary>
+    // Mirrors the core's SaslConfig::parse_jaas_option, so the check and the client never disagree:
+    // a key counts only at an option start outside quotes, and the raw quoted content is returned.
     internal static string? JaasField(string jaasConfig, string name)
     {
         string s = jaasConfig;
@@ -368,10 +292,9 @@ internal static class SoakConfig
                             k += 1;
                         }
 
-                        return null; // unterminated quote — malformed
+                        return null;
                     }
 
-                    // Bare value: read until whitespace or ';'.
                     int bareEnd = j;
                     while (bareEnd < n && !char.IsWhiteSpace(s[bareEnd]) && s[bareEnd] != ';')
                     {
@@ -388,7 +311,6 @@ internal static class SoakConfig
         return null;
     }
 
-    /// <summary>Advances past a quoted region opening at <c>s[i]</c>, honoring '\' escapes.</summary>
     private static int SkipQuoted(string s, int i)
     {
         int n = s.Length;
@@ -413,7 +335,6 @@ internal static class SoakConfig
         return i;
     }
 
-    /// <summary>Whether <paramref name="s"/> starts with <paramref name="value"/> at <paramref name="index"/>.</summary>
     private static bool StartsWithAt(string s, int index, string value)
     {
         if (index + value.Length > s.Length)
@@ -424,44 +345,13 @@ internal static class SoakConfig
         return string.CompareOrdinal(s, index, value, 0, value.Length) == 0;
     }
 
-    /// <summary>
-    /// Extracts <c>(username, password)</c> from a Java JAAS login-module string. Either
-    /// element is <c>null</c> when that field is absent. Used only to <i>validate</i> the
-    /// soak's admin credentials at startup (<see cref="CheckAdminCredentials"/>) — the
-    /// Rust admin client takes <c>sasl.jaas.config</c> verbatim and parses it itself, so
-    /// these values are never forwarded anywhere.
-    /// </summary>
     internal static (string? Username, string? Password) JaasCredentials(string jaasConfig)
     {
         return (JaasField(jaasConfig, "username"), JaasField(jaasConfig, "password"));
     }
 
-    /// <summary>
-    /// Fails fast at startup when SASL is configured but credentials cannot be recovered
-    /// from <c>sasl.jaas.config</c>.
-    /// <para>
-    /// The Rust admin client parses <c>sasl.jaas.config</c> itself, so this does NOT
-    /// translate the config — it only <i>validates</i> that a username and password are
-    /// present. Silently proceeding with no usable credentials is the one outcome worth
-    /// refusing: it turns a typo into an authentication error from the broker minutes
-    /// later, or — with an unauthenticated listener — into a soak that runs for two weeks
-    /// against the wrong thing. PLAINTEXT (no SASL) requires no credentials and passes
-    /// untouched.
-    /// </para>
-    /// <para>
-    /// A second, symmetric misconfiguration is refused just as fast: SASL credentials or
-    /// a mechanism are configured, but <c>security.protocol</c> is not a SASL protocol
-    /// (does not contain <c>"SASL"</c>). The Rust client defaults to PLAINTEXT, so it
-    /// would connect <i>unauthenticated</i> while the operator believes SASL is in force
-    /// — exactly the "runs for two weeks against the wrong thing" failure, in the
-    /// opposite direction. Naming it at startup beats discovering it from an
-    /// unauthenticated listener later.
-    /// </para>
-    /// </summary>
-    /// <exception cref="SoakFatalStartupException">
-    /// A restart cannot fix a bad credential or a protocol mismatch, so it names the
-    /// missing piece. Maps to <see cref="SoakExitCodes.Fatal"/>.
-    /// </exception>
+    // Fails fast, as Python: SASL without a username and password, or SASL settings under a
+    // non-SASL protocol, where the core would connect unauthenticated.
     internal static void CheckAdminCredentials(IReadOnlyDictionary<string, string> conf)
     {
         string protocol = conf.TryGetValue("security.protocol", out string? protocolValue) ? protocolValue : string.Empty;
@@ -475,9 +365,6 @@ internal static class SoakConfig
         bool saslCredsPresent = username is not null || password is not null;
         bool saslConfigured = mechanism.Length > 0 || saslCredsPresent;
 
-        // SASL is configured, but the protocol would not actually use it: the client
-        // connects as PLAINTEXT (the Rust default) — silently unauthenticated. A restart
-        // cannot fix a protocol mismatch, so refuse before the run begins.
         if (saslConfigured && !protocolIsSasl)
         {
             throw new SoakFatalStartupException(string.Format(

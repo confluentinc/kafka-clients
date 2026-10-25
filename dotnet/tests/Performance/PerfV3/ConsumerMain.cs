@@ -19,10 +19,8 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// The <c>MODE=consumer</c> entry — the C# analog of <c>consumer_performance_test.py</c>'s <c>main</c>:
-/// build the v3 consumer config, run the sync or async e2e-latency engine (which writes <c>results.json</c>
-/// and <c>metrics.jsonl</c>), and return the exit code — non-zero on assignment timeout, an exceeded p99
-/// budget, or zero measured messages.
+/// The <c>MODE=consumer</c> entry, as Python's consumer <c>main</c>: it runs the sync or async engine over this
+/// binding's consumer and returns the exit code.
 /// </summary>
 internal static class ConsumerMain
 {
@@ -30,9 +28,6 @@ internal static class ConsumerMain
     {
         ConsumerBenchmarkConfig config = ConsumerBenchmarkConfig.FromEnv();
 
-        // Optionally start from a clean topic before consuming (Python's run()/run_async(): recreate_topic
-        // before build_consumer). Runs here, before the shared ConsumerBenchmark engine, because an
-        // AdminClient is client-specific and ConsumerBenchmark carries no client dependency (M13/P1 D8).
         if (config.CreateTopic)
         {
             TopicProvisioning.RecreateTopic(config.BootstrapServers, config.Topic, config.Partitions);
@@ -62,10 +57,7 @@ internal static class ConsumerMain
 
         metrics.StopCollecting();
 
-        // The readiness gate never saw the pipeline go live (feeder still starting up, or nothing
-        // measurable arriving). Distinct from a benchmark failure: the launcher retries this rc.
-        // Checked FIRST — Python's main() tests the SETUP_NOT_READY sentinel ahead of the None
-        // (assignment-failure) case and the p99 / no-messages gates.
+        // Checked first, as Python's main does: the launcher retries this exit code.
         if (result.SetupNotReady)
         {
             return ConsumerBenchmarkResult.SetupNotReadyExitCode;

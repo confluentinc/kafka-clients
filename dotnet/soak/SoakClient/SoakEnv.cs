@@ -11,11 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
-// PROVENANCE: forked from dotnet/tests/Performance/PerformanceCommon/PerfEnv.cs
-// (see MetricPrimitives.cs's header for why the soak forks rather than references), with
-// GetDouble added — the soak carries several float-valued tunables (rate, poll timeout,
-// commit interval) that the perf harness has no counterpart for.
 
 using System;
 using System.Globalization;
@@ -23,28 +18,24 @@ using System.Globalization;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// Environment-variable parsing, matching the perf suite's conventions exactly so the
-/// same idioms drive every .NET tool in this repo: booleans are the case-sensitive
-/// string <c>"True"</c> (Python's <c>os.getenv(name, "False") == "True"</c>), and numbers
-/// parse with invariant culture.
+/// Environment-variable parsing, forked from the perf suite's <c>PerfEnv</c> (plus
+/// <c>GetDouble</c>): a boolean is the case-sensitive <c>"True"</c>, as the Python perf tests read
+/// it, and numbers parse with invariant culture.
 /// </summary>
 internal static class SoakEnv
 {
-    /// <summary>Returns the value of <paramref name="name"/>, or <paramref name="fallback"/> when unset / empty.</summary>
     internal static string GetString(string name, string fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
         return string.IsNullOrEmpty(value) ? fallback : value!;
     }
 
-    /// <summary>Returns the value of <paramref name="name"/>, or <see langword="null"/> when unset / empty.</summary>
     internal static string? GetStringOrNull(string name)
     {
         string? value = Environment.GetEnvironmentVariable(name);
         return string.IsNullOrEmpty(value) ? null : value;
     }
 
-    /// <summary>Parses <paramref name="name"/> as an int, or returns <paramref name="fallback"/> when unset / empty.</summary>
     internal static int GetInt(string name, int fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
@@ -56,7 +47,6 @@ internal static class SoakEnv
         return int.Parse(value!, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Parses <paramref name="name"/> as a double, or returns <paramref name="fallback"/> when unset / empty.</summary>
     internal static double GetDouble(string name, double fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);
@@ -68,11 +58,6 @@ internal static class SoakEnv
         return double.Parse(value!, NumberStyles.Float, CultureInfo.InvariantCulture);
     }
 
-    /// <summary>
-    /// Parses <paramref name="name"/> as the case-sensitive string <c>"True"</c>; any
-    /// other value — including <c>"true"</c> or <c>"1"</c> — is <see langword="false"/>,
-    /// matching Python and the perf suite.
-    /// </summary>
     internal static bool GetBool(string name, bool fallback)
     {
         string? value = Environment.GetEnvironmentVariable(name);

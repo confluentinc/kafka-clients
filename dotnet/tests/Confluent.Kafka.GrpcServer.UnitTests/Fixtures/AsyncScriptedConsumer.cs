@@ -20,19 +20,10 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 /// <summary>
-/// The async flavour's consumer behind the factory seam: an
-/// <see cref="AsyncMockConsumer{TKey, TValue}"/> (auto offset reset <c>earliest</c>, like the gRPC
-/// consumer servicer's mock) that applies the <see cref="ConsumerScript"/>'s queued steps at the
-/// start of each poll, records the calls the servicer makes under the same names the sync double
-/// uses, and records every token the servicer passes (T12). Every call reaches the real mock
-/// (DoD §12).
+/// The async flavour's consumer behind the factory seam: an <see cref="AsyncMockConsumer{TKey, TValue}"/>
+/// (auto offset reset <c>earliest</c>, as the consumer servicer's mock) that applies the script's steps at
+/// the start of each poll and records the servicer's calls and tokens; every call reaches the real mock.
 /// </summary>
-/// <remarks>
-/// The steps are applied before the inner poll is submitted, so no operation of this consumer is
-/// in flight while they run: the servicer awaits each operation before it starts the next, and the
-/// core releases its access guard before it completes the previous one. That is the async form of
-/// the single-owner rule the script documents.
-/// </remarks>
 internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IMockConsumerOperations
 {
     private readonly AsyncMockConsumer<byte[], byte[]> _inner =
@@ -45,31 +36,31 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         _script = script;
     }
 
-    /// <inheritdoc/>
     public async Task<ConsumerRecords<byte[], byte[]>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Poll), cancellationToken);
-        _script.ApplyPending(this);
+
+        // Before the inner poll: the servicer awaits each operation before it starts the next, so no
+        // other operation of this consumer is in flight while a step runs.
+        await _script.ApplyPendingAsync(this).ConfigureAwait(false);
         ConsumerRecords<byte[], byte[]> records = await _inner.Poll(timeout, cancellationToken).ConfigureAwait(false);
         if (records.Count == 0)
         {
-            // The mock returns at once when it has nothing (rust/src/consumer/mock_consumer.rs
-            // poll never waits); a real consumer waits out the timeout first. Waiting here keeps
-            // an idle workload's loop from spinning, without changing what any poll returns.
+            // The mock returns at once when it has nothing, where a real consumer waits out the
+            // timeout: waiting here keeps an idle loop from spinning, without changing what any
+            // poll returns.
             await Task.Delay(timeout, CancellationToken.None).ConfigureAwait(false);
         }
 
         return records;
     }
 
-    /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Subscribe), cancellationToken);
         return _inner.Subscribe(topics, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
         IConsumerRebalanceListener listener,
@@ -79,7 +70,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Subscribe(topics, listener, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Subscribe(
         IReadOnlyCollection<string> topics,
         IAsyncConsumerRebalanceListener listener,
@@ -89,63 +79,54 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Subscribe(topics, listener, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Unsubscribe), cancellationToken);
         return _inner.Unsubscribe(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Assign), cancellationToken);
         return _inner.Assign(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Pause), cancellationToken);
         return _inner.Pause(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Resume), cancellationToken);
         return _inner.Resume(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(SeekToBeginning), cancellationToken);
         return _inner.SeekToBeginning(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(SeekToEnd), cancellationToken);
         return _inner.SeekToEnd(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Position), cancellationToken);
         return _inner.Position(partition, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<long> Position(TopicPartition partition, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Position), cancellationToken);
         return _inner.Position(partition, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Commit(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Commit), cancellationToken);
@@ -153,7 +134,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Commit(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Commit(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Commit), cancellationToken);
@@ -161,7 +141,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Commit(timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Commit(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         CancellationToken cancellationToken = default)
@@ -171,7 +150,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Commit(offsets, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Commit(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         TimeSpan timeout,
@@ -182,7 +160,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Commit(offsets, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
@@ -191,7 +168,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Committed(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Committed(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -202,7 +178,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Committed(partitions, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default)
     {
@@ -210,7 +185,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.OffsetsForTimes(timestampsToSearch, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
         TimeSpan timeout,
@@ -220,7 +194,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.OffsetsForTimes(timestampsToSearch, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
@@ -228,7 +201,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.BeginningOffsets(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -238,7 +210,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.BeginningOffsets(partitions, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default)
     {
@@ -246,7 +217,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.EndOffsets(partitions, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
         IReadOnlyCollection<TopicPartition> partitions,
         TimeSpan timeout,
@@ -256,14 +226,12 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.EndOffsets(partitions, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(PartitionsFor), cancellationToken);
         return _inner.PartitionsFor(topic, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(
         string topic,
         TimeSpan timeout,
@@ -273,14 +241,12 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.PartitionsFor(topic, timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(ListTopics), cancellationToken);
         return _inner.ListTopics(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
@@ -289,43 +255,32 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.ListTopics(timeout, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Close), cancellationToken);
         _script.OnCall("Close");
-        _script.HandleUsableAtClose = IsHandleUsable();
         return _inner.Close(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Close(CloseOptions option, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Close), cancellationToken);
-        _script.OnCall("Close");
-        _script.HandleUsableAtClose = IsHandleUsable();
+        _script.OnCall("Close(option)");
         return _inner.Close(option, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public void Wakeup() => _inner.Wakeup();
 
-    /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Assignment() => _inner.Assignment();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<string> Subscription() => _inner.Subscription();
 
-    /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Paused() => _inner.Paused();
 
-    /// <inheritdoc/>
     public void EnforceRebalance(string? reason = null) => _inner.EnforceRebalance(reason);
 
-    /// <inheritdoc/>
     public Task CommitAsync(CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(CommitAsync), cancellationToken);
@@ -333,7 +288,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.CommitAsync(cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task CommitAsync(IOffsetCommitCallback callback, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(CommitAsync), cancellationToken);
@@ -341,7 +295,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.CommitAsync(callback, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IOffsetCommitCallback? callback = null,
@@ -352,7 +305,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.CommitAsync(offsets, callback, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task CommitAsync(IAsyncOffsetCommitCallback callback, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(CommitAsync), cancellationToken);
@@ -360,7 +312,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.CommitAsync(callback, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IAsyncOffsetCommitCallback callback,
@@ -371,14 +322,12 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.CommitAsync(offsets, callback, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(Seek), cancellationToken);
         return _inner.Seek(partition, offset, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task Seek(
         TopicPartition partition,
         OffsetAndMetadata offsetAndMetadata,
@@ -388,17 +337,14 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.Seek(partition, offsetAndMetadata, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public Task<long?> CurrentLag(TopicPartition partition, CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(CurrentLag), cancellationToken);
         return _inner.CurrentLag(partition, cancellationToken);
     }
 
-    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
 
-    /// <inheritdoc/>
     public ConsumerHandle Handle()
     {
         ConsumerHandle handle = _inner.Handle();
@@ -406,14 +352,12 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return handle;
     }
 
-    /// <inheritdoc/>
     public void Dispose()
     {
         _script.OnCall("Dispose");
         _inner.Dispose();
     }
 
-    /// <inheritdoc/>
     public ValueTask DisposeAsync()
     {
         _script.OnCall("Dispose");
@@ -424,23 +368,10 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
     void IMockConsumerOperations.UpdateBeginningOffset(string topic, int partition, long offset) =>
         _inner.UpdateBeginningOffset(topic, partition, offset);
 
-    void IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _inner.Rebalance(partitions);
+    Task IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _inner.Rebalance(partitions);
 
     void IMockConsumerOperations.AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _inner.AddRecord(topic, partition, offset, key, value);
 
     void IMockConsumerOperations.SetPollException(KafkaException? exception) => _inner.SetPollException(exception);
-
-    private bool IsHandleUsable()
-    {
-        try
-        {
-            _script.Handle?.Assignment();
-            return _script.Handle is not null;
-        }
-        catch (ObjectDisposedException)
-        {
-            return false;
-        }
-    }
 }

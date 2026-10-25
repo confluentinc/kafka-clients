@@ -192,10 +192,24 @@ Where Python and C differ, the proto decides. If the proto is silent, use Python
    never yields delays no other workload.
 3. **The async rate wait resumes early on stop.** Python async sleeps one interval without waking.
    This only shortens stop latency at low `--rps`.
-4. **No close-spec split** (§3.4). The handle ref-count makes the plain order correct.
-5. **The settle-once guard is unreachable in .NET.** It is kept for parity (D5, §5.5.3).
+4. **No close-spec split** (§3.4). Since M19/P1.5 (`6ffe2b0e`) the chaos consumer takes no
+   `ConsumerHandle`, so the plain `Close()` then `Dispose()` is the whole order, the close-time
+   revoke committing through the consumer (routed inside the callback, ledger 114), the same as
+   Python's plain `close()` since its handle went in #187.
+5. **The settle-once guard is reachable, as in Python.** A `Send` that throws after the record
+   reached the accumulator can still see its delivery callback fire once later (`dotnet/CLAUDE.md`
+   §4, "Which outcomes fire it"); `ChaosRecordOutcomes` then absorbs that callback and logs it with
+   Python's `_RecordOutcomes` text, so the record is settled once.
 6. **Server-side drain wait.** Like Python async and C, and unlike Python sync, the RPC handler
    waits for the workload to finish draining.
+7. **A poll loop that dies closes its consumer.** When the poll loop throws (a server-side fault:
+   the client's own errors are `ConsumerError` events), .NET sets `Closing`, closes and disposes
+   the consumer, then emits `Failed` (`ChaosWorkloadServiceImpl.cs:245-256`,
+   `AsyncChaosWorkloadServiceImpl.cs:263-274` at `efda7a78`). Python has no `try` there and leaves
+   its consumer open: the exception reaches `_guarded`, which emits `Failed`
+   (`python/grpc_chaos.py:483-509`, async `:777-801`; `:636-642`, `:875-881`). The verdict is the
+   same (`Failed` fails the run), and a long-lived .NET server does not keep the consumer. Kept by
+   ledger 213 (C3), with no Python follow-up.
 
 ### 3.6 Constants and exact strings (shared with `rust/tests/chaos/workload.rs` `check_record` / `build_value`)
 

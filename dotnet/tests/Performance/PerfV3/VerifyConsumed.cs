@@ -20,22 +20,12 @@ using System.Globalization;
 namespace Confluent.Kafka.Performance.V3;
 
 /// <summary>
-/// Optional post-run correctness check for the producer benchmark (<c>VERIFY_CONSUMED</c>, off by
-/// default) — the C# analog of <c>producer_performance_test.py</c>'s <c>get_topic_end_offsets</c> +
-/// <c>verify_consumed_messages</c>. Captures the topic's per-partition end offsets before the run, then
-/// consumes everything produced during the run from those baselines, asserting the count matches and (for
-/// keyed records) that each landed in the partition <see cref="Crc32"/> would have chosen — the v3
-/// producer's actual default partitioner (<c>design/current/partitioner.md</c>); there is no ABI surface to
-/// select anything else. Uses our binding's <see cref="KafkaConsumer{TKey, TValue}"/> query APIs
-/// (<c>PartitionsFor</c> / <c>BeginningOffsets</c> / <c>EndOffsets</c> / <c>Assign</c> / <c>Seek</c> / <c>Poll</c>).
+/// The optional <c>VERIFY_CONSUMED</c> check, as Python's <c>topic_end_offsets</c> and <c>verify_consumed_messages</c>:
+/// it captures the end offsets before the run, then consumes what the run produced and checks the count and, for keyed
+/// records, that each landed where <see cref="Crc32"/>, the core's default partitioner, puts it.
 /// </summary>
 internal static class VerifyConsumed
 {
-    /// <summary>
-    /// Captures <c>{partition: high_watermark}</c> for <paramref name="topic"/> before the run, or an empty
-    /// map if the topic has no partitions yet (treated as all starting at 0). Throws on a transport/query
-    /// failure — the caller catches it and skips verification (matching Python's baseline try/except).
-    /// </summary>
     internal static Dictionary<int, long> CaptureBaseline(string bootstrapServers, string topic)
     {
         using var consumer = NewVerifier(bootstrapServers, "perf-baseline");
@@ -61,21 +51,13 @@ internal static class VerifyConsumed
         return baseline;
     }
 
-    /// <summary>
-    /// Consumes everything produced during the run (from <paramref name="baseline"/> offsets), asserts the
-    /// count equals <paramref name="expectedCount"/>, and — when <paramref name="hasKeys"/> — that every
-    /// record landed in the CRC-32-chosen partition. Returns 0 on success, 1 on any verification failure.
-    /// </summary>
     internal static int VerifyConsumedMessages(string bootstrapServers, string topic, Dictionary<int, long> baseline, long expectedCount, bool hasKeys)
     {
         long consumedCount = 0;
         long mismatchCount = 0;
         var sampleMismatches = new List<string>();
 
-        // Scoped (not `using var`) so the consumer is closed BEFORE the summary is printed below —
-        // matching Python's `finally: consumer.close()` running before its trailing `print()` blank
-        // line and the verification summary, rather than after (a `using var` here would defer Dispose
-        // to the method's end, i.e. after those prints).
+        // Scoped, so the consumer closes before the summary prints, as Python's finally does.
         using (KafkaConsumer<byte[], byte[]> consumer = NewVerifier(bootstrapServers, "perf-verify"))
         {
             IReadOnlyList<PartitionInfo> partitions = consumer.PartitionsFor(topic);
@@ -113,9 +95,6 @@ internal static class VerifyConsumed
             double lastProgress = Monotonic();
             var pollTimeout = TimeSpan.FromSeconds(2);
 
-            // Rolling progress line (Python's `progress_print_at` / `progress_print_step`): printed at
-            // most once per step rather than per record, and overwritten in place via a trailing '\r'
-            // (no newline) so a long verification run doesn't scroll the terminal.
             long progressPrintAt = 0;
             long progressPrintStep = Math.Max(10000, expectedCount / 20);
 

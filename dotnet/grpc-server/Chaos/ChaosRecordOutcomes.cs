@@ -19,36 +19,10 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer.Chaos;
 
 /// <summary>
-/// Settles each record from its delivery callback, exactly once against a <c>Send</c> that
-/// threw — the .NET twin of Python's <c>_RecordOutcomes</c> (<c>python/grpc_chaos.py</c>),
-/// shared by both flavours (PLAN §5.5.3, decision D5).
+/// Settles each record exactly once between its delivery callback and a <c>Send</c> that threw, Python's
+/// <c>_RecordOutcomes</c>: a throw is reported only if the callback has not fired, the first callback after
+/// such a report is absorbed and logged, and any other callback is reported, a second one included.
 /// </summary>
-/// <remarks>
-/// <para>
-/// <b>The state machine, verbatim from the anchor.</b> A throw is reported as
-/// <c>SendFailed</c> only if the record's callback has not fired yet, and the first callback
-/// after such a report is <b>absorbed</b> (logged): either way the record is settled once. Any
-/// other callback is reported — including a second one for the same record, so the verifier
-/// sees a client that settles a record twice.
-/// </para>
-/// <para>
-/// <b>The absorb branch is unreachable in .NET</b>, and kept for parity (§3.5 item 5). The
-/// delivery callback fires on the producer's completion thread, and a <c>Send</c> that throws
-/// runs no callback, except a transactional producer's send outside a transaction
-/// (<c>IDeliveryCallback</c>'s remarks), which this harness never makes. The one "throws, yet the
-/// record is sent" case — the async stage-1 <see cref="OperationCanceledException"/> from the
-/// caller's token — is ruled out by never passing a token (D6). So if the branch is ever taken
-/// it logs that the D5 contract was violated, and a binding regression shows up in the server
-/// log instead of vanishing.
-/// </para>
-/// <para>
-/// An error while building the outcome event is not left to the binding (which traces and
-/// swallows whatever a delivery callback throws, so the record would look unsettled and the
-/// client would be blamed): it is logged and ends the workload with <c>Failed</c>, a
-/// server-side fault, as in Python.
-/// </para>
-/// <para>Test-server scaffolding with no Java class (DoD §7).</para>
-/// </remarks>
 internal sealed class ChaosRecordOutcomes
 {
     private readonly Action<Proto.WorkloadEvent> _emit;
@@ -61,13 +35,8 @@ internal sealed class ChaosRecordOutcomes
         _workloadId = workloadId;
     }
 
-    /// <summary>
-    /// The delivery callback for record <paramref name="index"/>, which also carries its
-    /// settlement state for <see cref="SendRaised"/> (Python <c>on_delivery(index)</c>).
-    /// </summary>
     internal RecordCallback ForRecord(ulong index) => new RecordCallback(this, index);
 
-    /// <summary>The <c>Send</c> of <paramref name="record"/>'s record threw <paramref name="error"/>.</summary>
     internal void SendRaised(RecordCallback record, Exception error)
     {
         bool report;
@@ -101,9 +70,8 @@ internal sealed class ChaosRecordOutcomes
         if (absorbed)
         {
             ChaosEvents.Log(
-                $"chaos producer {_workloadId}: WARNING: record {record.Index} settled by its failed Send(); " +
-                $"its callback fired afterwards with {(exception is not null ? "an error" : "metadata")}. " +
-                "The binding's contract that a throwing Send never fires its callback (PLAN D5) was violated.");
+                $"chaos producer {_workloadId}: record {record.Index} settled by its failed Send(); " +
+                $"its callback fired afterwards with {(exception is not null ? "an error" : "metadata")}");
             return;
         }
 
@@ -114,6 +82,8 @@ internal sealed class ChaosRecordOutcomes
         }
         catch (Exception e)
         {
+            // A server-side fault, reported as Failed: thrown into the binding, it would leave the
+            // record unsettled and the client would be blamed.
             ChaosEvents.Log($"chaos producer {_workloadId}: building record {record.Index}'s outcome failed: {e}");
             outcome = FailedQuietly(e);
         }
@@ -144,9 +114,8 @@ internal sealed class ChaosRecordOutcomes
     }
 
     /// <summary>
-    /// One record's <see cref="IDeliveryCallback"/>: it fires on the producer's completion
-    /// thread, so it only builds the event and queues it (PLAN §5.7) — anything slower would
-    /// delay every other completion of the producer (ffi §A1).
+    /// One record's delivery callback and settlement state. It fires on the producer's completion thread,
+    /// so it only builds the event and queues it.
     /// </summary>
     internal sealed class RecordCallback : IDeliveryCallback
     {
@@ -158,16 +127,13 @@ internal sealed class ChaosRecordOutcomes
             Index = index;
         }
 
-        /// <summary>The record's logical index.</summary>
         internal ulong Index { get; }
 
-        /// <summary>Callbacks fired so far (guarded by the owner's lock).</summary>
+        // Fired and SendFailureReported are read and written under the owner's lock.
         internal int Fired { get; set; }
 
-        /// <summary>Whether a <c>Send</c> failure was already reported (guarded by the owner's lock).</summary>
         internal bool SendFailureReported { get; set; }
 
-        /// <inheritdoc/>
         public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             try
@@ -176,8 +142,8 @@ internal sealed class ChaosRecordOutcomes
             }
             catch (Exception e)
             {
-                // Unreachable (the owner's path is total), and the binding would swallow it
-                // anyway; logged so a server fault is never silent.
+                // Unreachable, as the owner's path is total; logged so a server fault is never
+                // silent.
                 ChaosEvents.Log($"chaos producer {_owner._workloadId}: delivery callback failed: {e}");
             }
         }

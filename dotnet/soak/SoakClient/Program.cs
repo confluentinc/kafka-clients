@@ -11,24 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
-// Soak test producer-consumer end-to-end client for long term validation of the Rust
-// Kafka client through its .NET binding.
-//
-// Modelled on python/soak/soakclient.py, which is itself modelled on
-// confluent-kafka-python's tests/soak/soakclient.py. The structure (SoakRecord, the two
-// loops, prefix-routed configuration, per-partition high-water-mark bookkeeping,
-// counters/gauges, resource sampling, periodic status lines) is ported faithfully; the
-// client call sites are not, because this binding mirrors the Java API.
-//
-// Usage:
-//   SOAK_TESTID=<id> SOAK_TOPIC=<topic> SOAK_CONFIG_FILE=<file> dotnet SoakClient.dll
-//   dotnet SoakClient.dll --check      # startup preflight, creates nothing
-//
-// A unique topic should be used for each soak instance.
-//
-// Exit codes (a contract with run.sh, which keys its restart policy off them) live in
-// SoakExitCodes and are pinned by SoakExitCodeTests.
 
 using System;
 using System.Collections.Generic;
@@ -40,27 +22,13 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Soak;
 
 /// <summary>
-/// Hard-exits if shutdown wedges.
-/// <para>
-/// The producer has no <c>wakeup()</c>: a send parked on backpressure, <c>Flush</c> and
-/// <c>Close</c> are all uninterruptible. Four soaks share one box, so a wedged shutdown
-/// must not need a human.
-/// </para>
-/// <para>
-/// Exits <see cref="SoakExitCodes.ConsumerWedged"/>, <b>not</b>
-/// <see cref="SoakExitCodes.Fatal"/>: a shutdown that wedges on backpressure during a
-/// broker roll is transient, not a permanent failure, and <c>run.sh</c> only restarts
-/// non-fatal codes.
-/// </para>
+/// Hard-exits with <see cref="SoakExitCodes.ConsumerWedged"/> when shutdown wedges, as Python's
+/// watchdog: a send parked on backpressure, <c>Flush</c> and the untimed <c>Close</c> cannot be
+/// interrupted, and a wedge during a broker roll is transient, so <c>run.sh</c> restarts it.
 /// </summary>
 internal static class ShutdownWatchdog
 {
-    /// <summary>
-    /// Waits for shutdown to start, then for it to finish; hard-exits through
-    /// <paramref name="exit"/> if it does not finish within
-    /// <paramref name="timeoutSeconds"/>. The exit action is a parameter purely so the
-    /// unit tests can assert the code without terminating the test host.
-    /// </summary>
+    // exit is a parameter so the tests can assert the code without ending the test host.
     internal static void Run(
         ManualResetEventSlim shutdownStarted,
         ManualResetEventSlim exited,
@@ -77,14 +45,16 @@ internal static class ShutdownWatchdog
     }
 }
 
-/// <summary>The soak client's entry point.</summary>
+/// <summary>
+/// The soak client's entry point, a port of the Python soak's <c>main</c>; <c>--check</c> runs
+/// only the startup preflight.
+/// </summary>
 internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        // Process RSS before any Kafka client exists — the analog of the Python soak's
-        // post-import baseline. The difference between this and the post-construction
-        // baseline is what the client itself costs at startup.
+        // RSS before any client exists, as Python's post-import baseline; the gap to the
+        // post-construction baseline is the client's startup cost.
         double rssAtStartupMiB = new ProcessResourceSampler().CurrentRssMiB();
 
         if (args.Length > 0 && string.Equals(args[0], "--check", StringComparison.Ordinal))
@@ -101,8 +71,6 @@ internal static class Program
         }
         catch (Exception ex) when (ex is ArgumentException or IOException)
         {
-            // Configuration rejected at startup (a missing variable, a malformed config
-            // line, an unreadable file). A stack trace adds nothing here.
             Console.Error.WriteLine("soakclient: configuration error: " + ex.Message);
             return SoakExitCodes.Fatal;
         }
@@ -114,7 +82,6 @@ internal static class Program
         }
         catch (ArgumentException ex)
         {
-            // An unknown configuration key, rejected before the topic is created.
             Console.Error.WriteLine("soakclient: configuration error: " + ex.Message);
             return SoakExitCodes.Fatal;
         }
@@ -130,10 +97,8 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            // Unclassified: keep the stack trace, since this is the case nobody has
-            // diagnosed yet, but exit "transient" so the supervisor retries a few times
-            // under its rapid-failure bound rather than stopping dead on something that
-            // might be a flapping broker.
+            // Unclassified, as Python: keep the stack trace, but exit transient so the supervisor
+            // retries under its rapid-failure bound.
             Console.Error.WriteLine("soakclient: unexpected startup failure: " + ex);
             return SoakExitCodes.TransientStartup;
         }
@@ -145,12 +110,8 @@ internal static class Program
             shutdownStarted,
             exited,
             options.ShutdownTimeoutSeconds,
-            // ⚠ Environment.Exit runs AppDomain.ProcessExit handlers on the CALLING
-            // thread, so a blocking handler would wedge the very path that exists to
-            // un-wedge a wedged shutdown. SoakSignals installs the soak's ONLY ProcessExit
-            // handler, and it does nothing but set a flag and invoke a non-blocking
-            // callback (see the comment there) — which is what makes this safe. Whatever
-            // happens, the process must exit with exactly ConsumerWedged.
+            // Safe: Environment.Exit runs ProcessExit handlers on the watchdog thread, and the
+            // soak's only one, in SoakSignals, never blocks.
             Environment.Exit))
         {
             IsBackground = true,
@@ -172,11 +133,8 @@ internal static class Program
 
         try
         {
-            // Initial resource sample, as the reference does before its loop: without it
-            // the first metrics window carries no memory/CPU gauges at all, because the
-            // sampler and the window roll on the same cadence. Inside the try because
-            // SampleResources touches Process.Refresh / GC.GetTotalMemory, which Python's
-            // resource.getrusage() analog cannot throw from (74.1).
+            // Initial resource sample, as Python: without it the first window has no memory or CPU
+            // gauges. Inside the try, as sampling can throw.
             soak.SampleResources();
 
             while (!soak.StopToken.IsCancellationRequested)
@@ -211,14 +169,8 @@ internal static class Program
 
         shutdownStarted.Set();
 
-        // ⚠ 74.1 — the OUTER half of the shutdown guard. TerminateAsync has its own
-        // no-throw boundary around the metrics close (SoakClient.FinalizeMetrics), so
-        // this is the backstop for everything else on the teardown path: whatever
-        // happens, the process must exit with one of SoakExitCodes' five, because run.sh
-        // keys its restart policy off exactly those numbers. An escaping exception here
-        // would exit with the runtime's unhandled-exception code, which run.sh reads as
-        // an ordinary restartable failure — silently bypassing the never-restart and
-        // message-loss distinctions the contract encodes.
+        // The outer shutdown guard: whatever teardown throws, the process exits with one of
+        // SoakExitCodes' codes, which run.sh's restart policy keys off.
         try
         {
             await soak.TerminateAsync().ConfigureAwait(false);
@@ -229,9 +181,8 @@ internal static class Program
         }
         finally
         {
-            // In the finally: the soak's work IS over even if teardown threw, so leaving
-            // `exited` unset would let the watchdog hard-exit ConsumerWedged 60 s later
-            // and overwrite a verdict that was already decided.
+            // Set even if teardown threw: the verdict is decided, and the watchdog must not
+            // overwrite it with ConsumerWedged.
             exited.Set();
         }
 
@@ -247,15 +198,8 @@ internal static class Program
         return SoakExitCodes.ExitCodeFor(soak.MissedCount, soak.FatalReason);
     }
 
-    /// <summary>
-    /// The startup preflight <c>run.sh</c> blocks on. Proves the assembly resolves, the
-    /// native library loads and the configuration is acceptable — then exits.
-    /// <para>
-    /// ⚠ It uses the MOCKS (PLAN D10), not a real client against a fake broker address:
-    /// the mocks go through the same P/Invoke surface with no network, no DNS and no
-    /// timeout risk, which is what a preflight the supervisor waits on needs.
-    /// </para>
-    /// </summary>
+    // The preflight run.sh blocks on uses the mocks, not a real client: the same P/Invoke surface
+    // with no network, DNS or timeout risk.
     private static int Check()
     {
         try
@@ -269,9 +213,7 @@ internal static class Program
                 conf["bootstrap.servers"] = options.Brokers;
             }
 
-            // Validate exactly what the real startup path validates, so a typo fails here
-            // — before a topic is created and before a multi-day run begins on a default
-            // value — rather than seconds later.
+            // The real startup path's validation, so a typo fails here, before a topic is created.
             var pconf = SoakConfig.FilterConfig(conf, new[] { "consumer.", "admin." }, "producer.");
             (pconf, _) = SoakConfig.RouteSharedConfig(pconf, SoakConfig.ProducerConfigKeys, SoakConfig.ConsumerConfigKeys);
             SoakConfig.ValidateConfig(pconf, SoakConfig.ProducerConfigKeys, "producer");
