@@ -1773,6 +1773,18 @@ impl CommitRequestManager {
                     ac.set_inflight_commit_status(false);
                 }
             }
+            // Wake the bg loop now that the flag is clear. Java's
+            // `autoCommitCallback` runs on the network thread, so its next
+            // `runOnce` sees the cleared flag at once: `maximumTimeToWait`
+            // stops reporting the interval (KAFKA-20253, see `remaining_ms`),
+            // and if the interval expired while this commit was in flight the
+            // next poll's `maybeAutoCommitAsync` sends the next one ("after a
+            // response for the in-flight is received"). Here the callback runs
+            // on a spawned task; without the wake the bg loop would only see
+            // it when something else ended the network poll (up to its ~5 s
+            // timeout). At most one wake per auto-commit, on success and
+            // failure alike.
+            wake_background_task(&inner);
             match outcome {
                 Ok(Ok(_committed)) => {
                     // Java `autoCommitCallback`: on success, enqueue the
@@ -2742,8 +2754,9 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Wakes the bg task's network poll after a spawned retry driver
 /// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
 /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
-/// sleeps only for its backoff, and after `maybe_auto_commit_async` enqueues
-/// an interval auto-commit (possibly from the spawned `AsyncPoll` task). See
+/// sleeps only for its backoff, after `maybe_auto_commit_async` enqueues
+/// an interval auto-commit (possibly from the spawned `AsyncPoll` task), and
+/// after that auto-commit's completion clears the in-flight flag. See
 /// `CommitRequestManagerInner::completion_notify` for why Java needs no
 /// equivalent (its retry is enqueued on the network thread itself). The guard
 /// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
@@ -3856,6 +3869,74 @@ mod tests {
         manager.update_timer_and_maybe_commit(4_000);
         assert_eq!(1, manager.unsent_offset_commits_len_for_test());
         assert!(!woken(), "no new auto-commit was enqueued, so the bg loop must not be woken");
+    }
+
+    /// PR #255 review follow-up 3: Java's `autoCommitCallback`
+    /// (`CommitRequestManager.requestAutoCommit`) clears the in-flight flag on
+    /// the network thread, so the next `runOnce` already sees it: the cached
+    /// `maximumTimeToWait` stops reporting the interval, and the next poll
+    /// sends the auto-commit whose interval expired while the previous one was
+    /// in flight (`maybeAutoCommitAsync` javadoc: "the next auto-commit request
+    /// will be sent on the next call to poll, after a response for the
+    /// in-flight is received"). In Rust that callback runs on a spawned task,
+    /// so it must wake the bg loop once the flag is clear.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_completion_wakes_background_task_after_clearing_inflight_flag() {
+        use futures_util::FutureExt;
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        let coordinator = coordinator_with_node();
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(2_000);
+        // Consume the wake stored when the auto-commit was enqueued, so only
+        // the completion's own wake can satisfy the wait below.
+        assert!(
+            notify.notified().now_or_never().is_some(),
+            "enqueueing the auto-commit must wake the bg loop"
+        );
+        let inflight = || {
+            let guard = manager.inner.state.lock().unwrap();
+            guard.auto_commit.as_ref().unwrap().has_inflight_commit
+        };
+        assert!(inflight(), "the auto-commit must be in flight until its response arrives");
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 2_000);
+        // The interval expires again while the commit is in flight: Java's
+        // `maybeAutoCommitAsync` skips it, and `maximumTimeToWait` reports the
+        // interval instead of 0 (KAFKA-20253).
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert_eq!(1_000, manager.maximum_time_to_wait(3_000));
+
+        let woken = notify.notified();
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("the auto-commit completion must wake the bg loop, as Java's callback runs on the network thread");
+        assert!(
+            !inflight(),
+            "the in-flight flag must already be clear when the completion wakes the bg loop"
+        );
+        assert_eq!(
+            0,
+            manager.maximum_time_to_wait(3_000),
+            "with the flag clear, the expired interval must be due at once"
+        );
+
+        // The next application poll now sends the pending auto-commit.
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "after the in-flight auto-commit completes, the expired interval must enqueue the next one"
+        );
     }
 
     /// Audit finding C4-01 / KAFKA-18641: `CommitRequestManager.poll()`
