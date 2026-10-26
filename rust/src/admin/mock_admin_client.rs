@@ -959,7 +959,7 @@ fn current_time_millis() -> i64 {
 /// since `list_partition_reassignments` cannot throw, the caller fails the
 /// result's future instead (CLAUDE.md §12.1 — a panic here would unwind into C
 /// through the FFI). This is *not* only reachable through internal corruption:
-/// `delete_topics` removes the topic from `all_topics` without pruning
+/// `deleteTopics` removes the topic from `all_topics` without pruning
 /// `reassignments`, exactly as Java's does, so any legal
 /// alter-reassignment/delete-topic/list-reassignments sequence reaches it.
 fn find_partition_reassignment(
@@ -1292,7 +1292,11 @@ impl Admin for MockAdminClient {
         CreateTopicsResult::new(result)
     }
 
-    fn delete_topics_with_options(&self, topics: TopicCollection, _options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_with_topic_collection_options(
+        &self,
+        topics: TopicCollection,
+        _options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult {
         let mut state = self.state.lock().unwrap();
         match topics {
             TopicCollection::TopicNames(collection) => {
@@ -3390,7 +3394,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .delete_topics_with_options(
+            .delete_topics_with_topic_collection_options(
                 TopicCollection::of_topic_names(vec!["t".to_string()]),
                 DeleteTopicsOptions::new(),
             )
@@ -3410,7 +3414,7 @@ mod tests {
     #[tokio::test]
     async fn delete_missing_topic_fails() {
         let client = admin();
-        let result = client.delete_topics_with_options(
+        let result = client.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["nope".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -4100,7 +4104,7 @@ mod tests {
         assert!(listed.is_empty());
     }
 
-    /// Regression: `delete_topics` drops the topic from `all_topics` without
+    /// Regression: `deleteTopics` drops the topic from `all_topics` without
     /// pruning `reassignments` (as Java's does), so a subsequent
     /// `list_partition_reassignments` reaches `findPartitionReassignment`'s
     /// "no TopicMetadata" branch. Java throws a `RuntimeException` there; this
@@ -4110,7 +4114,7 @@ mod tests {
     async fn list_partition_reassignments_after_topic_deletion_fails_the_future() {
         let (client, _tp) = admin_with_reassignment().await;
         client
-            .delete_topics_with_options(
+            .delete_topics_with_topic_collection_options(
                 TopicCollection::of_topic_names(vec!["rt".to_string()]),
                 DeleteTopicsOptions::new(),
             )
@@ -4168,7 +4172,7 @@ mod tests {
             .unwrap();
 
         client
-            .delete_topics_with_options(
+            .delete_topics_with_topic_collection_options(
                 TopicCollection::of_topic_names(vec!["rt2".to_string()]),
                 DeleteTopicsOptions::new(),
             )

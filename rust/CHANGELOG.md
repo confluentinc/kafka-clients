@@ -67,6 +67,12 @@ breaking changes.
   (`PREPARING_REBALANCE`, `CONSUMER`), instead of the `toString()` text
   (`PreparingRebalance`, `Consumer`), which `Display` still prints and `parse`
   still reads.
+- **Breaking:** `Admin::delete_topics` and `Admin::delete_topics_with_options`
+  are renamed `delete_topics_with_topic_collection` and
+  `delete_topics_with_topic_collection_options`, and Java's two overloads
+  taking topic names are added as `delete_topics_with_string_slice` and
+  `delete_topics_with_string_slice_options`. Java names the parameter of all
+  four `topics`, so each is named after its parameter's type (CLAUDE.md §2).
 
 ### Common
 
@@ -99,6 +105,13 @@ breaking changes.
   return the constant name (`PREPARING_REBALANCE`), as Java's `Enum.name()`
   does. The text `_parse` reads (`PreparingRebalance`) is what the
   `_to_string` functions return.
+- **Breaking (C API):** `kafka_admin_Admin_delete_topics` and
+  `kafka_admin_Admin_delete_topics_with_options` are renamed
+  `kafka_admin_Admin_delete_topics_with_topic_collection` and
+  `kafka_admin_Admin_delete_topics_with_topic_collection_options`. The new
+  `kafka_admin_Admin_delete_topics_with_string_slice` and
+  `kafka_admin_Admin_delete_topics_with_string_slice_options` take the topic
+  names as a `kafka_List_t` of `const char *`.
 
 ## [0.3.0-beta.1] - 2026-10-23
 

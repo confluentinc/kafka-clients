@@ -8533,8 +8533,11 @@ static int topic_collection_build(PyObject* names, int by_ids, kafka_common_Topi
     return 0;
 }
 
-// Admin_delete_topics(h, [name | id], by_ids, options) -> AdminResult: the
-// `TopicCollection` of the names, or of the ids (Java's `Uuid.toString()`).
+// Admin_delete_topics(h, form, [name | id], options) -> AdminResult. `form`
+// picks the Java overload's entry point, as Admin_describe_topics's does: 0
+// `deleteTopics(Collection<String>)` (`_with_string_slice_options`), 1 a
+// `TopicNameCollection`, 2 a `TopicIdCollection` of ids (Java's
+// `Uuid.toString()`) (`_with_topic_collection_options`).
 ADMIN_OPT_TIMEOUT(DeleteTopics)
 ADMIN_OPT_BOOL(DeleteTopics, retry_on_quota_violation)
 static const AdminOptionsDesc DeleteTopicsOptions_desc = {
@@ -8551,23 +8554,35 @@ static const AdminResultDesc DeleteTopicsResult_desc = {
 
 static PyObject* py_Admin_delete_topics(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
-    unsigned long long h; PyObject* names; int by_ids; PyObject* opts;
-    if (!PyArg_ParseTuple(args, "KOpO", &h, &names, &by_ids, &opts)) return NULL;
+    unsigned long long h; int form; PyObject* names; PyObject* opts;
+    if (!PyArg_ParseTuple(args, "KiOO", &h, &form, &names, &opts)) return NULL;
     AdminHandle* a = admin_from_handle(h);
-    kafka_common_TopicCollection_t* topics; kafka_common_Error_t* err;
-    if (topic_collection_build(names, by_ids, &topics, &err) < 0) {
-        ffi_raise(err);
-        return NULL;
-    }
-    void* o = admin_options_build(&DeleteTopicsOptions_desc, opts);
-    if (o == NULL) {
-        ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
-        return NULL;
-    }
     kafka_admin_DeleteTopicsResult_t* r = NULL;
-    err = (r = kafka_admin_Admin_delete_topics_with_options_err(
-        a->admin, topics, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
-    ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+    kafka_common_Error_t* err = NULL;
+    void* o = NULL;
+    if (form == 0) {
+        str_list_t l;
+        if (str_list_build(names, &l) < 0) return NULL;
+        o = admin_options_build(&DeleteTopicsOptions_desc, opts);
+        if (o == NULL) { str_list_free(&l); return NULL; }
+        err = (r = kafka_admin_Admin_delete_topics_with_string_slice_options_err(
+            a->admin, l.list, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        str_list_free(&l);
+    } else {
+        kafka_common_TopicCollection_t* topics;
+        if (topic_collection_build(names, form == 2, &topics, &err) < 0) {
+            ffi_raise(err);
+            return NULL;
+        }
+        o = admin_options_build(&DeleteTopicsOptions_desc, opts);
+        if (o == NULL) {
+            ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+            return NULL;
+        }
+        err = (r = kafka_admin_Admin_delete_topics_with_topic_collection_options_err(
+            a->admin, topics, (kafka_admin_DeleteTopicsOptions_t*)o, &ffi_err), ffi_take(&ffi_err));
+        ffi_unraisable((kafka_common_TopicCollection_destroy_err(topics, &ffi_err), ffi_take(&ffi_err)));
+    }
     return admin_rpc_return(&DeleteTopicsOptions_desc, o, err, r, &DeleteTopicsResult_desc);
 }
 
@@ -11157,7 +11172,7 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Admin__config_future", py_Admin__config_future, METH_VARARGS, "Admin__config_future(result, accessor, [(name, value | None)], post) -> KafkaFuture: tests only, a completed Config future through the result table's converter"},
     {"Admin__execute_callbacks", py_Admin__execute_callbacks, METH_VARARGS, "Admin__execute_callbacks(handle) -> number of pending completion callbacks run on this thread"},
     {"Admin_create_topics", py_Admin_create_topics, METH_VARARGS, "Admin_create_topics(handle, topics, options) -> AdminResult"},
-    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, names_or_ids, by_ids, options) -> AdminResult"},
+    {"Admin_delete_topics", py_Admin_delete_topics, METH_VARARGS, "Admin_delete_topics(handle, form, names_or_ids, options) -> AdminResult"},
     {"Admin_list_topics", py_Admin_list_topics, METH_VARARGS, "Admin_list_topics(handle, options) -> AdminResult"},
     {"Admin_describe_topics", py_Admin_describe_topics, METH_VARARGS, "Admin_describe_topics(handle, form, names_or_ids, options) -> AdminResult"},
     {"Admin_create_partitions", py_Admin_create_partitions, METH_VARARGS, "Admin_create_partitions(handle, rows, options) -> AdminResult"},

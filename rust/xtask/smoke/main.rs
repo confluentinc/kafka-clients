@@ -129,7 +129,7 @@ async fn round_trip(bootstrap_servers: &str) -> Result<(), Error> {
     // Always delete the topic, but report the first failure that occurred.
     let cleanup = tokio::time::timeout(CLEANUP_DEADLINE, async {
         let delete = admin
-            .delete_topics(TopicCollection::of_topic_names(vec![topic.clone()]))
+            .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic.clone()]))
             .all()
             .get()
             .await;
