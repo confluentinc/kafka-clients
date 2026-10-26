@@ -61,7 +61,9 @@ tokio-rustls = "0.26"
 # At least 0.23.46: earlier releases print TLS session secrets in the `Debug`
 # output of their client session values (RUSTSEC-2026-0346).
 rustls = { version = "0.23.46", features = ["logging", "std", "tls12"] }
-webpki-roots = "0.26"
+# At least 1.0.10: earlier releases trust the leaked emSign intermediate CAs
+# (RUSTSEC-2026-0381).
+webpki-roots = "1.0.10"
 indexmap = "2"
 # Fast, non-cryptographic hasher (FxHash) for the Selector's internal per-poll
 # channel-id maps/sets. The keys are internal connection ids, not attacker-
