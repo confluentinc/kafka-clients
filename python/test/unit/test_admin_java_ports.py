@@ -35,7 +35,7 @@ Per class (`clients/admin`, `common.*`):
   DeleteTopicsResultTest | ported before | test_admin_reference_set.py
   DescribeTopicsResultTest | ported before | test_admin_results_hand.py
   DescribeUserScramCredentialsResultTest | ported before | test_admin_results_hand.py
-  EndpointTypeTest | skipped | EndpointType is used only inside KafkaAdminClient, not reachable from the public API, not generated
+  EndpointTypeTest | skipped | EndpointType is public, but no public method takes or returns it, so it is not reachable from what is generated; core: rust/src/admin/endpoint_type.rs test_round_trip_broker, test_round_trip_controller, test_unknown
   GroupListingTest | ported before | test_admin_value_types.py
   ListConsumerGroupsOptionsTest | skipped | deprecated class, not generated
   ListGroupsOptionsTest | ported before | test_admin_reference_set.py

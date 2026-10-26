@@ -38,7 +38,7 @@
 //! `LeastLoadedBrokerOrActiveKController` provider always picks a broker.
 
 use crate::admin::CreateTopicsResult;
-use crate::common::requests::DescribeClusterRequest;
+use crate::admin::EndpointType;
 use crate::common::requests::MetadataResponse;
 use crate::{kafka_debug, kafka_error, kafka_warn};
 use std::collections::HashMap;
@@ -842,9 +842,9 @@ impl KafkaAdminClient {
                     ));
                 }
                 let endpoint_type = if req_mm.using_bootstrap_controllers() {
-                    DescribeClusterRequest::ENDPOINT_TYPE_CONTROLLER
+                    EndpointType::Controller.id()
                 } else {
-                    DescribeClusterRequest::ENDPOINT_TYPE_BROKER
+                    EndpointType::Broker.id()
                 };
                 let mut data = DescribeClusterRequestData::new();
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
