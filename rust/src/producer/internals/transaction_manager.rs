@@ -4332,7 +4332,7 @@ impl TransactionManager {
             } else {
                 kafka_error!(
                     self.log_context,
-                    "Could not add partition {} due to unexpected error {:?}",
+                    "Could not add partition {} due to unexpected error {}",
                     topic_partition,
                     error
                 );
@@ -4352,7 +4352,7 @@ impl TransactionManager {
             return self.abortable_error(&handler, Error::topic_authorization(unauthorized_topics));
         }
         if has_partition_errors {
-            // Java 1625: `new KafkaException("Could not add partitions to transaction
+            // Java 1681: `new KafkaException("Could not add partitions to transaction
             // due to errors: " + errors)`, which interpolates a `HashMap`. A bare
             // `KafkaException` — `Error::kafka`, not a code-resolved
             // `UnknownServerError` — and the map is rendered in sorted order so the
@@ -4983,23 +4983,16 @@ fn sorted_partition_errors(errors: &HashMap<TopicPartition, Errors>) -> Vec<(&To
 /// render it, in topic-then-partition order.
 ///
 /// Java interpolates the map straight into a `KafkaException` message
-/// (`TransactionManager.java:1625`); `HashMap` order would make that text
+/// (`TransactionManager.java:1681`); `HashMap` order would make that text
 /// unreproducible, so it is sorted here.
 ///
-/// # Each error prints as its Rust variant name, not Java's constant name
-///
-/// Java's `Errors` is an enum, so interpolating one yields
-/// `Enum.toString()` = `name()`, e.g. `TOPIC_AUTHORIZATION_FAILED`. This crate's
-/// [`Errors`] renders `Display` as the human-readable `message()` and has no
-/// `name()`, so the variant identifier is printed instead:
-/// `TopicAuthorizationFailed`. That identifier *is* the translation of Java's
-/// constant under CLAUDE.md §2's PascalCase rule, and no Java test asserts on this
-/// message — adding a 134-arm `name()` to a shared file for one diagnostic string
-/// would be out of proportion. Recorded as a deviation in PLAN §10.8.
+/// Java's `Errors` is an enum, so interpolating one yields `Enum.toString()` =
+/// `name()`, e.g. `{foo-0=UNKNOWN_SERVER_ERROR}`. [`Errors`]'s `Display` renders
+/// that same constant name ([`Errors::enum_name`]).
 fn format_partition_errors(errors: &HashMap<TopicPartition, Errors>) -> String {
     let entries: Vec<String> = sorted_partition_errors(errors)
         .into_iter()
-        .map(|(partition, error)| format!("{partition}={error:?}"))
+        .map(|(partition, error)| format!("{partition}={error}"))
         .collect();
     format!("{{{}}}", entries.join(", "))
 }
@@ -8874,6 +8867,41 @@ mod tests {
     async fn test_transaction_abortable_error_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionAbortable).await;
         assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
+    }
+
+    /// An unexpected per-partition error makes the transaction abortable with
+    /// Java's `KafkaException("Could not add partitions to transaction due to
+    /// errors: " + errors)` (`TransactionManager.java:1681`), the map naming each
+    /// error by its Java constant (`Enum.toString()`), as Java 4.4 prints
+    /// `{t-0=UNKNOWN_SERVER_ERROR}`. Every partition of the response is listed,
+    /// in topic-then-partition order.
+    #[tokio::test]
+    async fn test_unexpected_error_in_add_partitions_names_errors_like_java() {
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+
+        let foo0 = TopicPartition::new("foo".to_string(), 0);
+        let foo1 = TopicPartition::new("foo".to_string(), 1);
+        manager.maybe_add_partition(&foo1).expect("a new partition is registered");
+        manager.maybe_add_partition(&foo0).expect("a new partition is registered");
+        run_add_partitions_to_txn(
+            &mut manager,
+            &mut pending,
+            &[
+                (foo1, Errors::OperationNotAttempted),
+                (foo0, Errors::UnknownServerError),
+            ],
+        )
+        .expect("the AddPartitionsToTxn response is handled");
+
+        assert!(manager.has_abortable_error());
+        assert_eq!(
+            "Could not add partitions to transaction due to errors: \
+             {foo-0=UNKNOWN_SERVER_ERROR, foo-1=OPERATION_NOT_ATTEMPTED}",
+            manager.last_error().expect("an error is recorded").message()
+        );
     }
 
     /// Translated from `testProducerFencedInAddPartitionToTxn` (Java 2056-2060) and

@@ -5,6 +5,42 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
+## [Unreleased]
+
+### Admin client
+
+- **Behaviour change:** a retriable error during `close(timeout)` no longer
+  fails the call at once: until the deadline the call is retried, as Java's
+  `close` does, and `close` returns once it completes. New calls are still
+  rejected as soon as `close` is called.
+- A negative per-call `timeout_ms` is treated as `0`, as Java's
+  `calcDeadlineMs` does: the call is sent once instead of timing out before it
+  was sent.
+- `Admin::list_transactions()` without options sends no duration filter
+  (`-1`), as Java's does; `ListTransactionsOptions::default()` now equals
+  `ListTransactionsOptions::new()`.
+- The admin client's `NetworkClient` allows one in-flight request per
+  connection and has Java's one-hour default request timeout, as
+  `KafkaAdminClient.createInternal` builds it. A broker that answers the
+  `ApiVersions` handshake after `request.timeout.ms` is waited for instead of
+  being disconnected, and a node with a request in flight is no longer picked
+  as the least-loaded node.
+
+### Common
+
+- The minimum rustls version is now 0.23.46, which fixes
+  [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
+  `Debug` output of rustls's client session values exposed TLS session secrets.
+  The client never formats those values, but the C and Python bindings were
+  built with the affected 0.23.45.
+- rustls-webpki 0.103.16 and webpki-roots 1.0.11 stop trusting the emSign
+  (eMudhra) intermediate CAs whose private keys leaked
+  ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382),
+  [RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381)): a
+  certificate signed with one of those keys could impersonate a broker. The C
+  and Python bindings are built with the fixed versions; a Rust application
+  picks them up by updating its lockfile.
+
 ## [0.3.0-beta.1] - 2026-10-23
 
 ### Producer

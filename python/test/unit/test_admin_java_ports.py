@@ -77,8 +77,8 @@ KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient
   testConnectionFailureOnMetadataUpdate | skipped | drives MockClient; core: no same-named core test
   testUnreachableBootstrapServer | skipped | drives MockClient; core: test_unreachable_bootstrap_server
   testUnreachableBootstrapServerNoRebootstrap | skipped | drives MockClient; core: test_unreachable_bootstrap_server_no_rebootstrap
-  testPropagatedMetadataFetchException | skipped | drives MockClient; core: no same-named core test
-  testAdminClientApisAuthenticationFailure | skipped | drives MockClient; core: no same-named core test
+  testPropagatedMetadataFetchException | skipped | drives MockClient; core: test_propagated_metadata_fetch_error
+  testAdminClientApisAuthenticationFailure | skipped | drives MockClient; core: test_admin_client_apis_authentication_failure
   testDescribeCluster | skipped | drives MockClient; core: test_describe_cluster
   testDescribeClusterHandleError | skipped | drives MockClient; core: test_describe_cluster_handle_error
   testDescribeClusterFailBack | skipped | drives MockClient; core: test_describe_cluster_fail_back
