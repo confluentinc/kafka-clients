@@ -89,7 +89,8 @@ bindings/dotnet/
 │     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
-   └─ Confluent.Kafka.UnitTests/   ← Mock* unit tests
+   ├─ Confluent.Kafka.UnitTests/          ← Mock* unit tests
+   └─ Confluent.Kafka.IntegrationTests/   ← broker-backed tests (Testcontainers), as python/test/integration
 ```
 
 (Folders are organizational; C# accessibility is still the `internal` keyword +
@@ -131,6 +132,11 @@ project's parent.
   `src/` in its own project directory **outside** the library tree — so default
   SDK compile globbing never pulls test files into the library assembly (no
   compile-scoping hack needed); `InternalsVisibleTo` grants access to internals.
+- `tests/Confluent.Kafka.IntegrationTests/` — the binding's broker-backed tests, as Python's
+  `test/integration`: a Testcontainers broker from the perf suite's `KafkaBrokerFixture.cs`
+  (linked, not referenced), net8.0 and net10.0, in the solution. Without Docker the tests skip.
+  Testcontainers and `Xunit.SkippableFact` are test-only packages here and in the perf suite,
+  never in `src/` or `Confluent.Kafka.UnitTests` (ledger 213).
 
 ---
 
@@ -1189,11 +1195,12 @@ A port is not done until it builds on the TFM matrix, unit tests pass against
 `MockProducer` / `MockConsumer`, lint/format are clean, and the `ffi-marshalling.md` anti-patterns
 are satisfied (`definition-of-done.md`).
 
-The gate is `make verify-dotnet`, run from the repository root. It runs format, the unit tests
-and the soak tests on net8.0 and net10.0, the `__grpc_dotnet` and `__grpc_dotnet_async`
+The gate is `make verify-dotnet`, run from the repository root. It runs format, the unit tests, the
+broker-backed integration tests and the soak tests on net8.0 and net10.0, the `__grpc_dotnet` and `__grpc_dotnet_async`
 multilanguage arms over the two .NET gRPC images, and the perf stage. CI runs it on Linux, and
 runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make verify-dotnet-macos-docker`:
-the unit tests, then the arms with the gRPC server as a native process, with no perf stage. The
+the unit tests, without the integration tests, as Python's macOS job runs `test-unit` only, then
+the arms with the gRPC server as a native process, with no perf stage. The
 arms skip only the tests named in `rust/Makefile`'s `DOTNET_GRPC_SKIPS`, each listed with its
 reason and its REMOVE condition. The gRPC server's own unit tests are a local gate, outside CI:
 `make -C dotnet test-grpc-server-dotnet`.
