@@ -1045,7 +1045,9 @@ class MockAdminClientCore:
                     raise InvalidRequestError(message="Empty resource name")
                 group_config = self._group_configs.get(resource_name, {})
                 for key, value in self._default_group_configs.items():
-                    group_config.setdefault(key, value)
+                    # Java's putIfAbsent, which also replaces a key set to null.
+                    if group_config.get(key) is None:
+                        group_config[key] = value
                 return _config(group_config, resource)
             raise _unsupported(_NOT_IMPLEMENTED)
 
