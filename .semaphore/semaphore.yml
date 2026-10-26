@@ -422,7 +422,10 @@ blocks:
             - export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
             - export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
             - export TESTCONTAINERS_RYUK_DISABLED=false
-            - make test-integration-dotnet-native
+            # The agent's mise shell hook can reset DOTNET_ROOT and PATH to mise's .NET 9 between
+            # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
+            # on the make's own command line.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make test-integration-dotnet-native
 
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
