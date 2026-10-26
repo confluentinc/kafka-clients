@@ -9,7 +9,6 @@ errors kafka_consumer_Consumer_poll_cb
 param kafka_admin_ScramMechanism_from_type
 warning crate::admin::AdminClientConfig::new
 warning crate::common::ClusterResourceListener
-warning crate::common::KafkaFuture::then_apply
 warning crate::common::metrics::MetricsReporter
 warning crate::common::serialization::Deserializer
 warning crate::common::serialization::Serializer
@@ -23,7 +22,6 @@ warning crate::producer::Partitioner::partition
 warning crate::producer::Producer::metrics
 warning crate::producer::ProducerConfig::new
 warning kafka_admin_AdminClientConfig_new
-warning kafka_common_KafkaFuture_then_apply
 warning kafka_common_serialization_StringDeserializer_new
 warning kafka_common_serialization_StringSerializer_new
 warning kafka_consumer_ConsumerConfig_new

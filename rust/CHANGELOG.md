@@ -68,6 +68,13 @@ breaking changes.
   first failure as the cause of `Failed to close kafka producer` /
   `Failed to close kafka consumer`, as Java's `closeQuietly`. Return `Ok(())`
   from your implementations.
+- `KafkaFuture::then_apply` runs its function once, when this future
+  completes (inside `then_apply` when it already has), and completes the
+  returned future with its result, as Java does. It ran on every `get` of the
+  returned future before, and never when nobody awaited it. `KafkaFuture::all_of`
+  completes once every future has, with the error of the first failed one in
+  the list, as Java's `allOf`; it returned the first failure in list order
+  without waiting for the others before.
 - The minimum rustls version is now 0.23.46, which fixes
   [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
   `Debug` output of rustls's client session values exposed TLS session secrets.
@@ -95,6 +102,11 @@ breaking changes.
   group is unknown.
 - **Breaking:** a C deserializer's `*_with_headers*` methods receive the record's headers
   as a mutable `kafka_common_header_internals_RecordHeaders_t *`.
+- `kafka_common_KafkaFuture_then_apply` runs the C function once, when the
+  source future completes, and completes the returned future with its result:
+  inside the call when the source is already complete, else from the client's
+  `__execute_callbacks`, where it is queued on completion. It ran on the first
+  `get` of the returned future before.
 - **Breaking:** `kafka_common_serialization_{Serializer,Deserializer}_configure`
   and `_close` take a trailing `kafka_common_Error_t **out_err`, and their
   `_configure_cb_t` / `_close_cb_t` completions receive a

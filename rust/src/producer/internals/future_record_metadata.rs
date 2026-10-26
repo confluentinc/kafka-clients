@@ -28,11 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::Error;
-use crate::common::KafkaFutureOps;
 use crate::common::TopicPartition;
 use crate::common::record::internal::RecordBatch;
 use crate::common::utils::SystemTime;
 use crate::common::utils::Time;
+use crate::common::{CompletionCallback, KafkaFutureOps};
 use crate::producer::RecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
 
@@ -334,6 +334,19 @@ impl KafkaFutureOps<RecordMetadata> for FutureRecordMetadata {
     fn is_done(&self) -> bool {
         FutureRecordMetadata::is_done(self)
     }
+
+    /// Follows [`get`](FutureRecordMetadata::get): once this node's result is
+    /// done, the chained future set by a batch split, if any, answers instead.
+    fn on_complete(self: Arc<Self>, callback: CompletionCallback<RecordMetadata>) {
+        let result = Arc::clone(&self.result);
+        result.on_done(Box::new(move || {
+            let next = self.next_record_metadata.lock().unwrap().as_ref().map(Arc::clone);
+            match next {
+                Some(chained) => chained.on_complete(callback),
+                None => callback(&self.value_or_error()),
+            }
+        }));
+    }
 }
 
 impl std::fmt::Debug for FutureRecordMetadata {
@@ -395,6 +408,37 @@ mod tests {
             .expect_err("the chained result never completes");
         assert!(matches!(error, Error::LocalTimeout(_)), "got {error:?}");
         assert_eq!("Timeout after waiting for 1000 ms.", error.message());
+    }
+
+    /// A `then_apply` over a record future runs when the batch completes, with
+    /// nobody waiting; over a chained (split) record, when the chained batch
+    /// completes, as Java's `FutureRecordMetadata` follows `nextRecordMetadata`.
+    #[test]
+    fn then_apply_runs_when_the_batch_completes_following_the_chain() {
+        let time = mock_time();
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let produce_request_result = make_result(tp.clone());
+        let future = Arc::new(future_record_metadata(&produce_request_result, time));
+        let chained_produce_request_result = make_result(tp);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let offset = crate::common::KafkaFuture::new(Arc::clone(&future) as Arc<dyn KafkaFutureOps<RecordMetadata>>)
+            .then_apply(move |metadata: RecordMetadata| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(metadata.offset())
+            });
+        future.chain(future_record_metadata(&chained_produce_request_result, time));
+
+        produce_request_result.set(0, RecordBatch::NO_TIMESTAMP, None);
+        produce_request_result.done();
+        assert!(!offset.is_done(), "waits for the chained batch");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        chained_produce_request_result.set(7, RecordBatch::NO_TIMESTAMP, None);
+        chained_produce_request_result.done();
+        assert!(offset.is_done());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(offset.result_if_done().unwrap().unwrap(), 7);
     }
 
     /// Translated from `FutureRecordMetadataTest.testFutureGetWithSeconds`.

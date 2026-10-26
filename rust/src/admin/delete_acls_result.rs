@@ -15,11 +15,7 @@
 //! The result of `Admin::delete_acls`.
 
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
 
-use crate::common::KafkaFutureOps;
 use crate::common::acl::{AclBinding, AclBindingFilter};
 use crate::common::{Error, KafkaFuture};
 
@@ -100,55 +96,32 @@ impl DeleteAclsResult {
     /// any ACLs, this is not considered an error.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<AclBinding>> {
-        KafkaFuture::new(Arc::new(AclBindingsFuture {
-            futures: self.futures.values().cloned().collect(),
-        }))
+        let futures: Vec<KafkaFuture<FilterResults>> = self.futures.values().cloned().collect();
+        KafkaFuture::all_of(futures.clone()).then_apply(move |()| get_acl_bindings(&futures))
     }
 }
 
-/// Internal aggregate future backing [`DeleteAclsResult::all`].
-///
-/// Awaits every per-filter future and flattens the successful [`FilterResult`]s
-/// into deleted [`AclBinding`]s, surfacing the first error encountered (a failed
-/// filter future or a per-ACL deletion error). Mirrors Java's
-/// `allOf(...).thenApply(getAclBindings)`.
-struct AclBindingsFuture {
-    futures: Vec<KafkaFuture<FilterResults>>,
-}
-
-impl AclBindingsFuture {
-    async fn collect(&self) -> Result<Vec<AclBinding>, Error> {
-        let mut acls = Vec::new();
-        for value in &self.futures {
-            let results = value.get().await?;
-            for result in results.values() {
-                if let Some(error) = result.error() {
-                    return Err(error.clone());
-                }
-                if let Some(binding) = result.binding() {
-                    acls.push(binding.clone());
-                }
+/// The deleted ACL bindings of `futures`, all complete, or the first per-ACL
+/// deletion error.
+#[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult#getAclBindings")]
+fn get_acl_bindings(futures: &[KafkaFuture<FilterResults>]) -> Result<Vec<AclBinding>, Error> {
+    let mut acls = Vec::new();
+    for value in futures {
+        // `all_of` has completed every future, successfully, so this is the
+        // unreachable branch Java reports as an internal error.
+        let results = match value.result_if_done() {
+            Some(Ok(results)) => results,
+            Some(Err(error)) => return Err(Error::kafka_message_source("DeleteAclsResult#all: internal error", error)),
+            None => return Err(Error::kafka_message("DeleteAclsResult#all: internal error")),
+        };
+        for result in results.values() {
+            if let Some(error) = result.error() {
+                return Err(error.clone());
+            }
+            if let Some(binding) = result.binding() {
+                acls.push(binding.clone());
             }
         }
-        Ok(acls)
     }
-}
-
-impl KafkaFutureOps<Vec<AclBinding>> for AclBindingsFuture {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, Error>> + Send + '_>> {
-        Box::pin(self.collect())
-    }
-
-    fn get_with_timeout(
-        &self,
-        _timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Vec<AclBinding>, Error>> + Send + '_>> {
-        // The per-filter futures resolve together via the background task; the
-        // aggregate simply awaits them (mirroring Java's `allOf` + `get`).
-        Box::pin(self.collect())
-    }
-
-    fn is_done(&self) -> bool {
-        self.futures.iter().all(KafkaFuture::is_done)
-    }
+    Ok(acls)
 }
