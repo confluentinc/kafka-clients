@@ -94,7 +94,10 @@ _SOAK_DIR = os.path.dirname(os.path.abspath(__file__))
 # way, so the soak validates its own configuration up front and refuses to
 # start on an unknown key.
 #
-# Keep these in sync with the two Rust files named above.
+# Keep these in sync with the two Rust files named above. Both configs also
+# define Java's Kerberos and OAuth `sasl.*` keys, which are left out here on
+# purpose: the client authenticates with PLAIN only, so a soak config naming one
+# of them is a mistake to stop on rather than a setting to accept.
 # ---------------------------------------------------------------------------
 PRODUCER_CONFIG_KEYS = frozenset([
     "acks",
@@ -106,7 +109,10 @@ PRODUCER_CONFIG_KEYS = frozenset([
     "client.dns.lookup",
     "client.id",
     "client.rack",
+    "compression.gzip.level",
+    "compression.lz4.level",
     "compression.type",
+    "compression.zstd.level",
     "connections.max.idle.ms",
     "delivery.timeout.ms",
     "enable.idempotence",
@@ -117,10 +123,16 @@ PRODUCER_CONFIG_KEYS = frozenset([
     "metadata.cluster.check.enable",
     "metadata.max.age.ms",
     "metadata.max.idle.ms",
+    "metadata.recovery.rebootstrap.trigger.ms",
+    "metadata.recovery.strategy",
+    "metrics.num.samples",
+    "metrics.recording.level",
+    "metrics.sample.window.ms",
     "partitioner.adaptive.partitioning.enable",
     "partitioner.availability.timeout.ms",
     "partitioner.ignore.keys",
     "partitioner.rack.aware",
+    "partitioner.type",
     "receive.buffer.bytes",
     "reconnect.backoff.max.ms",
     "reconnect.backoff.ms",
@@ -132,7 +144,10 @@ PRODUCER_CONFIG_KEYS = frozenset([
     "sasl.mechanism",
     "security.protocol",
     "send.buffer.bytes",
+    "socket.connection.setup.timeout.max.ms",
+    "socket.connection.setup.timeout.ms",
     "transaction.timeout.ms",
+    "transaction.two.phase.commit.enable",
     "transactional.id",
 ])
 
@@ -146,11 +161,9 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "client.dns.lookup",
     "client.id",
     "client.rack",
-    "config.providers",
     "connections.max.idle.ms",
     "default.api.timeout.ms",
     "enable.auto.commit",
-    "enable.metrics.push",
     "exclude.internal.topics",
     "fetch.max.bytes",
     "fetch.max.wait.ms",
@@ -172,7 +185,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "metrics.num.samples",
     "metrics.recording.level",
     "metrics.sample.window.ms",
-    "partition.assignment.strategy",
     "receive.buffer.bytes",
     "reconnect.backoff.max.ms",
     "reconnect.backoff.ms",
@@ -182,7 +194,6 @@ CONSUMER_CONFIG_KEYS = frozenset([
     "sasl.jaas.config",
     "sasl.mechanism",
     "security.protocol",
-    "security.providers",
     "send.buffer.bytes",
     "session.timeout.ms",
     "share.acknowledgement.mode",

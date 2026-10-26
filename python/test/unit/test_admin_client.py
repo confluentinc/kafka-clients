@@ -92,9 +92,6 @@ def _admin(**extra: Any) -> Admin:
 # ---- KafkaAdminClientTest ---------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "core gap: the Rust KafkaAdminClient does not reject default.api.timeout.ms "
-    "below request.timeout.ms (Java's configureDefaultApiTimeoutMs)"))
 def test_default_api_timeout_and_request_timeout_conflicts() -> None:
     """``testDefaultApiTimeoutAndRequestTimeoutConflicts``: Java's
     ``createInternal`` wraps the ``ConfigException`` in a ``KafkaException``."""
@@ -376,7 +373,7 @@ def test_negative_call_timeout_times_out_at_once() -> None:
     """A given negative ``timeout_ms`` is Java's ``Math.max(0, optionTimeoutMs)``
     (``calcDeadlineMs``): the call times out at once, not after
     ``default.api.timeout.ms``."""
-    with _admin(**{"default.api.timeout.ms": "20000"}) as admin:
+    with _admin(**{"default.api.timeout.ms": "20000", "request.timeout.ms": "100"}) as admin:
         result = admin.list_topics(options=ListTopicsOptions(timeout_ms=-5))
         started = time.monotonic()
         assert str(assert_future_throws(result.names(), KafkaTimeoutError)) == LIST_TIMED_OUT

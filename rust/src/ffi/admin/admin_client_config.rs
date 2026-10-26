@@ -16,9 +16,11 @@
 //! `org.apache.kafka.clients.admin.AdminClientConfig` (CLAUDE.md §4).
 //!
 //! Built from a `kafka_Map_t` of C strings, the way Rust's
-//! `AdminClientConfig::new` takes a `HashMap<String, String>`; validation
-//! happens here, so `kafka_admin_AdminClient_create` only sees a valid
-//! configuration.
+//! `AdminClientConfig::new` takes a `HashMap<String, String>`. Each value is
+//! parsed and validated here; the checks Java's `KafkaAdminClient`
+//! constructor makes across keys (no resolvable `bootstrap.servers`, or an
+//! explicit `default.api.timeout.ms` below `request.timeout.ms`) fail in
+//! `kafka_admin_AdminClient_create` instead.
 //!
 //! `AdminClient::create` takes an `AdminClientConfig` by value, which is not
 //! `Clone` (CLAUDE.md §3), while the C constructor borrows the handle; the

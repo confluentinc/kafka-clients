@@ -98,9 +98,9 @@ KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient
   testDescribeMetadataQuorumFailure | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testGetSubLevelError | skipped | package-private static helper, not generated; core: none
   testSuccessfulRetryAfterRequestTimeout | skipped | drives MockClient; core: no same-named core test
-  testDefaultApiTimeout | skipped | MockTime / MockClient; core: none (the call timeout itself is test_admin_client.py::test_create_topics_futures_fail_with_the_call_timeout)
-  testDefaultApiTimeoutOverride | skipped | MockTime / MockClient; core: none (the call timeout itself is test_admin_client.py::test_create_topics_futures_fail_with_the_call_timeout)
-  testRequestTimeoutExceedingDefaultApiTimeout | skipped | drives MockClient; core: no same-named core test
+  testDefaultApiTimeout | skipped | MockTime / MockClient; core: test_default_api_timeout
+  testDefaultApiTimeoutOverride | skipped | MockTime / MockClient; core: test_default_api_timeout_override
+  testRequestTimeoutExceedingDefaultApiTimeout | skipped | drives MockClient; core: test_request_timeout_exceeding_default_api_timeout
   testUnregisterBrokerSuccess | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testUnregisterBrokerFailure | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testUnregisterBrokerTimeoutAndSuccessRetry | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
