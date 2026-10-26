@@ -1222,7 +1222,10 @@ through `Translate.ToProto`, as every Python error crosses through `_kafka_error
   - `NotSupportedException`: -31 (`UnsupportedOperationError`).
 
   A core -2 goes out as -4, because .NET throws one type for -2 and -4 (decision 17); Python
-  sends -2.
+  sends -2. The text is the message the binding or the core gave the exception, without what .NET
+  appends to it: an `ArgumentException`'s " (Parameter '…')" and an
+  `ArgumentOutOfRangeException`'s "Actual value was …" line, and an `ObjectDisposedException`'s
+  "Object name: …" line. So the text is Python's, which sends Java's message alone.
 - An `ArgumentNullException`, and any other exception, is sent as -4 with the message
   "dotnet server: <Type>: <message>". This is Python's fallback for a class with no FFI id,
   `TypeError` included.

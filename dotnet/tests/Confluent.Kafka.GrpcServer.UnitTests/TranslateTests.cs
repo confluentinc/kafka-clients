@@ -49,8 +49,19 @@ public sealed class TranslateTests
         AssertBare(new ArgumentException("bad argument"), -3);
 
     [Fact]
-    public void AnArgumentOutOfRangeException_IsLocalIllegalArgument_WithItsMessage() =>
-        AssertBare(new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative."), -3);
+    public void AnArgumentException_WithAParamName_IsSentWithoutDotNetsParameterSuffix() =>
+        AssertBare(new ArgumentException("bad argument", "topic"), -3, "bad argument");
+
+    [Fact]
+    public void AnArgumentOutOfRangeException_IsLocalIllegalArgument_WithoutDotNetsParameterSuffix() =>
+        AssertBare(new ArgumentOutOfRangeException("timeout", "The timeout cannot be negative."), -3, "The timeout cannot be negative.");
+
+    [Fact]
+    public void AnArgumentOutOfRangeException_WithAnActualValue_IsSentWithoutDotNetsSuffixes() =>
+        AssertBare(
+            new ArgumentOutOfRangeException("timeout", TimeSpan.FromMilliseconds(-1), "Invalid negative timeout -1"),
+            -3,
+            "Invalid negative timeout -1");
 
     [Fact]
     public void AnArgumentNullException_IsTheServerFallback()
@@ -68,8 +79,11 @@ public sealed class TranslateTests
         AssertBare(new InvalidOperationException("KafkaConsumer is not safe for multi-threaded access."), -4);
 
     [Fact]
-    public void AnObjectDisposedException_IsLocalIllegalState_WithItsMessage() =>
-        AssertBare(new ObjectDisposedException("KafkaConsumer"), -4);
+    public void AnObjectDisposedException_IsLocalIllegalState_WithoutDotNetsObjectNameLine() =>
+        AssertBare(
+            new ObjectDisposedException("KafkaConsumer", "This consumer has already been closed."),
+            -4,
+            "This consumer has already been closed.");
 
     [Fact]
     public void ATimeoutException_IsLocalTimeout_WithItsMessage() =>
@@ -88,12 +102,14 @@ public sealed class TranslateTests
         Assert.Equal("dotnet server: FormatException: not a number", proto.Message);
     }
 
-    private static void AssertBare(Exception error, int code)
+    private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);
+
+    private static void AssertBare(Exception error, int code, string message)
     {
         Proto.KafkaError proto = Translate.ToProto(error);
 
         Assert.Equal(code, proto.Code);
-        Assert.Equal(error.Message, proto.Message);
+        Assert.Equal(message, proto.Message);
         Assert.DoesNotContain("dotnet server", proto.Message, StringComparison.Ordinal);
     }
 }

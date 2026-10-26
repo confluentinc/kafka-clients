@@ -80,9 +80,7 @@ public sealed class ConsumerServiceTests
 
         Assert.NotNull(error);
         Assert.Equal(-3, error.Code);
-        Assert.Equal(
-            $"{message} (Parameter 'timeout'){Environment.NewLine}Actual value was -00:00:00.0010000.",
-            error.Message);
+        Assert.Equal(message, error.Message);
     }
 
     [Theory]

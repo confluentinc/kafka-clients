@@ -131,8 +131,26 @@ internal static class Translate
     private static Proto.KafkaError Coded(int code, Exception error) => new Proto.KafkaError
     {
         Code = code,
-        Message = error.Message ?? string.Empty,
+        Message = WithoutDotNetSuffix(error),
     };
+
+    // The message without what .NET appends to it, so the text is Java's, as Python sends it. The suffix
+    // is read from a probe of the same type, so it matches this runtime and culture.
+    private static string WithoutDotNetSuffix(Exception error)
+    {
+        string message = error.Message ?? string.Empty;
+        string suffix = error switch
+        {
+            ArgumentOutOfRangeException e => new ArgumentOutOfRangeException(e.ParamName, e.ActualValue, string.Empty).Message,
+            ArgumentException e => new ArgumentException(string.Empty, e.ParamName).Message,
+            ObjectDisposedException e => new ObjectDisposedException(e.ObjectName, string.Empty).Message,
+            _ => string.Empty,
+        };
+
+        return suffix.Length > 0 && message.EndsWith(suffix, StringComparison.Ordinal)
+            ? message.Substring(0, message.Length - suffix.Length)
+            : message;
+    }
 
     private static Proto.KafkaError ServerMade(Exception error) => new Proto.KafkaError
     {

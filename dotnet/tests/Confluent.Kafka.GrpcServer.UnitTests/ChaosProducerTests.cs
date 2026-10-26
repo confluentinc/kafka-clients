@@ -133,9 +133,11 @@ public sealed class ChaosProducerTests
         foreach (Proto.WorkloadEvent failure in failures)
         {
             Exception thrown = harness.Producer.SendThrew[failure.SendFailed.Index];
-            Assert.IsType<ObjectDisposedException>(thrown);
+            ObjectDisposedException disposed = Assert.IsType<ObjectDisposedException>(thrown);
+            string withoutObjectName = new ObjectDisposedException((string?)null).Message;
+            Assert.StartsWith(withoutObjectName, disposed.Message, StringComparison.Ordinal);
             Assert.Equal(-4, failure.SendFailed.Error.Code);
-            Assert.Equal(thrown.Message, failure.SendFailed.Error.Message);
+            Assert.Equal(withoutObjectName, failure.SendFailed.Error.Message);
         }
 
         // The healthy records' callbacks fired once each; a throwing Send's never did.
