@@ -49,22 +49,24 @@ pub enum GroupState {
 }
 
 impl GroupState {
-    /// The display name of this group state (as used on the wire and in
-    /// `toString`).
+    /// The name of this enum constant, exactly as declared in Java
+    /// (`PREPARING_REBALANCE`).
     ///
-    /// Mirrors the private `name` field in Java.
+    /// Java's `Enum.name()`, which `GroupState` inherits. The text Java's
+    /// `toString()` returns (`PreparingRebalance`, the text the broker sends and
+    /// [`parse`](Self::parse) reads) is this type's [`Display`](fmt::Display).
     #[doc(alias = "org.apache.kafka.common.GroupState#name")]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Unknown => "Unknown",
-            Self::PreparingRebalance => "PreparingRebalance",
-            Self::CompletingRebalance => "CompletingRebalance",
-            Self::Stable => "Stable",
-            Self::Dead => "Dead",
-            Self::Empty => "Empty",
-            Self::Assigning => "Assigning",
-            Self::Reconciling => "Reconciling",
-            Self::NotReady => "NotReady",
+            Self::Unknown => "UNKNOWN",
+            Self::PreparingRebalance => "PREPARING_REBALANCE",
+            Self::CompletingRebalance => "COMPLETING_REBALANCE",
+            Self::Stable => "STABLE",
+            Self::Dead => "DEAD",
+            Self::Empty => "EMPTY",
+            Self::Assigning => "ASSIGNING",
+            Self::Reconciling => "RECONCILING",
+            Self::NotReady => "NOT_READY",
         }
     }
 
@@ -135,9 +137,22 @@ impl GroupState {
     }
 }
 
+/// Java's `toString()`, which returns the private `name` field: the text
+/// (`PreparingRebalance`) the broker sends and [`GroupState::parse`] reads, not
+/// the constant name [`GroupState::name`] returns (`GroupState.java:51-97`).
 impl fmt::Display for GroupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(match self {
+            Self::Unknown => "Unknown",
+            Self::PreparingRebalance => "PreparingRebalance",
+            Self::CompletingRebalance => "CompletingRebalance",
+            Self::Stable => "Stable",
+            Self::Dead => "Dead",
+            Self::Empty => "Empty",
+            Self::Assigning => "Assigning",
+            Self::Reconciling => "Reconciling",
+            Self::NotReady => "NotReady",
+        })
     }
 }
 
@@ -159,10 +174,37 @@ mod tests {
         assert_eq!(GroupState::parse("bogus"), GroupState::Unknown);
     }
 
+    /// New test, no Java original (Java has no `GroupStateTest`): every
+    /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
+    /// `toString()` (`GroupState.java:51-60, 93-96`), and `parse` reads the `toString()` text back.
     #[test]
-    fn to_string_matches_name() {
-        assert_eq!(GroupState::CompletingRebalance.to_string(), "CompletingRebalance");
-        assert_eq!(GroupState::Empty.to_string(), "Empty");
+    fn name_and_display_match_java_for_every_constant() {
+        for (state, name, display) in [
+            (GroupState::Unknown, "UNKNOWN", "Unknown"),
+            (GroupState::PreparingRebalance, "PREPARING_REBALANCE", "PreparingRebalance"),
+            (GroupState::CompletingRebalance, "COMPLETING_REBALANCE", "CompletingRebalance"),
+            (GroupState::Stable, "STABLE", "Stable"),
+            (GroupState::Dead, "DEAD", "Dead"),
+            (GroupState::Empty, "EMPTY", "Empty"),
+            (GroupState::Assigning, "ASSIGNING", "Assigning"),
+            (GroupState::Reconciling, "RECONCILING", "Reconciling"),
+            (GroupState::NotReady, "NOT_READY", "NotReady"),
+        ] {
+            assert_eq!(state.name(), name);
+            assert_eq!(state.to_string(), display);
+            assert_eq!(GroupState::parse(&state.to_string()), state);
+        }
+    }
+
+    /// New test, no Java original: Java's `parse` looks the upper-cased text up
+    /// among the upper-cased `toString()` texts (`GroupState.java:62-77`), so a
+    /// constant name with an underscore is not found and parses as `UNKNOWN`.
+    #[test]
+    fn parse_does_not_read_constant_names_with_an_underscore() {
+        assert_eq!(GroupState::parse("PREPARING_REBALANCE"), GroupState::Unknown);
+        assert_eq!(GroupState::parse("COMPLETING_REBALANCE"), GroupState::Unknown);
+        assert_eq!(GroupState::parse("NOT_READY"), GroupState::Unknown);
+        assert_eq!(GroupState::parse(GroupState::Stable.name()), GroupState::Stable);
     }
 
     #[test]
