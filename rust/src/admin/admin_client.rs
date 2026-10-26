@@ -50,8 +50,11 @@ impl AdminClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the bootstrap addresses cannot be resolved or the
-    /// channel builder cannot be created.
+    /// Returns a Kafka error, `Failed to create new KafkaAdminClient`, whose
+    /// source is the failure: the bootstrap addresses cannot be resolved, the
+    /// channel builder cannot be created, or `default.api.timeout.ms` is set
+    /// explicitly below `request.timeout.ms` (an [`Error::Config`], as Java's
+    /// `KafkaAdminClient.configureDefaultApiTimeoutMs` throws).
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClient#create")]
     pub fn create(config: AdminClientConfig) -> Result<Box<dyn Admin>, Error> {
         Ok(Box::new(KafkaAdminClient::new(config)?))
