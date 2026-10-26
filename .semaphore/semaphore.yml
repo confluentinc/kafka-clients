@@ -403,6 +403,11 @@ blocks:
             # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc.
             - name: MACOS_ENSURE_ROSETTA
               value: "true"
+            # The .NET unit and soak tests need no Docker, so the prologue skips Colima and the job
+            # starts it after them: its 6-CPU, 12 GB VM then does not share the agent with the unit
+            # tests. The commands below are dependencies-macos.sh's Colima bring-up.
+            - name: MACOS_SKIP_COLIMA
+              value: "true"
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"
@@ -410,7 +415,14 @@ blocks:
             - export DOTNET_MULTILEVEL_LOOKUP=0
             - which dotnet
             - dotnet --list-runtimes
-            - make verify-dotnet-macos-docker
+            - make test-dotnet-macos-docker
+            - command -v colima >/dev/null 2>&1 || brew install colima
+            - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
+            - docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done
+            - export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+            - export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+            - export TESTCONTAINERS_RYUK_DISABLED=false
+            - make test-integration-dotnet-native
 
   - name: "Check Rust docs (Linux amd64)"
     # Its own block so a documentation failure is attributable at a glance and
