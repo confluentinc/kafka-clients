@@ -110,10 +110,9 @@ impl AlterUserScramCredentialsRequest {
     /// Returns a copy of `data` with every upsertion's salt and salted
     /// password emptied, for rendering.
     ///
-    /// Mirrors Java's private `maskData`
-    /// (`AlterUserScramCredentialsRequest.java:85-91`), shared, as in Java, by
-    /// the request's `toString()` (`:96-97`) and `Builder.toString()`
-    /// (`:45-46`). Java returns the copy's `toString()`, and the callers here
+    /// Mirrors Java's private `AlterUserScramCredentialsRequest#maskData`, shared, as in Java,
+    /// by the request's `AlterUserScramCredentialsRequest#toString` and
+    /// `AlterUserScramCredentialsRequest.Builder#toString`. Java returns the copy's `toString()`, and the callers here
     /// render the copy.
     fn mask_data(data: &AlterUserScramCredentialsRequestData) -> AlterUserScramCredentialsRequestData {
         let mut temp_data = data.clone();
@@ -127,7 +126,7 @@ impl AlterUserScramCredentialsRequest {
 
 impl std::fmt::Display for AlterUserScramCredentialsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors Java's `toString()` (`AlterUserScramCredentialsRequest.java:94-98`),
+        // Mirrors Java's `org.apache.kafka.common.requests.AlterUserScramCredentialsRequest#toString`,
         // which renders `maskData(data)`: the data with every salt and salted
         // password emptied ("Do not print salt or saltedPassword").
         write!(
@@ -141,7 +140,7 @@ impl std::fmt::Display for AlterUserScramCredentialsRequest {
 
 /// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
 ///
-/// Java has a single `toString()` (`AlterUserScramCredentialsRequest.java:96-97`);
+/// Java has a single `AlterUserScramCredentialsRequest#toString`;
 /// a derived `Debug` would be a second, unredacted rendering that prints every
 /// upsertion's salt and salted password.
 impl std::fmt::Debug for AlterUserScramCredentialsRequest {
@@ -193,7 +192,7 @@ impl RequestBuilder for Builder {
     }
 }
 
-/// Mirrors Java's `Builder.toString()` (`AlterUserScramCredentialsRequest.java:45-46`),
+/// Mirrors Java's `AlterUserScramCredentialsRequest.Builder#toString`,
 /// which returns `maskData(data)`: the data with every salt and salted password
 /// emptied.
 impl std::fmt::Display for Builder {
@@ -290,8 +289,8 @@ mod tests {
     }
 
     /// New test, no Java original: the redacting `Display` renders the data
-    /// with every salt and salted password emptied, as Java's `toString()`
-    /// renders `maskData(data)` (`AlterUserScramCredentialsRequest.java:96-97`),
+    /// with every salt and salted password emptied, as Java's
+    /// `AlterUserScramCredentialsRequest#toString` renders `maskData(data)`,
     /// so the user names, mechanisms and iterations still show.
     #[test]
     fn display_redacts_salt_and_salted_password() {

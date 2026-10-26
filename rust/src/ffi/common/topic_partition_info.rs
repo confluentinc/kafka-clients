@@ -36,7 +36,7 @@ pub struct kafka_common_TopicPartitionInfo_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_TopicPartitionInfo_t`] points at: the value plus a
+/// What a `kafka_common_TopicPartitionInfo_t` points at: the value plus a
 /// cached leader so `leader()` is a borrowed node valid as long as the
 /// handle.
 pub(crate) struct TopicPartitionInfoInner {
@@ -95,15 +95,21 @@ pub(crate) fn box_topic_partition_info(info: TopicPartitionInfo) -> *mut kafka_c
     boxed(info)
 }
 
-/// `new TopicPartitionInfo(int partition, Node leader, List<Node> replicas,
-/// List<Node> isr)`, leaving `elr` and `lastKnownElr` null. `leader` is
-/// nullable; the lists hold `const kafka_common_Node_t *` and are copied.
-/// Owned, freed with [`kafka_common_TopicPartitionInfo_destroy`].
+/// Create an instance of this class with the provided parameters, with no eligible leader replicas.
+///
+/// # Parameters
+///
+/// - `partition` - the partition id
+/// - `leader` - the leader of the partition or `NULL` if there is none.
+/// - `replicas` - the replicas of the partition in the same order as the replica assignment (the
+///   preferred replica is the head of the list)
+/// - `isr` - the in-sync replicas
 ///
 /// # Safety
 ///
-/// `leader` must be null or a valid node handle and each list null or a
-/// valid list of node handles.
+/// `leader` must be `NULL` or a valid node handle and each list `NULL` or a
+/// valid list of node handles; all are copied. The returned handle is owned, freed with
+/// `kafka_common_TopicPartitionInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
@@ -127,15 +133,22 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_new(
     ))
 }
 
-/// `new TopicPartitionInfo(int partition, Node leader, List<Node> replicas,
-/// List<Node> isr, List<Node> elr, List<Node> lastKnownElr)`. A null `elr`
-/// or `last_known_elr` list is an empty one, as Java's constructor requires
-/// non-null lists.
+/// Create an instance of this class with the provided parameters.
+///
+/// # Parameters
+///
+/// - `partition` - the partition id
+/// - `leader` - the leader of the partition or `NULL` if there is none.
+/// - `replicas` - the replicas of the partition in the same order as the replica assignment (the
+///   preferred replica is the head of the list)
+/// - `isr` - the in-sync replicas
+/// - `elr` - the eligible leader replicas
+/// - `last_known_elr` - the last known eligible leader replicas.
 ///
 /// # Safety
 ///
-/// As [`kafka_common_TopicPartitionInfo_new`], plus `elr` and
-/// `last_known_elr` null or valid lists of node handles.
+/// As `kafka_common_TopicPartitionInfo_new`, plus `elr` and
+/// `last_known_elr` `NULL` or valid lists of node handles; a `NULL` list reads as empty.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr(
@@ -168,7 +181,11 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_with_elr_last_known_elr
     ))
 }
 
-/// `partition()`.
+/// Return the partition id.
+///
+/// # Returns
+///
+/// The partition id.
 ///
 /// # Safety
 ///
@@ -183,11 +200,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_partition(
     unsafe { inner_ref(self_) }.info.partition()
 }
 
-/// `leader()`: borrowed from the handle, or null when there is no leader.
+/// Return the leader of the partition or `NULL` if there is none.
+///
+/// # Returns
+///
+/// The leader, or `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned handle is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
@@ -199,12 +221,19 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_leader(
     optional_node_ptr(unsafe { inner_ref(self_) }.leader.as_ref())
 }
 
-/// `replicas()`: an owned list of `kafka_common_Node_t *` copies, freed with
-/// `kafka_List_destroy`.
+/// Return the replicas of the partition in the same order as the replica assignment. The preferred replica is the
+/// head of the list.
+///
+/// Brokers with version lower than 0.11.0.0 return the replicas in unspecified order due to a bug.
+///
+/// # Returns
+///
+/// The replicas.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
@@ -216,11 +245,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_replicas(
     node_list(unsafe { inner_ref(self_) }.info.replicas())
 }
 
-/// `isr()`: an owned list of `kafka_common_Node_t *` copies.
+/// Return the in-sync replicas of the partition. Note that the ordering of the result is unspecified.
+///
+/// # Returns
+///
+/// The in-sync replicas.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
@@ -232,12 +266,16 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_isr(
     node_list(unsafe { inner_ref(self_) }.info.isr())
 }
 
-/// `elr()`: an owned list of `kafka_common_Node_t *` copies, or null when the
-/// broker did not report eligible leader replicas (Java's null).
+/// Return the eligible leader replicas of the partition. Note that the ordering of the result is unspecified.
+///
+/// # Returns
+///
+/// The eligible leader replicas, or `NULL` when the broker did not report them.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
@@ -249,12 +287,17 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_elr(
     unsafe { inner_ref(self_) }.info.elr().map_or(ptr::null_mut(), node_list)
 }
 
-/// `lastKnownElr()`: an owned list of `kafka_common_Node_t *` copies, or null
-/// when the broker did not report it (Java's null).
+/// Return the last known eligible leader replicas of the partition. Note that the ordering of the result is
+/// unspecified.
+///
+/// # Returns
+///
+/// The last known eligible leader replicas, or `NULL` when the broker did not report them.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
@@ -269,11 +312,13 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_last_known_elr(
         .map_or(ptr::null_mut(), node_list)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `(partition=<id>, leader=<leader>, replicas=<nodes>, isr=<nodes>, elr=<nodes>, lastKnownElr=<nodes>)`, a
+/// `NULL` elr list printed as `N/A`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-partition-info handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicPartitionInfo_to_string(

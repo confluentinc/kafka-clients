@@ -147,7 +147,7 @@ async def test_topics_and_cluster() -> None:
 
 
 async def test_unregister_controller_follows_the_raft_controller_setting() -> None:
-    """``MockAdminClient.unregisterController`` (``MockAdminClient.java:1372-1380``):
+    """``org.apache.kafka.clients.admin.MockAdminClient#unregisterController``:
     without ``usingRaftController`` the future fails with
     ``new UnsupportedVersionException("")``; with it, it completes with ``null``."""
     cause = await async_assert_future_throws(

@@ -126,7 +126,7 @@ pub(crate) unsafe fn map_offset_and_metadata(map: *const kafka_Map_t) -> HashMap
 }
 
 /// Returns a freshly constructed value as an owned handle, or stores the
-/// construction error in `*out_err` (CLAUDE.md §4).
+/// construction error in `*out_err`.
 ///
 /// # Safety
 ///
@@ -141,14 +141,26 @@ unsafe fn deliver(
     unsafe { deliver_value(oam, out_err, box_offset_and_metadata) }
 }
 
-/// `new OffsetAndMetadata(long offset)`: returns an owned handle, freed with
-/// [`kafka_consumer_OffsetAndMetadata_destroy`]. A negative offset stores the
-/// Java `IllegalArgumentException` in `*out_err` (`LocalIllegalArgument`,
-/// "Invalid negative offset").
+/// Construct a new OffsetAndMetadata object for committing through a KafkaConsumer.
+///
+/// # Parameters
+///
+/// - `offset` - The offset to be committed
+///
+/// # Returns
+///
+/// The handle, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `offset` is negative
 ///
 /// # Safety
 ///
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndMetadata_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
@@ -159,13 +171,28 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_new(
     unsafe { deliver(OffsetAndMetadata::new(offset), out_err) }
 }
 
-/// `new OffsetAndMetadata(long offset, String metadata)`; a null `metadata`
-/// is Java `null`, which the class stores as the empty string.
+/// Construct a new OffsetAndMetadata object for committing through a KafkaConsumer.
+///
+/// # Parameters
+///
+/// - `offset` - The offset to be committed
+/// - `metadata` - Non-`NULL` metadata
+///
+/// # Returns
+///
+/// The handle, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `offset` is negative
 ///
 /// # Safety
 ///
 /// `metadata` must be null or a valid NUL-terminated string; `out_err` a valid
 /// slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndMetadata_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
@@ -181,13 +208,29 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_metadata(
     unsafe { deliver(OffsetAndMetadata::with_metadata(offset, metadata), out_err) }
 }
 
-/// `new OffsetAndMetadata(long offset, Optional<Integer> leaderEpoch, String metadata)`;
-/// a negative `leader_epoch` is `Optional.empty()`.
+/// Construct a new OffsetAndMetadata object for committing through a KafkaConsumer.
+///
+/// # Parameters
+///
+/// - `offset` - The offset to be committed
+/// - `leader_epoch` - Optional leader epoch of the last consumed record, negative for none
+/// - `metadata` - Non-`NULL` metadata
+///
+/// # Returns
+///
+/// The handle, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `offset` is negative
 ///
 /// # Safety
 ///
 /// `metadata` must be null or a valid NUL-terminated string; `out_err` a valid
 /// slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndMetadata_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(
@@ -210,11 +253,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_with_leader_epoch_meta
     }
 }
 
-/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
@@ -226,6 +275,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_to_string(
 }
 
 /// `offset()`.
+///
+/// # Returns
+///
+/// The offset
 ///
 /// # Safety
 ///
@@ -240,12 +293,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_offset(
     unsafe { offset_and_metadata_ref(self_) }.offset()
 }
 
-/// `metadata()`: the commit metadata, empty when none, borrowed from the
-/// handle.
+/// `metadata()`: the commit metadata, empty when none.
+///
+/// # Returns
+///
+/// The metadata or empty string if no metadata
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
@@ -260,6 +318,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndMetadata_metadata(
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
 /// A caught Rust panic returns -2, which is no leader epoch: Java's `leaderEpoch()` answers a negative one as `Optional.empty()`.
+///
+/// # Returns
+///
+/// The leader epoch or empty if not known
 ///
 /// # Safety
 ///

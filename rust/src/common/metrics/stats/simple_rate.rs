@@ -26,12 +26,13 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// This avoids the issue of an artificially high rate when the gap between
 /// readings is close to 0.
 ///
-/// In Java `SimpleRate extends Rate` and overrides only `windowSize`. Rust has
-/// no inheritance, so we compose a `Rate` and re-implement `measure` using the
-/// overridden `window_size` (Java's `measure` is on `Rate`, calling the virtual
-/// `windowSize`).
+/// # Translation notes
+///
+/// Composes a [`Rate`] instead of extending it.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate")]
+// Java's `SimpleRate extends Rate` and overrides only `windowSize`; Rust
+// re-implements `measure` using the overridden `window_size`.
 pub struct SimpleRate {
     rate: Rate,
 }
@@ -45,6 +46,15 @@ impl SimpleRate {
 
     /// Compute the window size in milliseconds, overriding [`Rate::window_size`]:
     /// `max(elapsed, config.timeWindowMs())`.
+    ///
+    /// # Arguments
+    ///
+    /// - `config` - the metric's configuration
+    /// - `now` - the current POSIX time in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// The window size in milliseconds.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SimpleRate#windowSize")]
     pub fn window_size(&self, config: &MetricConfig, now: i64) -> i64 {
         let stat = self.rate.stat();

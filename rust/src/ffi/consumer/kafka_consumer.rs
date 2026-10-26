@@ -129,25 +129,43 @@ unsafe fn deserializer_from(
     }
 }
 
-/// `KafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer,
-/// Deserializer<V> valueDeserializer)`: returns the owned class handle, freed
-/// with [`kafka_consumer_KafkaConsumer_destroy`], or stores the owned error in
-/// `*out_err` and returns `NULL`. The consumer gets its own copy of the
-/// handle's configuration, with the handle's `client.id` (the consumers of one
-/// handle share it, as Java's consumers given one `ConsumerConfig` do), so the
-/// handle stays the caller's and can build further consumers; each
-/// deserializer handle is consumed (its `self` stays the caller's until the
-/// consumer is destroyed, CLAUDE.md §4 rule 3), and `NULL` means the record's
-/// `void *` on that side is a `kafka_Bytes_t *` owned by the records (rule 6).
-/// A constructor that fails after taking the deserializers closes them, as
-/// Java's does (`AsyncKafkaConsumer.java:596-603`), and returns without
-/// waiting for a C deserializer's `close` to report: that report may arrive
-/// after this returned, on the handle, which stays valid for it.
+/// A consumer is instantiated by providing a set of key-value pairs as
+/// configuration, and a key and a value `Deserializer`.
+///
+/// Note: after creating a `KafkaConsumer` you must always close it to avoid
+/// resource leaks.
+///
+/// # Parameters
+///
+/// - `config` - The consumer configs
+/// - `key_deserializer` - The deserializer for key that implements `Deserializer`. The configure()
+///   method won't be called in the consumer when the deserializer is passed in directly.
+/// - `value_deserializer` - The deserializer for value that implements `Deserializer`. The
+///   configure() method won't be called in the consumer when the deserializer is passed in
+///   directly.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `group.protocol` is invalid
+/// - `kafka_common_Error_is_local_unsupported_operation_error` if `group.protocol` is
+///   `classic`
+///
+/// # Translation notes
+///
+/// The consumer gets its own copy of `config`, with its `client.id`, so `config`
+/// can build further consumers. A `NULL` deserializer makes that side's `void *`
+/// a `kafka_Bytes_t *` owned by the records. A constructor that fails after
+/// taking the deserializers closes them, as Java's does, without waiting for a C
+/// deserializer's `close` to report.
 ///
 /// # Safety
 ///
-/// `config` must be a live handle, each deserializer null or a live handle not
-/// used afterwards, and `out_err` a valid slot pointing at null.
+/// `config` must be a live handle, each deserializer null or a live handle (an
+/// owned one not used again by the caller; its `self` stays the caller's until the
+/// consumer is destroyed), `out_err` a valid slot pointing at null. The consumer is
+/// owned by the caller, freed with [`kafka_consumer_KafkaConsumer_destroy`]; a C
+/// deserializer's late `close` report arrives on its handle, which stays valid for
+/// it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
@@ -185,13 +203,17 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     }
 }
 
-/// The class as a `Consumer`: a borrowed view valid until the class handle
-/// is destroyed, never destroyed itself (CLAUDE.md §4 rule 3). `*mut`
-/// because `poll` and the other operations take `&mut self`.
+/// The class as a `Consumer`.
+///
+/// # Returns
+///
+/// The `Consumer` view of the class, `*mut` because `poll` and the other
+/// operations take `&mut self`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class
+/// handle is destroyed; there is no `kafka_consumer_Consumer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer__as_Consumer(

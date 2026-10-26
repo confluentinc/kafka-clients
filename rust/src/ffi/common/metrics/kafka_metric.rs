@@ -42,7 +42,7 @@ pub struct kafka_common_metrics_KafkaMetric_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_metrics_KafkaMetric_t`] points at: the registry's
+/// What a `kafka_common_metrics_KafkaMetric_t` points at: the registry's
 /// metric plus the views the borrowed getters hand out.
 pub(crate) struct KafkaMetricInner {
     metric: Arc<KafkaMetric>,
@@ -68,7 +68,7 @@ impl KafkaMetricInner {
 }
 
 /// `KafkaMetric.measurable()` as a shareable [`Measurable`]: the view
-/// [`kafka_common_metrics_KafkaMetric_measurable`] hands out, so a `*mut`
+/// `kafka_common_metrics_KafkaMetric_measurable` hands out, so a `*mut`
 /// parameter can share it (`Interface::take`) without owning the metric's
 /// provider.
 struct MetricMeasurable(Arc<KafkaMetric>);
@@ -89,7 +89,7 @@ impl Measurable for MetricMeasurable {
 }
 
 /// Hands `metric` to C as an owned handle sharing it, freed with
-/// [`kafka_common_metrics_KafkaMetric_destroy`].
+/// `kafka_common_metrics_KafkaMetric_destroy`.
 pub(crate) fn box_kafka_metric(metric: Arc<KafkaMetric>) -> *mut kafka_common_metrics_KafkaMetric_t {
     Box::into_raw(Box::new(KafkaMetricInner::new(metric))) as *mut kafka_common_metrics_KafkaMetric_t
 }
@@ -131,13 +131,12 @@ pub(crate) unsafe fn destroy_kafka_metric_element(element: *mut c_void) {
     unsafe { kafka_common_metrics_KafkaMetric_destroy(element as *mut kafka_common_metrics_KafkaMetric_t) }
 }
 
-/// The metric as the `Metric` interface it implements: a borrowed view,
-/// valid as long as the handle, never passed to `kafka_common_Metric_destroy`
-/// (there is none).
+/// Returns the metric as the `Metric` interface it implements.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle.
+/// `self_` must be a valid metric handle. The returned view is borrowed, valid as long as the
+/// handle; there is no `kafka_common_Metric_destroy` to pass it to.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
@@ -157,13 +156,19 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
         .as_ptr()
 }
 
-/// `config()`: an owned handle sharing the metric's config (setting through
-/// it does not change the metric, see `MetricConfig_t`), freed with
-/// `kafka_common_metrics_MetricConfig_destroy`.
+/// `config()`: a handle sharing the metric's config (setting through it does not change the metric,
+/// see `MetricConfig_t`).
+///
+/// # Returns
+///
+/// Return the config of this metric
 ///
 /// # Safety
 ///
 /// `self_` must be a valid metric handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_MetricConfig_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
@@ -177,6 +182,10 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
 
 /// `config(MetricConfig config)`: the metric shares `config` from now on
 /// (a borrowed handle is copied).
+///
+/// # Parameters
+///
+/// - `config` - configuration for this metrics
 ///
 /// # Safety
 ///
@@ -195,7 +204,11 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
     unsafe { kafka_metric_ref(self_) }.set_config(unsafe { metric_config_arc(config) });
 }
 
-/// `isMeasurable()`.
+/// The method determines if the metric value provider is of type Measurable.
+///
+/// # Returns
+///
+/// `1` if the metric value provider is of type Measurable, `0` otherwise.
 ///
 /// # Safety
 ///
@@ -210,15 +223,21 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
     i8::from(unsafe { kafka_metric_ref(self_) }.is_measurable())
 }
 
-/// `measurable()`: returns a view borrowed from the handle (valid as long as it
-/// is, never passed to `kafka_common_metrics_Measurable_destroy`), or stores
-/// the owned `IllegalStateException` translation in `*out_err` and returns
-/// `NULL` when the provider is a gauge.
+/// Get the underlying metric provider, which should be a `Measurable`.
+///
+/// # Returns
+///
+/// Return the metric provider
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the underlying metric is not a
+///   `Measurable`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle and `out_err` a valid slot pointing at
-/// null.
+/// `self_` must be a valid metric handle. The returned view is borrowed, valid as long as the
+/// handle, never passed to `kafka_common_metrics_Measurable_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
@@ -240,12 +259,15 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     view as *const Interface<dyn Measurable> as *const kafka_common_metrics_Measurable_t
 }
 
-/// `toString()`: the metric's name and its provider's type name, as an
-/// owned string freed with `kafka_string_destroy`.
+/// Returns a human-readable representation of this metric.
+///
+/// The metric value provider is represented by its type name rather than its full text form to
+/// avoid dumping internal stat state into logs.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle.
+/// `self_` must be a valid metric handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_to_string(

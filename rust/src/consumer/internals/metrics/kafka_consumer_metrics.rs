@@ -280,7 +280,7 @@ mod tests {
             .expect("double-valued metric")
     }
 
-    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3708), translated at
+    /// Java `org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollTimeMetrics`, translated at
     /// the `KafkaConsumerMetrics` level (the recording site). The Java test
     /// drives the values through `consumer.poll(Duration.ZERO)` + a mock
     /// clock; the value math is identical when driven via
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(read_metric(&metrics, "time-between-poll-max"), 10.0 * 1000.0);
     }
 
-    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3754), translated at
+    /// Java `org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollIdleRatio`, translated at
     /// the `KafkaConsumerMetrics` level. Drives `record_poll_start` /
     /// `record_poll_end` with the same timing the Java test produces via the
     /// mock clock + `consumer.poll()`, then reads `poll-idle-ratio-avg`.

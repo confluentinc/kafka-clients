@@ -118,8 +118,12 @@ unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArraySerialize
     unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
 }
 
-/// `new ByteArraySerializer()`. Owned, freed with
-/// [`kafka_common_serialization_ByteArraySerializer_destroy`].
+/// `new ByteArraySerializer()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_ByteArraySerializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
@@ -128,13 +132,15 @@ pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
         as *mut kafka_common_serialization_ByteArraySerializer_t
 }
 
-/// The serializer as a `Serializer`: a borrowed view valid as long as the
-/// handle, never passed to `Serializer_destroy`. Its `data` is a
+/// Returns the serializer as a `Serializer`. Its `data` is a
 /// `const kafka_Bytes_t *`, copied during the call.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to
+/// `kafka_common_serialization_Serializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Serializer(

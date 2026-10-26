@@ -25,87 +25,84 @@ use crate::common::header::RecordHeaders;
 
 /// An interface for converting bytes to objects.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.Deserializer<T>`.
+/// This interface can be combined with `ClusterResourceListener` to receive
+/// cluster metadata once it's available, as well as `Monitorable` to enable the
+/// deserializer to register metrics. For the latter, the following tags are
+/// automatically added to all metrics registered: `config` set to either
+/// `key.deserializer` or `value.deserializer`, and `class` set to the
+/// deserializer class name.
 ///
-/// # Asynchronous methods
+/// # Type Parameters
 ///
-/// Every method returns a `Send` future, so a deserializer can await I/O (a
-/// schema-registry lookup, for instance) without blocking the runtime.
-/// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible, so a consumer takes its deserializers as
-/// `impl Deserializer<K>` (`KafkaConsumer::new`) and holds them behind a
-/// crate-private dyn-compatible companion, whose methods store the future
-/// inline rather than on the heap as long as it is small: a deserializer that
-/// awaits a large operation only on a cache miss should `Box::pin` that
-/// operation alone. The receive path then adds no heap allocation per record
-/// beyond the deserialized `T` (`consumer-threading.md` §27).
+/// - `T` - Type to be deserialized into.
 ///
-/// A consumer's `poll()` may be cancelled while a record is being
-/// deserialized, for instance by `tokio::time::timeout`; the record is then
-/// deserialized again by the next `poll()`, so a deserializer should not rely
-/// on being called exactly once per record.
+/// # Translation notes
 ///
-/// # Bounds
+/// WARNING: combining with `ClusterResourceListener` or `Monitorable` has no effect: no client registers either.
 ///
-/// `Send + Sync + 'static` is required because the consumer's app side and its
-/// background task share the deserializers across tasks.
+/// Methods return a `Send` future, which the consumer stores inline: a deserializer
+/// awaiting a large operation only on a cache miss should `Box::pin` it alone.
+///
+/// A `poll()` cancelled mid-record deserializes that record again on the next
+/// `poll()`.
 #[doc(alias = "org.apache.kafka.common.serialization.Deserializer")]
 pub trait Deserializer<T>: Send + Sync + 'static {
-    /// Deserialize a record value from a byte slice.
-    ///
-    /// Corresponds to Java's `T deserialize(String topic, byte[] data)`.
+    /// Deserialize a record value from a byte array into a value or object.
     ///
     /// # Arguments
     ///
-    /// * `topic` - topic associated with the data
-    /// * `data` - serialized bytes; the receive path slices these from the
-    ///   underlying `CompletedFetch` buffer (`consumer-threading.md` §27).
+    /// - `topic` - topic associated with the data
+    /// - `data` - serialized bytes
     ///
     /// # Returns
     ///
     /// The deserialized typed object.
     ///
-    /// Java returns `T` directly and accepts a null `byte[]` returning a
-    /// null `T`. In Rust the receive path never passes a null slice — it
-    /// skips the call for a null key or value — so the trait surface only
-    /// models the happy path.
-    ///
     /// # Errors
     ///
     /// Whatever error the deserializer reports; the consumer returns it from
     /// `poll`.
+    ///
+    /// # Translation notes
+    ///
+    /// The consumer skips the call for a null key or value, so `data` and the
+    /// result are never `None`.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize<'a>(&'a self, topic: &'a str, data: &'a [u8]) -> impl Future<Output = Result<T, Error>> + Send + 'a;
 
-    /// Deserialize a record value with access to its headers.
+    /// Deserialize a record value from a byte array into a value or object.
     ///
-    /// Corresponds to Java's
-    /// `default T deserialize(String topic, Headers headers, byte[] data)`
-    /// (`Deserializer.java:86`). The default implementation ignores the headers
-    /// and delegates to [`deserialize`](Deserializer::deserialize).
+    /// Note that the passed in headers may be empty. The implementation is allowed to
+    /// modify the passed in headers, as a side effect of deserialization. It is
+    /// considered best practice to not delete or modify existing headers, but rather
+    /// only add new ones.
     ///
-    /// The translated Java overloads intersect on `{topic, data}`, which is
-    /// exactly `deserialize(String, byte[])` (`:66`) — so that one keeps the
-    /// plain name and this one is suffixed with the parameter that distinguishes
-    /// it (CLAUDE.md §2).
+    /// # Arguments
     ///
-    /// Override this method in custom deserializer implementations that need
-    /// to inspect headers during deserialization (for example, schema
-    /// registry integration).
+    /// - `topic` - topic associated with the data
+    /// - `headers` - headers associated with the record
+    /// - `data` - serialized bytes
     ///
-    /// Takes the concrete [`RecordHeaders`] rather than a `&dyn Headers`
-    /// trait object, as [`Serializer::serialize_with_headers`] does: Java's
-    /// parameter type is the `Headers` interface, but the client only ever
-    /// passes its one implementation, `RecordHeaders`, which is also what
-    /// `ConsumerRecord` and `ProducerRecord` hold. The concrete type keeps the
-    /// two serde traits symmetric and lets the C binding hand the headers over
-    /// as a `RecordHeaders_t` handle instead of an interface view.
+    /// # Returns
+    ///
+    /// The deserialized typed object.
     ///
     /// # Errors
     ///
     /// As [`deserialize`](Deserializer::deserialize).
     ///
-    /// [`Serializer::serialize_with_headers`]: crate::common::serialization::Serializer::serialize_with_headers
+    /// # Translation notes
+    ///
+    /// The default implementation ignores the headers and delegates to
+    /// [`deserialize`](Deserializer::deserialize). The consumer skips the call for a
+    /// null key or value.
+    ///
+    /// WARNING: the headers are borrowed immutably, so the implementation
+    /// cannot modify them.
+    // Takes the concrete `RecordHeaders` rather than a `&dyn Headers` trait
+    // object, as `Serializer::serialize_with_headers` does: the client only ever
+    // passes its one implementation, which keeps the two serde traits symmetric
+    // and lets the C binding hand the headers over as a `RecordHeaders_t` handle.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize_with_headers<'a>(
         &'a self,
@@ -117,36 +114,40 @@ pub trait Deserializer<T>: Send + Sync + 'static {
         self.deserialize(topic, data)
     }
 
-    /// Deserialize a record value from a shared [`Bytes`] buffer, with access
-    /// to its headers.
+    /// Deserialize a record value from a [`Bytes`] buffer into a value or object.
     ///
-    /// Corresponds to Java's
-    /// `default T deserialize(String topic, Headers headers, ByteBuffer data)`
-    /// (`Deserializer.java:115`, KIP-863), the overload Java's `CompletedFetch`
-    /// calls (`CompletedFetch.java:323,329`); the Rust `CompletedFetch` calls
-    /// this method at the same point. `data` is the record's key or value: a
-    /// refcounted slice of the buffer that owns the fetched bytes (the fetched
-    /// records buffer for an uncompressed batch, the buffer a compressed batch
-    /// was decompressed into), so a deserializer may keep it — or a
-    /// [`Bytes::slice`] of it — without copying (`consumer-threading.md` §27).
+    /// If this method is overridden, the implementation cannot make any assumptions
+    /// about the passed in buffer.
     ///
-    /// The default implementation delegates to
-    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
-    /// `&data[..]`, which, unlike Java's default (`Utils.toNullableArray`),
-    /// copies nothing. [`StringDeserializer`] overrides it, as Java's does, to
-    /// decode `data` in place; [`BytesDeserializer`] overrides it to return
-    /// `data` itself.
+    /// Note that the passed in headers may be empty. The implementation is allowed to
+    /// modify the passed in headers, as a side effect of deserialization. It is
+    /// considered best practice to not delete or modify existing headers, but rather
+    /// only add new ones.
     ///
-    /// Java's `byte[]` and `ByteBuffer` overloads share the parameter name
-    /// `data`, so the Rust type name `bytes` tells this one apart (CLAUDE.md
-    /// §2).
+    /// # Arguments
+    ///
+    /// - `topic` - topic associated with the data
+    /// - `headers` - headers associated with the record
+    /// - `data` - serialized bytes
+    ///
+    /// # Returns
+    ///
+    /// The deserialized typed object.
     ///
     /// # Errors
     ///
     /// As [`deserialize`](Deserializer::deserialize).
     ///
-    /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    /// [`StringDeserializer`]: crate::common::serialization::StringDeserializer
+    /// # Translation notes
+    ///
+    /// The consumer calls this overload. `data` is a refcounted slice of the fetched
+    /// bytes, so a deserializer may keep it without copying. The default delegates to
+    /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
+    /// `&data[..]`, copying nothing. The consumer skips the call for a null key or
+    /// value.
+    ///
+    /// WARNING: the headers are borrowed immutably, so the implementation
+    /// cannot modify them.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
@@ -157,11 +158,12 @@ pub trait Deserializer<T>: Send + Sync + 'static {
         self.deserialize_with_headers(topic, headers, &data[..])
     }
 
-    /// Configure this deserializer. The default implementation is a no-op.
+    /// Configure this class. The default implementation is a no-op.
     ///
-    /// Corresponds to Java's
-    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
-    /// returns `()` as Java's returns `void`.
+    /// # Arguments
+    ///
+    /// - `configs` - configs in key/value pairs
+    /// - `is_key` - whether the deserializer is used for the key or the value
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
     fn configure<'a>(
         &'a mut self,
@@ -173,18 +175,18 @@ pub trait Deserializer<T>: Send + Sync + 'static {
         async {}
     }
 
-    /// Close this deserializer. The default implementation is a no-op.
+    /// Close this deserializer.
     ///
-    /// Corresponds to Java's `default void close()`. As in Java, the method
-    /// must be idempotent, as it may be called multiple times.
+    /// This method must be idempotent as it may be called multiple times.
     ///
-    /// It returns `()` as Java's returns `void`: the consumer closes its
-    /// deserializers with `Utils.closeQuietly`, which logs a failure rather
-    /// than stopping. An implementation reports a failing close by panicking:
-    /// the consumer catches the panic, logs it and closes the other
-    /// deserializer; then the consumer's `close` returns `Failed to close kafka
-    /// consumer`, caused by `Failed to close deserializers` with the panic's
-    /// message as its source, while a failed constructor only logs it.
+    /// # Translation notes
+    ///
+    /// A failure is reported by panicking.
+    // The consumer closes its deserializers as Java's `Utils.closeQuietly` does:
+    // it catches the panic, logs it and closes the other deserializer; then the
+    // consumer's `close` returns `Failed to close kafka consumer`, caused by
+    // `Failed to close deserializers` with the panic's message as its source,
+    // while a failed constructor only logs it.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
     fn close(&mut self) -> impl Future<Output = ()> + Send {
         // intentionally left blank — Java default

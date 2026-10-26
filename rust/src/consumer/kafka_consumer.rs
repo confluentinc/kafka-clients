@@ -33,29 +33,13 @@ use crate::consumer::{
 
 /// A client that consumes records from a Kafka cluster.
 ///
-/// Translates `org.apache.kafka.clients.consumer.KafkaConsumer`. Java's class
-/// is a thin delegating wrapper: its constructor calls
-/// `ConsumerDelegateCreator.create(config, keyDeserializer, valueDeserializer)`
-/// (`KafkaConsumer.java:615`), which switches on `group.protocol` and returns
-/// either an `AsyncKafkaConsumer` or a `ClassicKafkaConsumer`
-/// (`ConsumerDelegateCreator.java:57-66`); its other methods forward verbatim
-/// to that delegate. The Rust struct has the same shape: it holds the
-/// delegate and every [`Consumer`] method forwards to it unchanged.
-///
-/// `ConsumerDelegate` and `ConsumerDelegateCreator` are out of scope per
-/// `consumer-threading.md` §20: only the KIP-848 delegate exists, so the
-/// delegate is held as `AsyncKafkaConsumer` directly, and [`Self::new`] is
-/// where the collapsed creator lives. When the classic protocol is added, the
-/// field becomes a private enum over the two delegates, with no change to
-/// this type's public surface.
+/// # Translation notes
 ///
 /// The concrete type lets callers dispatch statically: calling a [`Consumer`]
 /// method on a `KafkaConsumer`, or through generic code taking
 /// `C: Consumer<K, V>`, involves no boxed future. To hold it next to other
 /// consumer implementations behind one type, box it as
 /// [`DynConsumer`](crate::consumer::DynConsumer).
-///
-/// # Threads
 ///
 /// The consumer is `Send` but not `Sync`: it can move to another task or
 /// thread, but it cannot be shared between them. This is the type-level form
@@ -90,6 +74,15 @@ use crate::consumer::{
 ///     consumer.assignment()
 /// }
 /// ```
+// Java's class is a thin delegating wrapper: its constructor calls
+// `ConsumerDelegateCreator.create(config, keyDeserializer, valueDeserializer)`,
+// which switches on `group.protocol` and returns either an `AsyncKafkaConsumer`
+// or a `ClassicKafkaConsumer`; its other methods forward verbatim to that
+// delegate. The Rust struct has the same shape. `ConsumerDelegate` and
+// `ConsumerDelegateCreator` are out of scope per `consumer-threading.md` §20:
+// only the KIP-848 delegate exists, so it is held as `AsyncKafkaConsumer`
+// directly and `new` is where the collapsed creator lives. When the classic
+// protocol is added, the field becomes a private enum over the two delegates.
 #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer")]
 pub struct KafkaConsumer<K, V>
 where
@@ -98,7 +91,7 @@ where
 {
     delegate: AsyncKafkaConsumer<K, V>,
     /// Zero-sized: keeps the consumer `Send` and makes it `!Sync`, the
-    /// type-level form of Java's `acquire()` guard (see `Threads` above).
+    /// type-level form of Java's `acquire()` guard (see the type's docs).
     /// Cross-thread access goes through [`ConsumerHandle`].
     not_sync: PhantomData<Cell<()>>,
 }
@@ -108,7 +101,7 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// The delegate's client id and group id, never the configuration.
+    // The delegate's client id and group id, never the configuration.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaConsumer")
             .field("delegate", &self.delegate)
@@ -121,33 +114,46 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// Constructs a new consumer from a configuration and explicit key/value
-    /// deserializers, any [`Deserializer`] each.
+    /// A consumer is instantiated by providing a set of key-value pairs as
+    /// configuration, and a key and a value [`Deserializer`].
     ///
-    /// For `group.protocol=consumer` (KIP-848), the delegate is
-    /// `AsyncKafkaConsumer::new(...)` — the production consumer built
-    /// end-to-end with `SubscriptionState`, `ConsumerMetadata`,
-    /// `NetworkClient`, every `RequestManager`, and a single bg task
-    /// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
-    /// [`Error::local_unsupported_operation`] per `consumer-threading.md` §20
-    /// (classic protocol deferred to a later milestone), the class Java's
-    /// `ClassicKafkaConsumer` throws for a protocol feature it does not support
-    /// (`ClassicKafkaConsumer.java:544,550`).
+    /// Valid configuration strings are documented at [`ConsumerConfig`].
     ///
-    /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
-    /// them as explicit parameters (Phase 1 decision not to translate
-    /// reflection machinery) and boxes each once behind the crate-private
-    /// dyn-compatible `DynDeserializer`, so the consumer's type carries only
-    /// the record types `K` and `V`. The consumer hands them to its
-    /// `FetchCollector`, which calls them for every fetched record, and closes
-    /// them when the consumer closes.
+    /// Note: after creating a `KafkaConsumer` you must always
+    /// [`close`](Consumer::close) it to avoid resource leaks.
     ///
-    /// `MockConsumer` does NOT come through this constructor — it has its own.
+    /// # Arguments
+    ///
+    /// - `config` - The consumer configs
+    /// - `key_deserializer` - The deserializer for key that implements `Deserializer`. The
+    ///   configure() method won't be called in the consumer when the deserializer is passed in
+    ///   directly.
+    /// - `value_deserializer` - The deserializer for value that implements `Deserializer`. The
+    ///   configure() method won't be called in the consumer when the deserializer is passed in
+    ///   directly.
+    ///
+    /// # Returns
+    ///
+    /// The new consumer.
     ///
     /// # Errors
     ///
-    /// Returns an error if `group.protocol` is invalid or `classic`, or if the
-    /// delegate cannot be constructed from `config`.
+    /// - `Error::is_local_illegal_argument_error` if `group.protocol` is invalid.
+    /// - `Error::is_local_unsupported_operation_error` if `group.protocol` is
+    ///   `classic`.
+    /// - Any error building the consumer from `config`.
+    ///
+    /// # Translation notes
+    ///
+    /// The configuration is a built [`ConsumerConfig`], and the deserializers
+    /// are not configuration keys. Only `group.protocol=consumer` (KIP-848) is
+    /// supported.
+    // `classic` fails with `LocalUnsupportedOperationError`, the class Java's
+    // `ClassicKafkaConsumer` throws for a protocol feature it does not support
+    // (consumer-threading.md §20). The deserializers are boxed once behind the
+    // crate-private `DynDeserializer`, so the consumer's type carries only `K`
+    // and `V`; the `FetchCollector` calls them per record and the consumer
+    // closes them on close. `MockConsumer` has its own constructor.
     #[doc(alias = "org.apache.kafka.clients.consumer.KafkaConsumer#KafkaConsumer(Map,Deserializer,Deserializer)")]
     pub fn new(
         config: ConsumerConfig,
@@ -170,7 +176,7 @@ where
     ) -> Result<Self, Error> {
         // The `GroupProtocol::Consumer` arm builds the production delegate with
         // [`AsyncKafkaConsumer::new`], which translates the Java primary
-        // constructor at `AsyncKafkaConsumer.java:285-518` end-to-end. The ctor
+        // constructor `AsyncKafkaConsumer#AsyncKafkaConsumer` end-to-end. The ctor
         // builds the full dependency closure (`SubscriptionState`,
         // `ConsumerMetadata`, `NetworkClient` + PLAINTEXT `ChannelBuilder`,
         // every `RequestManager`, `ApplicationEventHandler`,
@@ -510,7 +516,7 @@ mod tests {
             ("bootstrap.servers".to_string(), broker.bootstrap()),
             ("group.protocol".to_string(), "consumer".to_string()),
             ("auto.offset.reset".to_string(), "earliest".to_string()),
-            // Java's `newConsumer` sets it too (`KafkaConsumerTest.java:3626`).
+            // Java's `newConsumer` sets it too (`KafkaConsumerTest#newConsumer`).
             ("isolation.level".to_string(), "read_uncommitted".to_string()),
         ]);
         KafkaConsumer::new(
@@ -745,8 +751,8 @@ mod tests {
     }
 
     /// An offsets query completes as soon as its response is read, as Java's
-    /// does inside `client.poll` (`NetworkClientDelegate.java:454-464` →
-    /// `OffsetsRequestManager.java:686`, `:208`). The LIST_OFFSETS forwarder
+    /// does inside `client.poll` (`NetworkClientDelegate#poll` →
+    /// `OffsetsRequestManager`'s response handlers). The LIST_OFFSETS forwarder
     /// must wake the background task; without that wake the completion waits
     /// for the network poll's own timeout (`MAX_POLL_TIMEOUT_MS`, 5 s) and a
     /// shorter timeout fails every time.
@@ -855,7 +861,7 @@ mod tests {
     /// manager's shared state, which owns that `Metadata`: an `Arc` cycle that
     /// kept the metadata, the subscription state and the manager allocated for
     /// the life of the process. Java builds the same cycle
-    /// (`OffsetsRequestManager.java:148`) and its garbage collector frees it.
+    /// (`OffsetsRequestManager#OffsetsRequestManager`) and its garbage collector frees it.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_closed_consumer_is_freed() {
         for query_offsets in [false, true] {

@@ -750,8 +750,8 @@ static PyObject* error_handle_to_py(const kafka_common_Error_t* e) {
 // (released when it resolves). A send that resolved with an error may still
 // fire the callback, once, later: Java's doSend appends the record, whose
 // appendCallbacks carry the Callback, before maybeAddPartition throws
-// (KafkaProducer.java:1110-1120), so a record that had reached the accumulator
-// completes with its batch; one rejected before the append never fires. Which
+// (`org.apache.kafka.clients.producer.KafkaProducer#doSend`), so a record that had
+// reached the accumulator completes with its batch; one rejected before the append never fires. Which
 // one it was cannot be told from here, so the context is then parked on the
 // producer's orphan list and freed at destroy, after `_destroy` ran every
 // still-pending callback: a late `on_completion` still finds it alive, and

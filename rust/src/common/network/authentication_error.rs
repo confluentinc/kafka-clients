@@ -100,7 +100,7 @@ pub fn is_authentication_error(e: &io::Error) -> bool {
 /// typed error must therefore use this rather than `e.to_string()`, or the prefix
 /// is applied twice and the application sees
 /// `"AuthenticationError: AuthenticationError: <reason>"`. Java rethrows the
-/// exception object itself (`NetworkClientUtils.java:86-87`), so the message is
+/// exception object itself (`NetworkClientUtils#awaitReady`), so the message is
 /// untouched.
 /// Like [`auth_io_error`], but carrying the error that caused the failure.
 ///

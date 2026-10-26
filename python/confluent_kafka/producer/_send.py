@@ -35,8 +35,9 @@ transaction-end calls and ``close()`` return, only once the callback reported
 before ``produceFuture.done()``. ``on_completion`` reports by returning: ``None``
 for a callback that returned, or raising the exception it raised, which the C
 extension reports as the callback's error. Python does not log that exception:
-the core logs it, once, with Java's message (``ProducerBatch.completeFutureAndFireCallbacks``,
-``ProducerBatch.java:318-320``) and the exception's text, and fails nothing. It
+the core logs it, once, with Java's message
+(``org.apache.kafka.clients.producer.internals.ProducerBatch#completeFutureAndFireCallbacks``)
+and the exception's text, and fails nothing. It
 returns ``True`` when the report comes later, from
 ``_lib.Producer__set_callback_result``: the asyncio producer's callback that
 runs on another event loop, or is an ``async def``.

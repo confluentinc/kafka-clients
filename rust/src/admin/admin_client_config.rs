@@ -15,7 +15,7 @@
 //! Configuration for the `KafkaAdminClient`.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`: the keys
-//! are defined on a `ConfigDef` in Java's order (`AdminClientConfig.java:166-319`)
+//! are defined on a `ConfigDef` in Java's order
 //! and parsed and validated by it, and the configuration answers Java's
 //! `AbstractConfig` getters.
 //!
@@ -67,8 +67,7 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ValidList::any_non_duplicate_values(true, false),
             Importance::High,
         )
-        // Java defines `bootstrap.controllers` here
-        // (`AdminClientConfig.java:173-178`); it is left undefined until
+        // Java defines `bootstrap.controllers` here; it is left undefined until
         // bootstrapping through the controllers (KIP-919) is implemented.
         .define(AdminClientConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium)
         .define_with_validator(
@@ -127,8 +126,7 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::High,
         )
-        // Java defines `enable.metrics.push` here
-        // (`AdminClientConfig.java:213-217`); it is left undefined until KIP-714
+        // Java defines `enable.metrics.push` here; it is left undefined until KIP-714
         // client telemetry is implemented.
         .define_with_validator(
             AdminClientConfig::REQUEST_TIMEOUT_MS_CONFIG,
@@ -231,21 +229,12 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             true,
             Importance::Low,
         )
-    // Java ends the chain with `config.providers`
-    // (`AdminClientConfig.java:310-315`); it is left undefined until config
+    // Java ends the chain with `config.providers`; it is left undefined until config
     // providers are translated.
 });
 
 /// The AdminClient configuration class, which also contains constants for
 /// configuration entry names.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AdminClientConfig`. Keys it
-/// does not define are accepted, as Java accepts them; the client reports
-/// them, with the defined keys it does not read, in one line when it is built
-/// ([`Self::log_unused`]).
-///
-/// Equality and hashing are Java's `equals` / `hashCode`: two configurations
-/// are equal when they were built from equal properties.
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig")]
 pub struct AdminClientConfig {
     /// The originals, the parsed values and the keys used so far.
@@ -287,10 +276,10 @@ pub struct AdminClientConfig {
 }
 
 impl fmt::Debug for AdminClientConfig {
-    /// The typed settings, whose secrets are `Password`s
-    /// rendered as `[hidden]`, and the keys of the properties, never their
-    /// values: they also hold keys this configuration does not define, whose
-    /// values may be secrets, and Java never prints a raw original value.
+    // The typed settings, whose secrets are `Password`s rendered as
+    // `[hidden]`, and the keys of the properties, never their values: they
+    // also hold keys this configuration does not define, whose values may be
+    // secrets, and Java never prints a raw original value.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Destructured exhaustively: a field added to the struct fails to
         // compile until it is bound here, and a bound but unrendered field is
@@ -356,7 +345,7 @@ impl fmt::Debug for AdminClientConfig {
 }
 
 impl PartialEq for AdminClientConfig {
-    /// Java's `AbstractConfig.equals`: the originals are equal.
+    // Java's `AbstractConfig.equals`: the originals are equal.
     fn eq(&self, other: &Self) -> bool {
         self.config == other.config
     }
@@ -365,7 +354,7 @@ impl PartialEq for AdminClientConfig {
 impl Eq for AdminClientConfig {}
 
 impl Hash for AdminClientConfig {
-    /// Java's `AbstractConfig.hashCode`, over the originals.
+    // Java's `AbstractConfig.hashCode`, over the originals.
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.hash(state);
     }
@@ -374,8 +363,7 @@ impl Hash for AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup`. Java's `AdminClientConfig.java` declares it as its
-    /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
+    /// `client.dns.lookup`
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// `client.id`
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
@@ -412,29 +400,25 @@ impl AdminClientConfig {
     /// disabled by setting the configuration `metadata.recovery.strategy=none`.
     /// If the client is connecting to a broker older than Apache Kafka 4.4, no
     /// checking is performed and this configuration has no effect.
-    ///
-    /// Java's `AdminClientConfig.java:157` declares it as its own public alias
-    /// of `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_CONFIG`, whose doc
-    /// (`CommonClientConfigs.java:268-271`) is the text above.
     pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &'static str =
         CommonClientConfigs::METADATA_CLUSTER_CHECK_ENABLE_CONFIG;
     /// `security.protocol`
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = CommonClientConfigs::SECURITY_PROTOCOL_CONFIG;
 
-    /// Creates a config from a property map: Java's `AdminClientConfig(Map)`.
+    /// Creates a config from a property map.
+    ///
+    /// # Arguments
+    ///
+    /// - `props` - The admin client configuration properties
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`] if a value fails to parse or validate, with
-    /// `ConfigDef`'s message, or if a SASL `security.protocol` has an empty
-    /// `sasl.mechanism`. An empty `bootstrap.servers` is accepted here, as in
-    /// Java; the client built from it fails (see
-    /// [`KafkaAdminClient`](crate::admin::KafkaAdminClient)).
+    /// - `Error::is_config_error` if a value fails to parse or validate, with
+    ///   `ConfigDef`'s message, or if a SASL `security.protocol` has an empty
+    ///   `sasl.mechanism` or one other than `PLAIN`. An empty
+    ///   `bootstrap.servers` is accepted here; the client built from it fails.
     ///
-    /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
-    /// returns a [`ConfigError`](crate::common::config::ConfigError): Java accepts any mechanism
-    /// name, but this client implements only PLAIN, and a client built
-    /// with another mechanism would fail only later, at authentication.
+    /// WARNING: `sasl.mechanism` must be `PLAIN`.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         Self::build(string_originals(props), true)
@@ -442,7 +426,7 @@ impl AdminClientConfig {
 
     /// The configuration of one more client given this one: the same
     /// properties, with its own record of the keys used, as [`Self::new`]
-    /// leaves it. It is not `Clone` (CLAUDE.md §3).
+    /// leaves it. It is not `Clone`: a `*Config` holder never is.
     ///
     /// Java's `Admin.create` builds one `AdminClientConfig` and hands it to
     /// one client, which logs nothing about it. The copy therefore logs none
@@ -512,7 +496,7 @@ impl AdminClientConfig {
         let socket_connection_setup_timeout_max_ms =
             values.long(CommonClientConfigs::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?;
         // The validator accepted the strategy case-insensitively, as `forName`
-        // reads it (`KafkaAdminClient.java:699`).
+        // reads it.
         let strategy = values.string(CommonClientConfigs::METADATA_RECOVERY_STRATEGY_CONFIG)?;
         let metadata_recovery_strategy =
             MetadataRecoveryStrategy::for_name(strategy).map_err(Error::local_illegal_argument)?;
@@ -568,110 +552,192 @@ impl AdminClientConfig {
         })
     }
 
-    /// The `SHORT` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `SHORT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'` when
-    ///   `key` is not a configuration this class defines.
-    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type, where Java's cast fails with a `ClassCastException`.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getShort")]
     pub fn get_short(&self, key: &str) -> Result<Option<i16>, Error> {
         self.config.get_short(key)
     }
 
-    /// The `INT` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `INT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getInt")]
     pub fn get_int(&self, key: &str) -> Result<Option<i32>, Error> {
         self.config.get_int(key)
     }
 
-    /// The `LONG` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `LONG` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getLong")]
     pub fn get_long(&self, key: &str) -> Result<Option<i64>, Error> {
         self.config.get_long(key)
     }
 
-    /// The `DOUBLE` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `DOUBLE` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getDouble")]
     pub fn get_double(&self, key: &str) -> Result<Option<f64>, Error> {
         self.config.get_double(key)
     }
 
-    /// The `LIST` configuration `key`, borrowed from the parsed values, `None`
-    /// for Java's `null`. Reading a key marks it used ([`Self::unused`]).
+    /// The `LIST` configuration `key`, borrowed from the parsed values.
+    /// Reading a key marks it used ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getList")]
     pub fn get_list(&self, key: &str) -> Result<Option<&[String]>, Error> {
         self.config.get_list(key)
     }
 
-    /// The `BOOLEAN` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `BOOLEAN` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getBoolean")]
     pub fn get_boolean(&self, key: &str) -> Result<Option<bool>, Error> {
         self.config.get_boolean(key)
     }
 
-    /// The `STRING` configuration `key`, trimmed, `None` for Java's `null`
-    /// (also what an unset `PASSWORD` key such as `ssl.keystore.key` answers,
-    /// as Java's cast of `null` succeeds). Reading a key marks it used
+    /// The `STRING` configuration `key`, trimmed. Reading a key marks it used
     /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null` (also what an unset `PASSWORD` key
+    /// such as `ssl.keystore.key` answers, as Java's cast of `null` succeeds).
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`]; a set `PASSWORD` key is not a `STRING`.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type (a set `PASSWORD` key is not a `STRING`), where
+    ///   Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         self.config.get_string(key)
     }
 
-    /// The keys of the properties this configuration was built from that were
-    /// never read: through a getter, or by the client built from it.
+    /// Returns the keys of the properties this configuration was built from
+    /// that were never read: through a getter, or by the client built from it.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#unused")]
     pub fn unused(&self) -> HashSet<String> {
         self.config.unused()
     }
 
     /// Marks the configuration `key` used without reading it.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#ignore")]
     pub fn ignore(&self, key: &str) {
         self.config.ignore(key);
     }
 
-    /// Info level log for any unused configurations: one line,
-    /// `These configurations '[a, b]' were supplied but are not used yet.`,
-    /// and nothing when every key was used.
+    /// Info level log for any unused configurations
+    // One line, `These configurations '[a, b]' were supplied but are not used
+    // yet.`, and nothing when every key was used.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#logUnused")]
     pub fn log_unused(&self) {
         self.config.log_unused();
     }
 
     /// The names of the configurations this class defines.
+    ///
+    /// # Returns
+    ///
+    /// The set of configuration keys
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClientConfig#configNames")]
     pub fn config_names() -> HashSet<String> {
         CONFIG.names()
@@ -797,7 +863,7 @@ impl AdminClientConfig {
 
     /// `metadata.recovery.strategy`: whether the client re-resolves
     /// `bootstrap.servers` when it cannot reach any known broker
-    /// (`KafkaAdminClient.java:699`).
+    ///.
     pub(crate) fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy {
         self.metadata_recovery_strategy
     }
@@ -909,7 +975,7 @@ mod tests {
     }
 
     /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default
-    /// `true` (`AdminClientConfig.java:305-309`).
+    /// `true`.
     #[test]
     fn metadata_cluster_check_enable() {
         assert_eq!(
@@ -1048,7 +1114,7 @@ mod tests {
     }
 
     /// The client reads the socket buffers and the metadata recovery settings
-    /// (`ClientUtils.createNetworkClient`, `KafkaAdminClient.java:617`), with
+    /// (`ClientUtils.createNetworkClient`), with
     /// `AdminClientConfig`'s defaults: 128 KiB / 64 KiB buffers, `rebootstrap` and
     /// 300000 ms.
     #[test]
@@ -1076,7 +1142,7 @@ mod tests {
     }
 
     /// The numeric validators of Java's define chain
-    /// (`AdminClientConfig.java:166-319`), each value just below its bound.
+    ///, each value just below its bound.
     #[test]
     fn test_numeric_validators() {
         let cases = [
@@ -1464,7 +1530,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`AdminClientConfig.java:170`): an empty
+    /// `ValidList.anyNonDuplicateValues(true, false)`: an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix).
     #[test]

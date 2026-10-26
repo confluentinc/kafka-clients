@@ -47,7 +47,7 @@ pub enum kafka_common_GroupState_e {
     kafka_common_GroupState_NOT_READY,
 }
 
-/// One static instance per value, indexed by [`kafka_common_GroupState_e`].
+/// One static instance per value, indexed by `kafka_common_GroupState_e`.
 static VARIANTS: [GroupState; 9] = [
     GroupState::Unknown,
     GroupState::PreparingRebalance,
@@ -96,70 +96,70 @@ pub(crate) unsafe fn value_of(state: *const kafka_common_GroupState_t) -> GroupS
     unsafe { *(state as *const GroupState) }
 }
 
-/// `GroupState.UNKNOWN`.
+/// Returns `GroupState.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_unknown() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Unknown)
 }
 
-/// `GroupState.PREPARING_REBALANCE`.
+/// Returns `GroupState.PREPARING_REBALANCE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_preparing_rebalance() -> *const kafka_common_GroupState_t {
     singleton(GroupState::PreparingRebalance)
 }
 
-/// `GroupState.COMPLETING_REBALANCE`.
+/// Returns `GroupState.COMPLETING_REBALANCE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_completing_rebalance() -> *const kafka_common_GroupState_t {
     singleton(GroupState::CompletingRebalance)
 }
 
-/// `GroupState.STABLE`.
+/// Returns `GroupState.STABLE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_stable() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Stable)
 }
 
-/// `GroupState.DEAD`.
+/// Returns `GroupState.DEAD`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_dead() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Dead)
 }
 
-/// `GroupState.EMPTY`.
+/// Returns `GroupState.EMPTY`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_empty() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Empty)
 }
 
-/// `GroupState.ASSIGNING`.
+/// Returns `GroupState.ASSIGNING`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_assigning() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Assigning)
 }
 
-/// `GroupState.RECONCILING`.
+/// Returns `GroupState.RECONCILING`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_reconciling() -> *const kafka_common_GroupState_t {
     singleton(GroupState::Reconciling)
 }
 
-/// `GroupState.NOT_READY`.
+/// Returns `GroupState.NOT_READY`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupState_not_ready() -> *const kafka_common_GroupState_t {
     singleton(GroupState::NotReady)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_GroupState_UNKNOWN`.
 ///
@@ -176,11 +176,12 @@ pub unsafe extern "C" fn kafka_common_GroupState__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name()`: a static string, never freed.
+/// Returns the state's name, as Java's `GroupState#toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common_GroupState_t) -> *const c_char {
@@ -190,12 +191,19 @@ pub unsafe extern "C" fn kafka_common_GroupState_name(self_: *const kafka_common
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `GroupState.parse(String name)`: case-insensitive, `UNKNOWN` for an
-/// unrecognised name, as in Java.
+/// Case-insensitive group state lookup by string name.
+///
+/// # Parameters
+///
+/// - `name` - the state's name
+///
+/// # Returns
+///
+/// The state, or `UNKNOWN` for an unrecognised name.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string.
+/// `name` must be a valid NUL-terminated string. The returned singleton is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *const kafka_common_GroupState_t {
@@ -205,17 +213,17 @@ pub unsafe extern "C" fn kafka_common_GroupState_parse(name: *const c_char) -> *
     singleton(GroupState::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// `GroupState.groupStatesForType(GroupType type)`: an owned list of the
-/// borrowed singletons in declaration order, freed with `kafka_List_destroy`
-/// (the elements are never freed).
+/// Returns the states a group of `group_type` can be in, in declaration order, or `NULL` for
+/// `GroupType.UNKNOWN`, where Java throws `IllegalArgumentException("Group type not known")`.
 ///
-/// Java throws `IllegalArgumentException("Group type not known")` for
-/// `GroupType.UNKNOWN`; the Rust translation panics there, and a panic must
-/// not cross the C boundary, so this returns null for that one input.
+/// # Parameters
+///
+/// - `group_type` - the group type
 ///
 /// # Safety
 ///
-/// `group_type` must be a `kafka_common_GroupType_t` singleton.
+/// `group_type` must be a `kafka_common_GroupType_t` singleton. The returned list is owned, freed
+/// with `kafka_List_destroy`; its elements are static singletons, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
@@ -238,11 +246,12 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
     box_list(elements, None)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the state's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupState_to_string(self_: *const kafka_common_GroupState_t) -> *mut c_char {

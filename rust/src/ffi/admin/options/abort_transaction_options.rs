@@ -67,15 +67,24 @@ fn boxed(options: AbortTransactionOptions) -> *mut kafka_admin_AbortTransactionO
 }
 
 /// `new AbortTransactionOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_AbortTransactionOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_AbortTransactionOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AbortTransactionOptions_new() -> *mut kafka_admin_AbortTransactionOptions_t {
     boxed(AbortTransactionOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -93,8 +102,12 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -110,11 +123,12 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionOptions_timeout_ms(
     unsafe { abort_transaction_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the options' `toString()` form.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AbortTransactionOptions_to_string(

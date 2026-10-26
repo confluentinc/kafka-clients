@@ -107,15 +107,18 @@ pub(crate) unsafe fn destroy_user_scram_credentials_description_element(element:
     }
 }
 
-/// `new UserScramCredentialsDescription(String name, List<ScramCredentialInfo>
-/// credentialInfos)`: a borrowed list of `const kafka_admin_ScramCredentialInfo_t *`,
-/// copied (null reads as empty). Owned, freed with
-/// [`kafka_admin_UserScramCredentialsDescription_destroy`].
+/// Creates the description.
+///
+/// # Parameters
+///
+/// - `name` - the required user name
+/// - `credential_infos` - the required SASL/SCRAM credential representations for the user
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `credential_infos` null
-/// or a valid list of SCRAM-credential-info handles.
+/// `name` must be a valid NUL-terminated string and `credential_infos` `NULL`, read as empty, or
+/// a valid borrowed list of `const kafka_admin_ScramCredentialInfo_t *`, copied. The returned
+/// handle is owned, freed with [`kafka_admin_UserScramCredentialsDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
@@ -142,11 +145,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_new(
     ))
 }
 
-/// `name()`: borrowed from the handle.
+/// # Returns
+///
+/// the user name
 ///
 /// # Safety
 ///
-/// `self_` must be a valid user-SCRAM-credentials-description handle.
+/// `self_` must be a valid user-SCRAM-credentials-description handle. The returned string is
+/// borrowed, valid as long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
@@ -158,12 +164,15 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_name(
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `credentialInfos()`: an owned list of owned `kafka_admin_ScramCredentialInfo_t *`
-/// copies, in Java's order, freed with `kafka_List_destroy`.
+/// # Returns
+///
+/// the always non-`NULL`/unmodifiable list of SASL/SCRAM credential representations for the user
 ///
 /// # Safety
 ///
-/// `self_` must be a valid user-SCRAM-credentials-description handle.
+/// `self_` must be a valid user-SCRAM-credentials-description handle. The returned list of
+/// `kafka_admin_ScramCredentialInfo_t *` copies, in Java's order, is owned, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_infos(
@@ -179,11 +188,12 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_credential_
     box_list(elements, Some(destroy_scram_credential_info_element))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid user-SCRAM-credentials-description handle.
+/// `self_` must be a valid user-SCRAM-credentials-description handle. The returned string is
+/// owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_to_string(
@@ -194,12 +204,12 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialsDescription_to_string(
     into_c_string(&unsafe { user_scram_credentials_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned user-SCRAM-credentials-description handle; null is a
+/// Frees an owned user-SCRAM-credentials-description handle; `NULL` is a
 /// no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

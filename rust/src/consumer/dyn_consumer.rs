@@ -87,27 +87,76 @@ where
     V: Send + 'static,
 {
     /// See [`Consumer::assignment`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::assignment`].
     fn assignment(&mut self) -> HashSet<TopicPartition>;
 
     /// See [`Consumer::subscription`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::subscription`].
     fn subscription(&mut self) -> HashSet<String>;
 
     /// See [`Consumer::paused`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::paused`].
     fn paused(&mut self) -> HashSet<TopicPartition>;
 
     /// See [`Consumer::group_metadata`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::group_metadata`].
     fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
 
     /// See [`Consumer::current_lag`].
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_partition` - as [`Consumer::current_lag`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::current_lag`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::current_lag`].
     fn current_lag<'a>(&'a mut self, topic_partition: &'a TopicPartition) -> BoxFuture<'a, Result<Option<i64>, Error>>;
 
     /// See [`Consumer::metrics`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::metrics`].
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     /// See [`Consumer::subscribe_with_topics`].
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - as [`Consumer::subscribe_with_topics`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::subscribe_with_topics`].
     fn subscribe_with_topics<'a>(&'a mut self, topics: Vec<String>) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::subscribe_with_topics_listener`].
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - as [`Consumer::subscribe_with_topics_listener`].
+    /// - `listener` - as [`Consumer::subscribe_with_topics_listener`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::subscribe_with_topics_listener`].
     fn subscribe_with_topics_listener<'a>(
         &'a mut self,
         topics: Vec<String>,
@@ -115,9 +164,26 @@ where
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::subscribe_with_pattern`].
+    ///
+    /// # Arguments
+    ///
+    /// - `pattern` - as [`Consumer::subscribe_with_pattern`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::subscribe_with_pattern`].
     fn subscribe_with_pattern<'a>(&'a mut self, pattern: SubscriptionPattern) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::subscribe_with_pattern_listener`].
+    ///
+    /// # Arguments
+    ///
+    /// - `pattern` - as [`Consumer::subscribe_with_pattern_listener`].
+    /// - `listener` - as [`Consumer::subscribe_with_pattern_listener`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::subscribe_with_pattern_listener`].
     fn subscribe_with_pattern_listener<'a>(
         &'a mut self,
         pattern: SubscriptionPattern,
@@ -125,27 +191,80 @@ where
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::assign`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::assign`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::assign`].
     fn assign<'a>(&'a mut self, partitions: Vec<TopicPartition>) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::unsubscribe`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::unsubscribe`].
     fn unsubscribe<'a>(&'a mut self) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::poll`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout` - as [`Consumer::poll`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::poll`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::poll`].
     fn poll<'a>(&'a mut self, timeout: Duration) -> BoxFuture<'a, Result<ConsumerRecords<K, V>, Error>>;
 
     /// See [`Consumer::commit_sync`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_sync`].
     fn commit_sync<'a>(&'a mut self) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_sync_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout` - as [`Consumer::commit_sync_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_sync_with_timeout`].
     fn commit_sync_with_timeout<'a>(&'a mut self, timeout: Duration) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_sync_with_offsets`].
+    ///
+    /// # Arguments
+    ///
+    /// - `offsets` - as [`Consumer::commit_sync_with_offsets`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_sync_with_offsets`].
     fn commit_sync_with_offsets<'a>(
         &'a mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_sync_with_offsets_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `offsets` - as [`Consumer::commit_sync_with_offsets_timeout`].
+    /// - `timeout` - as [`Consumer::commit_sync_with_offsets_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_sync_with_offsets_timeout`].
     fn commit_sync_with_offsets_timeout<'a>(
         &'a mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -153,15 +272,36 @@ where
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_async`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_async`].
     fn commit_async<'a>(&'a mut self) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_async_with_callback`].
+    ///
+    /// # Arguments
+    ///
+    /// - `callback` - as [`Consumer::commit_async_with_callback`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_async_with_callback`].
     fn commit_async_with_callback<'a>(
         &'a mut self,
         callback: Arc<dyn OffsetCommitCallback>,
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::commit_async_with_offsets_callback`].
+    ///
+    /// # Arguments
+    ///
+    /// - `offsets` - as [`Consumer::commit_async_with_offsets_callback`].
+    /// - `callback` - as [`Consumer::commit_async_with_offsets_callback`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::commit_async_with_offsets_callback`].
     fn commit_async_with_offsets_callback<'a>(
         &'a mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -169,9 +309,27 @@ where
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::seek_with_offset`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - as [`Consumer::seek_with_offset`].
+    /// - `offset` - as [`Consumer::seek_with_offset`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::seek_with_offset`].
     fn seek_with_offset<'a>(&'a mut self, partition: TopicPartition, offset: i64) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::seek_with_offset_and_metadata`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - as [`Consumer::seek_with_offset_and_metadata`].
+    /// - `offset_and_metadata` - as [`Consumer::seek_with_offset_and_metadata`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::seek_with_offset_and_metadata`].
     fn seek_with_offset_and_metadata<'a>(
         &'a mut self,
         partition: TopicPartition,
@@ -179,15 +337,56 @@ where
     ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::seek_to_beginning`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::seek_to_beginning`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::seek_to_beginning`].
     fn seek_to_beginning<'a>(&'a mut self, partitions: &'a [TopicPartition]) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::seek_to_end`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::seek_to_end`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::seek_to_end`].
     fn seek_to_end<'a>(&'a mut self, partitions: &'a [TopicPartition]) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::position`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - as [`Consumer::position`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::position`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::position`].
     fn position<'a>(&'a mut self, partition: &'a TopicPartition) -> BoxFuture<'a, Result<i64, Error>>;
 
     /// See [`Consumer::position_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - as [`Consumer::position_with_timeout`].
+    /// - `timeout` - as [`Consumer::position_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::position_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::position_with_timeout`].
     fn position_with_timeout<'a>(
         &'a mut self,
         partition: &'a TopicPartition,
@@ -195,12 +394,37 @@ where
     ) -> BoxFuture<'a, Result<i64, Error>>;
 
     /// See [`Consumer::committed`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::committed`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::committed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::committed`].
     fn committed<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>;
 
     /// See [`Consumer::committed_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::committed_with_timeout`].
+    /// - `timeout` - as [`Consumer::committed_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::committed_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::committed_with_timeout`].
     fn committed_with_timeout<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
@@ -208,9 +432,34 @@ where
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>;
 
     /// See [`Consumer::partitions_for`].
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - as [`Consumer::partitions_for`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::partitions_for`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::partitions_for`].
     fn partitions_for<'a>(&'a mut self, topic: &'a str) -> BoxFuture<'a, Result<Vec<PartitionInfo>, Error>>;
 
     /// See [`Consumer::partitions_for_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - as [`Consumer::partitions_for_with_timeout`].
+    /// - `timeout` - as [`Consumer::partitions_for_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::partitions_for_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::partitions_for_with_timeout`].
     fn partitions_for_with_timeout<'a>(
         &'a mut self,
         topic: &'a str,
@@ -218,21 +467,66 @@ where
     ) -> BoxFuture<'a, Result<Vec<PartitionInfo>, Error>>;
 
     /// See [`Consumer::list_topics`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::list_topics`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::list_topics`].
     fn list_topics<'a>(&'a mut self) -> BoxFuture<'a, Result<HashMap<String, Vec<PartitionInfo>>, Error>>;
 
     /// See [`Consumer::list_topics_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout` - as [`Consumer::list_topics_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::list_topics_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::list_topics_with_timeout`].
     fn list_topics_with_timeout<'a>(
         &'a mut self,
         timeout: Duration,
     ) -> BoxFuture<'a, Result<HashMap<String, Vec<PartitionInfo>>, Error>>;
 
     /// See [`Consumer::offsets_for_times`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timestamps_to_search` - as [`Consumer::offsets_for_times`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::offsets_for_times`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::offsets_for_times`].
     fn offsets_for_times<'a>(
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>>;
 
     /// See [`Consumer::offsets_for_times_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timestamps_to_search` - as [`Consumer::offsets_for_times_with_timeout`].
+    /// - `timeout` - as [`Consumer::offsets_for_times_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::offsets_for_times_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::offsets_for_times_with_timeout`].
     fn offsets_for_times_with_timeout<'a>(
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
@@ -240,12 +534,37 @@ where
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>>;
 
     /// See [`Consumer::beginning_offsets`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::beginning_offsets`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::beginning_offsets`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::beginning_offsets`].
     fn beginning_offsets<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, i64>, Error>>;
 
     /// See [`Consumer::beginning_offsets_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::beginning_offsets_with_timeout`].
+    /// - `timeout` - as [`Consumer::beginning_offsets_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::beginning_offsets_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::beginning_offsets_with_timeout`].
     fn beginning_offsets_with_timeout<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
@@ -253,12 +572,37 @@ where
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, i64>, Error>>;
 
     /// See [`Consumer::end_offsets`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::end_offsets`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::end_offsets`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::end_offsets`].
     fn end_offsets<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, i64>, Error>>;
 
     /// See [`Consumer::end_offsets_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::end_offsets_with_timeout`].
+    /// - `timeout` - as [`Consumer::end_offsets_with_timeout`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::end_offsets_with_timeout`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::end_offsets_with_timeout`].
     fn end_offsets_with_timeout<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
@@ -266,27 +610,71 @@ where
     ) -> BoxFuture<'a, Result<HashMap<TopicPartition, i64>, Error>>;
 
     /// See [`Consumer::pause`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::pause`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::pause`].
     fn pause<'a>(&'a mut self, partitions: &'a [TopicPartition]) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::resume`].
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - as [`Consumer::resume`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::resume`].
     fn resume<'a>(&'a mut self, partitions: &'a [TopicPartition]) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::enforce_rebalance`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::enforce_rebalance`].
     fn enforce_rebalance<'a>(&'a mut self) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::enforce_rebalance_with_reason`].
+    ///
+    /// # Arguments
+    ///
+    /// - `reason` - as [`Consumer::enforce_rebalance_with_reason`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::enforce_rebalance_with_reason`].
     fn enforce_rebalance_with_reason<'a>(&'a mut self, reason: &'a str) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::close`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::close`].
     fn close<'a>(&'a mut self) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::close_with_options`].
+    ///
+    /// # Arguments
+    ///
+    /// - `options` - as [`Consumer::close_with_options`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Consumer::close_with_options`].
     fn close_with_options<'a>(&'a mut self, options: CloseOptions) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`Consumer::wakeup`].
     fn wakeup(&self);
 
     /// See [`Consumer::handle`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Consumer::handle`].
     fn handle(&self) -> ConsumerHandle;
 }
 

@@ -23,26 +23,22 @@
 //! # What is translated, and what is not
 //!
 //! Milestone 11 Phase 4 translated the whole `transactionManager != null` block of
-//! `runOnce` (`Sender.java:311-345`), `maybeSendAndPollTransactionalRequest`
-//! (`:456-530`), `maybeFindCoordinatorAndRetry` (`:520-530`), `maybeAbortBatches`
-//! (`:532-538`), `awaitNodeReady` (`:563-574`),
-//! `hasPendingTransactionalRequests` (`:233-235`),
-//! `shouldHandleAuthorizationError` (`:351-360`), the three shutdown stages of
-//! `run()` (`:245-303`), and the unsynchronized half of
-//! `TxnRequestHandler.onComplete`.
+//! `Sender#runOnce`, `Sender#maybeSendAndPollTransactionalRequest`,
+//! `Sender#maybeFindCoordinatorAndRetry`, `Sender#maybeAbortBatches`, `Sender#awaitNodeReady`,
+//! `Sender#hasPendingTransactionalRequests`, `Sender#shouldHandleAuthorizationError`, the three
+//! shutdown stages of `Sender#run`, and the unsynchronized half of
+//! `TransactionManager.TxnRequestHandler#onComplete`.
 //!
 //! Phase 5a wired the coordinator arms Phase 4 had to defer:
 //! `maybeSendAndPollTransactionalRequest`'s `coordinator(coordinatorType)` and
-//! "coordinator not known" branches (`:481`, `:489-492`), the
-//! `lookupCoordinator` calls in `maybeFindCoordinatorAndRetry` (`:522`) and in
-//! the `onComplete` disconnect branch
-//! (`TransactionManager.java:1414`), and `awaitNodeReady`'s
-//! `handleCoordinatorReady` (`:568`). The coordinator nodes themselves are
-//! [`Sender`] fields (rules §2); see [`CoordinatorNodes`].
+//! "coordinator not known" branches, the `lookupCoordinator` calls in
+//! `maybeFindCoordinatorAndRetry` and in the `TxnRequestHandler#onComplete` disconnect
+//! branch, and `awaitNodeReady`'s `handleCoordinatorReady`. The coordinator nodes themselves
+//! are [`Sender`] fields (rules §2); see [`CoordinatorNodes`].
 //!
-//! Phase 6 closed the last deferral: `sendProduceRequest` now sets
-//! `transactional_id` (`Sender.java:922-928`) and builds the request through
-//! `ProduceRequest.builder(data, useTransactionV1Version)` (`:930-936`). See
+//! Phase 6 closed the last deferral: `Sender#sendProduceRequest` now sets
+//! `transactional_id` and builds the request through
+//! `ProduceRequest.builder(data, useTransactionV1Version)`. See
 //! [`Sender::send_produce_request`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -73,12 +69,11 @@ use crate::common::requests::{PartitionResponse, PartitionResponseOptionsBuilder
 /// associated functions can be called without a meaningless turbofish.
 ///
 /// `C` is a Rust-side client-injection parameter with no counterpart in Java —
-/// `Sender.java` is not generic — and neither
-/// [`Sender::throttle_time_sensor`] (Java's `public static
-/// Sender.throttleTimeSensor`, `Sender.java:967`) nor
+/// `Sender` is not generic — and neither [`Sender::throttle_time_sensor`] (Java's
+/// `public static` `Sender#throttleTimeSensor`) nor
 /// [`Sender::is_authorization_error_handled_by_sender`] (Java's pure private
-/// `shouldHandleAuthorizationError`, `Sender.java:351`) reads it — but Rust
-/// still cannot infer it at a call site (E0283).
+/// `Sender#shouldHandleAuthorizationError`) reads it — but Rust still cannot infer it at a
+/// call site (E0283).
 pub(crate) type SenderStatics = Sender<NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>>;
 use crate::ProduceRequestData;
 use crate::metadata::LeaderIdAndEpoch;
@@ -130,7 +125,7 @@ struct PendingProduceRequest {
     /// the identity of the batch that was sent.
     ///
     /// Java's callback closes over `recordsByPartition`, the exact `ProducerBatch`
-    /// objects the request carried (`Sender.java:918`, `:941`), so a response always
+    /// objects the request carried (`Sender#sendProduceRequest`), so a response always
     /// completes *its own* batch. Recording only the partition here was wrong once more
     /// than one request per partition can be in flight — which idempotence makes normal,
     /// since `max.in.flight.requests.per.connection` may be up to 5 — because the
@@ -442,8 +437,7 @@ pub struct Sender<C: KafkaClient> {
     /// All the state related to transactions, in particular the producer id,
     /// producer epoch, and sequence numbers; `None` when idempotence is disabled.
     ///
-    /// Translated from `Sender.transactionManager` (Java 123), which is nullable —
-    /// hence [`Option`].
+    /// Translated from `Sender#transactionManager`, which is nullable — hence [`Option`].
     ///
     /// # Lock topology
     ///
@@ -452,7 +446,7 @@ pub struct Sender<C: KafkaClient> {
     /// apply to every use below (rules §4):
     ///
     ///   1. **No guard may be held across an `.await`.** Acquire → read/mutate →
-    ///      drop, then await, then re-acquire. `Sender.java:459-518` interleaves
+    ///      drop, then await, then re-acquire. `Sender#maybeSendAndPollTransactionalRequest` interleaves
     ///      ten manager calls with three `client.poll(..)` calls and two sleeps,
     ///      all of which are `.await` points here.
     ///   2. **The network poll is never raced in a `tokio::select!`** — it is not
@@ -465,13 +459,11 @@ pub struct Sender<C: KafkaClient> {
     transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     /// The queue of transactional requests waiting to be sent.
     ///
-    /// Translated from `TransactionManager.pendingRequests`
-    /// (`TransactionManager.java:121`), which lives **outside**
+    /// Translated from `TransactionManager#pendingRequests`, which lives **outside**
     /// [`Self::transaction_manager`] because Java mutates it through the
-    /// *unsynchronized* `lookupCoordinator(TxnRequestHandler)`
-    /// (`TransactionManager.java:969`) that `Sender.java:522` calls directly. See
-    /// `.claude/rules/producer-transactions.md` §2 and the [`PendingRequests`]
-    /// docs.
+    /// *unsynchronized* `TransactionManager#lookupCoordinator(TxnRequestHandler)` that
+    /// `Sender#maybeFindCoordinatorAndRetry` calls directly. See
+    /// `.claude/rules/producer-transactions.md` §2 and the [`PendingRequests`] docs.
     ///
     /// # Why it is shared rather than Sender-confined
     ///
@@ -479,16 +471,14 @@ pub struct Sender<C: KafkaClient> {
     /// held while the only callers were Sender-side, but it is **not** true of the
     /// class as Java writes it. All four of `KafkaProducer`'s blocking transactional
     /// methods run on the *application* thread and reach `enqueueRequest` through a
-    /// `synchronized` manager method. Cited at the `transactionManager.<m>(..)` call
-    /// statement rather than at the enclosing method's declaration, so the line and
-    /// the method cannot drift apart:
+    /// `synchronized` manager method:
     ///
-    /// | `KafkaProducer` method | call statement | line | manager method |
-    /// |---|---|---|---|
-    /// | `initTransactions` | `initializeTransactions(false)` | 652 | `:299` |
-    /// | `sendOffsetsToTransaction` | `sendOffsetsToTransaction(..)` | 740 | `:404` |
-    /// | `commitTransaction` | `beginCommit()` | 783 | `:353` |
-    /// | `abortTransaction` | `beginAbort()` | 818 | `:361` |
+    /// | `KafkaProducer` method | call statement | manager method |
+    /// |---|---|---|
+    /// | `initTransactions` | `initializeTransactions(false)` | `TransactionManager#initializeTransactions` |
+    /// | `sendOffsetsToTransaction` | `sendOffsetsToTransaction(..)` | `TransactionManager#sendOffsetsToTransaction` |
+    /// | `commitTransaction` | `beginCommit()` | `TransactionManager#beginCommit` |
+    /// | `abortTransaction` | `beginAbort()` | `TransactionManager#beginAbort` |
     ///
     /// So the queue is written from both threads in Java, and an `Arc<Mutex<..>>`
     /// shared with [`KafkaProducer`] is what makes those four public methods
@@ -496,13 +486,14 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// # Java's unsynchronized writer races; this lock closes the race
     ///
-    /// `lookupCoordinator(TxnRequestHandler)` (`TransactionManager.java:969`) is
-    /// package-private and **not** `synchronized`, and both its callers are
-    /// Sender-side (`Sender.java:522`, `TransactionManager.java:1414`) — which is why
-    /// rules §2 grouped the queue with the Sender-confined state. But being called
-    /// from one thread is not the same as being safe: that site reaches
-    /// `pendingRequests.add` (`:969` → `:1191` → `enqueueRequest` `:1207` → `:1188`)
-    /// **without holding the monitor**, while the four public methods above add to the
+    /// `TransactionManager#lookupCoordinator(TxnRequestHandler)` is package-private and
+    /// **not** `synchronized`, and both its callers are Sender-side
+    /// (`Sender#maybeFindCoordinatorAndRetry`, `TransactionManager.TxnRequestHandler#onComplete`)
+    /// — which is why rules §2 grouped the queue with the Sender-confined state. But being
+    /// called from one thread is not the same as being safe: that site reaches
+    /// `pendingRequests.add` (`lookupCoordinator(TxnRequestHandler)` →
+    /// `lookupCoordinator(CoordinatorType,String)` → `enqueueRequest`) **without holding the
+    /// monitor**, while the four public methods above add to the
     /// same `PriorityQueue` *under* it. There is no other lock, nothing `volatile`,
     /// and `PriorityQueue` is not thread-safe, so there is no happens-before edge
     /// between the two writers: Java has a genuine race whose narrowness — the app-side
@@ -526,26 +517,27 @@ pub struct Sender<C: KafkaClient> {
     pending_requests: Arc<Mutex<PendingRequests>>,
     /// The coordinators this Sender has discovered.
     ///
-    /// Translated from `TransactionManager.transactionCoordinator`
-    /// (`TransactionManager.java:137`) and `consumerGroupCoordinator` (`:138`),
-    /// which live **here** for the same reason as [`Self::pending_requests`]:
-    /// Java's only reader is `Sender.java:481` and both of its writers are
+    /// Translated from `TransactionManager#transactionCoordinator` and
+    /// `TransactionManager#consumerGroupCoordinator`, which live **here** for the same reason
+    /// as [`Self::pending_requests`]: Java's only reader is
+    /// `Sender#maybeSendAndPollTransactionalRequest` and both of its writers are
     /// unsynchronized. See the [`CoordinatorNodes`] docs.
     coordinators: CoordinatorNodes,
     /// The correlation id of the transactional request currently in flight, or
     /// [`NO_INFLIGHT_REQUEST_CORRELATION_ID`] when there is none.
     ///
-    /// Translated from `TransactionManager.inFlightRequestCorrelationId`
-    /// (`TransactionManager.java:136`). Sender-confined for the same reason as
-    /// [`Self::pending_requests`], with stronger evidence: Java's three accessors
-    /// (`:973`, `:977`, `:981`) are *all* unsynchronized, and `onComplete` reads
-    /// the field at `:1407` while its `synchronized` block only starts at `:1421`.
+    /// Translated from `TransactionManager#inFlightRequestCorrelationId`. Sender-confined for
+    /// the same reason as [`Self::pending_requests`], with stronger evidence: Java's three
+    /// accessors (`TransactionManager#setInFlightCorrelationId`,
+    /// `TransactionManager#clearInFlightCorrelationId`, `TransactionManager#hasInFlightRequest`)
+    /// are *all* unsynchronized, and `TxnRequestHandler#onComplete` reads the field before
+    /// its `synchronized` block starts.
     in_flight_request_correlation_id: i32,
     /// The transactional request awaiting a response, keyed by the correlation id
     /// it was sent with.
     ///
     /// Java attaches the `TxnRequestHandler` itself to the `ClientRequest` as its
-    /// `RequestCompletionHandler` (`Sender.java:504-505`), so the network client
+    /// `RequestCompletionHandler` (`Sender#maybeSendAndPollTransactionalRequest`), so the network client
     /// hands the handler back when the response arrives. A Rust
     /// `RequestCompletionHandler` cannot capture `&mut self`, so the handler is
     /// parked here and matched against the response's correlation id after
@@ -553,8 +545,8 @@ pub struct Sender<C: KafkaClient> {
     /// produce responses (CLAUDE.md §11.2).
     ///
     /// An [`Option`] rather than a map because Java allows at most one in-flight
-    /// transactional request: `maybeSendAndPollTransactionalRequest` returns early
-    /// at `Sender.java:460` while `hasInFlightRequest()` holds.
+    /// transactional request: `Sender#maybeSendAndPollTransactionalRequest` returns early
+    /// while `hasInFlightRequest()` holds.
     pending_transactional_response: Option<(i32, TxnRequestHandler)>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
@@ -564,12 +556,11 @@ pub struct Sender<C: KafkaClient> {
     /// # The second holder Java gets for free
     ///
     /// Three Java paths complete a batch *now* and deallocate it *later*:
-    /// `maybeAbortBatches` → `abortBatches`'s `isInflight()` fork
-    /// (`RecordAccumulator.java:1208-1212`), `failBatch(deallocateBatch=false)` →
-    /// `maybeRemoveAndDeallocateBatchLater` (`Sender.java:177-180`), and
-    /// `abortIncompleteBatches` on a force close. All three rely on the request's
-    /// `RequestCompletionHandler` closing over `recordsByPartition`
-    /// (`Sender.java:918`, `:941`) — a *second* holder of the batch that outlives
+    /// `maybeAbortBatches` → the `isInflight()` fork of
+    /// `RecordAccumulator#abortBatches(RuntimeException)`, `failBatch(deallocateBatch=false)`
+    /// → `Sender#maybeRemoveAndDeallocateBatchLater`, and `abortIncompleteBatches` on a force
+    /// close. All three rely on the request's `RequestCompletionHandler` closing over
+    /// `recordsByPartition` (`Sender#sendProduceRequest`) — a *second* holder of the batch that outlives
     /// `inFlightBatches.clear()`, so the response can still reach it and deallocate
     /// (KAFKA-19012: the pooled buffer may still be in use by the network client).
     ///
@@ -601,7 +592,7 @@ pub struct Sender<C: KafkaClient> {
 
 impl<C: KafkaClient> Sender<C> {
     /// Whether `error` is one of the two authorization failures that
-    /// `Sender.shouldHandleAuthorizationError` (`Sender.java:351-360`) recovers from
+    /// `Sender#shouldHandleAuthorizationError` recovers from
     /// by failing the pending requests and transitioning back to `UNINITIALIZED`.
     ///
     /// This is the `instanceof` half of that method:
@@ -625,7 +616,8 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Suspends the Sender task for `duration_ms`, translating Java's
-    /// `time.sleep(retryBackoffMs)` (`Sender.java:501`, `:525`).
+    /// `time.sleep(retryBackoffMs)` (`Sender#maybeSendAndPollTransactionalRequest`,
+    /// `Sender#maybeFindCoordinatorAndRetry`).
     ///
     /// Java blocks the Sender thread; CLAUDE.md §11.1 makes that an `.await` here. Both
     /// call sites exist to prevent a tight retry loop and neither holds a
@@ -653,8 +645,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Rebuilds the typed [`Error::Authentication`] that Java rethrows when
     /// `awaitNodeReady` fails with an `AuthenticationException`
-    /// (`NetworkClientUtils.java:86-87`, escaping to `Sender.runOnce`'s catch at
-    /// `Sender.java:336`).
+    /// (`NetworkClientUtils#awaitReady`, escaping to `Sender#runOnce`'s catch).
     ///
     /// The payload's bare message is used, NOT `error.to_string()`: the latter is the
     /// `io::Error`'s `Display`, which already carries the `"AuthenticationError: "`
@@ -758,16 +749,14 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Whether any transactional request is pending.
     ///
-    /// Translated from `TransactionManager.hasPendingRequests()`
-    /// (`TransactionManager.java:1005`).
+    /// Translated from `TransactionManager#hasPendingRequests`.
     pub fn has_pending_requests(&self) -> bool {
         !self.pending_requests.lock().unwrap().is_empty()
     }
 
     /// The coordinator of the given type, or `None` if it has not been discovered.
     ///
-    /// Translated from `TransactionManager.coordinator(CoordinatorType)`
-    /// (`TransactionManager.java:958`), whose body reads only Sender-confined
+    /// Translated from `TransactionManager#coordinator`, whose body reads only Sender-confined
     /// state — the same criterion that moved the four accessors below (rules §2).
     ///
     /// # Errors
@@ -780,34 +769,30 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Records the correlation id of the transactional request now in flight.
     ///
-    /// Translated from `TransactionManager.setInFlightCorrelationId(int)`
-    /// (`TransactionManager.java:973`).
+    /// Translated from `TransactionManager#setInFlightCorrelationId`.
     fn set_in_flight_correlation_id(&mut self, correlation_id: i32) {
         self.in_flight_request_correlation_id = correlation_id;
     }
 
     /// Clears the in-flight correlation id.
     ///
-    /// Translated from `TransactionManager.clearInFlightCorrelationId()`
-    /// (`TransactionManager.java:977`).
+    /// Translated from `TransactionManager#clearInFlightCorrelationId`.
     fn clear_in_flight_correlation_id(&mut self) {
         self.in_flight_request_correlation_id = TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID;
     }
 
     /// Whether a transactional request is in flight.
     ///
-    /// Translated from `TransactionManager.hasInFlightRequest()`
-    /// (`TransactionManager.java:981`).
+    /// Translated from `TransactionManager#hasInFlightRequest`.
     pub fn has_in_flight_request(&self) -> bool {
         self.in_flight_request_correlation_id != TransactionManager::NO_INFLIGHT_REQUEST_CORRELATION_ID
     }
 
     /// Handles the response to a transactional request.
     ///
-    /// Translated from `TxnRequestHandler.onComplete(ClientResponse)`
-    /// (`TransactionManager.java:1406-1428`) — specifically everything Java runs
-    /// *outside* the `synchronized (TransactionManager.this)` block that begins at
-    /// `:1421`. The synchronized half is
+    /// Translated from `TransactionManager.TxnRequestHandler#onComplete` — specifically
+    /// everything Java runs *outside* the `synchronized (TransactionManager.this)` block near
+    /// its end. The synchronized half is
     /// [`TransactionManager::handle_response`], called below under the lock
     /// exactly as Java's block does.
     ///
@@ -830,15 +815,14 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
-            // Java `TransactionManager.java:1407` throws a plain
-            // `RuntimeException` — NOT a `KafkaException`, so `is_kafka_error()`
-            // and `is_api_error()` must both answer `false`.
-            // `Error::with_message(Errors::UnknownServerError, ..)` resolves the code
-            // to `UnknownServerException` and turns both `true`. The crate has no
-            // generic `RuntimeException` carrier; `LocalIllegalState` is the closest
-            // available one (Java's `IllegalStateException` is itself a plain
-            // `RuntimeException`) and answers `false` to every §10.4 predicate, so
-            // the hierarchy is faithful even though the class name is narrower.
+            // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete`
+            // throws a plain `RuntimeException` — NOT a `KafkaException`, so `is_kafka_error()` and
+            // `is_api_error()` must both answer `false`.
+            // `Error::with_message(Errors::UnknownServerError, ..)` resolves the code to
+            // `UnknownServerException` and turns both `true`. The crate has no generic `RuntimeException`
+            // carrier; `LocalIllegalState` is the closest available one (Java's `IllegalStateException` is
+            // itself a plain `RuntimeException`) and answers `false` to every §10.4 predicate, so the
+            // hierarchy is faithful even though the class name is narrower.
             let error = Error::local_illegal_state("Detected more than one in-flight transactional request.");
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
@@ -846,8 +830,9 @@ impl<C: KafkaClient> Sender<C> {
         self.clear_in_flight_correlation_id();
         if response.was_disconnected() {
             kafka_debug!(self.log_context, "Disconnected from {}. Will retry.", response.destination());
-            // Java 1413-1415: rediscover the coordinator before retrying, so the
-            // retry does not go straight back to a broker that just dropped us.
+            // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete`'s
+            // disconnect branch: rediscover the coordinator before retrying, so the retry does not go
+            // straight back to a broker that just dropped us.
             {
                 // `pending_requests` before the manager, per its field docs.
                 let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -855,9 +840,9 @@ impl<C: KafkaClient> Sender<C> {
                 if manager.needs_coordinator(&handler) {
                     manager.lookup_coordinator_for(&mut self.coordinators, &mut pending_requests, &handler)?;
                 }
-                // Java's `reenqueue()` (1394) takes the manager monitor for the two
-                // statements `isRetry = true; enqueueRequest(this)`, so `retry` is
-                // called under the lock here too.
+                // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#reenqueue`
+                // takes the manager monitor for the two statements `isRetry = true; enqueueRequest(this)`, so
+                // `retry` is called under the lock here too.
                 manager.retry(&mut pending_requests, handler);
             }
             return Ok(());
@@ -874,7 +859,8 @@ impl<C: KafkaClient> Sender<C> {
                     response_body,
                     handler
                 );
-                // Java 1421-1423: this and only this runs under the monitor.
+                // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete`'s
+                // `synchronized` block: this and only this runs under the monitor.
                 // `pending_requests` before the manager, per its field docs.
                 let mut pending_requests = self.pending_requests.lock().unwrap();
                 transaction_manager.lock().unwrap().handle_response(
@@ -885,7 +871,7 @@ impl<C: KafkaClient> Sender<C> {
                 )
             },
             None => {
-                // Java `TransactionManager.java:1424`:
+                // Java `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete`:
                 // `new KafkaException("Could not execute transactional request for
                 // unknown reasons")` — a BARE `KafkaException`, so `is_api_error()`
                 // must answer `false`.
@@ -898,7 +884,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Whether there are transactional requests that must still be flushed before
     /// shutdown can proceed.
     ///
-    /// Translated from `Sender.hasPendingTransactionalRequests()` (Java 233-235).
+    /// Translated from `Sender#hasPendingTransactionalRequests`.
     /// Reachable for a purely idempotent producer — see
     /// [`TransactionManager::has_ongoing_transaction`].
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#hasPendingTransactionalRequests")]
@@ -939,7 +925,7 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         // Abort the transaction if any commit or abort didn't go through the
-        // transaction manager's queue (Java 266-285).
+        // transaction manager's queue (`org.apache.kafka.clients.producer.internals.Sender#run`).
         while !self.force_close.load(Ordering::Acquire) && self.has_ongoing_transaction() {
             if !self.is_completing() {
                 kafka_info!(self.log_context, "Aborting incomplete transaction due to shutdown");
@@ -967,11 +953,10 @@ impl<C: KafkaClient> Sender<C> {
                     self.log_context,
                     "Aborting incomplete transactional requests due to forced shutdown"
                 );
-                // Java does not guard this call (`Sender.java:292`) and cannot fail
-                // it: `close()` only ever targets `FATAL_ERROR`, which is always a
-                // valid transition, and always supplies an error. Logged rather than
-                // unwrapped so an unreachable failure cannot panic the task
-                // (CLAUDE.md §12.1).
+                // Java does not guard this call (`org.apache.kafka.clients.producer.internals.Sender#run`)
+                // and cannot fail it: `close()` only ever targets `FATAL_ERROR`, which is always a valid
+                // transition, and always supplies an error. Logged rather than unwrapped so an unreachable
+                // failure cannot panic the task (CLAUDE.md §12.1).
                 // `pending_requests` before the manager, per its field docs.
                 let mut pending_requests = self.pending_requests.lock().unwrap();
                 if let Err(error) = transaction_manager.lock().unwrap().close(&mut pending_requests, Caller::Sender) {
@@ -995,18 +980,18 @@ impl<C: KafkaClient> Sender<C> {
 
         // Java leaks these buffers, and this port declines to.
         //
-        // `NetworkClient.close()` is the KIP-909 bootstrap-resolver shutdown, then
-        // `selector.close(); metadataUpdater.close(); telemetrySender.close();`
-        // (`NetworkClient.java:802-814`) — it never walks
-        // `inFlightRequests` and never calls `completeResponses`. `Selector.close()`
-        // closes each channel with `CloseMode.DISCARD_NO_NOTIFY`
-        // (`Selector.java:886-892`), defined at `:96` as "discard any outstanding
+        // `org.apache.kafka.clients.NetworkClient#close` is the KIP-909 bootstrap-resolver
+        // shutdown, then `selector.close(); metadataUpdater.close(); telemetrySender.close();`
+        // — it never walks `inFlightRequests` and never calls `completeResponses`.
+        // `org.apache.kafka.common.network.Selector#close()` closes each channel with
+        // `CloseMode.DISCARD_NO_NOTIFY` (`Selector#close(String)`), which
+        // `Selector.CloseMode#DISCARD_NO_NOTIFY` documents as "discard any outstanding
         // receives, no disconnect notification". So no completion callback runs, and
         // any batch Java was still holding for a response keeps its `ByteBuffer` — the
         // `BufferPool` never gets it back. That is unobservable in Java only because
         // the pool is constructed inside `KafkaProducer`'s constructor
-        // (`KafkaProducer.java:494` for the incremental strategy, `:508` for the full one),
-        // is reachable solely through the accumulator, and
+        // (the `org.apache.kafka.clients.producer.KafkaProducer` constructor, for both the
+        // incremental and the full strategy), is reachable solely through the accumulator, and
         // is collected with the producer.
         //
         // Releasing them here instead keeps `BufferPool`'s accounting exact for the
@@ -1026,11 +1011,11 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Runs one iteration and logs any failure, translating `Sender.run`'s three
     /// `catch (Exception e) { log.error("Uncaught error in kafka producer I/O
-    /// thread: ", e); }` blocks (Java 248-250, 261-263, 282-284).
+    /// thread: ", e); }` blocks (`Sender#run`).
     ///
     /// Java's catch is *blanket*, so it also covers the throws Rust spells as
     /// panics — `ProducerBatch`'s state-machine violations
-    /// (`ProducerBatch.java:311`, `"A {} batch must not attempt another state
+    /// (`ProducerBatch#done`, `"A {} batch must not attempt another state
     /// change to {}"`, and `abort`'s `"Batch has already been completed in final
     /// state"`). Handling only `Result::Err` here left those aborting the whole I/O
     /// task, after which nothing drains the accumulator or completes futures and
@@ -1059,21 +1044,21 @@ impl<C: KafkaClient> Sender<C> {
     /// disabled.
     ///
     /// The `transactionManager != null && transactionManager.hasOngoingTransaction()`
-    /// conjunction of `Sender.java:267`.
+    /// conjunction of `Sender#run`.
     fn has_ongoing_transaction(&self) -> bool {
         self.transaction_manager
             .as_ref()
             .is_some_and(|transaction_manager| transaction_manager.lock().unwrap().has_ongoing_transaction())
     }
 
-    /// `transactionManager.isCompleting()` (`Sender.java:268`).
+    /// `transactionManager.isCompleting()` (`Sender#run`).
     fn is_completing(&self) -> bool {
         self.transaction_manager
             .as_ref()
             .is_some_and(|transaction_manager| transaction_manager.lock().unwrap().is_completing())
     }
 
-    /// `transactionManager.beginAbort()` (`Sender.java:273`).
+    /// `transactionManager.beginAbort()` (`Sender#run`).
     ///
     /// The returned [`TransactionalRequestResult`] is discarded, exactly as Java
     /// discards the return value here: the shutdown loop's next `runOnce` sends the
@@ -1083,7 +1068,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Passes [`Caller::Sender`], which is what makes an invalid
     /// `→ ABORTING_TRANSACTION` **poison** the state machine here rather than
     /// returning cleanly (rules §1). Java anticipates precisely that throw at this
-    /// call site (`Sender.java:269-271`) and force-closes on it, which is what the
+    /// call site (`Sender#run`) and force-closes on it, which is what the
     /// caller below does with the error.
     ///
     /// [`TransactionalRequestResult`]: crate::producer::internals::TransactionalRequestResult
@@ -1106,7 +1091,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Run a single iteration of sending.
     ///
-    /// Translated from `Sender.runOnce()` (Java 310-346).
+    /// Translated from `Sender#runOnce`.
     ///
     /// In Java, `runOnce` calls `client.poll()` which invokes callbacks on
     /// completed requests. The Sender's produce response callback calls
@@ -1123,18 +1108,18 @@ impl<C: KafkaClient> Sender<C> {
     pub(crate) async fn run_once(&mut self) -> Result<(), Error> {
         if self.transaction_manager.is_some() {
             match self.run_transaction_phase().await {
-                // Java 322 / 326 / 334 — `runOnce` returns without producing.
+                // `org.apache.kafka.clients.producer.internals.Sender#runOnce`'s three early returns — it
+                // returns without producing.
                 Ok(true) => return Ok(()),
                 Ok(false) => {},
-                // Java 336-340: `catch (AuthenticationException e)`. This is already
-                // logged as an error, but propagated here to perform any clean ups.
-                // Note Java's `catch` does **not** return: execution continues to
-                // `sendProducerData` at `:343`, which this `match` arm preserves by
-                // falling through.
+                // `org.apache.kafka.clients.producer.internals.Sender#runOnce`'s
+                // `catch (AuthenticationException e)`. This is already logged as an error, but propagated
+                // here to perform any clean ups. Note Java's `catch` does **not** return: execution
+                // continues to `sendProducerData`, which this `match` arm preserves by falling through.
                 //
                 // The test is `is_authentication_error()` — CLAUDE.md §12.4's
                 // translation of `instanceof AuthenticationException`. Java's `catch`
-                // covers the *whole* `try` block (`:308-335`), so it fires for an
+                // covers the *whole* `try` block, so it fires for an
                 // authentication failure raised by ANY statement in it, not just by
                 // `awaitNodeReady`; a per-site tag could only ever match the one site
                 // it was written at.
@@ -1146,8 +1131,8 @@ impl<C: KafkaClient> Sender<C> {
                     );
                     self.authentication_failed(&error)?;
                 },
-                // Anything else propagates to `Sender.run`'s `catch (Exception e)` at
-                // `:248`, which only logs — see `run_once_logging_errors`.
+                // Anything else propagates to `org.apache.kafka.clients.producer.internals.Sender#run`'s
+                // `catch (Exception e)`, which only logs — see `run_once_logging_errors`.
                 Err(other) => return Err(other),
             }
         }
@@ -1158,7 +1143,7 @@ impl<C: KafkaClient> Sender<C> {
         Ok(())
     }
 
-    /// `transactionManager.authenticationFailed(e)` (`Sender.java:339`).
+    /// `transactionManager.authenticationFailed(e)` (`Sender#runOnce`).
     fn authentication_failed(&mut self, error: &Error) -> Result<(), Error> {
         match self.transaction_manager.clone() {
             Some(transaction_manager) => {
@@ -1178,8 +1163,8 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// This is the Rust stand-in for Java's `client.poll(..)`, which invokes each
     /// request's `RequestCompletionHandler` from inside the poll. Every Java
-    /// `client.poll` call site — `runOnce`'s at `:345`, the fatal-error one at
-    /// `:322`, and the three inside `maybeSendAndPollTransactionalRequest` — can
+    /// `client.poll` call site — the two in `Sender#runOnce` (the last statement and the
+    /// fatal-error one), and the three inside `maybeSendAndPollTransactionalRequest` — can
     /// therefore complete *both* produce and transactional requests, so they all go
     /// through here rather than only the one in `runOnce`.
     ///
@@ -1197,7 +1182,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// # Failures are isolated per response
     ///
-    /// This is `NetworkClient.completeResponses` (`NetworkClient.java:732-740`),
+    /// This is `NetworkClient#completeResponses`,
     /// which wraps each `response.onComplete()` in its own `try`/`catch`:
     ///
     /// ```java
@@ -1250,7 +1235,7 @@ impl<C: KafkaClient> Sender<C> {
     /// `split_and_reenqueue`, which re-insert an idempotent batch in sequence order via
     /// `insertInSequenceOrder`. Java's `IllegalStateException` escapes the completion
     /// callback but is caught **inside** `client.poll`, by
-    /// `NetworkClient.completeResponses` (`NetworkClient.java:732-740`) — *not* by
+    /// `NetworkClient#completeResponses` — *not* by
     /// `Sender.run`. [`Self::handle_client_responses`] is that boundary and logs the
     /// error there, so the remaining responses of the same poll are still dispatched.
     ///
@@ -1326,12 +1311,11 @@ impl<C: KafkaClient> Sender<C> {
             if let Some(batch) = batches.remove(&tp) {
                 match action {
                     BatchAction::Reenqueue => {
-                        // Java's `reenqueueBatch` records retries after re-enqueuing
-                        // (`Sender.java:754`). Capture the topic/count before the batch
-                        // is moved. RecordAccumulator::reenqueue calls batch.reenqueued()
-                        // internally, and on the idempotent sequence-order check failing
-                        // it hands the batch back rather than dropping it — fail it inline
-                        // so its records do not hang (issues.md Issue 4).
+                        // Java's `org.apache.kafka.clients.producer.internals.Sender#reenqueueBatch` records
+                        // retries after re-enqueuing. Capture the topic/count before the batch is moved.
+                        // RecordAccumulator::reenqueue calls batch.reenqueued() internally, and on the
+                        // idempotent sequence-order check failing it hands the batch back rather than
+                        // dropping it — fail it inline so its records do not hang (issues.md Issue 4).
                         let topic = batch.topic_partition.topic().to_string();
                         let count = batch.record_count;
                         match self.accumulator.reenqueue(batch, now) {
@@ -1357,7 +1341,7 @@ impl<C: KafkaClient> Sender<C> {
                         match self.accumulator.split_and_reenqueue(batch) {
                             Ok(_num_split_batches) => {
                                 // Java records the split in `completeBatch` right after
-                                // `splitAndReenqueue` (`Sender.java:690`).
+                                // `splitAndReenqueue`.
                                 self.sensors.record_batch_split();
                             },
                             Err(error) => {
@@ -1380,7 +1364,7 @@ impl<C: KafkaClient> Sender<C> {
         // earlier partition's completion raised an error or because the broker omitted
         // the partition. Java never removes such a batch from `inFlightBatches`, so it
         // expires at `delivery.timeout.ms` in `getExpiredInflightBatches`
-        // (`Sender.java:185`). Put it back so the same happens here. Its request has
+        // (`Sender#getExpiredInflightBatches`). Put it back so the same happens here. Its request has
         // completed, so it is no longer in flight, and `fail_expired_batches` releases
         // its buffer at expiry. A batch that is already done came from
         // `batches_awaiting_response` and only needed this response to release its
@@ -1415,20 +1399,20 @@ impl<C: KafkaClient> Sender<C> {
 
     // -- The `transactionManager != null` block of `runOnce` -----------------
 
-    /// Runs `runOnce`'s transaction block (`Sender.java:311-341`).
+    /// Runs the `transactionManager != null` block of `Sender#runOnce`.
     ///
     /// Returns `Ok(true)` when `runOnce` must return without producing in this
     /// iteration. The block has **four** early exits and their order is
     /// load-bearing:
     ///
-    ///   - `:322` fatal error — abort the batches, poll, return;
-    ///   - `:326` abortable error whose cause is an authorization failure —
-    ///     recover to `UNINITIALIZED` and return, *before* `:331` can attempt
-    ///     `ABORTABLE_ERROR → INITIALIZING` (an attempt Java never makes; see
-    ///     PLAN §9.15);
-    ///   - `:334` `maybeSendAndPollTransactionalRequest` returned `true`, i.e. a
+    ///   - `hasFatalError()`: fatal error — abort the batches, poll, return;
+    ///   - `hasAbortableError() && shouldHandleAuthorizationError(lastError)`: abortable
+    ///     error whose cause is an authorization failure — recover to `UNINITIALIZED` and
+    ///     return, *before* `bumpIdempotentEpochAndResetIdIfNeeded()` can attempt
+    ///     `ABORTABLE_ERROR → INITIALIZING` (an attempt Java never makes; see PLAN §9.15);
+    ///   - `maybeSendAndPollTransactionalRequest` returned `true`, i.e. a
     ///     transactional request was sent, awaited or re-queued;
-    ///   - the `AuthenticationException` catch at `:336`, which is *not* an early
+    ///   - the `catch (AuthenticationException e)`, which is *not* an early
     ///     exit — Java falls through to `sendProducerData`.
     ///
     /// No `TransactionManager` guard is held across any `.await` (rules §4): each
@@ -1441,11 +1425,11 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(false);
         };
 
-        // Sender.java:313
+        // `transactionManager.maybeResolveSequences()` in `org.apache.kafka.clients.producer.internals.Sender#runOnce`.
         transaction_manager.lock().unwrap().maybe_resolve_sequences(Caller::Sender)?;
 
-        // Sender.java:315-318 — read `lastError` and the error state together, so
-        // the two cannot disagree the way separate acquisitions could.
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`: read `lastError` and the error state
+        // together, so the two cannot disagree the way separate acquisitions could.
         let (last_error, has_fatal_error, has_abortable_error) = {
             let manager = transaction_manager.lock().unwrap();
             (
@@ -1455,8 +1439,8 @@ impl<C: KafkaClient> Sender<C> {
             )
         };
 
-        // Sender.java:318-323 — do not continue sending if the transaction manager
-        // is in a failed state.
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`: do not continue sending if the
+        // transaction manager is in a failed state.
         if has_fatal_error {
             if let Some(error) = &last_error {
                 // The manager guard is released above, so this takes the deque locks
@@ -1468,7 +1452,7 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(true);
         }
 
-        // Sender.java:325-327 → shouldHandleAuthorizationError (:351-360).
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce` → `Sender#shouldHandleAuthorizationError`.
         if has_abortable_error
             && let Some(error) = &last_error
             && Self::is_authorization_error_handled_by_sender(error)
@@ -1477,34 +1461,35 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(true);
         }
 
-        // Sender.java:329-331 — check whether we need a new producerId. If so, we
-        // will enqueue an InitProducerId request which will be sent below.
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`: check whether we need a new
+        // producerId. If so, we will enqueue an InitProducerId request which will be sent below.
         self.bump_idempotent_epoch_and_reset_id_if_needed()?;
 
-        // Sender.java:333-335
+        // `if (maybeSendAndPollTransactionalRequest()) return;` in
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`.
         if self.maybe_send_and_poll_transactional_request().await? {
             return Ok(true);
         }
         Ok(false)
     }
 
-    /// The side-effecting half of `Sender.shouldHandleAuthorizationError`
-    /// (`Sender.java:354-356`); the `instanceof` half is
+    /// The side-effecting half of `Sender#shouldHandleAuthorizationError`; the `instanceof`
+    /// half is
     /// [`Sender::is_authorization_error_handled_by_sender`].
     ///
     /// Java's three statements, in order: fail the pending requests with an
     /// `AuthenticationException` wrapping the cause, abort the batches, then
     /// transition to `UNINITIALIZED` so the user does not need to instantiate the
-    /// producer again (`Sender.java:348-350`).
+    /// producer again.
     fn handle_authorization_error(&mut self, error: &Error) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };
         // Java wraps the cause in `new AuthenticationException(exception)`
-        // (`Sender.java:354`), so the class is `AuthenticationException` and the
-        // cause is carried, not stringified. NOT `SaslAuthenticationFailed`: the
-        // cause here is a cluster or transactional-id authorization failure and
-        // nothing about it is SASL.
+        // (`org.apache.kafka.clients.producer.internals.Sender#shouldHandleAuthorizationError`), so the class
+        // is `AuthenticationException` and the cause is carried, not stringified. NOT
+        // `SaslAuthenticationFailed`: the cause here is a cluster or transactional-id authorization failure
+        // and nothing about it is SASL.
         //
         // This used to be a codeless `Errors::UnknownServerError`, on the grounds
         // that `AuthenticationException` carries no wire code of its own. But
@@ -1527,9 +1512,9 @@ impl<C: KafkaClient> Sender<C> {
         // Both guards from the block above are released at its `}`, so the deque
         // locks this takes are still acquired with no manager lock held (rules §3).
         self.maybe_abort_batches(error);
-        // Java 356 passes the **raw** exception here, not the
-        // `new AuthenticationException(exception)` wrapper handed to
-        // `failPendingRequests` at :354.
+        // `org.apache.kafka.clients.producer.internals.Sender#shouldHandleAuthorizationError` passes the **raw**
+        // exception to `transitionToUninitialized`, not the
+        // `new AuthenticationException(exception)` wrapper handed to `failPendingRequests`.
         transaction_manager
             .lock()
             .unwrap()
@@ -1537,7 +1522,7 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// `transactionManager.bumpIdempotentEpochAndResetIdIfNeeded()`
-    /// (`Sender.java:331`), with the in-flight batch pool rules §7 requires.
+    /// (`Sender#runOnce`), with the in-flight batch pool rules §7 requires.
     ///
     /// # Assembling the pool from **both** owners
     ///
@@ -1546,7 +1531,7 @@ impl<C: KafkaClient> Sender<C> {
     /// batches because `TxnPartitionEntry` tracks ordering keys only (rules §7).
     /// Those batches live in **either** owner: the Sender's
     /// [`Self::in_flight_batches`], or the accumulator's deques once
-    /// `reenqueueBatch` (`Sender.java:751-753`) has handed one back *without*
+    /// `Sender#reenqueueBatch` has handed one back *without*
     /// untracking it. Drawing from only one owner is the anti-pattern rules §7
     /// names: a reenqueued batch would keep its old epoch's sequence and the broker
     /// would answer `OUT_OF_ORDER_SEQUENCE_NUMBER` on the very path this call exists
@@ -1564,7 +1549,7 @@ impl<C: KafkaClient> Sender<C> {
         // Only an epoch bump reads the pool. `partitions_to_rewrite_sequences` is
         // written solely by the Sender task (through `handle_failed_batch`,
         // `can_retry` and `maybe_resolve_sequences`, the last of which already ran
-        // this iteration at `:313`), so reading it here and using it below cannot
+        // this iteration at the top of `runOnce`), so reading it here and using it below cannot
         // race.
         let partitions: Vec<TopicPartition> = {
             let manager = transaction_manager.lock().unwrap();
@@ -1602,26 +1587,25 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Sends or awaits the next transactional request.
     ///
-    /// Translated from `Sender.maybeSendAndPollTransactionalRequest()`
-    /// (Java 456-518). Returns `true` if a transactional request is sent or polled,
-    /// or if a `FindCoordinator` request is enqueued — i.e. exactly when `runOnce`
-    /// must return at `:334`. Java has one `return false` (`:474`, empty queue) and
-    /// six `return true`.
+    /// Translated from `Sender#maybeSendAndPollTransactionalRequest`. Returns `true` if a
+    /// transactional request is sent or polled, or if a `FindCoordinator` request is
+    /// enqueued — i.e. exactly when `Sender#runOnce` must return. Java has one
+    /// `return false` (empty queue) and six `return true`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeSendAndPollTransactionalRequest")]
     async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
         };
 
-        // Java 460-464: as long as there are outstanding transactional requests, we
-        // simply wait for them to return.
+        // `if (transactionManager.hasInFlightRequest())`: as long as there are outstanding
+        // transactional requests, we simply wait for them to return.
         if self.has_in_flight_request() {
             let now = self.time.milliseconds();
             self.poll_and_dispatch(self.retry_backoff_ms, now).await;
             return Ok(true);
         }
 
-        // Java 466-470.
+        // `accumulator.abortUndrainedBatches(..)` on an abortable error or while aborting.
         let abort_reason = {
             let manager = transaction_manager.lock().unwrap();
             if manager.has_abortable_error() {
@@ -1636,11 +1620,11 @@ impl<C: KafkaClient> Sender<C> {
             self.accumulator.abort_undrained_batches(reason);
         }
 
-        // Java 472-474. `nextRequest` can throw through `resetTransactionState`'s
-        // `transitionTo` on the "EndTxn for a transaction that never started" path
-        // (`TransactionManager.java:923`); Java lets that escape `runOnce` to
-        // `Sender.run`'s catch-and-log, which is what returning the error unchanged
-        // reaches here.
+        // `transactionManager.nextRequest(accumulator.hasIncomplete())`, returning `false` on
+        // `null`. `org.apache.kafka.clients.producer.internals.TransactionManager#nextRequest` can throw through
+        // `resetTransactionState`'s `transitionTo` on the "EndTxn for a transaction that never
+        // started" path; Java lets that escape `runOnce` to `org.apache.kafka.clients.producer.internals.Sender#run`'s
+        // catch-and-log, which is what returning the error unchanged reaches here.
         let has_incomplete = self.accumulator.has_incomplete();
         let next_request_handler = {
             // `pending_requests` before the manager, per its field docs.
@@ -1655,10 +1639,12 @@ impl<C: KafkaClient> Sender<C> {
             }
         };
 
-        // Java 479-482. `coordinatorType()` is null for a non-transactional
-        // `InitProducerId` (Java 1482-1488) and for a `FindCoordinator`
-        // (Java 1671), so those go to the least-loaded node; everything else is
-        // routed to the coordinator this Sender has discovered.
+        // `targetNode = coordinatorType != null ? .. : client.leastLoadedNode(..)`.
+        // `coordinatorType()` is null for a non-transactional `InitProducerId`
+        // (`org.apache.kafka.clients.producer.internals.TransactionManager.InitProducerIdHandler#coordinatorType`)
+        // and for a `FindCoordinator` (`TransactionManager.FindCoordinatorHandler#coordinatorType`), so those
+        // go to the least-loaded node; everything else is routed to the coordinator this Sender has
+        // discovered.
         let coordinator_type = transaction_manager.lock().unwrap().coordinator_type(&next_request_handler);
         let target_node = match coordinator_type {
             Some(coordinator_type) => self.coordinators.coordinator(coordinator_type)?.cloned(),
@@ -1670,7 +1656,7 @@ impl<C: KafkaClient> Sender<C> {
 
         let Some(target_node) = target_node else {
             if let Some(coordinator_type) = coordinator_type {
-                // Java 489-492.
+                // `else if (coordinatorType != null)`: the coordinator is not known.
                 kafka_trace!(
                     self.log_context,
                     "Coordinator not known for {}, will retry {} after finding coordinator.",
@@ -1680,7 +1666,7 @@ impl<C: KafkaClient> Sender<C> {
                 self.maybe_find_coordinator_and_retry(next_request_handler).await?;
                 return Ok(true);
             }
-            // Java 493-498: no nodes available.
+            // The final `else`: no nodes available.
             kafka_trace!(
                 self.log_context,
                 "No nodes available to send requests, will poll and retry when until a node is ready."
@@ -1698,7 +1684,7 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(true);
         };
 
-        // Java 483-488.
+        // `if (!awaitNodeReady(targetNode, coordinatorType))`.
         match self.await_node_ready(&target_node, coordinator_type).await {
             Ok(true) => {},
             Ok(false) => {
@@ -1710,8 +1696,9 @@ impl<C: KafkaClient> Sender<C> {
                 self.maybe_find_coordinator_and_retry(next_request_handler).await?;
                 return Ok(true);
             },
-            // Java's `awaitNodeReady` throws `IOException`, caught at :511, and
-            // `AuthenticationException`, which escapes to `runOnce`'s catch at :336.
+            // Java's `org.apache.kafka.clients.producer.internals.Sender#awaitNodeReady` throws
+            // `IOException`, caught by `maybeSendAndPollTransactionalRequest`'s `catch (IOException e)`, and
+            // `AuthenticationException`, which escapes to `Sender#runOnce`'s catch.
             // `network_client_utils::NetworkClientUtils::await_ready` folds both into `io::Error`; the
             // authentication case carries a typed `AuthenticationError` payload,
             // which is what `is_authentication_error` tests — the crate's documented
@@ -1721,14 +1708,14 @@ impl<C: KafkaClient> Sender<C> {
             // an unrelated `PermissionDenied` arrived.
             Err(error) if network::is_authentication_error(&error) => {
                 // Java rethrows the `AuthenticationException` itself
-                // (`NetworkClientUtils.java:86-87`), so the class must be
+                // (`org.apache.kafka.clients.NetworkClientUtils#awaitReady`), so the class must be
                 // `AuthenticationException` — not a codeless `UnknownServerError`,
                 // for which `is_authentication_error()` and therefore
                 // `request_utils::RequestUtils::is_fatal_error` both answer `false`.
                 return Err(Self::authentication_error_from_io(&error));
             },
             Err(error) => {
-                // Java 511-516: we break here so that we pick up the FindCoordinator
+                // `catch (IOException e)`: we break here so that we pick up the FindCoordinator
                 // request immediately.
                 kafka_debug!(
                     self.log_context,
@@ -1742,12 +1729,13 @@ impl<C: KafkaClient> Sender<C> {
             },
         }
 
-        // Java 500-501.
+        // `if (nextRequestHandler.isRetry()) time.sleep(nextRequestHandler.retryBackoffMs());`
         if next_request_handler.is_retry() {
             Self::sleep_ms(next_request_handler.retry_backoff_ms()).await;
         }
 
-        // Java 503-510.
+        // `client.newClientRequest(..)`, `client.send(..)`, `setInFlightCorrelationId(..)`,
+        // `client.poll(..)`.
         let current_time_ms = self.time.milliseconds();
         // Java hands the builder itself to `newClientRequest`, keeping the handler's
         // own reference alive for a possible retry. This crate only exposes builders
@@ -1791,7 +1779,7 @@ impl<C: KafkaClient> Sender<C> {
     /// Looks the coordinator up if the request needs one, otherwise backs off, and
     /// re-enqueues the request either way.
     ///
-    /// Translated from `Sender.maybeFindCoordinatorAndRetry()` (Java 520-530).
+    /// Translated from `Sender#maybeFindCoordinatorAndRetry`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#maybeFindCoordinatorAndRetry")]
     async fn maybe_find_coordinator_and_retry(&mut self, next_request_handler: TxnRequestHandler) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
@@ -1799,7 +1787,8 @@ impl<C: KafkaClient> Sender<C> {
         };
         let needs_coordinator = transaction_manager.lock().unwrap().needs_coordinator(&next_request_handler);
         if needs_coordinator {
-            // Java 522. `pending_requests` before the manager, per its field docs.
+            // `transactionManager.lookupCoordinator(nextRequestHandler)`. `pending_requests`
+            // before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
             transaction_manager.lock().unwrap().lookup_coordinator_for(
                 &mut self.coordinators,
@@ -1807,8 +1796,8 @@ impl<C: KafkaClient> Sender<C> {
                 &next_request_handler,
             )?;
         } else {
-            // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
-            // loop when no node is available.
+            // For non-coordinator requests, sleep here to prevent a tight loop when no node is
+            // available.
             Self::sleep_ms(self.retry_backoff_ms).await;
             self.metadata.request_update(false);
         }
@@ -1824,8 +1813,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Waits for `node` to become ready, up to `request.timeout.ms`.
     ///
-    /// Translated from `Sender.awaitNodeReady(Node, CoordinatorType)`
-    /// (Java 563-574).
+    /// Translated from `Sender#awaitNodeReady`.
     ///
     /// Java's comment on the `CoordinatorType.TRANSACTION` branch: "indicate to the
     /// transaction manager that the coordinator is ready, allowing it to check
@@ -1854,7 +1842,8 @@ impl<C: KafkaClient> Sender<C> {
         // `io::Result` on every exit (success, timeout, connection-failed,
         // auth-failed), and we dispatch them here before the `?` propagates a
         // connection/auth error — mirroring Java, whose `client.poll()`
-        // self-dispatches before it throws (`NetworkClientUtils.java:43,70-71,85-87`),
+        // self-dispatches before it throws (`org.apache.kafka.clients.NetworkClientUtils#isReady`,
+        // `NetworkClientUtils#awaitReady`),
         // so it loses nothing on the error paths either. No manager guard is held
         // across the await above or this dispatch (rules §4).
         if !responses.is_empty() {
@@ -1873,8 +1862,7 @@ impl<C: KafkaClient> Sender<C> {
         Ok(true)
     }
 
-    /// Aborts every incomplete batch, translating `Sender.maybeAbortBatches`
-    /// (Java 532-538).
+    /// Aborts every incomplete batch, translating `Sender#maybeAbortBatches`.
     ///
     /// Must not be called while the `TransactionManager` guard is held: it takes the
     /// accumulator's per-partition deque locks, and rules §3 fixes the order as
@@ -1892,8 +1880,8 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Aborts every batch the `Sender` still owns, with `reason`.
     ///
-    /// Java has no counterpart because it does not need one: `abortBatches`
-    /// (`RecordAccumulator.java:1200`) iterates `incomplete.copyAll()`, which returns
+    /// Java has no counterpart because it does not need one:
+    /// `RecordAccumulator#abortBatches(RuntimeException)` iterates `incomplete.copyAll()`, which returns
     /// the `ProducerBatch` objects themselves and so covers batches already drained
     /// into the Sender. Rust's [`IncompleteBatches`](super::IncompleteBatches) tracks
     /// [`ProduceRequestResult`]s rather than batches — a `ProducerBatch` has exactly
@@ -1901,13 +1889,12 @@ impl<C: KafkaClient> Sender<C> {
     /// deques. Without this, the record futures of drained batches are never
     /// completed, which CLAUDE.md §7 forbids.
     ///
-    /// Applies Java's in-flight fork (`:1160-1167`): a batch still marked in flight
-    /// keeps its pooled buffer until its response arrives (KAFKA-19012), so it moves
-    /// to [`Self::batches_awaiting_response`] rather than being deallocated or
-    /// dropped.
+    /// Applies Java's in-flight fork (in `RecordAccumulator#abortBatches(RuntimeException)`): a batch
+    /// still marked in flight keeps its pooled buffer until its response arrives (KAFKA-19012), so it
+    /// moves to [`Self::batches_awaiting_response`] rather than being deallocated or dropped.
     ///
-    /// Called from [`Self::maybe_abort_batches`] (`Sender.java:536`) and from
-    /// [`Self::run`]'s force-close branch (`Sender.java:294-295`).
+    /// Called from [`Self::maybe_abort_batches`] (`Sender#maybeAbortBatches`) and from
+    /// [`Self::run`]'s force-close branch (`Sender#run`).
     fn abort_in_flight_batches(&mut self, reason: &Error) {
         let accumulator = Arc::clone(&self.accumulator);
         for (_, batches) in self.in_flight_batches.drain() {
@@ -1998,7 +1985,7 @@ impl<C: KafkaClient> Sender<C> {
 
     /// Send producer data.
     ///
-    /// Translated from `Sender.sendProducerData()` (Java 379-454).
+    /// Translated from `Sender#sendProducerData`.
     ///
     /// # Errors
     ///
@@ -2076,13 +2063,12 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
-        // Java records `sensors.updateProduceRequestMetrics(batches)` at
-        // `Sender.java:434` — after `addToInflightBatches`, using the same
-        // `batches` references (Java's `addToInflightBatches` does not remove
-        // them from the map). In Rust, `add_to_inflight_batches` MOVES the
-        // batches out of the map, so we record here (before the move) instead;
-        // the recorded values (estimated size, queue time, compression ratio,
-        // max record size, record count) are unchanged by the reorder.
+        // Java records `sensors.updateProduceRequestMetrics(batches)` in
+        // `org.apache.kafka.clients.producer.internals.Sender#sendProducerData` — after
+        // `addToInflightBatches`, using the same `batches` references (Java's `addToInflightBatches`
+        // does not remove them from the map). In Rust, `add_to_inflight_batches` MOVES the batches out
+        // of the map, so we record here (before the move) instead; the recorded values (estimated size,
+        // queue time, compression ratio, max record size, record count) are unchanged by the reorder.
         self.sensors.update_produce_request_metrics(&batches);
 
         // Move batches into in-flight tracking (takes ownership)
@@ -2109,8 +2095,7 @@ impl<C: KafkaClient> Sender<C> {
         Ok(poll_timeout)
     }
 
-    /// Fails every expired batch, translating `Sender.failExpiredBatches`
-    /// (Java 362-377).
+    /// Fails every expired batch, translating `Sender#failExpiredBatches`.
     ///
     /// Takes the batches **by value** because `deallocate_buffer = false` means the
     /// pooled buffer is released only when the produce response arrives, so the batch
@@ -2141,8 +2126,8 @@ impl<C: KafkaClient> Sender<C> {
             // later in this pass. A batch drained in this pass is flagged in flight only
             // when that request is built, as in Java. A batch whose response has already
             // been handled has no response left to release its buffer, so it is released
-            // now, as `abortBatches` does for a batch that is not in flight
-            // (`RecordAccumulator.java:1160-1167`).
+            // now, as `RecordAccumulator#abortBatches` does for a batch that is not in
+            // flight.
             let awaits_response = expired_batch.is_inflight()
                 || request_data
                     .iter()
@@ -2153,8 +2138,9 @@ impl<C: KafkaClient> Sender<C> {
             if let Some(transaction_manager) = self.transaction_manager.clone()
                 && expired_batch.in_retry()
             {
-                // This ensures that no new batches are drained until the current in
-                // flight batches are fully resolved (`Sender.java:372-375`).
+                // This ensures that no new batches are drained until the current in flight batches are
+                // fully resolved
+                // (`org.apache.kafka.clients.producer.internals.Sender#failExpiredBatches`).
                 transaction_manager.lock().unwrap().mark_sequence_unresolved(&expired_batch);
             }
 
@@ -2164,16 +2150,15 @@ impl<C: KafkaClient> Sender<C> {
                 self.batches_awaiting_response.push(expired_batch);
             }
 
-            // No unmute here, in either arm — Java's `failExpiredBatches` performs
-            // none (`Sender.java:362-377`). The mute is placed per *drained* batch in
-            // `send_producer_data` (`Sender.java:418-424`) and released by that
-            // batch's own response in `complete_batch_for` (`Sender.java:735-737`),
-            // which is the file's only `unmutePartition` call. An undrained batch
-            // never muted the partition, so releasing the mute on its expiry would
-            // release a mute belonging to a batch whose request is still outstanding,
-            // and the next drain would put a second request for the partition in
-            // flight — the reordering that `guarantee_message_order` exists to
-            // prevent. Pinned by
+            // No unmute here, in either arm — Java's
+            // `org.apache.kafka.clients.producer.internals.Sender#failExpiredBatches` performs none. The
+            // mute is placed per *drained* batch in `send_producer_data` (`Sender#sendProducerData`) and
+            // released by that batch's own response in `complete_batch_for`
+            // (`Sender#completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`), which is the
+            // file's only `unmutePartition` call. An undrained batch never muted the partition, so
+            // releasing the mute on its expiry would release a mute belonging to a batch whose request
+            // is still outstanding, and the next drain would put a second request for the partition in
+            // flight — the reordering that `guarantee_message_order` exists to prevent. Pinned by
             // `test_expiring_an_undrained_batch_does_not_unmute_the_partition`.
         }
     }
@@ -2190,7 +2175,7 @@ impl<C: KafkaClient> Sender<C> {
     /// (`deallocate` panics on an inflight non-split batch), fail it, then — for an idempotent
     /// or transactional producer whose batch was a retry — mark the sequence unresolved
     /// so no new batches drain until the in-flight sequences are resolved
-    /// (`Sender.java:372-375`, the expired-batch analog).
+    /// (`Sender#failExpiredBatches`, the expired-batch analog).
     fn fail_undelivered_batch(&mut self, batch: &mut ProducerBatch, error: Error) {
         batch.set_inflight(false);
         let retain = self.fail_batch_with_error(batch, error, false, true);
@@ -2302,7 +2287,8 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination(),
                 response.version_mismatch().map_or("unknown", |e| e.message())
             );
-            // Java: `new PartitionResponse(Errors.UNSUPPORTED_VERSION)` (`Sender.java:599`),
+            // Java: `new PartitionResponse(Errors.UNSUPPORTED_VERSION)`
+            // (`org.apache.kafka.clients.producer.internals.Sender#handleProduceResponse`),
             // with no message, so the batch fails with the code's default text; the
             // mismatch diagnostic goes to the log line above only.
             let part_resp = PartitionResponse::new(Errors::UnsupportedVersion);
@@ -2401,7 +2387,7 @@ impl<C: KafkaClient> Sender<C> {
                 }
                 // Java: sensors.recordLatency(response.destination(),
                 // response.requestLatencyMs()) at the end of the hasResponse()
-                // branch (`Sender.java:651`).
+                // branch (`org.apache.kafka.clients.producer.internals.Sender#handleProduceResponse`).
                 self.sensors
                     .record_latency(response.destination(), response.request_latency_ms());
             } else {
@@ -2454,9 +2440,9 @@ impl<C: KafkaClient> Sender<C> {
                 self.retries - batch.attempts(),
                 Self::format_err_msg(response)
             );
-            // The batch will be split and the sub-batches re-tracked with their own
-            // sequences, so the big batch stops being tracked here
-            // (`Sender.java:686-687`).
+            // The batch will be split and the sub-batches re-tracked with their own sequences, so the
+            // big batch stops being tracked here (`org.apache.kafka.clients.producer.internals.Sender`'s
+            // `completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`).
             if let Some(transaction_manager) = self.transaction_manager.clone() {
                 transaction_manager.lock().unwrap().remove_in_flight_batch(batch)?;
             }
@@ -2511,10 +2497,12 @@ impl<C: KafkaClient> Sender<C> {
                 );
             } else {
                 // Java interpolates `error.exception(response.errorMessage).toString()`
-                // (`Sender.java:719`) — the exception *object*, whose `toString()` is
-                // "<class>: <message>" — not the `Errors` constant. `Errors.exception`
-                // falls back to the cached default instance when the response carries
-                // no message (`Errors.java:462-469`), which is `Errors::error()` here.
+                // (`org.apache.kafka.clients.producer.internals.Sender`'s
+                // `completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`) — the exception
+                // *object*, whose `toString()` is "<class>: <message>" — not the `Errors` constant.
+                // `Errors.exception` falls back to the cached default instance when the response carries
+                // no message (`org.apache.kafka.common.protocol.Errors#exception(String)`), which is
+                // `Errors::error()` here.
                 let rendered = match response.error_message.as_deref() {
                     Some(message) => error.error_with_message(message),
                     None => error.error(),
@@ -2523,9 +2511,11 @@ impl<C: KafkaClient> Sender<C> {
                 .unwrap_or_default();
                 kafka_warn!(
                     self.log_context,
-                    // Java's format string has no separator after the interpolated
-                    // exception, whose message already ends in a period
-                    // (`Sender.java:718`); keep the text byte-identical.
+                    // Java's format string has no separator after the interpolated exception, whose
+                    // message already ends in a period
+                    // (`org.apache.kafka.clients.producer.internals.Sender`'s
+                    // `completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`); keep the text
+                    // byte-identical.
                     "Received invalid metadata error in produce request on partition {} due to {} \
                      Going to request metadata update now",
                     batch.topic_partition,
@@ -2603,11 +2593,12 @@ impl<C: KafkaClient> Sender<C> {
         deallocate_batch: bool,
     ) -> bool {
         let top_level_error = if response.error == Errors::TopicAuthorizationFailed {
-            // Java `:775`: `new TopicAuthorizationException(Collections.singleton(topic))`.
-            // The single-set constructor formats the message as
-            // "Not authorized to access topics: [<topics>]" AND populates
-            // `unauthorizedTopics()`. Passing the topic as the *message* instead left
-            // the topic set empty and the message a bare topic name.
+            // Java `org.apache.kafka.clients.producer.internals.Sender`'s
+            // `failBatch(ProducerBatch,PartitionResponse,boolean,boolean)`:
+            // `new TopicAuthorizationException(Collections.singleton(topic))`. The single-set
+            // constructor formats the message as "Not authorized to access topics: [<topics>]" AND
+            // populates `unauthorizedTopics()`. Passing the topic as the *message* instead left the
+            // topic set empty and the message a bare topic name.
             Error::topic_authorization(HashSet::from([batch.topic_partition.topic().to_string()]))
         } else if response.error == Errors::ClusterAuthorizationFailed {
             Error::with_message(
@@ -2627,9 +2618,10 @@ impl<C: KafkaClient> Sender<C> {
             // Build per-record error map
             let mut record_error_map: HashMap<i32, Error> = HashMap::with_capacity(response.record_errors.len());
             for record_error in &response.record_errors {
-                // Java falls back to `response.error.message()` — the code's default
-                // human description (`Sender.java:796`) — not the enum constant that
-                // `Display` renders.
+                // Java falls back to `response.error.message()` — the code's default human description
+                // (`org.apache.kafka.clients.producer.internals.Sender`'s
+                // `failBatch(ProducerBatch,PartitionResponse,boolean,boolean)`) — not the enum constant
+                // that `Display` renders.
                 let error_message = record_error
                     .message
                     .clone()
@@ -2647,12 +2639,13 @@ impl<C: KafkaClient> Sender<C> {
                 }
             }
 
-            // Java `:812-815`: a BARE `KafkaException`, deliberately a different class
-            // from the `InvalidRecordException` the named records get above — the Java
-            // comment states the intent, "To avoid confusion for the remaining records,
-            // we return a generic exception". A caller must be able to tell "my record
-            // was rejected" (`InvalidRecordException`, code 87) from "my record was
-            // collateral damage" (no code, `is_api_error() == false`).
+            // Java `org.apache.kafka.clients.producer.internals.Sender`'s
+            // `failBatch(ProducerBatch,PartitionResponse,boolean,boolean)`: a BARE `KafkaException`,
+            // deliberately a different class from the `InvalidRecordException` the named records get
+            // above — the Java comment states the intent, "To avoid confusion for the remaining records,
+            // we return a generic exception". A caller must be able to tell "my record was rejected"
+            // (`InvalidRecordException`, code 87) from "my record was collateral damage" (no code,
+            // `is_api_error() == false`).
             //
             // The message reproduces Java's literal string, typo included
             // ("one more more"): the text is part of the contract.
@@ -2703,10 +2696,10 @@ impl<C: KafkaClient> Sender<C> {
         )
     }
 
-    /// Returns `true` when the caller must keep the batch reachable until its produce
-    /// response arrives, i.e. when this took Java's `maybeRemoveAndDeallocateBatchLater`
-    /// branch (`Sender.java:861`) and the pooled buffer has *not* been returned. See
-    /// [`Self::batches_awaiting_response`].
+    /// Returns `true` when the caller must keep the batch reachable until its produce response arrives,
+    /// i.e. when this took Java's `maybeRemoveAndDeallocateBatchLater` branch
+    /// (`Sender#failBatch(ProducerBatch,RuntimeException,Function,boolean,boolean)`) and the pooled
+    /// buffer has *not* been returned. See [`Self::batches_awaiting_response`].
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender#failBatch")]
     fn fail_batch_with_record_errors(
@@ -2717,10 +2710,10 @@ impl<C: KafkaClient> Sender<C> {
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
-        // Java records errors at the top of `failBatch(...)` (`Sender.java:841`),
-        // before completing the batch. Both the response-failure path and the
-        // expired-batch path route through here, matching Java's single
-        // `recordErrors` site.
+        // Java records errors at the top of `org.apache.kafka.clients.producer.internals.Sender`'s
+        // `failBatch(ProducerBatch,RuntimeException,Function,boolean,boolean)`, before completing the
+        // batch. Both the response-failure path and the expired-batch path route through here, matching
+        // Java's single `recordErrors` site.
         self.sensors.record_errors(batch.topic_partition.topic(), batch.record_count);
 
         // The batch has already been removed from `in_flight_batches` by the caller
@@ -2730,8 +2723,8 @@ impl<C: KafkaClient> Sender<C> {
             if let Some(transaction_manager) = self.transaction_manager.clone() {
                 // `handleFailedBatch` needs the partition's *remaining* tracked
                 // batches for the transactional sequence adjustment
-                // (`TransactionManager.java:818` → `TxnPartitionMap.
-                // adjustSequencesDueToFailedBatch`): every batch behind the failed
+                // (`org.apache.kafka.clients.producer.internals.TransactionManager#handleFailedBatch` →
+                // `TxnPartitionMap#adjustSequencesDueToFailedBatch`): every batch behind the failed
                 // one is rewritten `recordCount` sequences down so the retried ones
                 // fill the gap instead of dying on OUT_OF_ORDER_SEQUENCE_NUMBER
                 // forever — which also kept `has_incomplete_batches` true, parked a
@@ -2759,10 +2752,11 @@ impl<C: KafkaClient> Sender<C> {
                             Caller::Sender,
                         )
                     });
-                // This call can return an error in the rare case that there's an
-                // invalid state transition attempted. Log it so as not to interfere
-                // with the rest of the logic — Java catches and logs at debug for the
-                // same reason (`Sender.java:845-851`).
+                // This call can return an error in the rare case that there's an invalid state
+                // transition attempted. Log it so as not to interfere with the rest of the logic — Java
+                // catches and logs at debug for the same reason
+                // (`org.apache.kafka.clients.producer.internals.Sender`'s
+                // `failBatch(ProducerBatch,RuntimeException,Function,boolean,boolean)`).
                 if let Err(error) = handled {
                     kafka_debug!(
                         self.log_context,
@@ -2775,7 +2769,7 @@ impl<C: KafkaClient> Sender<C> {
                 self.accumulator.complete_and_deallocate_batch(batch);
                 false
             } else {
-                // Java's `maybeRemoveAndDeallocateBatchLater` (`Sender.java:861`): the
+                // Java's `org.apache.kafka.clients.producer.internals.Sender#maybeRemoveAndDeallocateBatchLater`: the
                 // pooled ByteBuffer may still be in use by the network client, so it is
                 // deallocated when the response arrives.
                 self.accumulator.complete_batch(batch);
@@ -2805,7 +2799,7 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         // `TransactionManager::can_retry`'s transactional `UNKNOWN_PRODUCER_ID`
-        // log-truncation arm (`TransactionManager.java:1042-1050`) rewrites the
+        // log-truncation arm (`org.apache.kafka.clients.producer.internals.TransactionManager#canRetry`) rewrites the
         // partition's in-flight sequences from zero via `start_sequences_at_beginning`,
         // which — per `.claude/rules/producer-transactions.md` §7 — errors unless every
         // batch it still tracks is supplied in the pool. The failing batch is still
@@ -2943,8 +2937,9 @@ impl<C: KafkaClient> Sender<C> {
             }
         }
 
-        // Java 922-928. Both stay at their defaults for a non-transactional or
-        // purely idempotent producer: `transactionalId` is null and
+        // `transactionalId` and `useTransactionV1Version` in
+        // `org.apache.kafka.clients.producer.internals.Sender#sendProduceRequest`. Both stay at their
+        // defaults for a non-transactional or purely idempotent producer: `transactionalId` is null and
         // `useTransactionV1Version` false.
         let (transactional_id, use_transaction_v1_version) = match &self.transaction_manager {
             Some(transaction_manager) => {
@@ -2967,7 +2962,8 @@ impl<C: KafkaClient> Sender<C> {
         data.set_transactional_id(transactional_id);
         data.set_topic_data(topic_data_list);
 
-        // Java 930-936: `ProduceRequest.builder(data, useTransactionV1Version)` caps
+        // `org.apache.kafka.clients.producer.internals.Sender#sendProduceRequest`'s
+        // `ProduceRequest.builder(data, useTransactionV1Version)` caps
         // the version at the last Transaction V1 one when the flag is set, so a
         // broker that has not finalized `transaction.version` 2 is not sent a v12+
         // produce request.
@@ -3105,7 +3101,7 @@ mod tests {
     const TOPIC_IDLE_MS: i64 = 60 * 1000;
     const MAX_BLOCK_TIMEOUT: i64 = 1000;
 
-    /// Mirrors `TransactionManagerTest.transactionTimeoutMs` (Java 128).
+    /// Mirrors `TransactionManagerTest#transactionTimeoutMs`.
     const TRANSACTION_TIMEOUT_MS: i32 = 1121;
 
     const TOPIC_NAME: &str = "test";
@@ -3134,8 +3130,8 @@ mod tests {
     /// `TransactionManagerTest.initializeTransactionManager(Optional.empty(), ..)`.
     ///
     /// Nothing on the idempotent path reads `ApiVersions` — the manager consults it
-    /// only from `handleCoordinatorReady` (Java 1104) and
-    /// `maybeUpdateTransactionV2Enabled` (493), and both are reached only through
+    /// only from `TransactionManager#handleCoordinatorReady` and
+    /// `TransactionManager#maybeUpdateTransactionV2Enabled`, and both are reached only through
     /// transactional entry points — so an empty instance is sufficient here.
     fn idempotent_transaction_manager(metadata: Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>> {
         Arc::new(Mutex::new(TransactionManager::new(
@@ -3149,14 +3145,14 @@ mod tests {
         )))
     }
 
-    /// `transactionalId` (Java 133).
+    /// `TransactionManagerTest#transactionalId`.
     const TRANSACTIONAL_ID: &str = "foobar";
 
     /// Builds a transactional [`TransactionManager`], mirroring
     /// `TransactionManagerTest.initializeTransactionManager(Optional.of(transactionalId), false)`.
     ///
     /// Node `"0"` is registered with `INIT_PRODUCER_ID` v6 as Java's helper does
-    /// (Java 186-189), so `handleCoordinatorReady` finds epoch-bump support once
+    /// (`TransactionManagerTest#setup`), so `handleCoordinatorReady` finds epoch-bump support once
     /// the coordinator connection is ready.
     fn transactional_transaction_manager(metadata: Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>> {
         use crate::api_versions_response_data::ApiVersion;
@@ -3191,12 +3187,12 @@ mod tests {
     /// The timing knobs a `SenderTest`-style context can override, matching the ones
     /// Java's bespoke `RecordAccumulator` / `Sender` constructions vary.
     ///
-    /// Note the two backoffs are separate, as they are in Java:
-    /// `setupWithTransactionState` builds the accumulator with `retryBackoffMs = 0L`
-    /// (`SenderTest.java:3860`), so a re-enqueued batch is drainable on the very next
-    /// `runOnce`, while the `Sender` gets `RETRY_BACKOFF_MS = 50` (`:3864`) for its
-    /// transactional-request backoff. Collapsing them made re-enqueued batches wait a
-    /// backoff Java does not impose, which is visible in every multi-in-flight retry
+    /// Note the two backoffs are separate, as they are in Java: `setupWithTransactionState` builds the
+    /// accumulator with `retryBackoffMs = 0L`
+    /// (`SenderTest#setupWithTransactionState(TransactionManager,boolean,BufferPool,boolean,int,int)`),
+    /// so a re-enqueued batch is drainable on the very next `runOnce`, while the `Sender` gets
+    /// `RETRY_BACKOFF_MS = 50` for its transactional-request backoff. Collapsing them made re-enqueued
+    /// batches wait a backoff Java does not impose, which is visible in every multi-in-flight retry
     /// test.
     struct SenderTestTimeouts {
         request_timeout_ms: i32,
@@ -3204,7 +3200,7 @@ mod tests {
         accumulator_retry_backoff_ms: i64,
         sender_retry_backoff_ms: i64,
         /// `lingerMs`, which `SenderTest.setupWithTransactionState(txnManager, lingerMs)`
-        /// (Java 3825-3827) is the only overload to vary; every other one passes 0.
+        /// is the only overload to vary; every other one passes 0.
         linger_ms: i32,
     }
 
@@ -3241,7 +3237,7 @@ mod tests {
         }
 
         /// Setup with a transactional [`TransactionManager`], mirroring
-        /// `TransactionManagerTest.setup()` (Java 161-169).
+        /// `TransactionManagerTest#setup`.
         fn transactional() -> Self {
             Self::with_transaction_state(false, i32::MAX, Some(Box::new(transactional_transaction_manager)), None, None)
         }
@@ -3259,11 +3255,10 @@ mod tests {
             Self::with_transaction_state(false, retries, Some(Box::new(idempotent_transaction_manager)), None, None)
         }
 
-        /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the
-        /// bespoke `RecordAccumulator` + `Sender` that
-        /// `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
-        /// (Java 754-763) builds: `retryBackoffMs` is `0` on both, so a re-enqueued
-        /// batch is immediately drainable again.
+        /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the bespoke
+        /// `RecordAccumulator` + `Sender` that
+        /// `TransactionManagerTest#testDuplicateSequenceAfterProducerReset` builds: `retryBackoffMs` is
+        /// `0` on both, so a re-enqueued batch is immediately drainable again.
         fn idempotent_with_timeouts(request_timeout_ms: i32, delivery_timeout_ms: i32) -> Self {
             Self::with_transaction_state(
                 false,
@@ -3284,7 +3279,7 @@ mod tests {
         /// timeout overrides, and an optional caller-supplied `BufferPool`.
         ///
         /// `buffer_pool` mirrors the `BufferPool customPool` parameter Java's
-        /// `setupWithTransactionState` overloads carry (Java 3829): `None` means
+        /// `SenderTest.setupWithTransactionState` overloads carry: `None` means
         /// "build the default pool", exactly as Java's `null` does.
         fn with_transaction_state(
             guarantee_message_order: bool,
@@ -3302,8 +3297,8 @@ mod tests {
             } = timeouts.unwrap_or(SenderTestTimeouts {
                 request_timeout_ms: REQUEST_TIMEOUT,
                 delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
-                // Java 3860: the accumulator's retry backoff is 0 in every
-                // `setupWithTransactionState` variant.
+                // `org.apache.kafka.clients.producer.internals.SenderTest.setupWithTransactionState`: the accumulator's
+                // retry backoff is 0 in every variant.
                 accumulator_retry_backoff_ms: 0,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
                 linger_ms: 0,
@@ -3396,8 +3391,7 @@ mod tests {
 
         /// Re-publishes the topic metadata with `tp0` at `tp0_leader_epoch` and `tp1` at
         /// epoch 0, mirroring the `metadataUpdateWithIds(1, .., tp -> epoch)` calls in
-        /// `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`
-        /// (Java 3325-3339).
+        /// `SenderTest#testProducerBatchRetriesWhenPartitionLeaderChanges`.
         fn update_metadata_with_leader_epochs(&self, tp0_leader_epoch: i32) {
             let mut topic_partition_counts = HashMap::new();
             topic_partition_counts.insert(TOPIC_NAME.to_string(), 2);
@@ -3459,7 +3453,7 @@ mod tests {
         /// Java reads `endTxnRequest.version()` from inside a `RequestMatcher`, i.e. at
         /// send time. `end_txn_request::Builder::new(.., is_transaction_v2_enabled)` fixes the
         /// bound when `beginCompletingTransaction` enqueues the handler
-        /// (`TransactionManager.java:1737`), so reading it off the queued handler gives
+        /// (`TransactionManager#beginCompletingTransaction`), so reading it off the queued handler gives
         /// the same answer earlier — and reads the builder rather than restating the
         /// V2-implies-v5 rule, so it cannot drift from it.
         ///
@@ -3525,8 +3519,7 @@ mod tests {
 
         /// Build a produce response covering several partitions, in the given order.
         ///
-        /// `SenderTest.produceResponse(Map<TopicPartition, OffsetAndError>)`
-        /// (Java 3760-3785). Ordering matters: the tests rely on the response listing
+        /// `SenderTest#produceResponse(Map)`. Ordering matters: the tests rely on the response listing
         /// `tp1` before `tp0`.
         fn produce_response_for(&self, entries: &[(&TopicPartition, i64, Errors)]) -> ConcreteResponse {
             let mut by_topic: Vec<TopicProduceResponse> = Vec::new();
@@ -3633,7 +3626,7 @@ mod tests {
     /// Regression test: two different topics that both lack a resolved topic id
     /// must NOT be merged into a single `TopicProduceData` entry.
     ///
-    /// Java's `Sender.sendProduceRequest` (Java 902-913) groups partitions with
+    /// Java's `Sender#sendProduceRequest` groups partitions with
     /// the generated `TopicProduceDataCollection.find(name, topicId)`, whose
     /// collection key is the conjunction of *both* `mapKey` fields — `Name` AND
     /// `TopicId` (`ProduceRequest.json`: both are `"mapKey": true`, and the
@@ -3708,10 +3701,10 @@ mod tests {
     // =====================================================================
 
     /// `Sender.formatErrMsg` renders `String.format("%s%s", response.error, suffix)`
-    /// (`Sender.java:747`), and `Errors` overrides no `toString()`, so the leading
+    /// (`Sender#formatErrMsg`), and `Errors` overrides no `toString()`, so the leading
     /// token is the **enum constant** — not the code's long description. Java's own
     /// javadoc spells the expected output for the network-disconnect code
-    /// (`Sender.java:742`); this client renders that constant as `NETWORK_ERROR`,
+    /// (`Sender#formatErrMsg`); this client renders that constant as `NETWORK_ERROR`,
     /// because Java's spelling carries the word CLAUDE.md §2 bans from Rust code
     /// (see the arm comment in `Errors::enum_name`).
     #[test]
@@ -3738,8 +3731,8 @@ mod tests {
     }
 
     /// Java rethrows the `AuthenticationException` object `awaitNodeReady` threw,
-    /// with its message untouched (`NetworkClientUtils.java:86-87`), and
-    /// `Sender.runOnce` catches it at `Sender.java:336`.
+    /// with its message untouched (`NetworkClientUtils#awaitReady`), and
+    /// `Sender#runOnce` catches it.
     ///
     /// The Rust transport carries that class as an `AuthenticationError` payload
     /// inside an `io::Error`, whose own `Display` is already the Java `toString()`
@@ -3814,7 +3807,7 @@ mod tests {
 
     /// `Sender.shouldHandleAuthorizationError` passes
     /// `new AuthenticationException(exception)` to `failPendingRequests`
-    /// (`Sender.java:354`), so what a user awaiting `init_transactions()` /
+    /// (`Sender#shouldHandleAuthorizationError`), so what a user awaiting `init_transactions()` /
     /// `commit_transaction()` receives is an `AuthenticationException`.
     ///
     /// It used to be rebuilt as a codeless `Errors::UnknownServerError`, for which
@@ -3872,11 +3865,11 @@ mod tests {
     }
 
     /// `Sender.run`'s blanket `catch (Exception e) { log.error("Uncaught error in
-    /// kafka producer I/O thread: ", e); }` (Java 246-250, 261, 282) also covers the
+    /// kafka producer I/O thread: ", e); }` also covers the
     /// throws Rust spells as panics: `getExpiredInflightBatches`'s
     /// `IllegalStateException("<tp> batch created at <ms> gets unexpected final
     /// state <state>")`, and `ProducerBatch`'s two state-machine violations
-    /// (`ProducerBatch.java:311` and `abort`).
+    /// (`ProducerBatch#done` and `ProducerBatch#abort`).
     ///
     /// Here an already-completed batch reaches the delivery-timeout sweep, which is
     /// the first of those. Java logs it and the I/O thread keeps running; the Rust
@@ -4141,7 +4134,7 @@ mod tests {
     /// `delivery.timeout.ms`.
     ///
     /// Java loses nothing here because `client.poll()` self-dispatches before it
-    /// throws (`NetworkClientUtils.java:43,70-71,85-87`). The fix moves the responses
+    /// throws (`NetworkClientUtils#isReady`, `NetworkClientUtils#awaitReady`). The fix moves the responses
     /// *outside* the `Result` so `await_node_ready` dispatches them before propagating
     /// the error.
     ///
@@ -4234,9 +4227,10 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
-        // Java `Sender.java:775` builds
-        // `new TopicAuthorizationException(Collections.singleton(topic))`, whose
-        // single-set constructor formats the message and populates the topic set.
+        // Java `org.apache.kafka.clients.producer.internals.Sender`'s
+        // `failBatch(ProducerBatch,PartitionResponse,boolean,boolean)` builds
+        // `new TopicAuthorizationException(Collections.singleton(topic))`, whose single-set constructor
+        // formats the message and populates the topic set.
         assert_eq!(err.message(), format!("Not authorized to access topics: [{}]", tp0.topic()));
         match &err {
             Error::TopicAuthorization(e) => {
@@ -4409,7 +4403,7 @@ mod tests {
     /// Regression test for the unmute placement in [`Sender::fail_expired_batches`].
     ///
     /// Not a translation of a Java test — Java has no test for this because Java's
-    /// `failExpiredBatches` (`Sender.java:362-377`) never unmutes, so the bug is
+    /// `Sender#failExpiredBatches` never unmutes, so the bug is
     /// unrepresentable there. This port did unmute for undrained expired batches, which
     /// released a mute belonging to a batch whose request was still outstanding.
     ///
@@ -4476,7 +4470,8 @@ mod tests {
         );
         assert_eq!(ctx.accumulator.deque_size(&tp0), 1);
 
-        // A's response is what releases the mute (`Sender.java:735-737`).
+        // A's response is what releases the mute (`org.apache.kafka.clients.producer.internals.Sender`'s
+        // `completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`).
         let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
@@ -4753,7 +4748,8 @@ mod tests {
                     !err.is_api_error(),
                     "a bare KafkaException is not an ApiException, unlike InvalidRecordException"
                 );
-                // Java's literal text, typo included (`Sender.java:814`).
+                // Java's literal text, typo included (`org.apache.kafka.clients.producer.internals.Sender`'s
+                // `failBatch(ProducerBatch,PartitionResponse,boolean,boolean)`).
                 assert_eq!(
                     err.message(),
                     "Failed to append record because it was part of a batch which had one more more invalid records"
@@ -4955,7 +4951,7 @@ mod tests {
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
     }
 
-    /// Translated from `SenderTest.testNoBufferReuseWhenBatchExpires` (Java 3605-3634).
+    /// Translated from `SenderTest#testNoBufferReuseWhenBatchExpires`.
     ///
     /// An expired batch's buffer must **not** go back to the pool: the produce request
     /// it was serialised into may still be on the wire, so handing the allocation to
@@ -4965,8 +4961,8 @@ mod tests {
     /// # One assertion translated by observable, not by expression
     ///
     /// Java pins buffer identity twice, with `assertSame(buffer.array(),
-    /// batch.records().buffer().array())` before the expiry (3624) and
-    /// `assertNotSame(buffer.array(), newBuffer.array())` after it (3632). Neither
+    /// batch.records().buffer().array())` before the expiry and
+    /// `assertNotSame(buffer.array(), newBuffer.array())` after it. Neither
     /// literal form survives translation, for two different reasons — and the
     /// underlying invariant is asserted in a form that holds:
     ///
@@ -4994,39 +4990,40 @@ mod tests {
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testNoBufferReuseWhenBatchExpires")]
     async fn test_no_buffer_reuse_when_batch_expires() {
-        // Java 3606-3608: `batchSize` is 16 KiB (Java 171), `totalSize` 1 MiB.
+        // `org.apache.kafka.clients.producer.internals.SenderTest#batchSize` is 16 KiB, `totalSize` 1 MiB.
         const BATCH_SIZE: usize = 16 * 1024;
         let pool = Arc::new(BufferPool::new_for_test(1024 * 1024, BATCH_SIZE));
 
-        // Java 3610-3612: allocate and store a poolable buffer, then return it to the
+        // Allocate and store a poolable buffer, then return it to the
         // pool so the Sender can pick it up.
         let buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
         pool.deallocate(buffer);
         assert_eq!(pool.free_size(), 1, "the buffer we created is the pool's only free one");
 
-        // Java 3614: `setupWithTransactionState(null, false, pool)`.
+        // `setupWithTransactionState(null, false, pool)`.
         let mut ctx = SenderTestContext::with_transaction_state(false, i32::MAX, None, None, Some(Arc::clone(&pool)));
         let tp0 = ctx.tp0.clone();
 
-        // Java 3615-3617.
+        // `appendToAccumulator(tp0, 0L, "key", "value")` and two `sender.runOnce()`.
         ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await.expect("run_once"); // connect
         ctx.sender.run_once().await.expect("run_once"); // send produce request
 
-        // Java 3619-3620.
+        // The two `assertEquals(1, ..)`.
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
         assert!(!ctx.sender.in_flight_batches(&tp0)[0].is_buffer_deallocated());
 
-        // Java 3624, by observable (see the doc comment).
+        // `assertSame(buffer.array(), ..)`, by observable (see the doc comment).
         assert_eq!(pool.free_size(), 0, "Sender should have allocated the same buffer we created");
 
-        // Java 3626-3627.
+        // `time.sleep(DELIVERY_TIMEOUT_MS + 100)` and `sender.runOnce()`.
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 + 100);
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0, "the batch must have expired");
 
-        // Java 3629-3632, by observable (see the doc comment).
+        // `assertNotSame(buffer.array(), newBuffer.array(), ..)`, by observable (see the doc
+        // comment).
         assert_eq!(pool.free_size(), 0, "Buffer should not be reused");
         let new_buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
         assert_eq!(new_buffer.len(), BATCH_SIZE);
@@ -5402,8 +5399,8 @@ mod tests {
     }
 
     // =====================================================================
-    // `TxnRequestHandler.onComplete` — the unsynchronized half
-    // (`TransactionManager.java:1406-1420`)
+    // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete` — the
+    // unsynchronized half
     //
     // These three moved here from `transaction_manager.rs`'s test module in
     // Phase 4, together with the code they exercise: the correlation-id check and
@@ -5412,8 +5409,8 @@ mod tests {
     // =====================================================================
 
     /// Enqueues an `InitProducerId` and hands back the dequeued handler, playing
-    /// the part of `Sender.runOnce`'s `:331` + `maybeSendAndPollTransactionalRequest`'s
-    /// `nextRequest` at `:472`.
+    /// the part of `Sender#runOnce`'s `bumpIdempotentEpochAndResetIdIfNeeded()` +
+    /// `Sender#maybeSendAndPollTransactionalRequest`'s `nextRequest`.
     fn pending_init_producer_id_handler(ctx: &mut SenderTestContext) -> TxnRequestHandler {
         let transaction_manager = ctx.transaction_manager();
         let mut pool = InFlightBatchPool::new();
@@ -5462,7 +5459,7 @@ mod tests {
     }
 
     /// A response whose correlation id does not match the in-flight one is fatal
-    /// (`TransactionManager.java:1407-1408`).
+    /// (`TransactionManager.TxnRequestHandler#onComplete`).
     #[test]
     fn test_mismatched_correlation_id_is_fatal() {
         let mut ctx = SenderTestContext::idempotent();
@@ -5480,7 +5477,8 @@ mod tests {
         assert!(manager.has_fatal_error());
         let last_error = manager.last_error().expect("recorded");
         assert_eq!(last_error.message(), "Detected more than one in-flight transactional request.");
-        // Java `TransactionManager.java:1407` throws a plain `RuntimeException`, which is
+        // Java `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete` throws a
+        // plain `RuntimeException`, which is
         // outside the `KafkaException` hierarchy entirely.
         assert!(
             !last_error.is_kafka_error(),
@@ -5498,7 +5496,8 @@ mod tests {
 
     /// A disconnect re-enqueues the request; an idempotent `InitProducerId` needs
     /// no coordinator, so no lookup is attempted
-    /// (`TransactionManager.java:1411-1415`, `:1482`).
+    /// (`TransactionManager.TxnRequestHandler#onComplete`,
+    /// `TransactionManager.InitProducerIdHandler#coordinatorType`).
     #[test]
     fn test_disconnect_reenqueues_a_transactional_request_without_a_coordinator_lookup() {
         let mut ctx = SenderTestContext::idempotent();
@@ -5524,7 +5523,7 @@ mod tests {
     }
 
     /// A successful response clears the in-flight correlation id before the body
-    /// reaches the manager (`TransactionManager.java:1410`).
+    /// reaches the manager (`TransactionManager.TxnRequestHandler#onComplete`).
     #[test]
     fn test_transactional_response_clears_the_in_flight_correlation_id() {
         let mut ctx = SenderTestContext::idempotent();
@@ -5543,11 +5542,12 @@ mod tests {
     }
 
     // =====================================================================
-    // `runOnce`'s `transactionManager != null` block (`Sender.java:311-341`)
+    // The `transactionManager != null` block of `org.apache.kafka.clients.producer.internals.Sender#runOnce`
     //
     // One test per exit, driving the real `run_once`. Before Phase 4 the only
     // model of this block was `transaction_manager.rs`'s
-    // `run_manager_transaction_phase` harness, which models `:333-335` as a
+    // `run_manager_transaction_phase` harness, which models
+    // `if (maybeSendAndPollTransactionalRequest()) return;` as a
     // predicate; these are what PLAN §Phase-4 means by "replaces the predicate
     // with the real call".
     // =====================================================================
@@ -5573,13 +5573,12 @@ mod tests {
     }
 
     /// Drives a transactional producer's `initTransactions` through
-    /// `Sender.runOnce`, the way `TransactionManagerTest.doInitTransactions`
-    /// (Java 4348) drives it.
+    /// `Sender#runOnce`, the way `TransactionManagerTest#doInitTransactions()` drives it.
     ///
     /// The three iterations are the three exits of
     /// `maybeSendAndPollTransactionalRequest`: the coordinator is unknown so a
-    /// `FindCoordinator` is enqueued (`Sender.java:489-492`), the `FindCoordinator`
-    /// goes to the least-loaded node (`:481`), then the `InitProducerId` goes to the
+    /// `FindCoordinator` is enqueued (the "coordinator not known" branch), the
+    /// `FindCoordinator` goes to the least-loaded node, then the `InitProducerId` goes to the
     /// coordinator.
     async fn run_init_transactions(ctx: &mut SenderTestContext) -> Arc<TransactionalRequestResult> {
         let node = ctx.metadata.fetch().node_by_id(0).expect("node 0").clone();
@@ -5615,11 +5614,10 @@ mod tests {
 
     /// `Sender.maybeSendAndPollTransactionalRequest` routes a transactional
     /// `InitProducerId` to the coordinator, after discovering it — the coordinator
-    /// arms at `Sender.java:479-492` that Phase 4 left as deferrals.
+    /// arms of `Sender#maybeSendAndPollTransactionalRequest` that Phase 4 left as deferrals.
     ///
     /// Also covers `testDisconnectAndRetry`'s successful half and
-    /// `handleCoordinatorReady` reaching the manager through `awaitNodeReady`
-    /// (`Sender.java:565-570`).
+    /// `handleCoordinatorReady` reaching the manager through `Sender#awaitNodeReady`.
     #[tokio::test]
     async fn test_transactional_init_producer_id_is_routed_to_the_coordinator() {
         let mut ctx = SenderTestContext::transactional();
@@ -5642,10 +5640,9 @@ mod tests {
         );
     }
 
-    /// Translated from `testLookupCoordinatorOnDisconnectAfterSend`
-    /// (Java 1261-1290): a disconnect while the `InitProducerId` is in flight
-    /// forgets the coordinator and re-enqueues both requests
-    /// (`TransactionManager.java:1411-1416`).
+    /// Translated from `TransactionManagerTest#testLookupCoordinatorOnDisconnectAfterSend`: a
+    /// disconnect while the `InitProducerId` is in flight forgets the coordinator and
+    /// re-enqueues both requests (`TransactionManager.TxnRequestHandler#onComplete`).
     #[tokio::test]
     async fn test_lookup_coordinator_on_disconnect_after_send() {
         let mut ctx = SenderTestContext::transactional();
@@ -5701,11 +5698,11 @@ mod tests {
         assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
     }
 
-    /// Translated from `testDisconnectAndRetry` (Java 1081-1091): a disconnected
+    /// Translated from `TransactionManagerTest#testDisconnectAndRetry`: a disconnected
     /// `FindCoordinator` response leaves the coordinator unknown and the request is
     /// retried, without a nested lookup — `FindCoordinatorHandler.coordinatorType()`
-    /// is null (Java 1671), so `needsCoordinator()` is false at
-    /// `TransactionManager.java:1413`.
+    /// is null, so `needsCoordinator()` is false in
+    /// `TransactionManager.TxnRequestHandler#onComplete`.
     #[tokio::test]
     async fn test_disconnect_and_retry() {
         let mut ctx = SenderTestContext::transactional();
@@ -5739,10 +5736,10 @@ mod tests {
         );
     }
 
-    /// Translated from `testLookupCoordinatorOnDisconnectBeforeSend`
-    /// (Java 1293-1321): a coordinator that is unreachable *before* the
-    /// `InitProducerId` goes out drives `awaitNodeReady` to `false`
-    /// (`Sender.java:485-488`), and `maybeFindCoordinatorAndRetry` then forgets it.
+    /// Translated from `TransactionManagerTest#testLookupCoordinatorOnDisconnectBeforeSend`: a
+    /// coordinator that is unreachable *before* the `InitProducerId` goes out drives
+    /// `awaitNodeReady` to `false` (`Sender#maybeSendAndPollTransactionalRequest`), and
+    /// `maybeFindCoordinatorAndRetry` then forgets it.
     #[tokio::test]
     async fn test_lookup_coordinator_on_disconnect_before_send() {
         let mut ctx = SenderTestContext::transactional();
@@ -5799,9 +5796,9 @@ mod tests {
         assert_eq!(manager.producer_id_and_epoch().epoch, 1);
     }
 
-    /// Translated from `testUnsupportedInitTransactions` (Java 1118-1134): a version
+    /// Translated from `TransactionManagerTest#testUnsupportedInitTransactions`: a version
     /// mismatch on the `InitProducerId`, once the coordinator is known, is fatal
-    /// (`TransactionManager.java:1417-1418`).
+    /// (`TransactionManager.TxnRequestHandler#onComplete`).
     #[tokio::test]
     async fn test_unsupported_init_transactions() {
         let mut ctx = SenderTestContext::transactional();
@@ -5829,15 +5826,13 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testInitProducerIdWithMaxInFlightOne`
-    /// (Java 636-656) — the transactional twin of
-    /// [`test_idempotent_init_producer_id_with_max_in_flight_one`], 30 lines above it
-    /// in the Java file.
+    /// Translated from `SenderTest#testInitProducerIdWithMaxInFlightOne` — the
+    /// transactional twin of [`test_idempotent_init_producer_id_with_max_in_flight_one`].
     ///
     /// Same property, one extra round trip: with one node and `max.in.flight = 1`, an
     /// unrelated request already in flight makes `leastLoadedNode` report nothing, so
     /// the request that needs it must be **re-queued** rather than dropped
-    /// (`Sender.java:493-498`) and go out once the node frees up. For a transactional
+    /// (`Sender#maybeSendAndPollTransactionalRequest`) and go out once the node frees up. For a transactional
     /// producer the request blocked by the busy node is the `FindCoordinator`, not the
     /// `InitProducerId`: the latter is routed to a coordinator, so it takes
     /// `maybeFindCoordinatorAndRetry`'s lookup arm without consulting
@@ -5929,7 +5924,7 @@ mod tests {
         result.await_result().await.expect("initTransactions succeeded");
     }
 
-    /// Translated from `SenderTest.testDoNotPollWhenNoRequestSent` (Java 2991-3001).
+    /// Translated from `SenderTest#testDoNotPollWhenNoRequestSent`.
     ///
     /// Java's own comment: *"doInitTransactions calls sender.doOnce three times, only
     /// two requests are sent, so we should only poll twice"*. The property is that the
@@ -5989,27 +5984,27 @@ mod tests {
         result.await_result().await.expect("initTransactions succeeded");
     }
 
-    /// Translated from `SenderTest.testNodeNotReady` (Java 689-712). Java's javadoc:
+    /// Translated from `SenderTest#testNodeNotReady`. Java's javadoc:
     /// *"Tests the code path where the target node to send FindCoordinator or
     /// InitProducerId is not ready."*
     ///
     /// Java's body has two halves and this translates both, because they exercise the
     /// two *different* arms of [`Sender::maybe_find_coordinator_and_retry`]:
     ///
-    ///   - **FindCoordinator target unready** (Java 702, `client.delayReady`) → the
+    ///   - **FindCoordinator target unready** (`client.delayReady`) → the
     ///     handler needs no coordinator of its own, so the `else` arm runs
-    ///     (`Sender.java:523-527`: `time.sleep(retryBackoffMs)` +
+    ///     (`Sender#maybeFindCoordinatorAndRetry`: `time.sleep(retryBackoffMs)` +
     ///     `metadata.requestUpdate(false)`). This is the **only** cover for that arm:
     ///     every other test reaching the method carries an `InitProducerId` on a
     ///     transactional manager, so `needs_coordinator` is true and only the `if` arm
     ///     runs.
-    ///   - **InitProducerId target unready** (Java 708, `client.throttle`) → the handler
+    ///   - **InitProducerId target unready** (`client.throttle`) → the handler
     ///     *does* need a coordinator, so the `if` arm forgets it and re-looks it up,
-    ///     which is why Java queues a second `prepareFindCoordinatorResponse` at `:709`.
+    ///     which is why Java queues a second `prepareFindCoordinatorResponse`.
     ///     That production path is also reached by
     ///     [`test_lookup_coordinator_on_disconnect_before_send`], through
     ///     `set_unreachable` rather than throttling; translating it here anyway is what
-    ///     makes the "Java 689-711" claim above true, and it is the only exercise of
+    ///     makes the claim to translate `testNodeNotReady` above true, and it is the only exercise of
     ///     `MockClient::throttle` on the transactional path.
     ///
     /// # Two deliberate departures from Java's timing, both to remove a coin flip
@@ -6031,7 +6026,7 @@ mod tests {
     ///      the way [`test_lookup_coordinator_on_disconnect_before_send`] already does
     ///      for `set_unreachable`. The branch under test is reached identically; only
     ///      the margin stops being accidental. The same substitution is applied to
-    ///      Java's `client.throttle(node, REQUEST_TIMEOUT + 20)` (`:708`), whose margin
+    ///      Java's `client.throttle(node, REQUEST_TIMEOUT + 20)`, whose margin
     ///      is the same two ticks for the same reason.
     ///
     /// [`test_lookup_coordinator_on_disconnect_before_send`]: fn@test_lookup_coordinator_on_disconnect_before_send
@@ -6078,14 +6073,16 @@ mod tests {
             "the else arm must call metadata.requestUpdate(false) (Sender.java:526)"
         );
 
-        // Clear the delay and let the FindCoordinator through (Java 704-706).
+        // Clear the delay and let the FindCoordinator through (Java's second
+        // `sender.runOnce()` and its `assertNotNull`).
         //
         // Exactly one `run_once`: it sends the FindCoordinator and returns at
-        // `Sender.java:334`, so the `InitProducerId` is still *queued*. Java is in the
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`'s "return;" after
+        // `maybeSendAndPollTransactionalRequest`, so the `InitProducerId` is still *queued*. Java is in the
         // same state at its `assertNotNull` — its two `runOnce` calls are the else-arm
         // one and this one — and the second half depends on it, because a request
-        // already in flight would make `maybeSendAndPollTransactionalRequest` return at
-        // `:460-463` without ever consulting the coordinator.
+        // already in flight would make `maybeSendAndPollTransactionalRequest` return on
+        // `hasInFlightRequest()` without ever consulting the coordinator.
         ctx.time.sleep(delay_ms);
         ctx.sender.run_once().await.expect("run_once");
         assert!(
@@ -6098,11 +6095,11 @@ mod tests {
         assert!(ctx.sender.has_pending_requests(), "the InitProducerId must still be queued");
         assert!(!ctx.sender.has_in_flight_request());
 
-        // Second half, Java 708-709: now the **InitProducerId**'s target is unready.
+        // Second half: now the **InitProducerId**'s target is unready.
         // Throttling the coordinator drives `awaitNodeReady` to `false` again, but this
         // handler *does* need a coordinator, so `maybe_find_coordinator_and_retry` takes
         // its `if` arm instead: the coordinator is forgotten and re-looked-up, which is
-        // why Java queues a second `prepareFindCoordinatorResponse` at `:709`.
+        // why Java queues a second `prepareFindCoordinatorResponse`.
         let throttle_ms = i64::from(REQUEST_TIMEOUT) * 2;
         ctx.sender.client_mut().throttle(&node, throttle_ms);
         ctx.sender
@@ -6119,7 +6116,7 @@ mod tests {
         assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
 
-        // Java 710-711: `prepareInitProducerResponse` then `waitForProducerId`, which
+        // Then `prepareInitProducerResponse` and `waitForProducerId`, which
         // spins up to five `runOnce` calls.
         ctx.time.sleep(throttle_ms);
         ctx.sender
@@ -6149,9 +6146,9 @@ mod tests {
         result.await_result().await.expect("initTransactions succeeded");
     }
 
-    /// Translated from `testUnsupportedFindCoordinator` (Java 1101-1115): a version
+    /// Translated from `TransactionManagerTest#testUnsupportedFindCoordinator`: a version
     /// mismatch on the `FindCoordinator` is fatal
-    /// (`TransactionManager.java:1417-1418`).
+    /// (`TransactionManager.TxnRequestHandler#onComplete`).
     ///
     /// Java's response matcher also asserts the outgoing request's shape; those
     /// assertions live in the manager-level
@@ -6177,7 +6174,7 @@ mod tests {
         );
     }
 
-    /// `Sender.java:318-323`: a fatal transaction-manager error aborts the batches
+    /// `Sender#runOnce`: a fatal transaction-manager error aborts the batches
     /// and returns without producing.
     #[tokio::test]
     async fn test_run_once_returns_on_a_fatal_transaction_manager_error() {
@@ -6206,7 +6203,7 @@ mod tests {
         assert!(!ctx.accumulator.has_incomplete());
     }
 
-    /// `Sender.java:325-327` → `shouldHandleAuthorizationError` (`:351-360`): an
+    /// `Sender#runOnce` → `Sender#shouldHandleAuthorizationError`: an
     /// idempotent producer that hit `CLUSTER_AUTHORIZATION_FAILED` recovers to
     /// `UNINITIALIZED` and can send again.
     ///
@@ -6220,7 +6217,9 @@ mod tests {
             .prepare_response(init_producer_id_response(Errors::ClusterAuthorizationFailed, -1, -1));
 
         // Iteration 1 enqueues, sends and completes the InitProducerId, whose
-        // authorization arm (`TransactionManager.java:1524-1528`) lands the manager
+        // authorization arm
+        // (`org.apache.kafka.clients.producer.internals.TransactionManager.InitProducerIdHandler#handleResponse`)
+        // lands the manager
         // in ABORTABLE_ERROR.
         ctx.sender.run_once().await.expect("run_once");
         {
@@ -6256,9 +6255,9 @@ mod tests {
         assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
     }
 
-    /// `Sender.java:333-335`: while an `InitProducerId` is pending or in flight,
+    /// `Sender#runOnce`: while an `InitProducerId` is pending or in flight,
     /// `maybeSendAndPollTransactionalRequest` returns `true` and `runOnce` never
-    /// reaches `sendProducerData` at `:344`.
+    /// reaches `sendProducerData`.
     #[tokio::test]
     async fn test_run_once_returns_without_producing_while_init_producer_id_is_pending() {
         let mut ctx = SenderTestContext::idempotent();
@@ -6291,8 +6290,8 @@ mod tests {
         assert!(!future.is_done());
     }
 
-    /// Falling through past `Sender.java:335` to `sendProducerData` at `:344` once a
-    /// producer id is held and nothing is pending.
+    /// `Sender#runOnce` falling through past `maybeSendAndPollTransactionalRequest` to
+    /// `sendProducerData` once a producer id is held and nothing is pending.
     #[tokio::test]
     async fn test_run_once_produces_once_a_producer_id_is_held() {
         let mut ctx = SenderTestContext::idempotent();
@@ -6319,7 +6318,7 @@ mod tests {
         let in_flight = ctx.sender.in_flight_batches(&tp0);
         assert_eq!(in_flight.len(), 1);
         // The drain assigned the producer state before the batch was serialised
-        // (`RecordAccumulator.java:948-973`).
+        // (`org.apache.kafka.clients.producer.internals.RecordAccumulator#drainBatchesForOneNode`).
         assert_eq!(in_flight[0].producer_id(), 13131);
         assert_eq!(in_flight[0].producer_epoch(), 1);
         assert_eq!(in_flight[0].base_sequence(), 0);
@@ -6329,7 +6328,7 @@ mod tests {
         assert!(manager.has_inflight_batches(&tp0));
     }
 
-    /// `Sender.java:756-759`: a successful produce response is reported to the
+    /// `Sender#completeBatch(ProducerBatch,PartitionResponse)`: a successful produce response is reported to the
     /// transaction manager, which advances the last-acked sequence and offset and
     /// stops tracking the batch.
     #[tokio::test]
@@ -6360,7 +6359,7 @@ mod tests {
         );
     }
 
-    /// `Sender.java:875-882` + `TransactionManager.java:1015`: an
+    /// `Sender#canRetry` + `TransactionManager#canRetry`: an
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER` on an idempotent producer is retried and
     /// requests an epoch bump, where a non-idempotent producer would fail the batch
     /// (the error is not `RetriableException`).
@@ -6429,12 +6428,13 @@ mod tests {
         assert_eq!(in_flight[0].base_sequence(), 0);
         // `sequence_has_been_reset()` is deliberately not asserted here: both Java and
         // this port clear the `reopened` flag in `ProducerBatch::close()`
-        // (`ProducerBatch.java:544`), which the drain calls on the way out. Java's
+        // (`org.apache.kafka.clients.producer.internals.ProducerBatch#close`), which the drain
+        // calls on the way out. Java's
         // `testHealthyPartitionRetriesDuringEpochBump` can assert it only because it
         // holds the batch itself and never re-drains it.
     }
 
-    /// `Sender.java:372-375`: a batch that expires while in retry leaves its
+    /// `Sender#failExpiredBatches`: a batch that expires while in retry leaves its
     /// partition's sequence unresolved, so no new batch is drained until the
     /// in-flight ones are accounted for.
     #[tokio::test]
@@ -6468,18 +6468,17 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testSenderShouldCloseWhenTransactionManagerInErrorState`
-    /// (Java 3399-3414).
+    /// `SenderTest#testSenderShouldCloseWhenTransactionManagerInErrorState`.
     ///
-    /// Java uses the file's only `mock(TransactionManager.class)` (Java 3403), stubbing
+    /// Java uses the file's only `mock(TransactionManager.class)`, stubbing
     /// `hasOngoingTransaction() -> true` and `beginAbort()` to throw, then asserts
     /// `verify(transactionManager, times(1)).close()`. `TransactionManager` is a concrete
     /// struct here, so there is nothing to stub — the mock is replaced by the **real
     /// state that satisfies both stubs**: an idempotent producer left in
     /// `ABORTABLE_ERROR` by a `ClusterAuthorizationException` on its `InitProducerId`.
     /// `hasOngoingTransaction()` is true for an idempotent producer in that state
-    /// (`TransactionManager.java:1012`), and `beginAbort()`'s `ensureTransactional()`
-    /// guard rejects it, so `Sender.run`'s second shutdown loop (`Sender.java:266-296`)
+    /// (`TransactionManager#hasOngoingTransaction`), and `beginAbort()`'s `ensureTransactional()`
+    /// guard rejects it, so `Sender#run`'s second shutdown loop
     /// takes the `catch` that sets `forceClose` — the only thing that ends the loop.
     ///
     /// PLAN §9.19 listed this entry as "blocked on missing surface", offering exactly two
@@ -6520,7 +6519,7 @@ mod tests {
         // The `runOnce` in the loop body still executes, and it is what recovers the
         // state — pinning the body order (abort attempt, then runOnce).
         assert!(!ctx.transaction_manager().lock().unwrap().has_abortable_error());
-        // Java's `verify(transactionManager, times(1)).close()` (Java 3413).
+        // Java's `verify(transactionManager, times(1)).close()`.
         assert_eq!(
             ctx.transaction_manager().lock().unwrap().close_call_count(),
             1,
@@ -6535,7 +6534,7 @@ mod tests {
     // =====================================================================
 
     /// Acquires a producer id through the real path, mirroring
-    /// `TransactionManagerTest.initializeIdempotentProducerId` (Java 4333), which
+    /// `TransactionManagerTest#initializeIdempotentProducerId`, which
     /// spins `Sender.runOnce` against a prepared `InitProducerId` response.
     async fn initialize_idempotent_producer_id(ctx: &mut SenderTestContext, producer_id: i64, epoch: i16) {
         ctx.sender
@@ -6546,8 +6545,8 @@ mod tests {
     }
 
     /// Assigns the next sequence to a fresh single-record batch and tracks it in
-    /// flight, mirroring `TransactionManagerTest.writeIdempotentBatchWithValue`
-    /// (Java 812) — i.e. a batch that has been drained and sent but not answered.
+    /// flight, mirroring `TransactionManagerTest#writeIdempotentBatchWithValue` — i.e.
+    /// a batch that has been drained and sent but not answered.
     ///
     /// The batch is returned to the caller rather than left with an owner, which is
     /// how Java's helper behaves too: Java's `TxnPartitionEntry` holds a reference,
@@ -6587,8 +6586,7 @@ mod tests {
         batch
     }
 
-    /// Translated from `TransactionManagerTest.testDuplicateSequenceAfterProducerReset`
-    /// (Java 749-810).
+    /// Translated from `TransactionManagerTest#testDuplicateSequenceAfterProducerReset`.
     ///
     /// The only one of the three that goes purely through the real path:
     /// `accumulator.append` + `sender.runOnce()` across a request timeout, a retry and
@@ -6670,13 +6668,11 @@ mod tests {
         }
     }
 
-    /// The shared body of `testHealthyPartitionRetriesDuringEpochBump`
-    /// (Java 3601-3692) and `testFailedInflightBatchAfterEpochBump`
-    /// (Java 3726-3816). In Kafka 4.2 the two differ only by one
-    /// `maybeUpdateProducerIdAndEpoch(tp1)` call before their closing pair of
-    /// assertions, which are themselves identical. Both are translated (below)
-    /// rather than collapsed into one, so each Java method has a Rust counterpart;
-    /// the duplication is Java's.
+    /// The shared body of `testHealthyPartitionRetriesDuringEpochBump` and
+    /// `testFailedInflightBatchAfterEpochBump`. In Kafka 4.2 the two differ only by one
+    /// `maybeUpdateProducerIdAndEpoch(tp1)` call before their closing pair of assertions, which are
+    /// themselves identical. Both are translated (below) rather than collapsed into one, so each Java
+    /// method has a Rust counterpart; the duplication is Java's.
     ///
     /// Returns the context so each caller can make its own closing assertions.
     ///
@@ -6891,8 +6887,7 @@ mod tests {
         ctx
     }
 
-    /// Translated from `TransactionManagerTest.testHealthyPartitionRetriesDuringEpochBump`
-    /// (Java 3601-3692).
+    /// Translated from `TransactionManagerTest#testHealthyPartitionRetriesDuringEpochBump`.
     #[tokio::test]
     async fn test_healthy_partition_retries_during_epoch_bump() {
         for _transaction_v2_enabled in [true, false] {
@@ -6925,7 +6920,7 @@ mod tests {
             assert_eq!(tp1b3[0].producer_epoch(), 2, "epoch + 1");
             assert_eq!(tp1b3[0].base_sequence(), 0);
 
-            // Java 3684-3692: completing that batch leaves nothing in flight for tp1
+            // Completing that batch leaves nothing in flight for tp1
             // and the sequence at 1. Java reaches it through `tp1b3.complete(..)` plus
             // `handleCompletedBatch`, which is what the response round trip does here.
             let response = ctx.produce_response(&tp1, 500, Errors::None, 0);
@@ -6943,8 +6938,7 @@ mod tests {
         }
     }
 
-    /// Translated from `TransactionManagerTest.testFailedInflightBatchAfterEpochBump`
-    /// (Java 3726-3816).
+    /// Translated from `TransactionManagerTest#testFailedInflightBatchAfterEpochBump`.
     ///
     /// In Kafka 4.2 this is identical to
     /// `testHealthyPartitionRetriesDuringEpochBump` except that it stops before the
@@ -6987,14 +6981,14 @@ mod tests {
         }
     }
 
-    /// `NetworkClient.completeResponses` (`NetworkClient.java:732-740`) catches and
+    /// `NetworkClient#completeResponses` catches and
     /// logs per response, so one failing completion must not abandon the rest of the
     /// poll's responses.
     ///
     /// Two produce requests are in flight for the same partition. Both are answered
     /// in the same poll, the first with a retriable error whose re-enqueue is made to
     /// fail (its partition is no longer tracked, so `insertInSequenceOrder` rejects
-    /// it, `RecordAccumulator.java:603-605`). The second response must still be
+    /// it in `RecordAccumulator#insertInSequenceOrder`). The second response must still be
     /// dispatched and complete its record.
     ///
     /// The first record must be **failed**, not left hanging (issues.md Issue 4):
@@ -7092,8 +7086,8 @@ mod tests {
     /// completes `tp1` but omits `tp0`. Java's response callback then skips
     /// `completeBatch` for `tp0`, so its batch stays in `inFlightBatches` until
     /// `getExpiredInflightBatches` fails it with a `TimeoutException`
-    /// (`Sender.java:185`, `Sender.java:362-377`). Its buffer must still be returned to
-    /// the pool, because no later response will release it.
+    /// (`Sender#getExpiredInflightBatches`, `Sender#failExpiredBatches`). Its buffer must
+    /// still be returned to the pool, because no later response will release it.
     ///
     /// [`test_a_later_partitions_completion_error_does_not_drop_earlier_batches`] covers
     /// the other way a batch is left over: a `complete_batch` that raises an error.
@@ -7213,7 +7207,7 @@ mod tests {
     /// complete, as in Java.
     ///
     /// Java's shutdown loop waits only for undrained batches, in-flight requests and
-    /// transactional requests (`Sender.java:258`). The batch is in none of them, so
+    /// transactional requests (`Sender#run`). The batch is in none of them, so
     /// `run` returns without completing it, and its record is left unresolved.
     #[tokio::test]
     async fn test_a_graceful_close_does_not_wait_for_a_batch_the_response_did_not_complete() {
@@ -7352,7 +7346,7 @@ mod tests {
     /// producer epoch (when `expected_epoch` is `Some`) and base sequence, then answers
     /// it.
     ///
-    /// The analogue of `SenderTest.sendIdempotentProducerResponse` (Java 2136-2156).
+    /// The analogue of `SenderTest#sendIdempotentProducerResponse`.
     /// Java inspects the request inside `client.respond(matcher, response)`; the Rust
     /// `MockClient` has no matcher form, so the queued request is built and read
     /// directly before responding. That also covers Java's
@@ -7416,7 +7410,7 @@ mod tests {
     /// Asserts a partition's tracked producer id, epoch, next sequence and last-acked
     /// sequence.
     ///
-    /// `SenderTest.assertPartitionState` (Java 1230-1242).
+    /// `SenderTest#assertPartitionState`.
     fn assert_partition_state(
         transaction_manager: &Arc<Mutex<TransactionManager>>,
         tp: &TopicPartition,
@@ -7439,7 +7433,7 @@ mod tests {
 
     /// Appends one record, sends it and completes it successfully.
     ///
-    /// `SenderTest.assertSuccessfulSend` (Java 3871-3885).
+    /// `SenderTest#assertSuccessfulSend`.
     async fn assert_successful_send(ctx: &mut SenderTestContext) {
         let tp0 = ctx.tp0.clone();
         let future = ctx.append_to_accumulator(&tp0).await;
@@ -7460,7 +7454,7 @@ mod tests {
 
     /// Appends one record and asserts the send fails immediately with `expected`.
     ///
-    /// `SenderTest.assertSendFailure` (Java 3887-3897).
+    /// `SenderTest#assertSendFailure`.
     async fn assert_send_failure(ctx: &mut SenderTestContext, expected: Errors) {
         let tp0 = ctx.tp0.clone();
         let future = ctx.append_to_accumulator(&tp0).await;
@@ -7469,7 +7463,7 @@ mod tests {
         assert_eq!(future.get().await.expect_err("Future should have raised").error(), expected);
     }
 
-    /// Translated from `SenderTest.testInitProducerIdRequest` (Java 620-628).
+    /// Translated from `SenderTest#testInitProducerIdRequest`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInitProducerIdRequest")]
     async fn test_init_producer_id_request() {
@@ -7484,7 +7478,7 @@ mod tests {
 
     /// A force close must complete the record futures of batches the `Sender` owns,
     /// not only those still in the accumulator's deques
-    /// (`Sender.java:294-295` → `RecordAccumulator.java:1200-1216`).
+    /// (`Sender#run` → `RecordAccumulator#abortIncompleteBatches`).
     ///
     /// Critic 44 note 2: `abort_incomplete_batches` walks the deques only, because
     /// Rust's `IncompleteBatches` tracks `ProduceRequestResult`s rather than batches,
@@ -7522,8 +7516,7 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testIdempotenceWithMultipleInflights`
-    /// (Java 762-807).
+    /// Translated from `SenderTest#testIdempotenceWithMultipleInflights`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotenceWithMultipleInflights")]
     async fn test_idempotence_with_multiple_inflights() {
@@ -7564,8 +7557,7 @@ mod tests {
         assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
     }
 
-    /// Translated from `SenderTest.testIdempotenceWithMultipleInflightsRetriedInOrder`
-    /// (Java 811-909).
+    /// Translated from `SenderTest#testIdempotenceWithMultipleInflightsRetriedInOrder`.
     ///
     /// Three requests in flight, all retried one at a time in the correct order. This
     /// is the multi-in-flight ordering that `should_stop_drain_batches_for_partition`'s
@@ -7663,8 +7655,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted`
-    /// (Java 912-968).
+    /// `SenderTest#testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted`.
     ///
     /// The first of two in-flight batches fails fatally with `MESSAGE_TOO_LARGE`
     /// (`recordCount == 1`, so `completeBatch`'s split arm does not apply and
@@ -7718,8 +7709,7 @@ mod tests {
         assert_eq!(request2.get().await.expect("succeeds").offset(), 0);
     }
 
-    /// Translated from `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatch`
-    /// (Java 971-1016).
+    /// Translated from `SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatch`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatch"
@@ -7768,9 +7758,9 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight`
-    /// (Java 1019-1102): a partition with no in-flight batch when the epoch is bumped
-    /// gets its sequence reset lazily, on its next send.
+    /// `SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight`: a partition
+    /// with no in-flight batch when the epoch is bumped gets its sequence reset lazily, on its next
+    /// send.
     #[tokio::test]
     async fn test_epoch_bump_on_out_of_order_sequence_when_there_is_no_batch_in_flight() {
         const PRODUCER_ID: i64 = 343_434;
@@ -7829,8 +7819,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails`
-    /// (Java 1105-1228).
+    /// `SenderTest#testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails`.
     ///
     /// The third arm of the epoch-bump family, and the only one where the partition
     /// carrying the stale epoch still has a batch **in flight** when the bump happens.
@@ -7847,8 +7836,7 @@ mod tests {
     )]
     async fn test_epoch_bump_on_out_of_order_sequence_for_next_batch_when_batch_in_flight_fails() {
         const PRODUCER_ID: i64 = 343_434;
-        // `setupWithTransactionState(transactionManager, false, null, true, 1, 0)`
-        // (Java 1113) — retries once.
+        // `setupWithTransactionState(transactionManager, false, null, true, 1, 0)` — retries once.
         let mut ctx = SenderTestContext::idempotent_with_retries(1);
         let tp0 = ctx.tp0.clone();
         let tp1 = ctx.tp1.clone();
@@ -7930,10 +7918,9 @@ mod tests {
         assert_partition_state(&manager, &tp0, PRODUCER_ID, 1, 2, Some(1));
     }
 
-    /// Translated from `SenderTest.testCorrectHandlingOfOutOfOrderResponses`
-    /// (Java 1245-1323): both in-flight requests fail, their responses arrive in
-    /// reverse order, and the batches must still be re-queued and re-sent in sequence
-    /// order.
+    /// Translated from `SenderTest#testCorrectHandlingOfOutOfOrderResponses`: both in-flight requests
+    /// fail, their responses arrive in reverse order, and the batches must still be re-queued and
+    /// re-sent in sequence order.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCorrectHandlingOfOutOfOrderResponses")]
     async fn test_correct_handling_of_out_of_order_responses() {
@@ -8006,11 +7993,9 @@ mod tests {
         assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
     }
 
-    /// Translated from
-    /// `SenderTest.testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds`
-    /// (Java 1326-1391): the second request succeeds before the first, so the
-    /// last-acked sequence jumps to 1 and must not move back when the first is retried
-    /// and finally succeeds.
+    /// Translated from `SenderTest#testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds`: the
+    /// second request succeeds before the first, so the last-acked sequence jumps to 1 and must not move
+    /// back when the first is retried and finally succeeds.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds"
@@ -8066,10 +8051,9 @@ mod tests {
         assert_eq!(request1.get().await.expect("succeeds").offset(), 0);
     }
 
-    /// Translated from
-    /// `SenderTest.testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences`
-    /// (Java 1394-1414): a batch that expires before it was ever sent has no sequence,
-    /// so it must not leave the partition unresolved.
+    /// Translated from `SenderTest#testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences`: a batch
+    /// that expires before it was ever sent has no sequence, so it must not leave the partition
+    /// unresolved.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences"
@@ -8092,10 +8076,9 @@ mod tests {
         assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
     }
 
-    /// Translated from
-    /// `SenderTest.testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences`
-    /// (Java 1575-1610): when every sent batch expires, the partition is unresolved and
-    /// the next iteration bumps the epoch to clear it.
+    /// Translated from `SenderTest#testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences`: when every
+    /// sent batch expires, the partition is unresolved and the next iteration bumps the epoch to clear
+    /// it.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences"
@@ -8136,10 +8119,9 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed`
-    /// (Java 1417-1481): the first batch expires while a later one is still in flight;
-    /// the partition stays unresolved — blocking new drains — until the later batch
-    /// succeeds and `maybeResolveSequences` clears it.
+    /// `SenderTest#testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed`: the
+    /// first batch expires while a later one is still in flight; the partition stays unresolved —
+    /// blocking new drains — until the later batch succeeds and `maybeResolveSequences` clears it.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed"
@@ -8212,10 +8194,9 @@ mod tests {
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
     }
 
-    /// Translated from
-    /// `SenderTest.testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail`
-    /// (Java 1484-1531): the later batch fails with `OUT_OF_ORDER_SEQUENCE_NUMBER`
-    /// instead of succeeding, so the unresolved partition is cleared by an epoch bump.
+    /// Translated from `SenderTest#testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail`: the
+    /// later batch fails with `OUT_OF_ORDER_SEQUENCE_NUMBER` instead of succeeding, so the unresolved
+    /// partition is cleared by an epoch bump.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail"
@@ -8262,10 +8243,9 @@ mod tests {
         assert!(!ctx.transaction_manager().lock().unwrap().has_unresolved_sequence(&tp0));
     }
 
-    /// Translated from
-    /// `SenderTest.testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry`
-    /// (Java 1720-1764): a batch drained under the old producer id still succeeds after
-    /// the epoch is bumped for a different partition.
+    /// Translated from `SenderTest#testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry`: a
+    /// batch drained under the old producer id still succeeds after the epoch is bumped for a different
+    /// partition.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry"
@@ -8312,11 +8292,9 @@ mod tests {
         );
     }
 
-    /// Translated from
-    /// `SenderTest.testResetOfProducerStateShouldAllowQueuedBatchesToDrain`
-    /// (Java 1613-1652): with the epoch already at `Short.MAX_VALUE`, the bump resets
-    /// the producer id instead, and the batch queued for the healthy partition still
-    /// drains.
+    /// Translated from `SenderTest#testResetOfProducerStateShouldAllowQueuedBatchesToDrain`: with the
+    /// epoch already at `Short.MAX_VALUE`, the bump resets the producer id instead, and the batch queued
+    /// for the healthy partition still drains.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testResetOfProducerStateShouldAllowQueuedBatchesToDrain"
@@ -8366,9 +8344,8 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testForceCloseWithProducerIdReset`
-    /// (Java 1689-1717): a force close while the producer id is being reset must not
-    /// block, and must abort the pending batches.
+    /// Translated from `SenderTest#testForceCloseWithProducerIdReset`: a force close while the producer
+    /// id is being reset must not block, and must abort the pending batches.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testForceCloseWithProducerIdReset")]
     async fn test_force_close_with_producer_id_reset() {
@@ -8401,7 +8378,7 @@ mod tests {
         assert!(successful_response.is_done());
     }
 
-    /// Translated from `SenderTest.testCloseWithProducerIdReset` (Java 1655-1686): an
+    /// Translated from `SenderTest#testCloseWithProducerIdReset`: an
     /// orderly close drains the queued batches even though the close began while the
     /// producer id was being reset.
     #[tokio::test]
@@ -8443,8 +8420,8 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
-    /// (Java 715-735 — the produce-request variant is at Java 2159-2179): a cluster
+    /// `SenderTest#testClusterAuthorizationExceptionInInitProducerIdRequest` (the
+    /// produce-request variant is `SenderTest#testClusterAuthorizationExceptionInProduceRequest`): a cluster
     /// authorization failure on `InitProducerId` is *abortable*, so the producer
     /// recovers to `UNINITIALIZED`, retries and works again.
     #[tokio::test]
@@ -8472,9 +8449,10 @@ mod tests {
         }
 
         // Java asserts the *send* fails while the error is outstanding. The recovery at
-        // `Sender.java:325` runs first in the very `runOnce` that `assert_send_failure`
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`'s `shouldHandleAuthorizationError` runs
+        // first in the very `runOnce` that `assert_send_failure`
         // drives, so the failure is observed through `maybe_add_partition` instead —
-        // which is exactly what `doSend` calls (`KafkaProducer.java:1119`).
+        // which is exactly what `org.apache.kafka.clients.producer.KafkaProducer#doSend` calls.
         {
             let manager = ctx.transaction_manager();
             let mut manager = manager.lock().unwrap();
@@ -8505,9 +8483,8 @@ mod tests {
         assert_successful_send(&mut ctx).await;
     }
 
-    /// Translated from `SenderTest.testClusterAuthorizationExceptionInProduceRequest`
-    /// (Java 2159-2179): a cluster authorization failure on a *produce* request is
-    /// fatal, and stays fatal for later sends.
+    /// Translated from `SenderTest#testClusterAuthorizationExceptionInProduceRequest`: a cluster
+    /// authorization failure on a *produce* request is fatal, and stays fatal for later sends.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testClusterAuthorizationExceptionInProduceRequest"
@@ -8531,9 +8508,8 @@ mod tests {
         assert_send_failure(&mut ctx, Errors::ClusterAuthorizationFailed).await;
     }
 
-    /// Translated from `SenderTest.testUnsupportedForMessageFormatInProduceRequest`
-    /// (Java 2223-2241): `UNSUPPORTED_FOR_MESSAGE_FORMAT` fails the batch but is *not*
-    /// fatal for the producer.
+    /// Translated from `SenderTest#testUnsupportedForMessageFormatInProduceRequest`:
+    /// `UNSUPPORTED_FOR_MESSAGE_FORMAT` fails the batch but is *not* fatal for the producer.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnsupportedForMessageFormatInProduceRequest"
@@ -8557,8 +8533,8 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testUnsupportedVersionInProduceRequest`
-    /// (Java 2244-2262): a version mismatch is fatal and stays fatal.
+    /// Translated from `SenderTest#testUnsupportedVersionInProduceRequest`: a version mismatch is fatal
+    /// and stays fatal.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnsupportedVersionInProduceRequest")]
     async fn test_unsupported_version_in_produce_request() {
@@ -8580,7 +8556,7 @@ mod tests {
         assert_send_failure(&mut ctx, Errors::UnsupportedVersion).await;
     }
 
-    /// Translated from `SenderTest.testSequenceNumberIncrement` (Java 2265-2303).
+    /// Translated from `SenderTest#testSequenceNumberIncrement`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testSequenceNumberIncrement")]
     async fn test_sequence_number_increment() {
@@ -8602,7 +8578,7 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
     }
 
-    /// Translated from `SenderTest.testRetryWhenProducerIdChanges` (Java 2306-2338):
+    /// Translated from `SenderTest#testRetryWhenProducerIdChanges`:
     /// with the epoch maxed out, a disconnect resets the producer id, and the batch is
     /// retried under the new one.
     #[tokio::test]
@@ -8653,8 +8629,7 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().sequence_number(&tp0), 1);
     }
 
-    /// Translated from `SenderTest.testBumpEpochWhenOutOfOrderSequenceReceived`
-    /// (Java 2341-2369).
+    /// Translated from `SenderTest#testBumpEpochWhenOutOfOrderSequenceReceived`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testBumpEpochWhenOutOfOrderSequenceReceived")]
     async fn test_bump_epoch_when_out_of_order_sequence_received() {
@@ -8677,19 +8652,18 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().producer_id_and_epoch().epoch, 1);
     }
 
-    /// Translated from `SenderTest.testIdempotentInitProducerIdWithMaxInFlightOne`
-    /// (Java 664-682).
+    /// Translated from `SenderTest#testIdempotentInitProducerIdWithMaxInFlightOne`.
     ///
     /// With one node and `max.in.flight = 1`, an unrelated request already in flight
     /// makes `leastLoadedNode` report nothing, so `InitProducerId` cannot be sent yet.
     /// It must be **re-queued** rather than dropped or failed
-    /// (`Sender.java:493-498`), and go out once the node frees up — which takes several
+    /// (`Sender#maybeSendAndPollTransactionalRequest`), and go out once the node frees up — which takes several
     /// polls, hence the test's name.
     ///
     /// # Where this differs from Java, and why it is still the same test
     ///
     /// Java overrides `MockClient.leastLoadedNode` in an anonymous subclass
-    /// (`createMockClientWithMaxFlightOneMetadataPending`, Java 3956-3986). Rust cannot
+    /// (`SenderTest#createMockClientWithMaxFlightOneMetadataPending`). Rust cannot
     /// subclass a concrete struct, so the override is a flag —
     /// `MockClient::set_max_in_flight_one` — with the same `canSendMore` snapshot
     /// semantics. Java's out-of-band request is a `Metadata` request; a `Produce`
@@ -8761,8 +8735,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails`
-    /// (Java 2000-2083).
+    /// `SenderTest#testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails`.
     ///
     /// Three batches, two in flight in parallel. The second comes back
     /// `UNKNOWN_PRODUCER_ID` with `logStartOffset > lastAckedOffset`, which resets the
@@ -8775,8 +8748,8 @@ mod tests {
     ///
     /// Neither this test nor Java's distinguishes which of `canRetry`'s two
     /// `UNKNOWN_PRODUCER_ID` sub-arms retries the third batch: after the reset both
-    /// `sequenceHasBeenReset()` (`TransactionManager.java:1980-1986`) and
-    /// `lastAckedOffset < logStartOffset` (`:1990-2010`) hold, and both return `true`.
+    /// `sequenceHasBeenReset()` and `lastAckedOffset < logStartOffset` hold in
+    /// `TransactionManager#canRetry`, and both return `true`.
     /// Confirmed by mutation: disabling the `sequenceHasBeenReset()` arm leaves this
     /// test green, because the truncation arm then answers instead. The arm order is
     /// still faithful to Java; it is the *test* that cannot tell them apart, and saying
@@ -8862,8 +8835,7 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1012));
     }
 
-    /// Translated from `SenderTest.testCancelInFlightRequestAfterFatalError`
-    /// (Java 2182-2220).
+    /// Translated from `SenderTest#testCancelInFlightRequestAfterFatalError`.
     ///
     /// Java asserts with a `MatchingBufferPool` that the aborted in-flight batch's
     /// buffer is **not** returned when the fatal error aborts it, and **is** returned
@@ -8929,8 +8901,8 @@ mod tests {
 
     /// The buffer of a batch that expires while still in flight is likewise released
     /// only when its response arrives — Java's
-    /// `maybeRemoveAndDeallocateBatchLater` path (`Sender.java:856-861`), reached from
-    /// `failExpiredBatches(expiredInflightBatches, now, false)` (`:432`).
+    /// `Sender#maybeRemoveAndDeallocateBatchLater` path, reached from
+    /// `failExpiredBatches(expiredInflightBatches, now, false)` in `Sender#sendProducerData`.
     ///
     /// The sibling leak Critic 44 issue 2 identified alongside the abort path.
     #[tokio::test]
@@ -9020,8 +8992,7 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testCorrectHandlingOfDuplicateSequenceError`
-    /// (Java 1767-1817).
+    /// Translated from `SenderTest.testCorrectHandlingOfDuplicateSequenceError`.
     ///
     /// Two batches go out with sequences 0 and 1. The *second* is answered first and
     /// succeeds; the first then comes back `DUPLICATE_SEQUENCE_NUMBER`, which must be
@@ -9074,11 +9045,10 @@ mod tests {
         assert_eq!(metadata.offset(), -1);
     }
 
-    /// Translated from
-    /// `SenderTest.testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown`
-    /// (Java 1942-1997): an `UNKNOWN_PRODUCER_ID` whose `logStartOffset` is `-1` is
-    /// retried *without* resetting the sequence numbers, because the broker could not
-    /// report where the log starts (`TransactionManager.java:1969-1977`).
+    /// Translated from `SenderTest#testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown`:
+    /// an `UNKNOWN_PRODUCER_ID` whose `logStartOffset` is `-1` is retried *without* resetting the
+    /// sequence numbers, because the broker could not report where the log starts
+    /// (`TransactionManager#canRetry`).
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown"
@@ -9130,11 +9100,9 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1011));
     }
 
-    /// Translated from
-    /// `SenderTest.testIdempotentUnknownProducerHandlingWhenRetentionLimitReached`
-    /// (Java 1884-1939): the broker's `logStartOffset` has moved past our last acked
-    /// offset, so the producer state was lost to retention — bump the epoch and restart
-    /// the sequence at 0 (`TransactionManager.java:1990-2010`).
+    /// Translated from `SenderTest#testIdempotentUnknownProducerHandlingWhenRetentionLimitReached`: the
+    /// broker's `logStartOffset` has moved past our last acked offset, so the producer state was lost to
+    /// retention — bump the epoch and restart the sequence at 0 (`TransactionManager#canRetry`).
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testIdempotentUnknownProducerHandlingWhenRetentionLimitReached"
@@ -9190,10 +9158,9 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated`
-    /// (Java 2086-2126): the `logStartOffset` has *not* moved past our last acked
-    /// offset, so the idempotent producer still bumps the epoch and retries rather than
-    /// failing the batch.
+    /// `SenderTest#testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated`: the
+    /// `logStartOffset` has *not* moved past our last acked offset, so the idempotent producer still
+    /// bumps the epoch and retries rather than failing the batch.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated"
@@ -9231,51 +9198,49 @@ mod tests {
         assert!(!request2.is_done());
     }
 
-    /// Translated from `SenderTest.testTooLargeBatchesAreSafelyRemoved`
-    /// (Java 3004-3036).
+    /// Translated from `SenderTest#testTooLargeBatchesAreSafelyRemoved`.
     ///
     /// A `MESSAGE_TOO_LARGE` response splits the batch and re-enqueues the pieces
-    /// (`Sender.java:674-688`); the big batch stops being tracked and is deallocated,
-    /// so the retried send completes normally and sleeping past the delivery timeout
-    /// afterwards raises nothing.
+    /// (`Sender#completeBatch(ProducerBatch,PartitionResponse,long,long,Map)`); the big batch stops
+    /// being tracked and is deallocated, so the retried send completes normally and sleeping past the
+    /// delivery timeout afterwards raises nothing.
     ///
     /// This was the reproducer for PLAN §9.18 and is no longer `#[ignore]`d. It was
     /// also **not** a faithful translation while it was: it was built on
     /// `SenderTestContext::idempotent()` where Java builds a *transactional* manager
-    /// with `transactional.id = "testSplitBatchAndSend"` (Java 3006), it stopped after
+    /// with `transactional.id = "testSplitBatchAndSend"`, it stopped after
     /// the split instead of driving the retry to completion, it omitted Java's closing
     /// `time.sleep(2000)` + `runOnce()`, and it asserted `deque_size == 2` ("one
     /// sub-batch per record") — an invention: `splitAndReenqueue` targets
-    /// `this.batchSize` (`RecordAccumulator.java:562`), which is 16 KiB here, so both
+    /// `RecordAccumulator#batchSize`, which is 16 KiB here, so both
     /// small records land in a *single* sub-batch. Java asserts no sub-batch count at
     /// all.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTooLargeBatchesAreSafelyRemoved")]
     async fn test_too_large_batches_are_safely_removed() {
-        // Java 3005-3010. `new TransactionManager(logContext, "testSplitBatchAndSend",
+        // `new TransactionManager(logContext, "testSplitBatchAndSend",
         // 60000, 100, apiVersions, false)` plus
         // `setupWithTransactionState(txnManager, false, null)`, which is
-        // `guaranteeOrder = false`, `retries = Integer.MAX_VALUE`, `lingerMs = 0`
-        // (Java 3829-3831).
+        // `guaranteeOrder = false`, `retries = Integer.MAX_VALUE`, `lingerMs = 0`.
         let mut ctx = sender_test_transactional_context("testSplitBatchAndSend", 100, 0, i32::MAX, 6);
         let tp0 = ctx.tp0.clone();
         run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
 
-        // Java 3012-3015: beginTransaction, maybeAddPartition, answer the
+        // beginTransaction, maybeAddPartition, answer the
         // AddPartitionsToTxn.
         begin_transaction_with_partition(&mut ctx, &tp0).await;
 
-        // Java 3017-3019: a producer batch with more than one record, so it is
+        // A producer batch with more than one record, so it is
         // eligible for splitting.
         let now = ctx.time.milliseconds();
         let request1 = ctx.append_to_accumulator_with(&tp0, now, "key1", "value1").await;
         let request2 = ctx.append_to_accumulator_with(&tp0, now, "key2", "value2").await;
 
-        // Java 3021-3023: send the request.
+        // Send the request.
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
 
-        // Java 3024-3026: return a MESSAGE_TOO_LARGE error, which splits the batch.
+        // Return a MESSAGE_TOO_LARGE error, which splits the batch.
         let response = ctx.produce_response(&tp0, -1, Errors::MessageTooLarge, -1);
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
@@ -9283,20 +9248,20 @@ mod tests {
         // Not in Java, but it is what this test exists to pin down after §9.18: the big
         // batch is untracked and gone from the Sender's map, and the split sub-batch is
         // queued in the accumulator carrying its own sequence
-        // (`RecordAccumulator.java:575-578`).
+        // (`org.apache.kafka.clients.producer.internals.RecordAccumulator#splitAndReenqueue`).
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
         assert_eq!(ctx.accumulator.deque_size(&tp0), 1);
         assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
         assert!(!request1.is_done());
         assert!(!request2.is_done());
 
-        // Java 3028-3031: process the retried response.
+        // Process the retried response.
         ctx.sender.run_once().await.expect("run_once");
         let retried_response = ctx.produce_response(&tp0, 0, Errors::None, 0);
         ctx.sender.client_mut().respond(retried_response);
         ctx.sender.run_once().await.expect("run_once");
 
-        // Java 3033-3035: in-flight batches should be empty; sleeping past the
+        // In-flight batches should be empty; sleeping past the
         // expiration time of the batch and running once must raise nothing.
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
         ctx.time.sleep(2000);
@@ -9315,28 +9280,26 @@ mod tests {
     // `SenderTest.testSplitBatchAndSend` and its two entry points
     //
     // Both were blocked on PLAN §9.18 until the split stopped panicking; they are
-    // the reason that section existed. `testIdempotentSplitBatchAndSend` (2372) is
-    // the idempotent entry point, `testTransactionalSplitBatchAndSend` (2385) the
-    // transactional one, and they share the driver at Java 2406-2496.
+    // the reason that section existed. `testIdempotentSplitBatchAndSend` is
+    // the idempotent entry point, `testTransactionalSplitBatchAndSend` the
+    // transactional one, and they share the driver `testSplitBatchAndSend`.
     // =====================================================================
 
     /// `new TopicPartition("testSplitBatchAndSend", 1)` — the partition both entry
-    /// points build their `TopicIdPartition` on (Java 2373-2375, 2388-2390).
+    /// points build their `TopicIdPartition` on.
     const SPLIT_TOPIC_NAME: &str = "testSplitBatchAndSend";
 
     /// Serialises the two `testSplitBatchAndSend` entry points against each other.
     ///
-    /// `CompressionRatioEstimator` is a process-wide singleton keyed by topic name in
-    /// both languages (`compression_ratio_estimator.rs`'s `INSTANCE`, Java's static
-    /// `ConcurrentHashMap`), and both entry points use the topic
-    /// `testSplitBatchAndSend`. Java is safe because JUnit runs a class's methods
-    /// sequentially; `cargo test` runs them on parallel threads, and the estimate is
-    /// something the driver both **asserts on** (Java 2455-2457) and **depends on** —
-    /// `MemoryRecordsBuilder::has_room_for` sizes batches from it, so a concurrent
-    /// `set_estimation` changes how many records fit and the run fails at "The next
-    /// sequence should be 2" with one record in the batch instead of two. Measured, not
-    /// assumed: without this lock, `cargo test --lib split_batch_and_send --
-    /// --test-threads=8` failed 8 runs out of 8.
+    /// `CompressionRatioEstimator` is a process-wide singleton keyed by topic name in both languages
+    /// (`compression_ratio_estimator.rs`'s `INSTANCE`, Java's static `ConcurrentHashMap`), and both
+    /// entry points use the topic `testSplitBatchAndSend`. Java is safe because JUnit runs a class's
+    /// methods sequentially; `cargo test` runs them on parallel threads, and the estimate is something
+    /// the driver both **asserts on** ("The compression ratio should have been improved once.") and
+    /// **depends on** — `MemoryRecordsBuilder::has_room_for` sizes batches from it, so a concurrent
+    /// `set_estimation` changes how many records fit and the run fails at "The next sequence should be
+    /// 2" with one record in the batch instead of two. Measured, not assumed: without this lock,
+    /// `cargo test --lib split_batch_and_send -- --test-threads=8` failed 8 runs out of 8.
     ///
     /// A `tokio::sync::Mutex` rather than a `std` one because the guard is necessarily
     /// held across the driver's `.await` points (CLAUDE.md §11.6.2 / clippy's
@@ -9344,12 +9307,12 @@ mod tests {
     static SPLIT_BATCH_AND_SEND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// `new ProduceResponse(singletonMap(tpId, new PartitionResponse(..)))`, which the
-    /// driver builds inline rather than through `produceResponse` (Java 2449-2451,
-    /// 2468, 2485).
+    /// driver builds inline rather than through `produceResponse`, for the MESSAGE_TOO_LARGE
+    /// answer and both sub-batch answers.
     ///
     /// The topic id is `Uuid.ZERO_UUID` because `TOPIC_IDS` has no entry for
-    /// `testSplitBatchAndSend` — Java spells that out at 2373-2375 with
-    /// `TOPIC_IDS.getOrDefault(.., Uuid.ZERO_UUID)`. `handle_produce_response` then
+    /// `testSplitBatchAndSend` — Java's `SenderTest#testIdempotentSplitBatchAndSend` spells
+    /// that out with `TOPIC_IDS.getOrDefault(.., Uuid.ZERO_UUID)`. `handle_produce_response` then
     /// resolves the partition by topic *name*, which is the branch it keeps for
     /// exactly this case.
     fn split_produce_response(tp: &TopicPartition, error: Errors, base_offset: i64) -> ConcreteResponse {
@@ -9371,8 +9334,8 @@ mod tests {
         ConcreteResponse::Produce(ProduceResponse::new(data))
     }
 
-    /// The bespoke `RecordAccumulator` + `Sender` pair the driver builds
-    /// (Java 2409-2428), plus its two-broker cluster: gzip, `lingerMs = 0`,
+    /// The bespoke `RecordAccumulator` + `Sender` pair the driver builds, plus
+    /// its two-broker cluster: gzip, `lingerMs = 0`,
     /// `retryBackoffMs = 0` on the accumulator and `1000` on the `Sender`,
     /// `deliveryTimeoutMs = 3000`, `maxRetries = 1`, `guaranteeOrder = true`, and
     /// `testSplitBatchAndSend` with two partitions across brokers 0 and 1 — so
@@ -9382,7 +9345,7 @@ mod tests {
     ///
     /// Java runs its InitProducerId / AddPartitionsToTxn exchanges on the *default*
     /// `setupWithTransactionState` rig and only then shadows `sender` with this one,
-    /// reusing `client` and `metadata` (Java 2379-2402 then 2417-2422). Rust runs
+    /// reusing `client` and `metadata` (first in the entry point, then in the driver). Rust runs
     /// them on this rig from the start. Two reasons, and the substitution is exact
     /// for this test:
     ///
@@ -9402,7 +9365,7 @@ mod tests {
         let batch_size = 16 * 1024;
         let total_size = 1024 * 1024;
 
-        // Java 2415: "Set a good compression ratio."
+        // "Set a good compression ratio."
         CompressionRatioEstimator::set_estimation(SPLIT_TOPIC_NAME, CompressionType::Gzip, 0.2);
 
         let metadata = Arc::new(ProducerMetadata::new(
@@ -9414,7 +9377,7 @@ mod tests {
         ));
         let transaction_manager = transaction_manager(metadata.metadata_arc());
 
-        // Java 2417-2419: `deliveryTimeoutMs = 3000`, gzip, `lingerMs = 0`, both
+        // `deliveryTimeoutMs = 3000`, gzip, `lingerMs = 0`, both
         // retry backoffs `0`.
         let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
@@ -9429,7 +9392,7 @@ mod tests {
             Some(Arc::clone(&transaction_manager)),
         ));
 
-        // Java 2423-2424: "a two broker cluster, with partition 0 on broker 0 and
+        // "a two broker cluster, with partition 0 on broker 0 and
         // partition 1 on broker 1".
         let nodes = vec![
             Node::new(0, "localhost".to_string(), 1969),
@@ -9446,7 +9409,7 @@ mod tests {
         )));
         let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
-        // Java 2421-2422: `guaranteeOrder = true`, `maxRetries = 1`,
+        // `guaranteeOrder = true`, `maxRetries = 1`,
         // `retryBackoffMs = 1000`.
         let sender = Sender::new(
             client,
@@ -9470,7 +9433,7 @@ mod tests {
         metadata.add(SPLIT_TOPIC_NAME, time.milliseconds());
         let mut topic_partition_counts = HashMap::new();
         topic_partition_counts.insert(SPLIT_TOPIC_NAME.to_string(), 2);
-        // Java 2424-2425: `metadataUpdateWithIds(2, singletonMap(topic, 2), TOPIC_IDS)`,
+        // `metadataUpdateWithIds(2, singletonMap(topic, 2), TOPIC_IDS)`,
         // where `TOPIC_IDS` carries no entry for this topic.
         let metadata_response = crate::common::requests::RequestTestUtils::metadata_update_with_ids(
             "kafka-cluster",
@@ -9498,7 +9461,7 @@ mod tests {
     }
 
     /// `accumulator.append(topic, partition, 0L, key.getBytes(), new byte[batchSize / 2],
-    /// null, null, MAX_BLOCK_TIMEOUT, nowMs, cluster)` (Java 2433-2436) — a value half
+    /// null, null, MAX_BLOCK_TIMEOUT, nowMs, cluster)` — a value half
     /// the batch size, so two of them make a batch the broker will reject and the
     /// client must split.
     async fn append_half_batch(ctx: &SenderTestContext, tp: &TopicPartition, key: &str) -> Arc<FutureRecordMetadata> {
@@ -9524,7 +9487,7 @@ mod tests {
     }
 
     /// The `destination()` → `Node` → `isReady` triple `SenderTest.testSplitBatchAndSend`
-    /// repeats verbatim at Java 2441-2447, 2462-2466 and 2479-2483: peek the queued
+    /// repeats verbatim after each of its three sends: peek the queued
     /// request, assert it is a PRODUCE, rebuild the destination node from the id string
     /// the request carries, then assert one request in flight and the client ready for
     /// that node.
@@ -9556,31 +9519,29 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testSplitBatchAndSend` (Java 2406-2497), the driver
+    /// Translated from `SenderTest#testSplitBatchAndSend`, the driver
     /// both split entry points share.
     ///
     /// Two deviations, both forced and both narrow:
     ///
     ///   - Java holds `inflightBatch` — a live reference into `sender.inFlightBatches`
-    ///     — across the split and asserts `isInflight()` flips to false (Java 2445,
-    ///     2453). Rust's `Sender` *owns* its batches and `split_and_reenqueue`
+    ///     — across the split and asserts `isInflight()` flips to false.
+    ///     Rust's `Sender` *owns* its batches and `split_and_reenqueue`
     ///     consumes the big one, so no reference can outlive it. The observable is
     ///     asserted where Rust can see it instead: the big batch leaves
     ///     `in_flight_batches` and sub-batches appear in the accumulator's deque.
-    ///   - Java's closing `assertTrue(batchSplitRate > 0)` (Java 2495) has no
+    ///   - Java's closing `assertTrue(batchSplitRate > 0)` has no
     ///     counterpart: this `Sender` has no `SenderMetricsRegistry`, and there is no
     ///     metrics surface anywhere in `src/producer/`. The split is proved directly
     ///     instead — two produce requests come back with base offsets 0 and 1, which
     ///     one un-split batch could not produce.
     ///
-    /// Everything else is translated, including the three
-    /// `destination()` → `Node` → `isReady` triples (Java 2441-2447, 2462-2466,
-    /// 2479-2483). An earlier revision of this driver dropped those and still claimed
-    /// "two deviations" — Critic 50 issue 3. They are weak assertions in Java too (the
-    /// node is derived from whatever destination the request carries, so they cannot
-    /// detect a wrong-broker send), but they are not *forced* omissions:
-    /// `MockClient::is_ready` exists and this file already uses the idiom four times.
-    /// A deviation list is only worth reading if it is exhaustive.
+    /// Everything else is translated, including the three `destination()` → `Node` → `isReady` triples.
+    /// An earlier revision of this driver dropped those and still claimed "two deviations" — Critic 50
+    /// issue 3. They are weak assertions in Java too (the node is derived from whatever destination the
+    /// request carries, so they cannot detect a wrong-broker send), but they are not *forced* omissions:
+    /// `MockClient::is_ready` exists and this file already uses the idiom four times. A deviation list
+    /// is only worth reading if it is exhaustive.
     async fn drive_split_batch_and_send(
         ctx: &mut SenderTestContext,
         producer_id_and_epoch: ProducerIdAndEpoch,
@@ -9589,13 +9550,13 @@ mod tests {
         let manager = ctx.transaction_manager();
         let is_transactional = manager.lock().unwrap().is_transactional();
 
-        // Java 2430-2438: send the first message.
+        // Send the first message.
         let f1 = append_half_batch(ctx, tp, "key1").await;
         let f2 = append_half_batch(ctx, tp, "key2").await;
         ctx.sender.run_once().await.expect("run_once"); // connect
         ctx.sender.run_once().await.expect("run_once"); // send produce request
 
-        // Java 2440-2447.
+        // Java's checks after `sender.runOnce(); // send produce request`.
         assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
         assert_produce_in_flight_and_ready(ctx);
         assert_eq!(ctx.sender.in_flight_batches(tp).len(), 1);
@@ -9604,12 +9565,12 @@ mod tests {
             "Batch should be marked inflight after being sent"
         );
 
-        // Java 2449-2452: MESSAGE_TOO_LARGE, then split and reenqueue.
+        // MESSAGE_TOO_LARGE, then split and reenqueue.
         let response = split_produce_response(tp, Errors::MessageTooLarge, -1);
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
 
-        // Java 2453 in the shape Rust can observe (see the doc comment).
+        // Java's `assertFalse(inflightBatch.isInflight(), ..)` in the shape Rust can observe (see the doc comment).
         assert!(
             ctx.sender.in_flight_batches(tp).is_empty(),
             "the big batch must no longer be in flight after being split and re-enqueued"
@@ -9619,11 +9580,11 @@ mod tests {
             2,
             "the two half-batch-sized records must land in one sub-batch each"
         );
-        // Java 2454.
+        // Java's second "The next sequence should be 2" check.
         assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
-        // Java 2455-2457: "The compression ratio should have been improved once."
-        // `splitAndReenqueue` resets the estimate to `max(1.0, bigBatch.compressionRatio())`
-        // (`RecordAccumulator.java:560`), and closing each sub-batch then walks it down
+        // "The compression ratio should have been improved once."
+        // `org.apache.kafka.clients.producer.internals.RecordAccumulator#splitAndReenqueue` resets
+        // the estimate to `max(1.0, bigBatch.compressionRatio())`, and closing each sub-batch then walks it down
         // by one improving step.
         let estimation = CompressionRatioEstimator::estimation(tp.topic(), CompressionType::Gzip);
         let expected = CompressionType::Gzip.rate() - CompressionRatioEstimator::COMPRESSION_RATIO_IMPROVING_STEP;
@@ -9632,7 +9593,7 @@ mod tests {
             "compression ratio estimate {estimation} should be within 0.01 of {expected}"
         );
 
-        // Java 2458-2466: send the first sub-batch.
+        // Send the first sub-batch.
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(
             manager.lock().unwrap().sequence_number(tp),
@@ -9643,7 +9604,7 @@ mod tests {
         assert!(!f2.is_done(), "The future shouldn't have been done.");
         assert_produce_in_flight_and_ready(ctx);
 
-        // Java 2468-2477: answer it, matching on base sequence 0.
+        // Answer it, matching on base sequence 0.
         let response = split_produce_response(tp, Errors::None, 0);
         ctx.sender.client_mut().respond_matcher(
             split_produce_request_matcher(tp, producer_id_and_epoch, 0, is_transactional),
@@ -9668,7 +9629,7 @@ mod tests {
             "Offset of the first message should be 0"
         );
 
-        // Java 2478-2487: send the second sub-batch and answer it at sequence 1.
+        // Send the second sub-batch and answer it at sequence 1.
         ctx.sender.run_once().await.expect("run_once");
         assert_produce_in_flight_and_ready(ctx);
 
@@ -9679,7 +9640,7 @@ mod tests {
         );
         ctx.sender.run_once().await.expect("run_once"); // receive
 
-        // Java 2489-2494.
+        // Java's closing assertions after `sender.runOnce(); // receive`.
         assert!(f2.is_done(), "The future should have been done.");
         assert_eq!(
             manager.lock().unwrap().sequence_number(tp),
@@ -9699,11 +9660,10 @@ mod tests {
         assert_eq!(ctx.accumulator.deque_size(tp), 0, "There should be no batch in the accumulator");
     }
 
-    /// `SenderTest.produceRequestMatcher(tp, producerIdAndEpoch, sequence, isTransactional)`
-    /// (Java 3699-3724).
+    /// `SenderTest.produceRequestMatcher(tp, producerIdAndEpoch, sequence, isTransactional)`.
     ///
     /// Distinct from [`produce_request_matcher`], which is the Phase-5b matcher for
-    /// `TransactionManagerTest` (Java 4109) and always requires a transactional batch
+    /// `TransactionManagerTest` and always requires a transactional batch
     /// plus a transactional id. This one takes `isTransactional` as a parameter, as
     /// its Java twin does, because the same driver serves the idempotent entry point.
     fn split_produce_request_matcher(
@@ -9746,7 +9706,7 @@ mod tests {
         })
     }
 
-    /// Translated from `SenderTest.testIdempotentSplitBatchAndSend` (Java 2372-2382).
+    /// Translated from `SenderTest#testIdempotentSplitBatchAndSend`.
     ///
     /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
     #[tokio::test]
@@ -9754,17 +9714,17 @@ mod tests {
     async fn test_idempotent_split_batch_and_send() {
         let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
 
-        // Java 2376-2377: `createTransactionManager()` — no transactional id.
+        // `createTransactionManager()` — no transactional id.
         let mut ctx = split_batch_and_send_context(Box::new(idempotent_transaction_manager));
         let tp = ctx.tp1.clone();
 
-        // Java 2379-2381: `prepareAndReceiveInitProducerId(123456L, Errors.NONE)`.
+        // `prepareAndReceiveInitProducerId(123456L, Errors.NONE)`.
         initialize_idempotent_producer_id(&mut ctx, 123_456, 0).await;
 
         drive_split_batch_and_send(&mut ctx, ProducerIdAndEpoch::new(123_456, 0), &tp).await;
     }
 
-    /// Translated from `SenderTest.testTransactionalSplitBatchAndSend` (Java 2385-2403).
+    /// Translated from `SenderTest#testTransactionalSplitBatchAndSend`.
     ///
     /// Was blocked on PLAN §9.18 — the same panic, reached through the transactional
     /// entry point.
@@ -9773,22 +9733,22 @@ mod tests {
     async fn test_transactional_split_batch_and_send() {
         let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
 
-        // Java 2392: `new TransactionManager(logContext, "testSplitBatchAndSend",
+        // `new TransactionManager(logContext, "testSplitBatchAndSend",
         // 60000, 100, apiVersions, false)`.
         let mut ctx = split_batch_and_send_context(Box::new(split_transactional_manager));
         let tp = ctx.tp1.clone();
 
-        // Java 2395: `doInitTransactions(txnManager, producerIdAndEpoch)`.
+        // `doInitTransactions(txnManager, producerIdAndEpoch)`.
         run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123_456, 0)).await;
 
-        // Java 2397-2401: begin, add the partition, answer the AddPartitionsToTxn.
+        // Begin, add the partition, answer the AddPartitionsToTxn.
         begin_transaction_with_partition(&mut ctx, &tp).await;
 
         drive_split_batch_and_send(&mut ctx, ProducerIdAndEpoch::new(123_456, 0), &tp).await;
     }
 
-    /// The `TransactionManager` `testTransactionalSplitBatchAndSend` builds
-    /// (Java 2392): transactional id `testSplitBatchAndSend`, `transactionTimeoutMs =
+    /// The `TransactionManager` `testTransactionalSplitBatchAndSend` builds:
+    /// transactional id `testSplitBatchAndSend`, `transactionTimeoutMs =
     /// 60000`, `retryBackoffMs = 100`.
     ///
     /// Not [`sender_test_transactional_context`], because that helper also builds the
@@ -9823,20 +9783,19 @@ mod tests {
         )))
     }
 
-    /// Translated from `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`
-    /// (Java 3308-3394).
+    /// Translated from `SenderTest#testProducerBatchRetriesWhenPartitionLeaderChanges`.
     ///
     /// A retriable failure schedules the batch for retry. Discovering a **new leader
     /// epoch** must let it go out immediately, skipping the retry backoff
-    /// (`RecordAccumulator.shouldBackoff`, Java 844-861, whose
+    /// (`RecordAccumulator#shouldBackoff`, whose
     /// `hasLeaderChanged` term is what suppresses the wait); a retry to the *same*
     /// leader must wait the backoff, and go out once it has elapsed.
     ///
     /// # Reclassified: this is not an idempotence test
     ///
     /// It was on Phase 4's `SenderTest` list because the string `transactionManager`
-    /// appears in its body — as the literal `null` argument at Java 3321 (the
-    /// accumulator) and 3324 (the `Sender`). Both are built **without** a transaction
+    /// appears in its body — as the literal `null` argument given to the
+    /// accumulator and to the `Sender`. Both are built **without** a transaction
     /// manager, so it is neither idempotent nor transactional. It is translated anyway
     /// rather
     /// than argued out of scope: it is the only end-to-end cover for the leader-change
@@ -9848,7 +9807,7 @@ mod tests {
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testProducerBatchRetriesWhenPartitionLeaderChanges"
     )]
     async fn test_producer_batch_retries_when_partition_leader_changes() {
-        // Java 3317-3324: `lingerMs = 0`, `retryBackoffMs = 10`,
+        // `lingerMs = 0`, `retryBackoffMs = 10`,
         // `retryBackoffMaxMs = 100`, `retries = 10`, and no transaction manager.
         let mut ctx = SenderTestContext::with_transaction_state(
             false,
@@ -9859,7 +9818,7 @@ mod tests {
                 delivery_timeout_ms: DELIVERY_TIMEOUT_MS,
                 accumulator_retry_backoff_ms: 10,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
-                // Java 3317: `lingerMs = 0`.
+                // `lingerMs = 0`.
                 linger_ms: 0,
             }),
             None,
@@ -9943,7 +9902,7 @@ mod tests {
     /// What the pair pins is therefore a **contract** rather than a live path: the
     /// poisoning must already hold when Phase 6 opens the application-side caller. That
     /// is the guarantee Java's shutdown loop is written against — it anticipates the
-    /// throw here (`Sender.java:269-271`) and force-closes on it.
+    /// throw here (in `Sender#run`) and force-closes on it.
     #[tokio::test]
     async fn test_sender_begin_abort_poisons_the_state_machine() {
         let mut ctx = SenderTestContext::with_transaction_state(
@@ -9977,6 +9936,12 @@ mod tests {
     // =====================================================================
     // `SenderTest.java` accounting (`definition-of-done.md` §3)
     //
+    // NOTE: the entries and test headers below used to cite Java line numbers, and the
+    // programs and transcripts in this block key on those `` `name` (line) `` pairs and
+    // "(Java A-B)" ranges. The citations now name Java members instead (no file:line
+    // references, `documentation.md` §7), so the programs no longer reproduce the
+    // transcripts: they record the audit as it stood before that rewrite.
+    //
     // Scope: every `SenderTest` method whose body references a `TransactionManager`.
     // 52 construct one and `testSenderShouldCloseWhenTransactionManagerInErrorState`
     // mocks one, for **53**. None could have been translated before Phase 3, which is
@@ -10009,7 +9974,7 @@ mod tests {
     // name prefix: the Java splitter matched `/^    (public|private) void test/` and the
     // Rust grep matched `` `test[A-Za-z]+` ``. `SenderTest.java` has exactly one
     // annotated test whose name does not start with `test` —
-    // `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (508) — and
+    // `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` — and
     // it was therefore missing from the Java list, from every group below, and from the
     // count.
     //
@@ -10159,7 +10124,7 @@ mod tests {
     //     revision justified it by *shape* — "every one cites a body region, which the
     //     declaration-to-brace rule does not govern". False, and not marginally: the
     //     program reports `23 helper citations, of which 14 are declaration-to-brace`.
-    //     `SenderTest.addPartitionToTxn` (Java 2873-2878) is one — 2873 is the declaration
+    //     `SenderTest#addPartitionToTxn` is one — 2873 is the declaration
     //     and 2878 its closing brace.
     //
     //     The boundary is the **verb**, and it is a deliberate scope choice rather than an
@@ -10431,11 +10396,11 @@ mod tests {
     // parentheses rather than closing them**. An earlier revision of this paragraph
     // reported "40 headers" — because the sweep it describes required that closing paren,
     // and so could not see the single header of exactly that shape
-    // (`testClusterAuthorizationExceptionInInitProducerIdRequest`, whose header reads
-    // `(Java 715-735 — the produce-request variant is at Java 2159-2179)`). **The checker
+    // (`testClusterAuthorizationExceptionInInitProducerIdRequest`, whose header named the
+    // produce-request variant inside the same parentheses as its range). **The checker
     // had inherited the blind spot the checked text warns about, three sentences below its
-    // own count** (Critic 46 pass 4). Nothing was masked — that header conforms, 715 and
-    // 735 verified — but 40 was the one number here a reviewer re-running the sweep could
+    // own count** (Critic 46 pass 4). Nothing was masked — that header conforms, both
+    // ends verified — but 40 was the one number here a reviewer re-running the sweep could
     // not reproduce.
     //
     // Checking both ends rather than only the start is what found the **five**
@@ -10444,69 +10409,70 @@ mod tests {
     // brace) and one pre-existing end-off-by-one on `testNodeNotReady`.
     //
     // TRANSLATED IN PHASE 4 (33 entries — 32 in scope, plus one out-of-scope):
-    //   `testInitProducerIdRequest` (620),
-    //   `testIdempotentInitProducerIdWithMaxInFlightOne` (664),
-    //   `testClusterAuthorizationExceptionInInitProducerIdRequest` (715),
-    //   `testIdempotenceWithMultipleInflights` (762),
-    //   `testIdempotenceWithMultipleInflightsRetriedInOrder` (811),
-    //   `testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted` (912),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatch` (971),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight` (1019),
-    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails` (1105),
-    //   `testCorrectHandlingOfOutOfOrderResponses` (1245),
-    //   `testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds` (1326),
-    //   `testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences` (1394),
-    //   `testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed` (1417),
-    //   `testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail` (1484),
-    //   `testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences` (1575),
-    //   `testResetOfProducerStateShouldAllowQueuedBatchesToDrain` (1613),
-    //   `testCloseWithProducerIdReset` (1655),
-    //   `testForceCloseWithProducerIdReset` (1689),
-    //   `testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry` (1720),
-    //   `testCorrectHandlingOfDuplicateSequenceError` (1767),
-    //   `testIdempotentUnknownProducerHandlingWhenRetentionLimitReached` (1884),
-    //   `testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown` (1942),
-    //   `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails` (2000),
-    //   `testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated` (2086),
-    //   `testClusterAuthorizationExceptionInProduceRequest` (2159),
-    //   `testCancelInFlightRequestAfterFatalError` (2182),
-    //   `testUnsupportedForMessageFormatInProduceRequest` (2223),
-    //   `testUnsupportedVersionInProduceRequest` (2244),
-    //   `testSequenceNumberIncrement` (2265),
-    //   `testRetryWhenProducerIdChanges` (2306),
-    //   `testBumpEpochWhenOutOfOrderSequenceReceived` (2341),
-    //   `testTooLargeBatchesAreSafelyRemoved` (3004) — was `#[ignore]`d on PLAN §9.18;
+    //   `testInitProducerIdRequest`,
+    //   `testIdempotentInitProducerIdWithMaxInFlightOne`,
+    //   `testClusterAuthorizationExceptionInInitProducerIdRequest`,
+    //   `testIdempotenceWithMultipleInflights`,
+    //   `testIdempotenceWithMultipleInflightsRetriedInOrder`,
+    //   `testIdempotenceWithMultipleInflightsWhereFirstFailsFatallyAndSequenceOfFutureBatchesIsAdjusted`,
+    //   `testEpochBumpOnOutOfOrderSequenceForNextBatch`,
+    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenThereIsNoBatchInFlight`,
+    //   `testEpochBumpOnOutOfOrderSequenceForNextBatchWhenBatchInFlightFails`,
+    //   `testCorrectHandlingOfOutOfOrderResponses`,
+    //   `testCorrectHandlingOfOutOfOrderResponsesWhenSecondSucceeds`,
+    //   `testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences`,
+    //   `testExpiryOfFirstBatchShouldNotCauseUnresolvedSequencesIfFutureBatchesSucceed`,
+    //   `testExpiryOfFirstBatchShouldCauseEpochBumpIfFutureBatchesFail`,
+    //   `testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences`,
+    //   `testResetOfProducerStateShouldAllowQueuedBatchesToDrain`,
+    //   `testCloseWithProducerIdReset`,
+    //   `testForceCloseWithProducerIdReset`,
+    //   `testBatchesDrainedWithOldProducerIdShouldSucceedOnSubsequentRetry`,
+    //   `testCorrectHandlingOfDuplicateSequenceError`,
+    //   `testIdempotentUnknownProducerHandlingWhenRetentionLimitReached`,
+    //   `testUnknownProducerErrorShouldBeRetriedWhenLogStartOffsetIsUnknown`,
+    //   `testUnknownProducerErrorShouldBeRetriedForFutureBatchesWhenFirstFails`,
+    //   `testShouldRaiseOutOfOrderSequenceExceptionToUserIfLogWasNotTruncated`,
+    //   `testClusterAuthorizationExceptionInProduceRequest`,
+    //   `testCancelInFlightRequestAfterFatalError`,
+    //   `testUnsupportedForMessageFormatInProduceRequest`,
+    //   `testUnsupportedVersionInProduceRequest`,
+    //   `testSequenceNumberIncrement`,
+    //   `testRetryWhenProducerIdChanges`,
+    //   `testBumpEpochWhenOutOfOrderSequenceReceived`,
+    //   `testTooLargeBatchesAreSafelyRemoved` — was `#[ignore]`d on PLAN §9.18;
     //     the split panic is fixed and the test now runs. It was also rewritten in the
     //     same commit, having diverged from Java (idempotent rig instead of Java's
     //     transactional one, no retry leg, and an invented sub-batch-count assertion).
-    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — **out of scope**:
+    //   `testProducerBatchRetriesWhenPartitionLeaderChanges` — **out of scope**:
     //     both the accumulator and the `Sender` are built with `transactionManager = null`
-    //     (Java 3321, 3324), so it is neither idempotent nor transactional. Translated anyway,
+    //     in Java, so it is neither idempotent nor transactional. Translated anyway,
     //     as the only end-to-end cover for the leader-change backoff skip.
     //
     // TRANSLATED IN PHASE 5A (3) — moved out of the transactional group below, whose
     // blanket rationale ("not expressible while `TransactionManager::new` refuses a
     // transactional id") Phase 5a deleted along with the guard. Critic 45 issue 3 named
     // the first two; re-deriving the group per-entry (see its header) surfaced the third.
-    //   `testInitProducerIdWithMaxInFlightOne` (636)
+    //   `testInitProducerIdWithMaxInFlightOne`
     //     → test_init_producer_id_with_max_in_flight_one. The transactional twin of
-    //     `testIdempotentInitProducerIdWithMaxInFlightOne` (664), already translated
+    //     `testIdempotentInitProducerIdWithMaxInFlightOne`, already translated
     //     30 lines above it in the Java file; the delta is a transactional manager and
     //     one FindCoordinator round trip, both of which 5a supplies.
-    //   `testNodeNotReady` (689) → test_node_not_ready. Both halves of Java's body, so
-    //     both arms of `maybe_find_coordinator_and_retry`. The `else` arm (Java 523-527,
-    //     reached via `client.delayReady` at `:702`) has **no other** cover: before this,
+    //   `testNodeNotReady` → test_node_not_ready. Both halves of Java's body, so
+    //     both arms of `maybe_find_coordinator_and_retry`. The `else` arm
+    //     (`org.apache.kafka.clients.producer.internals.Sender#maybeFindCoordinatorAndRetry`,
+    //     reached via `client.delayReady`) has **no other** cover: before this,
     //     every test reaching that method carried an `InitProducerId` on a transactional
     //     manager, so only the `if` arm ran, and `MockClient::delay_ready` had zero
-    //     callers in the tree. The `if` arm (via `client.throttle` at `:708`) is also
+    //     callers in the tree. The `if` arm (via `client.throttle`) is also
     //     reached by `test_lookup_coordinator_on_disconnect_before_send` through
-    //     `set_unreachable`; translated here anyway so the "Java 689-711" claim is true,
+    //     `set_unreachable`; translated here anyway so the claim to translate all of `testNodeNotReady` is true,
     //     and it is the only exercise of `MockClient::throttle` on the transactional
     //     path. Both halves mutation-checked: removing the `else` arm's
     //     `metadata.request_update(false)`, and making `lookup_coordinator` stop
     //     forgetting the TRANSACTION node, each fail their own assertion.
-    //   `testDoNotPollWhenNoRequestSent` (2991) → test_do_not_poll_when_no_request_sent.
-    //     Its only blocker was `SenderTest.doInitTransactions` (Java 3923), which is
+    //   `testDoNotPollWhenNoRequestSent` → test_do_not_poll_when_no_request_sent.
+    //     Its only blocker was `SenderTest#doInitTransactions`, which is
     //     `initializeTransactions` + FindCoordinator + InitProducerId and so is fully
     //     5a surface. Needed one piece of test infrastructure rather than production
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
@@ -10532,20 +10498,20 @@ mod tests {
     // could not have been written before `Sender::run`'s transactional tail was live,
     // plus the one the old scope program could not see:
     //
-    //   508  senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
+    //   senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
     //          -> test_sender_thread_should_not_get_stuck_when_throttled_and_adding_partitions_to_txn
     //          Needed `MockClient::advance_time_during_poll`, Java's
-    //          `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`) — a
+    //          `client.advanceTimeDuringPoll(true)` — a
     //          `MockClient` method this port had not translated, added here rather than
     //          deferred, since without something moving the clock the throttle the test
     //          installs can never expire.
-    //   2737 testTransactionalRequestsSentOnShutdown
+    //   testTransactionalRequestsSentOnShutdown
     //          -> test_transactional_requests_sent_on_shutdown
-    //   2898 testIncompleteTransactionAbortOnShutdown
+    //   testIncompleteTransactionAbortOnShutdown
     //          -> test_incomplete_transaction_abort_on_shutdown
-    //   2932 testForceShutdownWithIncompleteTransaction
+    //   testForceShutdownWithIncompleteTransaction
     //          -> test_force_shutdown_with_incomplete_transaction
-    //   2966 testTransactionAbortedExceptionOnAbortWithoutError
+    //   testTransactionAbortedExceptionOnAbortWithoutError
     //          -> test_transaction_aborted_error_on_abort_without_error
     //
     // TRANSLATED IN PHASE 8 (10) — the "STILL OWED (11)" list this block carried until
@@ -10555,9 +10521,9 @@ mod tests {
     // `run_init_transactions_with`, `add_partition_to_txn`, `respond_to_produce`,
     // `respond_to_end_txn`).
     //
-    //   1534 testUnresolvedSequencesAreNotFatal
+    //   testUnresolvedSequencesAreNotFatal
     //          -> test_unresolved_sequences_are_not_fatal
-    //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
+    //   testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
     //          -> test_transactional_unknown_producer_handling_when_retention_limit_reached
     //          Translated, then `#[ignore]`d on **PLAN §9.25** — a defect it surfaced, not
     //          a gap in the translation. It is the only test in the tree that reaches the
@@ -10566,20 +10532,20 @@ mod tests {
     //          translated here because it is: the body is complete and the assertion that
     //          fails is a production assertion, which is precisely why it is left in place
     //          as the reproducer (the §9.18 precedent).
-    //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion
+    //   testRecordsFlushedImmediatelyOnTransactionCompletion
     //          -> test_records_flushed_immediately_on_transaction_completion
     //          Needed the linger-configured context Java gets from
     //          `setupWithTransactionState(txnManager, lingerMs)`; `linger_ms` is now a
     //          field on `SenderTestTimeouts`.
-    //   2829 testAwaitPendingRecordsBeforeCommittingTransaction
+    //   testAwaitPendingRecordsBeforeCommittingTransaction
     //          -> test_await_pending_records_before_committing_transaction
-    //   3051 testTransactionShouldTransitionToAbortableForSenderAPI
+    //   testTransactionShouldTransitionToAbortableForSenderAPI
     //          -> test_transaction_should_transition_to_abortable_for_sender_api_coordinator_load_in_progress
     //          -> test_transaction_should_transition_to_abortable_for_sender_api_invalid_txn_state
     //          One Java `@ParameterizedTest` over
     //          `@EnumSource(names = {"COORDINATOR_LOAD_IN_PROGRESS", "INVALID_TXN_STATE"})`,
     //          split into two Rust tests over a shared body so a failure names its case.
-    //   3126 testReceiveFailedBatchTwiceWithTransactions
+    //   testReceiveFailedBatchTwiceWithTransactions
     //          -> test_receive_failed_batch_twice_with_transactions
     //          The only entry whose *mechanism* does not port. Java retains the request via
     //          `disconnect(node, allowLateResponses = true)` and re-fires the same
@@ -10591,16 +10557,16 @@ mod tests {
     //          batch, pinned by four assertions on the routing state. PLAN §9.28, and the
     //          test's own rustdoc, carry the derivation. An earlier Phase-8 revision shipped
     //          a translated `allowLateResponses` overload that was inert in this port.
-    //   3176 testInvalidTxnStateIsAnAbortableError
+    //   testInvalidTxnStateIsAnAbortableError
     //          -> test_invalid_txn_state_is_an_abortable_error
-    //   3215 testTransactionAbortableExceptionIsAnAbortableError
+    //   testTransactionAbortableExceptionIsAnAbortableError
     //          -> test_transaction_abortable_error_is_an_abortable_error
-    //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
+    //   testAbortableErrorIsConvertedToFatalErrorDuringAbort
     //          -> test_abortable_error_is_converted_to_fatal_error_during_abort
-    //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
+    //   testSenderShouldCloseWhenTransactionManagerInErrorState
     //          -> test_sender_should_close_when_transaction_manager_in_error_state
     //          **This entry was listed as "blocked on named missing surface" and was not.**
-    //          It is the one entry Java gives `mock(TransactionManager.class)` (Java 3403),
+    //          It is the one entry Java gives `mock(TransactionManager.class)`,
     //          stubbing `hasOngoingTransaction() -> true` with `beginAbort()` throwing. The
     //          old note offered two routes — a `#[cfg(test)]` hook that fails `begin_abort`
     //          on demand, or "a state the real machine can be forced into where
@@ -10615,12 +10581,12 @@ mod tests {
     //
     // WAS BLOCKED, NOW TRANSLATED (1):
     //
-    //   2385 testTransactionalSplitBatchAndSend → test_transactional_split_batch_and_send.
+    //   testTransactionalSplitBatchAndSend → test_transactional_split_batch_and_send.
     //     Was **blocked on PLAN §9.18**: it drives a `MESSAGE_TOO_LARGE` split, which
     //     panicked because `ProducerBatch::records()` moved the built buffer out and
     //     `split` could not re-read it. Same blocker as `testIdempotentSplitBatchAndSend`
     //     below, and both were closed by making `MemoryRecordsBuilder::build` memoise as
-    //     Java's does. It shares Java's driver (2406-2496), translated here as
+    //     Java's does. It shares Java's driver (`testSplitBatchAndSend`), translated here as
     //     `drive_split_batch_and_send`.
     //
     // The blocking identifiers are derived, not asserted, by the same technique the
@@ -10672,41 +10638,41 @@ mod tests {
     // three 5a ones print `-`, confirming they need no 5b surface. Markers appear in
     // `MARKERS` declaration order, so this transcript is reproducible on any awk:
     //
-    //   636  testInitProducerIdWithMaxInFlightOne
+    //   testInitProducerIdWithMaxInFlightOne
     //          -
-    //   689  testNodeNotReady
+    //   testNodeNotReady
     //          -
-    //   2991 testDoNotPollWhenNoRequestSent
+    //   testDoNotPollWhenNoRequestSent
     //          -
-    //   1534 testUnresolvedSequencesAreNotFatal
+    //   testUnresolvedSequencesAreNotFatal
     //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
-    //   1820 testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
+    //   testTransactionalUnknownProducerHandlingWhenRetentionLimitReached
     //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
-    //   2385 testTransactionalSplitBatchAndSend
+    //   testTransactionalSplitBatchAndSend
     //          beginTransaction+maybeAddPartition+AddPartitionsToTxn
-    //   2737 testTransactionalRequestsSentOnShutdown
+    //   testTransactionalRequestsSentOnShutdown
     //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn+EndTxn
-    //   2771 testRecordsFlushedImmediatelyOnTransactionCompletion
+    //   testRecordsFlushedImmediatelyOnTransactionCompletion
     //          beginTransaction+beginCommit+EndTxn
-    //   2829 testAwaitPendingRecordsBeforeCommittingTransaction
+    //   testAwaitPendingRecordsBeforeCommittingTransaction
     //          beginTransaction+beginCommit+EndTxn
-    //   2898 testIncompleteTransactionAbortOnShutdown
+    //   testIncompleteTransactionAbortOnShutdown
     //          beginTransaction+maybeAddPartition+AddPartitionsToTxn+EndTxn
-    //   2932 testForceShutdownWithIncompleteTransaction
+    //   testForceShutdownWithIncompleteTransaction
     //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn
-    //   2966 testTransactionAbortedExceptionOnAbortWithoutError
+    //   testTransactionAbortedExceptionOnAbortWithoutError
     //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn
-    //   3051 testTransactionShouldTransitionToAbortableForSenderAPI
+    //   testTransactionShouldTransitionToAbortableForSenderAPI
     //          beginTransaction+beginCommit+maybeAddPartition+AddPartitionsToTxn
-    //   3126 testReceiveFailedBatchTwiceWithTransactions
+    //   testReceiveFailedBatchTwiceWithTransactions
     //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
-    //   3176 testInvalidTxnStateIsAnAbortableError
+    //   testInvalidTxnStateIsAnAbortableError
     //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
-    //   3215 testTransactionAbortableExceptionIsAnAbortableError
+    //   testTransactionAbortableExceptionIsAnAbortableError
     //          beginTransaction+beginAbort+maybeAddPartition+AddPartitionsToTxn+EndTxn
-    //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
+    //   testAbortableErrorIsConvertedToFatalErrorDuringAbort
     //          beginTransaction+beginCommit+beginAbort+EndTxn
-    //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
+    //   testSenderShouldCloseWhenTransactionManagerInErrorState
     //          beginAbort+mock(TransactionManager
     //
     // The 16, restated in prose so a reader need not run anything. Six carry a
@@ -10714,37 +10680,37 @@ mod tests {
     // which was the group's one blocked entry until the PLAN §9.18 split panic was fixed.
     // The other ten are the owed list above, all landed in Phase 8:
     //
-    //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (508)
-    //     [TRANSLATED] — beginTransaction, maybeAddPartition; the manager is built at
-    //     `SenderTest.java:515`. Absent from every earlier revision of this block; see
+    //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`
+    //     [TRANSLATED] — beginTransaction, maybeAddPartition; the manager is built in
+    //     the test itself. Absent from every earlier revision of this block; see
     //     "why this program changed" above.
     //
-    //   `testUnresolvedSequencesAreNotFatal` (1534) — beginTransaction + maybeAddPartition
-    //     + AddPartitionsToTxn; the manager is built at `SenderTest.java:1537`.
-    //   `testTransactionalUnknownProducerHandlingWhenRetentionLimitReached` (1820) — same three.
-    //   `testTransactionalSplitBatchAndSend` (2385) [TRANSLATED] — same three.
-    //   `testTransactionalRequestsSentOnShutdown` (2737) [TRANSLATED] — + beginCommit, EndTxn.
-    //   `testRecordsFlushedImmediatelyOnTransactionCompletion` (2771) — beginTransaction,
+    //   `testUnresolvedSequencesAreNotFatal` — beginTransaction + maybeAddPartition
+    //     + AddPartitionsToTxn; the manager is built in the test itself.
+    //   `testTransactionalUnknownProducerHandlingWhenRetentionLimitReached` — same three.
+    //   `testTransactionalSplitBatchAndSend` [TRANSLATED] — same three.
+    //   `testTransactionalRequestsSentOnShutdown` [TRANSLATED] — + beginCommit, EndTxn.
+    //   `testRecordsFlushedImmediatelyOnTransactionCompletion` — beginTransaction,
     //     beginCommit, EndTxn.
-    //   `testAwaitPendingRecordsBeforeCommittingTransaction` (2829) — beginTransaction,
+    //   `testAwaitPendingRecordsBeforeCommittingTransaction` — beginTransaction,
     //     beginCommit, EndTxn.
-    //   `testIncompleteTransactionAbortOnShutdown` (2898) [TRANSLATED] — + maybeAddPartition,
+    //   `testIncompleteTransactionAbortOnShutdown` [TRANSLATED] — + maybeAddPartition,
     //     AddPartitionsToTxn, EndTxn.
-    //   `testForceShutdownWithIncompleteTransaction` (2932) [TRANSLATED] — + beginCommit,
+    //   `testForceShutdownWithIncompleteTransaction` [TRANSLATED] — + beginCommit,
     //     maybeAddPartition, AddPartitionsToTxn.
-    //   `testTransactionAbortedExceptionOnAbortWithoutError` (2966) [TRANSLATED] — + beginAbort,
+    //   `testTransactionAbortedExceptionOnAbortWithoutError` [TRANSLATED] — + beginAbort,
     //     maybeAddPartition, AddPartitionsToTxn.
-    //   `testTransactionShouldTransitionToAbortableForSenderAPI` (3051) — + beginCommit,
+    //   `testTransactionShouldTransitionToAbortableForSenderAPI` — + beginCommit,
     //     maybeAddPartition, AddPartitionsToTxn.
-    //   `testReceiveFailedBatchTwiceWithTransactions` (3126) — + beginAbort, EndTxn,
+    //   `testReceiveFailedBatchTwiceWithTransactions` — + beginAbort, EndTxn,
     //     maybeAddPartition, AddPartitionsToTxn.
-    //   `testInvalidTxnStateIsAnAbortableError` (3176) — same five.
-    //   `testTransactionAbortableExceptionIsAnAbortableError` (3215) — same five.
-    //   `testAbortableErrorIsConvertedToFatalErrorDuringAbort` (3254) — beginTransaction,
+    //   `testInvalidTxnStateIsAnAbortableError` — same five.
+    //   `testTransactionAbortableExceptionIsAnAbortableError` — same five.
+    //   `testAbortableErrorIsConvertedToFatalErrorDuringAbort` — beginTransaction,
     //     beginCommit, beginAbort, EndTxn.
-    //   `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — beginAbort, and
-    //     the one entry given a `mock(TransactionManager.class)` rather than a real one
-    //     (Java 3403); it stubs `hasOngoingTransaction` / `beginAbort` to drive `run()`'s
+    //   `testSenderShouldCloseWhenTransactionManagerInErrorState` — beginAbort, and
+    //     the one entry given a `mock(TransactionManager.class)` rather than a real one;
+    //     it stubs `hasOngoingTransaction` / `beginAbort` to drive `run()`'s
     //     abort loop.
     //
     //   Reclassification, corrected after Critic 44 issue 7: the method that moved out
@@ -10786,7 +10752,7 @@ mod tests {
     // standard. This is the *idempotent / non-transactional* blocked entry; the
     // transactional group above no longer names any of its own, so the entry arithmetic
     // below is unaffected:
-    //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
+    //   `testSenderShouldRetryWithBackoffOnRetriableError` — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
     //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Time>`, which has no
     //     `sleep`, so `sleep_ms` uses `tokio::time::sleep` and does not move the test's
@@ -10799,11 +10765,11 @@ mod tests {
     // UNBLOCKED BY THE §9.18 FIX AND TRANSLATED (3) — the split-on-MESSAGE_TOO_LARGE
     // panic was the whole of the blockage for the first two, and half of it for the
     // third:
-    //   `testIdempotentSplitBatchAndSend` (2372) → test_idempotent_split_batch_and_send.
-    //   `testTransactionalSplitBatchAndSend` (2385) →
+    //   `testIdempotentSplitBatchAndSend` → test_idempotent_split_batch_and_send.
+    //   `testTransactionalSplitBatchAndSend` →
     //     test_transactional_split_batch_and_send. Counted in the transactional group
     //     above, listed here so the split trio reads together.
-    //   `testNoBufferReuseWhenBatchExpires` (3605) — **out of scope** (it uses no
+    //   `testNoBufferReuseWhenBatchExpires` — **out of scope** (it uses no
     //     transaction manager), listed here because the same §9.18 gap blocked it.
     //     Its other stated blocker was false: `BufferPool` is not accounting-only, it
     //     keeps a `VecDeque<Vec<u8>>` free list that `allocate` pops from, so the pooled
@@ -10827,9 +10793,9 @@ mod tests {
     // 5b, so what they needed was this end-to-end accumulator + `Sender` harness.
     // =====================================================================
 
-    /// `SenderTest.buildAddPartitionsToTxnResponseData(0, singletonMap(tp, NONE))`
-    /// (Java 3846-3853): the per-partition errors filed under the v3-and-below
-    /// transactional id, which is the only shape a client request produces.
+    /// `SenderTest.buildAddPartitionsToTxnResponseData(0, singletonMap(tp, NONE))`: the per-partition
+    /// errors filed under the v3-and-below transactional id, which is the only shape a client request
+    /// produces.
     fn add_partitions_to_txn_response(errors: &[(TopicPartition, Errors)]) -> ConcreteResponse {
         use crate::AddPartitionsToTxnResponseData;
         use crate::common::requests::AddPartitionsToTxnResponse;
@@ -10855,7 +10821,7 @@ mod tests {
         ConcreteResponse::EndTxn(EndTxnResponse::new(data))
     }
 
-    /// The Rust stand-in for `SenderTest.AssertEndTxnRequestMatcher` (Java 3893-3912):
+    /// The Rust stand-in for `SenderTest#AssertEndTxnRequestMatcher`:
     /// asserts the queued request really is an `EndTxn` carrying `committed`, then
     /// answers it.
     ///
@@ -10878,7 +10844,7 @@ mod tests {
     }
 
     /// Begins a transaction and adds `tp` to it, mirroring
-    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)` (Java 2873-2878).
+    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)`.
     async fn begin_transaction_with_partition(ctx: &mut SenderTestContext, tp: &TopicPartition) {
         ctx.transaction_manager()
             .lock()
@@ -10902,8 +10868,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`
-    /// (Java 508-545).
+    /// `SenderTest#senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn`.
     ///
     /// With the coordinator throttled, `awaitNodeReady` must ride out the throttle and
     /// no longer: `NetworkClientUtils.awaitReady` clamps its poll timeout to
@@ -10913,7 +10878,7 @@ mod tests {
     /// instead.
     ///
     /// Needs `MockClient::advance_time_during_poll` — Java's
-    /// `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`) — because the
+    /// `client.advanceTimeDuringPoll(true)` — because the
     /// throttle can only expire if something moves the clock, and the test drives the
     /// Sender itself so nothing else does.
     ///
@@ -10980,13 +10945,11 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testTransactionalRequestsSentOnShutdown`
-    /// (Java 2737-2768).
+    /// Translated from `SenderTest#testTransactionalRequestsSentOnShutdown`.
     ///
-    /// `initiateClose` then `beginCommit`: the `EndTxn` was enqueued *after* the run
-    /// loop was told to stop, so only `Sender.run`'s drain loop (`Sender.java:257-265`,
-    /// whose condition includes `hasPendingTransactionalRequests()`) can send it. That
-    /// is the behaviour under test.
+    /// `initiateClose` then `beginCommit`: the `EndTxn` was enqueued *after* the run loop was told to
+    /// stop, so only `Sender#run`'s drain loop (whose condition includes
+    /// `hasPendingTransactionalRequests()`) can send it. That is the behaviour under test.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionalRequestsSentOnShutdown")]
     async fn test_transactional_requests_sent_on_shutdown() {
@@ -11020,11 +10983,10 @@ mod tests {
         commit.await_result().await.expect("the commit succeeded");
     }
 
-    /// Translated from `SenderTest.testIncompleteTransactionAbortOnShutdown`
-    /// (Java 2898-2928).
+    /// Translated from `SenderTest#testIncompleteTransactionAbortOnShutdown`.
     ///
     /// No commit or abort is requested; `Sender.run`'s third loop
-    /// (`Sender.java:266-285`) notices the ongoing transaction and aborts it itself.
+    /// (in `Sender#run`) notices the ongoing transaction and aborts it itself.
     ///
     /// Java's `AssertEndTxnRequestMatcher(TransactionResult.ABORT)` has no equivalent
     /// here: the `EndTxn` is both created *and* answered inside the single
@@ -11052,8 +11014,7 @@ mod tests {
         );
     }
 
-    /// Translated from `SenderTest.testForceShutdownWithIncompleteTransaction`
-    /// (Java 2932-2963).
+    /// Translated from `SenderTest#testForceShutdownWithIncompleteTransaction`.
     ///
     /// The commit is requested and then the Sender is force-closed, so the `EndTxn` is
     /// never sent and `TransactionManager.close` fails the pending request.
@@ -11083,12 +11044,11 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testTransactionAbortedExceptionOnAbortWithoutError`
-    /// (Java 2966-2988).
+    /// `SenderTest#testTransactionAbortedExceptionOnAbortWithoutError`.
     ///
     /// A record is appended and the transaction aborted before it can be drained, so
     /// `maybeSendAndPollTransactionalRequest`'s `isAborting()` arm
-    /// (`Sender.java:468-470`) must fail the undrained batch with
+    /// (in `Sender#maybeSendAndPollTransactionalRequest`) must fail the undrained batch with
     /// `TransactionAbortedException` rather than send it.
     #[tokio::test]
     #[doc(
@@ -11123,7 +11083,7 @@ mod tests {
     // The 47 the PHASE-5B TEST ACCOUNTING block in `transaction_manager.rs` owed to
     // this phase, plus the helpers they share. They land in this file because Java's
     // `TransactionManagerTest` builds its own `RecordAccumulator` + `Sender` +
-    // `MockClient` (Java 209-224) and every one of these bodies drives them, while
+    // `MockClient` and every one of these bodies drives them, while
     // `transaction_manager.rs`'s test module has no client at all — it substitutes
     // `run_manager_transaction_phase` for the Sender. Six `TransactionManagerTest`
     // methods already live here for exactly that reason (group A of the accounting
@@ -11132,32 +11092,32 @@ mod tests {
     // destination file for every entry, so nothing is harder to find.
     // =====================================================================
 
-    /// `TransactionManagerTest.REQUEST_TIMEOUT` (Java 130). Distinct from
+    /// `TransactionManagerTest#REQUEST_TIMEOUT`. Distinct from
     /// [`REQUEST_TIMEOUT`], which is `SenderTest`'s.
     const TXN_MGR_REQUEST_TIMEOUT: i32 = 1000;
-    /// `deliveryTimeoutMs` in `initializeTransactionManager` (Java 217).
+    /// `deliveryTimeoutMs` in `initializeTransactionManager`.
     const TXN_MGR_DELIVERY_TIMEOUT_MS: i32 = 3000;
-    /// `TransactionManagerTest.DEFAULT_RETRY_BACKOFF_MS` (Java 131) — the manager's
-    /// backoff, which is *not* the `Sender`'s 50 (Java 224).
+    /// `TransactionManagerTest#DEFAULT_RETRY_BACKOFF_MS` — the manager's
+    /// backoff, which is *not* the `Sender`'s 50.
     const TXN_MGR_DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
-    /// `consumerGroupId` (Java 144).
+    /// `TransactionManagerTest#consumerGroupId`.
     const CONSUMER_GROUP_ID: &str = "myConsumerGroup";
-    /// `memberId` (Java 145).
+    /// `TransactionManagerTest#memberId`.
     const MEMBER_ID: &str = "member";
-    /// `generationId` (Java 146).
+    /// `TransactionManagerTest#generationId`.
     const GENERATION_ID: i32 = 5;
-    /// `groupInstanceId` (Java 147).
+    /// `TransactionManagerTest#groupInstanceId`.
     const GROUP_INSTANCE_ID: &str = "instance";
-    /// `producerId` (Java 140).
+    /// `TransactionManagerTest#producerId`.
     const TXN_PRODUCER_ID: i64 = 13131;
-    /// `epoch` (Java 141).
+    /// `TransactionManagerTest#epoch`.
     const TXN_EPOCH: i16 = 1;
 
-    /// Builds the `TransactionManager` `TransactionManagerTest.initializeTransactionManager`
-    /// builds (Java 178-212), including the `ApiVersions` contents that carry the
+    /// Builds the `TransactionManager` `TransactionManagerTest#initializeTransactionManager`
+    /// builds, including the `ApiVersions` contents that carry the
     /// `transactionV2Enabled` parameterisation.
     ///
-    /// The `finalizedFeaturesEpoch` Java increments per call (Java 207) is always `0`
+    /// The `finalizedFeaturesEpoch` Java increments per call is always `0`
     /// here: no test in this group calls the initializer twice, and the tests that do
     /// re-publish features mid-run pass their own epoch.
     fn txn_mgr_test_manager(
@@ -11227,15 +11187,14 @@ mod tests {
         )))
     }
 
-    /// The context `TransactionManagerTest.initializeTransactionManager` leaves behind
-    /// (Java 213-224).
+    /// The context `TransactionManagerTest#initializeTransactionManager` leaves behind.
     ///
     /// Three knobs differ from [`SenderTestContext::transactional`] and all three are
-    /// load-bearing: `guaranteeMessageOrder` is **`true`** here (Java 219), the request
+    /// load-bearing: `guaranteeMessageOrder` is **`true`** here, the request
     /// timeout is 1000 rather than 5000, and the delivery timeout is 3000 rather than
     /// 1500. The manager's own retry backoff is 100 while the `Sender`'s is 50 — Java
-    /// passes `DEFAULT_RETRY_BACKOFF_MS` to the manager (Java 210) and the literal `50`
-    /// to the `Sender` (Java 224).
+    /// passes `DEFAULT_RETRY_BACKOFF_MS` to the manager and the literal `50`
+    /// to the `Sender`.
     fn txn_mgr_test_context(transaction_v2_enabled: bool) -> SenderTestContext {
         SenderTestContext::with_transaction_state(
             true,
@@ -11244,20 +11203,20 @@ mod tests {
             Some(SenderTestTimeouts {
                 request_timeout_ms: TXN_MGR_REQUEST_TIMEOUT,
                 delivery_timeout_ms: TXN_MGR_DELIVERY_TIMEOUT_MS,
-                // Java 216: `retryBackoffMs` and `retryBackoffMaxMs` are both 0L on the
+                // `retryBackoffMs` and `retryBackoffMaxMs` are both 0L on the
                 // accumulator, so a re-enqueued batch is drainable on the next runOnce.
                 accumulator_retry_backoff_ms: 0,
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
-                // Java 216: `lingerMs` is 0.
+                // `lingerMs` is 0.
                 linger_ms: 0,
             }),
             None,
         )
     }
 
-    /// `TransactionManagerTest.produceResponse(tp, offset, error, throttleTimeMs)`
-    /// (Java 4322-4324), whose `logStartOffset` defaults to **10** — not to the `-1`
-    /// [`SenderTestContext::produce_response`] uses for the `SenderTest` group.
+    /// `TransactionManagerTest.produceResponse(tp, offset, error, throttleTimeMs)`, whose
+    /// `logStartOffset` defaults to **10** — not to the `-1` [`SenderTestContext::produce_response`]
+    /// uses for the `SenderTest` group.
     fn txn_produce_response(
         ctx: &SenderTestContext,
         tp: &TopicPartition,
@@ -11267,7 +11226,7 @@ mod tests {
         ctx.produce_response_with_message(tp, offset, error, 0, 10, None)
     }
 
-    /// `produceRequestMatcher(producerId, epoch, tp)` (Java 4109-4133).
+    /// `produceRequestMatcher(producerId, epoch, tp)`.
     fn produce_request_matcher(producer_id: i64, epoch: i16, tp: &TopicPartition) -> crate::RequestMatcher {
         use crate::common::record::internal::MemoryRecords;
         use crate::common::requests::AbstractRequest;
@@ -11302,7 +11261,7 @@ mod tests {
         })
     }
 
-    /// `prepareProduceResponse(error, producerId, producerEpoch, tp)` (Java 4105-4107).
+    /// `prepareProduceResponse(error, producerId, producerEpoch, tp)`.
     fn prepare_produce_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11367,7 +11326,7 @@ mod tests {
         ctx.sender.client_mut().prepare_response_matcher(matcher, response);
     }
 
-    /// `sendProduceResponse(error, producerId, producerEpoch, tp)` (Java 4097-4099):
+    /// `sendProduceResponse(error, producerId, producerEpoch, tp)`:
     /// answers a produce request that is already in flight.
     fn send_produce_response(
         ctx: &mut SenderTestContext,
@@ -11382,7 +11341,7 @@ mod tests {
             .respond_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
     }
 
-    /// `getPartitionsFromV3Request(request)` (Java 4167-4169).
+    /// `getPartitionsFromV3Request(request)`.
     ///
     /// Takes the request *data* rather than the request, so the call site does not have
     /// to care whether its `let`-binding produced a value or a reference; Java's body is
@@ -11393,7 +11352,7 @@ mod tests {
         AddPartitionsToTxnRequest::get_partitions(&data.v3_and_below_topics)
     }
 
-    /// `prepareAddPartitionsToTxn(Map<TopicPartition, Errors>)` (Java 4028-4036): the
+    /// `prepareAddPartitionsToTxn(Map<TopicPartition, Errors>)`: the
     /// matcher asserts the request's partition *set* equals the response's key set.
     fn prepare_add_partitions_to_txn(ctx: &mut SenderTestContext, errors: &[(TopicPartition, Errors)]) {
         use crate::common::requests::AbstractRequest;
@@ -11412,10 +11371,9 @@ mod tests {
             .prepare_response_matcher(matcher, add_partitions_to_txn_response(errors));
     }
 
-    /// `addPartitionsRequestMatcher(topicPartition, epoch, producerId)`
-    /// (Java 4155-4165). Unlike [`prepare_add_partitions_to_txn`]'s matcher this one
-    /// asserts the producer id / epoch / transactional id too, and compares the
-    /// partitions as an ordered `List`.
+    /// `addPartitionsRequestMatcher(topicPartition, epoch, producerId)`. Unlike
+    /// [`prepare_add_partitions_to_txn`]'s matcher this one asserts the producer id / epoch /
+    /// transactional id too, and compares the partitions as an ordered `List`.
     fn add_partitions_request_matcher(tp: &TopicPartition, epoch: i16, producer_id: i64) -> crate::RequestMatcher {
         use crate::common::requests::AbstractRequest;
 
@@ -11432,8 +11390,7 @@ mod tests {
         })
     }
 
-    /// `prepareAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`
-    /// (Java 4135-4143).
+    /// `prepareAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`.
     fn prepare_add_partitions_to_txn_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11447,8 +11404,7 @@ mod tests {
             .prepare_response_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
     }
 
-    /// `sendAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`
-    /// (Java 4145-4153).
+    /// `sendAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`.
     fn send_add_partitions_to_txn_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11462,7 +11418,7 @@ mod tests {
             .respond_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
     }
 
-    /// `endTxnMatcher(result, producerId, epoch)` (Java 4262-4271).
+    /// `endTxnMatcher(result, producerId, epoch)`.
     fn end_txn_matcher(result: TransactionResult, producer_id: i64, epoch: i16) -> crate::RequestMatcher {
         use crate::common::requests::AbstractRequest;
 
@@ -11478,9 +11434,8 @@ mod tests {
         })
     }
 
-    /// `prepareEndTxnResponse(error, result, requestProducerId, requestProducerEpoch)`
-    /// (Java 4184-4222) — the Transaction-V1 form, which *fails* if the request went
-    /// out at v5 or above.
+    /// `prepareEndTxnResponse(error, result, requestProducerId, requestProducerEpoch)` — the
+    /// Transaction-V1 form, which *fails* if the request went out at v5 or above.
     fn prepare_end_txn_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11509,7 +11464,7 @@ mod tests {
     }
 
     /// `prepareEndTxnResponse(error, result, requestProducerId, requestEpochId,
-    /// expectedProducerId, expectedEpochId, shouldDisconnect)` (Java 4224-4252) — the
+    /// expectedProducerId, expectedEpochId, shouldDisconnect)` — the
     /// Transaction-V2 form, which fills the response's producer id / epoch when the
     /// request went out at v5 or above.
     ///
@@ -11543,7 +11498,7 @@ mod tests {
         );
     }
 
-    /// `sendEndTxnResponse(error, result, producerId, epoch)` (Java 4254-4260).
+    /// `sendEndTxnResponse(error, result, producerId, epoch)`.
     fn send_end_txn_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11556,8 +11511,7 @@ mod tests {
             .respond_matcher(end_txn_matcher(result, producer_id, epoch), end_txn_response(error));
     }
 
-    /// `prepareAddOffsetsToTxnResponse(error, consumerGroupId, producerId, producerEpoch)`
-    /// (Java 4273-4288).
+    /// `prepareAddOffsetsToTxnResponse(error, consumerGroupId, producerId, producerEpoch)`.
     fn prepare_add_offsets_to_txn_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11588,7 +11542,7 @@ mod tests {
     }
 
     /// `prepareTxnOffsetCommitResponse(consumerGroupId, producerId, producerEpoch,
-    /// txnOffsetCommitResponse)` (Java 4290-4301).
+    /// txnOffsetCommitResponse)`.
     fn prepare_txn_offset_commit_response(
         ctx: &mut SenderTestContext,
         consumer_group_id: &str,
@@ -11600,8 +11554,7 @@ mod tests {
     }
 
     /// `prepareTxnOffsetCommitResponse(consumerGroupId, producerId, producerEpoch,
-    /// groupInstanceId, memberId, generationId, txnOffsetCommitResponse)`
-    /// (Java 4303-4320).
+    /// groupInstanceId, memberId, generationId, txnOffsetCommitResponse)`.
     /// Java passes `groupInstanceId`, `memberId` and `generationId` as three separate
     /// parameters read off its own fields; they are taken from the
     /// [`ConsumerGroupMetadata`] the matching `sendOffsetsToTransaction` call used, which
@@ -11677,7 +11630,7 @@ mod tests {
     }
 
     /// `prepareFindCoordinatorResponse(error, shouldDisconnect, coordinatorType,
-    /// coordinatorKey)` (Java 4042-4054).
+    /// coordinatorKey)`.
     fn prepare_find_coordinator_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11713,9 +11666,8 @@ mod tests {
         );
     }
 
-    /// `prepareInitPidResponse(error, shouldDisconnect, producerId, producerEpoch)`
-    /// (Java 4056-4063), which delegates to the eight-argument form with
-    /// `keepPreparedTxn = enable2Pc = false` and no ongoing transaction.
+    /// `prepareInitPidResponse(error, shouldDisconnect, producerId, producerEpoch)`, which delegates to
+    /// the eight-argument form with `keepPreparedTxn = enable2Pc = false` and no ongoing transaction.
     fn prepare_init_pid_response(
         ctx: &mut SenderTestContext,
         error: Errors,
@@ -11751,15 +11703,15 @@ mod tests {
         );
     }
 
-    /// `doInitTransactions()` (Java 4348-4350), which delegates to
-    /// `doInitTransactions(producerId, epoch)` (Java 4352-4365).
+    /// `doInitTransactions()`, which delegates to
+    /// `doInitTransactions(producerId, epoch)`.
     async fn do_init_transactions(ctx: &mut SenderTestContext) {
         do_init_transactions_with(ctx, TXN_PRODUCER_ID, TXN_EPOCH).await;
     }
 
-    /// `doInitTransactions(producerId, epoch)` (Java 4352-4365).
+    /// `doInitTransactions(producerId, epoch)`.
     ///
-    /// Java's `maybeUpdateTransactionV2Enabled(true)` at the end (Java 4360) is
+    /// Java's `maybeUpdateTransactionV2Enabled(true)` at the end is
     /// reproduced literally, because a V2 context must leave `initializeTransactions`
     /// with the flag latched — `run_init_transactions` (the `SenderTest` helper) does
     /// not do this, which is why this group needs its own.
@@ -11856,7 +11808,7 @@ mod tests {
     }
 
     /// `new ConsumerGroupMetadata(consumerGroupId, generationId, memberId,
-    /// Optional.of(groupInstanceId))` (Java 2691).
+    /// Optional.of(groupInstanceId))`.
     fn full_consumer_group_metadata() -> ConsumerGroupMetadataImpl {
         ConsumerGroupMetadataImpl::with_generation_id_member_id_group_instance_id(
             CONSUMER_GROUP_ID,
@@ -11871,13 +11823,13 @@ mod tests {
         OffsetAndMetadata::new(offset).expect("a non-negative offset")
     }
 
-    /// `assertProduceFutureFailed(future)` (Java 4444-4453).
+    /// `assertProduceFutureFailed(future)`.
     async fn assert_produce_future_failed(future: &Arc<FutureRecordMetadata>) {
         assert!(future.is_done());
         future.get().await.expect_err("Expected produce future to throw");
     }
 
-    /// `assertAbortableError(Class)` (Java 4409-4421).
+    /// `assertAbortableError(Class)`.
     ///
     /// Java asserts on `e.getCause()`'s class; `Error` is flat here, so the cause
     /// is asserted on [`TransactionManager::last_error`]'s wire code — the same
@@ -11912,7 +11864,7 @@ mod tests {
         assert!(!manager.lock().unwrap().has_error());
     }
 
-    /// `assertFatalError(Class)` (Java 4423-4442): an abort is refused, twice —
+    /// `assertFatalError(Class)`: an abort is refused, twice —
     /// "transaction abort cannot clear fatal error state".
     fn assert_fatal_error(ctx: &SenderTestContext, cause: Errors) {
         let manager = ctx.transaction_manager();
@@ -11974,7 +11926,7 @@ mod tests {
     }
 
     /// `verifyCommitOrAbortTransactionRetriable(firstTransactionResult,
-    /// retryTransactionResult)` (Java 3997-4026).
+    /// retryTransactionResult)`.
     ///
     /// The `EndTxn` is answered but its response is **disconnected**, so the result
     /// stays incomplete and the manager must re-look-up the coordinator before the
@@ -12059,8 +12011,7 @@ mod tests {
         Ok(())
     }
 
-    /// Translated from `TransactionManagerTest.testRetryAbortTransaction`
-    /// (Java 3695-3697).
+    /// Translated from `TransactionManagerTest#testRetryAbortTransaction`.
     #[tokio::test]
     async fn test_retry_abort_transaction() {
         let mut ctx = txn_mgr_test_context(false);
@@ -12069,8 +12020,7 @@ mod tests {
             .expect("retrying an abort after an abort timeout is allowed");
     }
 
-    /// Translated from `TransactionManagerTest.testRetryCommitTransaction`
-    /// (Java 3700-3702).
+    /// Translated from `TransactionManagerTest#testRetryCommitTransaction`.
     #[tokio::test]
     async fn test_retry_commit_transaction() {
         let mut ctx = txn_mgr_test_context(false);
@@ -12080,8 +12030,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRetryAbortTransactionAfterCommitTimeout`
-    /// (Java 3705-3707).
+    /// `TransactionManagerTest#testRetryAbortTransactionAfterCommitTimeout`.
     ///
     /// Java asserts `IllegalStateException`; the Rust equivalent is the
     /// `Errors::UnknownServerError`-coded `Error::local_illegal_state`
@@ -12102,8 +12051,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRetryCommitTransactionAfterAbortTimeout`
-    /// (Java 3710-3712).
+    /// `TransactionManagerTest#testRetryCommitTransactionAfterAbortTimeout`.
     #[tokio::test]
     async fn test_retry_commit_transaction_after_abort_timeout() {
         let mut ctx = txn_mgr_test_context(false);
@@ -12118,8 +12066,7 @@ mod tests {
         );
     }
 
-    /// Translated from `TransactionManagerTest.testSenderShutdownWithPendingTransactions`
-    /// (Java 228-246).
+    /// Translated from `TransactionManagerTest#testSenderShutdownWithPendingTransactions`.
     #[tokio::test]
     async fn test_sender_shutdown_with_pending_transactions() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12151,7 +12098,7 @@ mod tests {
         }
     }
 
-    /// Translated from `TransactionManagerTest.testBasicTransaction` (Java 881-931).
+    /// Translated from `TransactionManagerTest#testBasicTransaction`.
     #[tokio::test]
     async fn test_basic_transaction() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12245,8 +12192,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testFatalErrorWhenProduceResponseWithInvalidPidMapping`
-    /// (Java 1435-1448).
+    /// `TransactionManagerTest#testFatalErrorWhenProduceResponseWithInvalidPidMapping`.
     #[tokio::test]
     async fn test_fatal_error_when_produce_response_with_invalid_pid_mapping() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12270,8 +12216,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testTopicAuthorizationFailureInAddPartitions`
-    /// (Java 1516-1550).
+    /// `TransactionManagerTest#testTopicAuthorizationFailureInAddPartitions`.
     #[tokio::test]
     async fn test_topic_authorization_failure_in_add_partitions() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12337,8 +12282,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight`
-    /// (Java 1553-1599).
+    /// `TransactionManagerTest#testCommitWithTopicAuthorizationFailureInAddPartitionsInFlight`.
     #[tokio::test]
     async fn test_commit_with_topic_authorization_failure_in_add_partitions_in_flight() {
         use crate::common::requests::AbstractRequest;
@@ -12405,8 +12349,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRecoveryFromAbortableErrorTransactionNotStarted`
-    /// (Java 1602-1645).
+    /// `TransactionManagerTest#testRecoveryFromAbortableErrorTransactionNotStarted`.
     #[tokio::test]
     async fn test_recovery_from_abortable_error_transaction_not_started() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12476,8 +12419,7 @@ mod tests {
         }
     }
 
-    /// Translated from `TransactionManagerTest.testRetryAbortTransactionAfterTimeout`
-    /// (Java 1648-1677).
+    /// Translated from `TransactionManagerTest#testRetryAbortTransactionAfterTimeout`.
     #[tokio::test]
     async fn test_retry_abort_transaction_after_timeout() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12534,8 +12476,7 @@ mod tests {
         assert!(manager.lock().unwrap().has_ongoing_transaction());
     }
 
-    /// Translated from `TransactionManagerTest.testRetryCommitTransactionAfterTimeout`
-    /// (Java 1680-1711).
+    /// Translated from `TransactionManagerTest#testRetryCommitTransactionAfterTimeout`.
     #[tokio::test]
     async fn test_retry_commit_transaction_after_timeout() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12593,8 +12534,8 @@ mod tests {
     }
 
     /// The four `assertThrows(IllegalStateException.class, ..)` lines both
-    /// `testRetryAbortTransactionAfterTimeout` (Java 1666-1669) and
-    /// `testRetryCommitTransactionAfterTimeout` (Java 1698-1701) make while a completed
+    /// `testRetryAbortTransactionAfterTimeout` and
+    /// `testRetryCommitTransactionAfterTimeout` make while a completed
     /// but unacked result is cached: everything except a matching retry is refused.
     fn assert_pending_abort_rejects_other_operations(
         ctx: &SenderTestContext,
@@ -12641,8 +12582,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRecoveryFromAbortableErrorTransactionStarted`
-    /// (Java 1746-1796).
+    /// `TransactionManagerTest#testRecoveryFromAbortableErrorTransactionStarted`.
     #[tokio::test]
     async fn test_recovery_from_abortable_error_transaction_started() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12728,8 +12668,7 @@ mod tests {
         }
     }
 
-    /// Translated from `TransactionManagerTest.testFlushPendingPartitionsOnCommit`
-    /// (Java 1895-1929).
+    /// Translated from `TransactionManagerTest#testFlushPendingPartitionsOnCommit`.
     #[tokio::test]
     async fn test_flush_pending_partitions_on_commit() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12782,8 +12721,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testMultipleAddPartitionsPerForOneProduce`
-    /// (Java 1932-1970).
+    /// `TransactionManagerTest#testMultipleAddPartitionsPerForOneProduce`.
     #[tokio::test]
     async fn test_multiple_add_partitions_per_for_one_produce() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12849,8 +12787,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRecoveryFromAbortableErrorProduceRequestInRetry`
-    /// (Java 1799-1860).
+    /// `TransactionManagerTest#testRecoveryFromAbortableErrorProduceRequestInRetry`.
     #[tokio::test]
     async fn test_recovery_from_abortable_error_produce_request_in_retry() {
         use crate::producer::internals::ProducerTestUtils;
@@ -12951,7 +12888,7 @@ mod tests {
     }
 
     /// The four `assertThrows(KafkaException.class, ..)` follow-up calls that
-    /// `testInvalidProducerEpochConvertToProducerFencedInEndTxn` (Java 2143-2148) makes
+    /// `testInvalidProducerEpochConvertToProducerFencedInEndTxn` makes
     /// to prove the fatal error is raised directly by each entry point.
     fn assert_all_transactional_entry_points_are_refused(ctx: &SenderTestContext) {
         let manager = ctx.transaction_manager();
@@ -12970,8 +12907,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testInvalidProducerEpochConvertToProducerFencedInEndTxn`
-    /// (Java 2125-2152).
+    /// `TransactionManagerTest#testInvalidProducerEpochConvertToProducerFencedInEndTxn`.
     #[tokio::test]
     async fn test_invalid_producer_epoch_convert_to_producer_fenced_in_end_txn() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13016,8 +12952,7 @@ mod tests {
         assert_all_transactional_entry_points_are_refused(&ctx);
     }
 
-    /// Translated from `TransactionManagerTest.testInvalidProducerEpochFromProduce`
-    /// (Java 2155-2186).
+    /// Translated from `TransactionManagerTest#testInvalidProducerEpochFromProduce`.
     #[tokio::test]
     async fn test_invalid_producer_epoch_from_produce() {
         use crate::common::protocol::ApiKeys;
@@ -13056,8 +12991,7 @@ mod tests {
         assert_eq!(handler.api_key(), &ApiKeys::INIT_PRODUCER_ID);
     }
 
-    /// Translated from `TransactionManagerTest.testDisallowCommitOnProduceFailure`
-    /// (Java 2189-2214).
+    /// Translated from `TransactionManagerTest#testDisallowCommitOnProduceFailure`.
     #[tokio::test]
     async fn test_disallow_commit_on_produce_failure() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13099,8 +13033,7 @@ mod tests {
         assert!(ctx.transaction_manager().lock().unwrap().is_ready());
     }
 
-    /// Translated from `TransactionManagerTest.testAllowAbortOnProduceFailure`
-    /// (Java 2217-2237).
+    /// Translated from `TransactionManagerTest#testAllowAbortOnProduceFailure`.
     #[tokio::test]
     async fn test_allow_abort_on_produce_failure() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13136,8 +13069,7 @@ mod tests {
         assert!(manager.lock().unwrap().is_ready());
     }
 
-    /// Translated from `TransactionManagerTest.testAbortableErrorWhileAbortInProgress`
-    /// (Java 2240-2267).
+    /// Translated from `TransactionManagerTest#testAbortableErrorWhileAbortInProgress`.
     #[tokio::test]
     async fn test_abortable_error_while_abort_in_progress() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13194,8 +13126,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testCommitTransactionWithUnsentProduceRequest`
-    /// (Java 2270-2310).
+    /// `TransactionManagerTest#testCommitTransactionWithUnsentProduceRequest`.
     #[tokio::test]
     async fn test_commit_transaction_with_unsent_produce_request() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13253,8 +13184,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testCommitTransactionWithInFlightProduceRequest`
-    /// (Java 2313-2352).
+    /// `TransactionManagerTest#testCommitTransactionWithInFlightProduceRequest`.
     #[tokio::test]
     async fn test_commit_transaction_with_in_flight_produce_request() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13315,8 +13245,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testCancelUnsentAddPartitionsAndProduceOnAbort`
-    /// (Java 2377-2395).
+    /// `TransactionManagerTest#testCancelUnsentAddPartitionsAndProduceOnAbort`.
     #[tokio::test]
     async fn test_cancel_unsent_add_partitions_and_produce_on_abort() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13349,8 +13278,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testAbortResendsAddPartitionErrorIfRetried`
-    /// (Java 2398-2421).
+    /// `TransactionManagerTest#testAbortResendsAddPartitionErrorIfRetried`.
     #[tokio::test]
     async fn test_abort_resends_add_partition_error_if_retried() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13394,8 +13322,7 @@ mod tests {
         );
     }
 
-    /// Translated from `TransactionManagerTest.testAbortResendsProduceRequestIfRetried`
-    /// (Java 2424-2449).
+    /// Translated from `TransactionManagerTest#testAbortResendsProduceRequestIfRetried`.
     #[tokio::test]
     async fn test_abort_resends_produce_request_if_retried() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13432,8 +13359,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testHandlingOfUnknownTopicPartitionErrorOnAddPartitions`
-    /// (Java 2452-2470).
+    /// `TransactionManagerTest#testHandlingOfUnknownTopicPartitionErrorOnAddPartitions`.
     #[tokio::test]
     async fn test_handling_of_unknown_topic_partition_error_on_add_partitions() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13478,8 +13404,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed`
-    /// (Java 2574-2585).
+    /// `TransactionManagerTest#shouldNotAddPartitionsToTransactionWhenTopicAuthorizationFailed`.
     #[tokio::test]
     async fn should_not_add_partitions_to_transaction_when_topic_authorization_failed() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13502,7 +13427,7 @@ mod tests {
         assert!(!manager.lock().unwrap().transaction_contains_partition(&tp0));
     }
 
-    /// `prepareGroupMetadataCommit(Runnable)` (Java 2684-2710).
+    /// `prepareGroupMetadataCommit(Runnable)`.
     ///
     /// `prepare_txn_commit_response` stands in for Java's `Runnable`: it is invoked at
     /// the same point, between the `FindCoordinator` response being prepared and the two
@@ -13544,8 +13469,7 @@ mod tests {
         add_offsets_result
     }
 
-    /// Translated from `TransactionManagerTest.testSendOffsetsWithGroupMetadata`
-    /// (Java 2643-2663).
+    /// Translated from `TransactionManagerTest#testSendOffsetsWithGroupMetadata`.
     #[tokio::test]
     async fn test_send_offsets_with_group_metadata() {
         let mut ctx = txn_mgr_test_context(false);
@@ -13591,8 +13515,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled`
-    /// (Java 2666-2682).
+    /// `TransactionManagerTest#testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled`.
     ///
     /// Java caps the *client's* `TXN_OFFSET_COMMIT` at v2 with
     /// `client.setNodeApiVersions(..)`, so `NetworkClient` refuses to send the v3+
@@ -13655,8 +13578,7 @@ mod tests {
         )
     }
 
-    /// Translated from `TransactionManagerTest.testNoDrainWhenPartitionsPending`
-    /// (Java 2712-2743).
+    /// Translated from `TransactionManagerTest#testNoDrainWhenPartitionsPending`.
     #[tokio::test]
     async fn test_no_drain_when_partitions_pending() {
         let mut ctx = txn_mgr_test_context(false);
@@ -13690,8 +13612,7 @@ mod tests {
         assert!(!manager.lock().unwrap().has_error());
     }
 
-    /// Translated from `TransactionManagerTest.testAllowDrainInAbortableErrorState`
-    /// (Java 2746-2772).
+    /// Translated from `TransactionManagerTest#testAllowDrainInAbortableErrorState`.
     #[tokio::test]
     async fn test_allow_drain_in_abortable_error_state() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13739,8 +13660,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testRaiseErrorWhenNoPartitionsPendingOnDrain`
-    /// (Java 2775-2808).
+    /// `TransactionManagerTest#testRaiseErrorWhenNoPartitionsPendingOnDrain`.
     #[tokio::test]
     async fn test_raise_error_when_no_partitions_pending_on_drain() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13788,8 +13708,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.resendFailedProduceRequestAfterAbortableError`
-    /// (Java 2811-2829).
+    /// `TransactionManagerTest#resendFailedProduceRequestAfterAbortableError`.
     #[tokio::test]
     async fn resend_failed_produce_request_after_abortable_error() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13883,8 +13802,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testTransitionToAbortableErrorOnBatchExpiry`
-    /// (Java 2832-2867).
+    /// `TransactionManagerTest#testTransitionToAbortableErrorOnBatchExpiry`.
     #[tokio::test]
     async fn test_transition_to_abortable_error_on_batch_expiry() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13932,8 +13850,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testTransitionToAbortableErrorOnMultipleBatchExpiry`
-    /// (Java 2870-2921).
+    /// `TransactionManagerTest#testTransitionToAbortableErrorOnMultipleBatchExpiry`.
     #[tokio::test]
     async fn test_transition_to_abortable_error_on_multiple_batch_expiry() {
         use crate::producer::internals::ProducerTestUtils;
@@ -13990,8 +13907,7 @@ mod tests {
         assert!(manager.lock().unwrap().has_abortable_error());
     }
 
-    /// Translated from `TransactionManagerTest.testDropCommitOnBatchExpiry`
-    /// (Java 2924-2976).
+    /// Translated from `TransactionManagerTest#testDropCommitOnBatchExpiry`.
     #[tokio::test]
     async fn test_drop_commit_on_batch_expiry() {
         use crate::producer::internals::ProducerTestUtils;
@@ -14048,7 +13964,9 @@ mod tests {
         // — the abortable wrapper carries the timeout as its cause, so only the
         // wrapper's own code is asserted here.
         //
-        // AK 4.3.1 `TransactionManagerTest.java:2986` additionally asserts the commit
+        // AK 4.3.1
+        // `org.apache.kafka.clients.producer.internals.TransactionManagerTest#testDropCommitOnBatchExpiry`
+        // additionally asserts the commit
         // result's cause message contains `SENDER_TIMEOUT_MSG`
         // (`timeoutEx2.getMessage().contains(SENDER_TIMEOUT_MSG)`). The wrapper's *own*
         // message cannot carry it: batch expiry flows through
@@ -14096,8 +14014,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testTransitionToFatalErrorWhenRetriedBatchIsExpired`
-    /// (Java 2979-3036).
+    /// `TransactionManagerTest#testTransitionToFatalErrorWhenRetriedBatchIsExpired`.
     ///
     /// Java's `apiVersions.update("0", ..)` caps `INIT_PRODUCER_ID` at v1 and `PRODUCE`
     /// at v7. Only the first is load-bearing here — it is what makes
@@ -14164,8 +14081,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testEpochUpdateAfterBumpFromEndTxnResponseInV2`
-    /// (Java 3191-3215).
+    /// `TransactionManagerTest#testEpochUpdateAfterBumpFromEndTxnResponseInV2`.
     #[tokio::test]
     async fn test_epoch_update_after_bump_from_end_txn_response_in_v2() {
         use crate::producer::internals::ProducerTestUtils;
@@ -14212,8 +14128,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2`
-    /// (Java 3218-3241).
+    /// `TransactionManagerTest#testProducerIdAndEpochUpdateAfterOverflowFromEndTxnResponseInV2`.
     #[tokio::test]
     async fn test_producer_id_and_epoch_update_after_overflow_from_end_txn_response_in_v2() {
         use crate::producer::internals::ProducerTestUtils;
@@ -14258,8 +14173,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testAbortTransactionAndReuseSequenceNumberOnError`
-    /// (Java 3269-3322).
+    /// `TransactionManagerTest#testAbortTransactionAndReuseSequenceNumberOnError`.
     ///
     /// Java's `apiVersions.update("0", ..)` caps `INIT_PRODUCER_ID` at v1, `END_TXN` at
     /// v4 and `PRODUCE` at v7. The first is load-bearing (no epoch-bump support, so the
@@ -14349,8 +14263,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testAbortTransactionAndResetSequenceNumberOnUnknownProducerId`
-    /// (Java 3325-3391).
+    /// `TransactionManagerTest#testAbortTransactionAndResetSequenceNumberOnUnknownProducerId`.
     ///
     /// See [`test_abort_transaction_and_reuse_sequence_number_on_error`] for which of
     /// Java's three `apiVersions` caps are load-bearing.
@@ -14571,18 +14484,11 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testBumpTransactionalEpochOnAbortableError`
-    /// (Java 3395-3438).
+    /// `TransactionManagerTest#testBumpTransactionalEpochOnAbortableError`.
     ///
     /// Java declares this `@ParameterizedTest` over `@ValueSource(booleans = {true,
     /// false})`, but the `transactionV2Enabled` parameter is **never read in the body** —
-    /// it appears exactly once in the method, in the signature:
-    ///
-    /// ```text
-    /// $ awk 'NR>=3395{print; if($0=="    }")exit}' TransactionManagerTest.java \
-    ///     | grep -c transactionV2Enabled
-    /// 1
-    /// ```
+    /// it appears exactly once in the method, in the signature.
     ///
     /// So Java's two runs are identical: the manager `setup()` built is used unchanged and
     /// is Transaction V1 in both. One Rust test therefore covers both parameterisations,
@@ -14594,16 +14500,14 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testBumpTransactionalEpochOnUnknownProducerIdError`
-    /// (Java 3441-3485).
+    /// `TransactionManagerTest#testBumpTransactionalEpochOnUnknownProducerIdError`.
     #[tokio::test]
     async fn test_bump_transactional_epoch_on_unknown_producer_id_error() {
         let mut ctx = txn_mgr_test_context(false);
         run_bump_transactional_epoch(&mut ctx, 1, 2, FailThirdProduce::UnknownProducerId).await;
     }
 
-    /// Translated from `TransactionManagerTest.testBumpTransactionalEpochOnTimeout`
-    /// (Java 3488-3544).
+    /// Translated from `TransactionManagerTest#testBumpTransactionalEpochOnTimeout`.
     #[tokio::test]
     async fn test_bump_transactional_epoch_on_timeout() {
         let mut ctx = txn_mgr_test_context(false);
@@ -14611,8 +14515,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError`
-    /// (Java 3567-3597).
+    /// `TransactionManagerTest#testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError`.
     #[tokio::test]
     async fn test_bump_transactional_epoch_on_recoverable_add_offsets_request_error() {
         use crate::producer::internals::ProducerTestUtils;
@@ -14668,8 +14571,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `TransactionManagerTest.testTransactionAbortableExceptionInEndTxn`
-    /// (Java 3925-3947).
+    /// `TransactionManagerTest#testTransactionAbortableExceptionInEndTxn`.
     #[tokio::test]
     async fn test_transaction_abortable_error_in_end_txn() {
         use crate::producer::internals::ProducerTestUtils;
@@ -14717,14 +14619,14 @@ mod tests {
     /// `has_incomplete_batches` until `max.block.ms`.
     ///
     /// The Java chain under test: `Sender.failBatch` →
-    /// `TransactionManager.handleFailedBatch` (`TransactionManager.java:788`)
-    /// → `TxnPartitionMap.adjustSequencesDueToFailedBatch` (`:818`) rewrites
+    /// `TransactionManager#handleFailedBatch`
+    /// → `TxnPartitionMap#adjustSequencesDueToFailedBatch` rewrites
     /// every later batch's sequence down by the failed batch's record count,
     /// so the pipelined follow-up that was rejected with
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER` retries into the gap and succeeds
     /// (asserted on the wire via the sequence-pinning matcher); with all
     /// batches resolved, `nextRequest` dequeues the EndTxn and
-    /// `maybeTerminateRequestWithError` (`:1174`) fails the pending commit
+    /// `TransactionManager#maybeTerminateRequestWithError` fails the pending commit
     /// with `lastError` promptly. Regression shape: the Rust call site passed
     /// an empty batch pool to `handle_failed_batch`, so the follow-up kept
     /// its stale sequence and retried `OUT_OF_ORDER_SEQUENCE_NUMBER` forever.
@@ -14846,7 +14748,7 @@ mod tests {
     // (the "STILL OWED (11)" list in the accounting block above)
     // =====================================================================
 
-    /// `SenderTest.doInitTransactions(txnManager, producerIdAndEpoch)` (Java 3923-3933).
+    /// `SenderTest.doInitTransactions(txnManager, producerIdAndEpoch)`.
     ///
     /// Differs from [`run_init_transactions`] only in taking the producer id and epoch;
     /// that one is the `13131` / `1` specialisation `TransactionManagerTest` uses.
@@ -14882,7 +14784,7 @@ mod tests {
         result
     }
 
-    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)` (Java 2873-2878).
+    /// `SenderTest.addPartitionToTxn(sender, txnManager, tp)`.
     ///
     /// Unlike [`begin_transaction_with_partition`] this does **not** begin the
     /// transaction — Java's helper only adds the partition to an already-begun one.
@@ -14902,7 +14804,7 @@ mod tests {
         assert!(!ctx.sender.has_in_flight_request());
     }
 
-    /// `SenderTest.respondToProduce(tp, error, offset)` (Java 2880-2886).
+    /// `SenderTest.respondToProduce(tp, error, offset)`.
     fn respond_to_produce(ctx: &mut SenderTestContext, tp: &TopicPartition, error: Errors, offset: i64) {
         use crate::common::requests::AbstractRequest;
 
@@ -14911,7 +14813,7 @@ mod tests {
         ctx.sender.client_mut().respond_matcher(matcher, response);
     }
 
-    /// `SenderTest.respondToEndTxn(error)` (Java 2888-2895).
+    /// `SenderTest.respondToEndTxn(error)`.
     fn respond_to_end_txn(ctx: &mut SenderTestContext, error: Errors) {
         use crate::common::requests::AbstractRequest;
 
@@ -14919,7 +14821,7 @@ mod tests {
         ctx.sender.client_mut().respond_matcher(matcher, end_txn_response(error));
     }
 
-    /// `SenderTest.assertFutureFailure(future, Class)` (Java 3944-3954).
+    /// `SenderTest.assertFutureFailure(future, Class)`.
     async fn assert_future_failure(future: &Arc<FutureRecordMetadata>, expected: Errors) {
         assert!(future.is_done());
         let error = future.get().await.expect_err("Future should have raised");
@@ -14930,8 +14832,8 @@ mod tests {
     /// the given `linger.ms` / retry count, mirroring the bespoke `TransactionManager` +
     /// `setupWithTransactionState(..)` pairs the `SenderTest` transactional group builds.
     ///
-    /// Java's `setupWithTransactionState` overloads vary exactly these three things
-    /// (Java 3821-3835), and the manager is always built with `transactionTimeoutMs =
+    /// Java's `setupWithTransactionState` overloads vary exactly these three things,
+    /// and the manager is always built with `transactionTimeoutMs =
     /// 60000` and `retryBackoffMs = 100` — except `testTransactionShouldTransitionToAbortableForSenderAPI`,
     /// which passes `RETRY_BACKOFF_MS`.
     fn sender_test_transactional_context(
@@ -14987,7 +14889,7 @@ mod tests {
         )
     }
 
-    /// Translated from `SenderTest.testUnresolvedSequencesAreNotFatal` (Java 1534-1572).
+    /// Translated from `SenderTest#testUnresolvedSequencesAreNotFatal`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testUnresolvedSequencesAreNotFatal")]
     async fn test_unresolved_sequences_are_not_fatal() {
@@ -15033,11 +14935,10 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
-    /// (Java 1820-1881).
+    /// `SenderTest#testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`.
     ///
     /// This is the only test in the tree that drives the *transactional* log-truncation
-    /// branch of `TransactionManager.canRetry` (`TransactionManager.java:1042-1050`).
+    /// branch of `TransactionManager#canRetry`.
     /// It was `#[ignore]`d on PLAN §9.25 while `Sender::can_retry` handed that branch an
     /// **empty** batch pool — `start_sequences_at_beginning` then failed on the tracked
     /// in-flight batch it was not given, the error was swallowed by the per-response
@@ -15119,8 +15020,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testRecordsFlushedImmediatelyOnTransactionCompletion`
-    /// (Java 2771-2826).
+    /// `SenderTest#testRecordsFlushedImmediatelyOnTransactionCompletion`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testRecordsFlushedImmediatelyOnTransactionCompletion"
@@ -15181,8 +15081,7 @@ mod tests {
         assert!(!ctx.accumulator.has_undrained());
     }
 
-    /// Translated from `SenderTest.testAwaitPendingRecordsBeforeCommittingTransaction`
-    /// (Java 2829-2871).
+    /// Translated from `SenderTest#testAwaitPendingRecordsBeforeCommittingTransaction`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testAwaitPendingRecordsBeforeCommittingTransaction"
@@ -15229,8 +15128,8 @@ mod tests {
         }
     }
 
-    /// The shared body of `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
-    /// (Java 3051-3101), a `@ParameterizedTest` over
+    /// The shared body of `SenderTest#testTransactionShouldTransitionToAbortableForSenderAPI`, a
+    /// `@ParameterizedTest` over
     /// `@EnumSource(names = {"COORDINATOR_LOAD_IN_PROGRESS", "INVALID_TXN_STATE"})`.
     async fn run_transaction_should_transition_to_abortable_for_sender_api(error: Errors) {
         // Java builds the manager with `RETRY_BACKOFF_MS` here rather than the usual 100,
@@ -15301,25 +15200,24 @@ mod tests {
         );
     }
 
-    /// Translated from
-    /// `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
-    /// (Java 3051-3101), the `COORDINATOR_LOAD_IN_PROGRESS` parameterisation.
+    /// Translated from `SenderTest#testTransactionShouldTransitionToAbortableForSenderAPI`, the
+    /// `COORDINATOR_LOAD_IN_PROGRESS` parameterisation.
     #[tokio::test]
     async fn test_transaction_should_transition_to_abortable_for_sender_api_coordinator_load_in_progress() {
         run_transaction_should_transition_to_abortable_for_sender_api(Errors::CoordinatorLoadInProgress).await;
     }
 
     /// Translated from
-    /// `SenderTest.testTransactionShouldTransitionToAbortableForSenderAPI`
-    /// (Java 3051-3101), the `INVALID_TXN_STATE` parameterisation.
+    /// `SenderTest#testTransactionShouldTransitionToAbortableForSenderAPI`, the `INVALID_TXN_STATE` parameterisation.
     #[tokio::test]
     async fn test_transaction_should_transition_to_abortable_for_sender_api_invalid_txn_state() {
         run_transaction_should_transition_to_abortable_for_sender_api(Errors::InvalidTxnState).await;
     }
 
-    /// The tail the three `SenderTest` abortable-error entries share (Java 3155-3173,
-    /// 3200-3212, 3239-3251): abort, answer the `EndTxn`, re-acquire a producer id, then
-    /// prove a new transaction can begin.
+    /// The tail the three `SenderTest` abortable-error entries share
+    /// (`testReceiveFailedBatchTwiceWithTransactions`, `testInvalidTxnStateIsAnAbortableError`,
+    /// `testTransactionAbortableExceptionIsAnAbortableError`): abort, answer the `EndTxn`, re-acquire a
+    /// producer id, then prove a new transaction can begin.
     async fn abort_and_reinitialize(
         ctx: &mut SenderTestContext,
         result: &Arc<TransactionalRequestResult>,
@@ -15345,8 +15243,7 @@ mod tests {
         begin_transaction(ctx);
     }
 
-    /// Translated from `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
-    /// (Java 3126-3173).
+    /// Translated from `SenderTest#testReceiveFailedBatchTwiceWithTransactions`.
     ///
     /// # The "twice", and how it is reached here
     ///
@@ -15357,7 +15254,7 @@ mod tests {
     /// `client.disconnect(node, allowLateResponses = true)` to retain the request.
     ///
     /// That mechanism does not port. Java's routing rides on the request:
-    /// `ClientRequest.callback()` (`ClientRequest.java:104-105`) is a getter, so the
+    /// `org.apache.kafka.clients.ClientRequest#callback` is a getter, so the
     /// disconnect response and the late one share one `RequestCompletionHandler` and
     /// `ClientResponse.onComplete` fires it both times. This port routes produce responses
     /// by correlation id through [`Sender::pending_produce_responses`], which the first
@@ -15452,16 +15349,14 @@ mod tests {
         abort_and_reinitialize(&mut ctx, &result, producer_id_and_epoch).await;
     }
 
-    /// Translated from `SenderTest.testInvalidTxnStateIsAnAbortableError`
-    /// (Java 3176-3212).
+    /// Translated from `SenderTest#testInvalidTxnStateIsAnAbortableError`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.SenderTest#testInvalidTxnStateIsAnAbortableError")]
     async fn test_invalid_txn_state_is_an_abortable_error() {
         run_abortable_produce_error(Errors::InvalidTxnState, "testInvalidTxnState").await;
     }
 
-    /// Translated from `SenderTest.testTransactionAbortableExceptionIsAnAbortableError`
-    /// (Java 3215-3251).
+    /// Translated from `SenderTest#testTransactionAbortableExceptionIsAnAbortableError`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testTransactionAbortableExceptionIsAnAbortableError"
@@ -15501,8 +15396,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `SenderTest.testAbortableErrorIsConvertedToFatalErrorDuringAbort`
-    /// (Java 3254-3305).
+    /// `SenderTest#testAbortableErrorIsConvertedToFatalErrorDuringAbort`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.internals.SenderTest#testAbortableErrorIsConvertedToFatalErrorDuringAbort"
@@ -15587,7 +15481,9 @@ mod tests {
             last_error.message(),
             "Could not execute transactional request for unknown reasons"
         );
-        // Java `TransactionManager.java:1424` throws a BARE `KafkaException`, so
+        // Java's
+        // `org.apache.kafka.clients.producer.internals.TransactionManager.TxnRequestHandler#onComplete`
+        // throws a BARE `KafkaException`, so
         // `is_kafka_error()` is `true` and `is_api_error()` is `false`.
         assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
         assert!(last_error.is_kafka_error(), "Java throws KafkaException here");

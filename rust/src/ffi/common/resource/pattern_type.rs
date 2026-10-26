@@ -46,7 +46,7 @@ pub enum kafka_common_resource_PatternType_e {
     kafka_common_resource_PatternType_PREFIXED,
 }
 
-/// One static instance per value, indexed by [`kafka_common_resource_PatternType_e`].
+/// One static instance per value, indexed by `kafka_common_resource_PatternType_e`.
 static VARIANTS: [PatternType; 5] = [
     PatternType::Unknown,
     PatternType::Any,
@@ -85,6 +85,10 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_resource_PatternType_t)
 }
 
 /// `PatternType.UNKNOWN`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_unknown() -> *const kafka_common_resource_PatternType_t {
@@ -92,6 +96,10 @@ pub extern "C" fn kafka_common_resource_PatternType_unknown() -> *const kafka_co
 }
 
 /// `PatternType.ANY`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_any() -> *const kafka_common_resource_PatternType_t {
@@ -99,6 +107,10 @@ pub extern "C" fn kafka_common_resource_PatternType_any() -> *const kafka_common
 }
 
 /// `PatternType.MATCH`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_match() -> *const kafka_common_resource_PatternType_t {
@@ -106,6 +118,10 @@ pub extern "C" fn kafka_common_resource_PatternType_match() -> *const kafka_comm
 }
 
 /// `PatternType.LITERAL`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_literal() -> *const kafka_common_resource_PatternType_t {
@@ -113,13 +129,17 @@ pub extern "C" fn kafka_common_resource_PatternType_literal() -> *const kafka_co
 }
 
 /// `PatternType.PREFIXED`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_prefixed() -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::Prefixed)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_resource_PatternType_UNKNOWN`.
 ///
@@ -136,14 +156,13 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `code()`: the wire-protocol byte.
-///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
+/// Returns the code of this resource.
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+// A caught Rust panic returns -1, which is no code of this Java `byte` enum: its 0 is the
+// valid `UNKNOWN`.
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_code(
@@ -154,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_code(
     unsafe { value_of(self_) }.code()
 }
 
-/// `isUnknown()`: whether this is the `UNKNOWN` value.
+/// Returns 1 if this pattern type is UNKNOWN, else 0.
 ///
 /// # Safety
 ///
@@ -169,8 +188,12 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_unknown(
     i8::from(unsafe { value_of(self_) }.is_unknown())
 }
 
-/// `isSpecific()`: whether the value names a concrete pattern type rather
-/// than a filter (`ANY`, `MATCH`, `UNKNOWN`).
+/// `isSpecific()`.
+///
+/// # Returns
+///
+/// 1 if this resource pattern type is a concrete type, rather than UNKNOWN or one of the filter
+/// types, else 0.
 ///
 /// # Safety
 ///
@@ -185,17 +208,30 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_is_specific(
     i8::from(unsafe { value_of(self_) }.is_specific())
 }
 
-/// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
-/// for one this client does not know.
+/// Return the PatternType with the provided code or `UNKNOWN` if one cannot be found.
+///
+/// # Parameters
+///
+/// - `code` - The wire-protocol code.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_from_code(code: i8) -> *const kafka_common_resource_PatternType_t {
     singleton(PatternType::from_code(code))
 }
 
-/// `PatternType.values()`: an owned list of the borrowed singletons in
-/// declaration order, freed with `kafka_List_destroy` (the elements are
-/// never freed).
+/// `PatternType.values()`.
+///
+/// # Returns
+///
+/// The singletons in declaration order.
+///
+/// # Safety
+///
+/// The returned list is owned, freed with `kafka_List_destroy`; its elements are statics, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_PatternType_values() -> *mut kafka_List_t {
@@ -203,8 +239,15 @@ pub extern "C" fn kafka_common_resource_PatternType_values() -> *mut kafka_List_
     box_list(elements, None)
 }
 
-/// `fromString(String)`: the singleton named by `name` (Java's constant name),
-/// `UNKNOWN` for any other string.
+/// Return the PatternType with the provided name or `UNKNOWN` if one cannot be found.
+///
+/// # Parameters
+///
+/// - `name` - The constant's name.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 ///
 /// # Safety
 ///
@@ -220,12 +263,12 @@ pub unsafe extern "C" fn kafka_common_resource_PatternType_from_string(
     singleton(PatternType::from_string(&unsafe { c_str_to_string(name) }))
 }
 
-/// `toString()`: Java's constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the constant's name.
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_PatternType_to_string(

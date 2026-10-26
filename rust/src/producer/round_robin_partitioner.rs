@@ -30,13 +30,14 @@ use crate::producer::Partitioner;
 /// writes to all partitions equally. This is the behaviour regardless of record
 /// key hash.
 ///
-/// The record key (if present) is ignored: the partitioner cycles through the
-/// topic's partitions in order, choosing only from partitions that currently
-/// have a leader (available partitions), so a leaderless partition is skipped.
-///
-/// A single instance is shared by the producer across tasks, so the per-topic
-/// counter is an [`AtomicI32`] inside a concurrent map — the direct translation
-/// of Java's `ConcurrentMap<String, AtomicInteger>`.
+//
+// The record key (if present) is ignored: the partitioner cycles through the
+// topic's partitions in order, choosing only from partitions that currently
+// have a leader (available partitions), so a leaderless partition is skipped.
+//
+// A single instance is shared by the producer across tasks, so the per-topic
+// counter is an `AtomicI32` inside a concurrent map, the direct translation of
+// Java's `ConcurrentMap<String, AtomicInteger>`.
 #[derive(Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.producer.RoundRobinPartitioner")]
 pub struct RoundRobinPartitioner {
@@ -72,21 +73,18 @@ impl RoundRobinPartitioner {
 }
 
 impl<K, V> Partitioner<K, V> for RoundRobinPartitioner {
-    /// Compute the partition for the given record.
-    ///
-    /// If there are available (leader-having) partitions for the topic, the next
-    /// counter value picks one of them round-robin; otherwise it falls back to
-    /// the full partition count. The key/value are ignored.
-    ///
-    /// # Precondition / panics
-    ///
-    /// When the topic has **no** partitions at all in `cluster`, the fallback
-    /// `Utils::to_positive(next) % 0` divides by zero — Java's identical code throws
-    /// `ArithmeticException` there. This is unreachable from
-    /// [`KafkaProducer`](crate::producer::KafkaProducer): `wait_on_metadata`
-    /// guarantees the topic has partitions before `partition` is called. Per
-    /// CLAUDE.md §12.1 this class of panic (division by zero) is acceptable, so
-    /// the `i32` return type is preserved rather than made fallible.
+    // Compute the partition for the given record.
+    //
+    // If there are available (leader-having) partitions for the topic, the next
+    // counter value picks one of them round-robin; otherwise it falls back to
+    // the full partition count. The key/value are ignored.
+    //
+    // Panics: when the topic has no partitions at all in `cluster`, the
+    // fallback `Utils::to_positive(next) % 0` divides by zero; Java's identical
+    // code throws `ArithmeticException` there. This is unreachable from
+    // `KafkaProducer`: `wait_on_metadata` guarantees the topic has partitions
+    // before `partition` is called. Per CLAUDE.md §12.1 a division by zero may
+    // panic, so the `i32` return type is preserved rather than made fallible.
     fn partition(
         &self,
         topic: &str,

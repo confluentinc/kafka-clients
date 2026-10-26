@@ -80,11 +80,17 @@ impl MetricsShared {
 
 /// A registry of sensors and metrics.
 ///
-/// A metrics registry is a global repository of metrics and sensors. Sensors
-/// apply a sequence of values to associated metrics. This is the consumer-
-/// relevant subset of Java's `Metrics`; JMX, the sensor-expiry scheduler thread,
-/// and quota machinery are omitted (the expiry mechanism is exposed via
-/// `Metrics::expire_sensors`, crate-private, so tests can drive it explicitly).
+/// A metric is a named, numerical measurement. A sensor is a handle to record
+/// numerical measurements as they occur. Each [`Sensor`] has zero or more
+/// associated metrics. For example, a [`Sensor`] might represent message sizes,
+/// and we might associate with this sensor a metric for the average, maximum,
+/// or other statistics computed off the sequence of message sizes that are
+/// recorded by the sensor.
+///
+/// # Translation notes
+///
+/// The subset of Java's `Metrics` the clients use: JMX, the sensor-expiry
+/// task and the quota machinery are omitted.
 #[doc(alias = "org.apache.kafka.common.metrics.Metrics")]
 pub struct Metrics {
     config: Arc<MetricConfig>,
@@ -100,12 +106,11 @@ pub struct Metrics {
 /// The parameters of [`Metrics::sensor_with_options`].
 ///
 /// Java's widest `sensor` overload
-/// (`sensor(String, MetricConfig, long, Sensor.RecordingLevel, Sensor...)`,
-/// `Metrics.java:401`) carries four parameters beyond the overload group's
-/// `{name}` intersection, so CLAUDE.md §2 caps the derived name and makes this
-/// struct the method's *only* parameter — every Java parameter lives here,
-/// `name` included. This struct has no Java counterpart: it exists solely to
-/// satisfy that naming rule (DoD #7).
+/// (`sensor(String, MetricConfig, long, Sensor.RecordingLevel, Sensor...)`)
+/// carries four parameters beyond the overload group's `{name}` intersection,
+/// so the overload naming rule makes this struct the method's *only* parameter:
+/// every Java parameter lives here, `name` included. This struct has no Java
+/// counterpart: it exists solely to satisfy that naming rule.
 ///
 /// It is `#[non_exhaustive]`, so build it from [`SensorOptionsBuilder::new`]
 /// and set the fields you need. Every other field's initial value is Java's —
@@ -125,24 +130,24 @@ pub struct SensorOptions<'a> {
     /// Java's `name`, the sensor's unique registry key.
     pub(crate) name: &'a str,
     /// Java's `config`. Starts as `None`, meaning the registry's own config,
-    /// as in `Metrics.java:325,336,348,360`.
+    /// as Java's narrower `sensor` overloads pass.
     pub(crate) config: Option<Arc<MetricConfig>>,
     /// Java's `inactiveSensorExpirationTimeSeconds`. Starts as `i64::MAX`, as
-    /// in `Metrics.java:325,336,348,360,372,386`.
+    /// Java's narrower `sensor` overloads pass.
     pub(crate) inactive_sensor_expiration_time_seconds: i64,
-    /// Java's `recordingLevel`. Starts as `INFO`, as in
-    /// `Metrics.java:325,348,372,427`.
+    /// Java's `recordingLevel`. Starts as `INFO`, as Java's narrower `sensor`
+    /// overloads pass.
     pub(crate) recording_level: RecordingLevel,
-    /// Java's `parents` varargs. Starts empty, as in `Metrics.java:325,336`.
+    /// Java's `parents` varargs. Starts empty, as Java's narrower `sensor`
+    /// overloads pass.
     pub(crate) parents: &'a [Arc<Sensor>],
 }
 
 /// Fluent builder for [`SensorOptions`].
 ///
-/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
-/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
-/// [`Error::LocalIllegalArgument`] if they were not set. Like [`SensorOptions`] it has no Java counterpart and
-/// exists solely to satisfy that naming rule (DoD #7).
+/// [`Self::new`] takes no parameters, every parameter has a fluent setter,
+/// and [`Self::build`] validates the mandatory ones — returning
+/// [`Error::LocalIllegalArgument`] if they were not set.
 #[derive(Debug)]
 // builds SensorOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
@@ -174,27 +179,67 @@ impl<'a> SensorOptionsBuilder<'a> {
     }
 
     /// Sets `SensorOptions::name`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the sensor's unique name
+    ///
+    /// # Returns
+    ///
+    /// This builder, for chaining.
     pub fn set_name(mut self, name: &'a str) -> Self {
         self.name = Some(name);
         self
     }
     /// Sets `SensorOptions::config`.
+    ///
+    /// # Arguments
+    ///
+    /// - `config` - the sensor's default config, `None` for the registry's
+    ///
+    /// # Returns
+    ///
+    /// This builder, for chaining.
     pub fn set_config(mut self, config: Option<Arc<MetricConfig>>) -> Self {
         self.config = config;
         self
     }
     /// Sets `SensorOptions::inactive_sensor_expiration_time_seconds`.
+    ///
+    /// # Arguments
+    ///
+    /// - `inactive_sensor_expiration_time_seconds` - how long the sensor may go without a recording before it can be removed
+    ///
+    /// # Returns
+    ///
+    /// This builder, for chaining.
     pub fn set_inactive_sensor_expiration_time_seconds(mut self, inactive_sensor_expiration_time_seconds: i64) -> Self {
         self.inactive_sensor_expiration_time_seconds = inactive_sensor_expiration_time_seconds;
         self
     }
     /// Sets `SensorOptions::recording_level`.
+    ///
+    /// # Arguments
+    ///
+    /// - `recording_level` - the sensor's recording level
+    ///
+    /// # Returns
+    ///
+    /// This builder, for chaining.
     pub fn set_recording_level(mut self, recording_level: RecordingLevel) -> Self {
         self.recording_level = recording_level;
         self
     }
     /// Sets `SensorOptions::parents`.
+    ///
+    /// # Arguments
+    ///
+    /// - `parents` - the parent sensors
+    ///
+    /// # Returns
+    ///
+    /// This builder, for chaining.
     pub fn set_parents(mut self, parents: &'a [Arc<Sensor>]) -> Self {
         self.parents = parents;
         self
@@ -202,8 +247,8 @@ impl<'a> SensorOptionsBuilder<'a> {
 
     /// Returns the built options.
     ///
-    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
-    /// being named in the constructor, so a later Java version that makes one of
+    /// The mandatory parameters are validated here rather than being named in
+    /// the constructor, so a later Java version that makes one of
     /// them optional changes the set this accepts instead of adding a second
     /// constructor. Today there is one mandatory set: `name`.
     ///
@@ -211,8 +256,7 @@ impl<'a> SensorOptionsBuilder<'a> {
     ///
     /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
     /// set which was not given a setter call. Only presence is checked here;
-    /// semantic validation belongs to the method the options are passed to
-    /// (CLAUDE.md §2).
+    /// semantic validation belongs to the method the options are passed to.
     pub fn build(self) -> Result<SensorOptions<'a>, Error> {
         Ok(SensorOptions {
             name: self.name.ok_or_else(|| Self::missing("name"))?,
@@ -233,7 +277,7 @@ impl<'a> SensorOptionsBuilder<'a> {
 }
 
 impl std::fmt::Debug for Metrics {
-    /// How many sensors and metrics the registry holds, not their state.
+    // How many sensors and metrics the registry holds, not their state.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sensors = self.sensors.lock().expect("sensors mutex poisoned").len();
         let metrics = self.shared.metrics.lock().expect("metrics mutex poisoned").len();
@@ -245,49 +289,50 @@ impl std::fmt::Debug for Metrics {
 }
 
 impl Metrics {
-    // Java's `Metrics` constructors (`Metrics.java:85,93,101,111,122,134,145,158`)
-    // have an EMPTY parameter-name intersection, and the no-arg `:85` matches it,
-    // so that one keeps the plain name `new` and every sibling is suffixed with
-    // its full Rust parameter list (CLAUDE.md §2). The two `MetricsContext`
-    // overloads (`:134`, `:158`) are not translated — `MetricsContext` itself is
-    // untranslated.
+    // Java's `Metrics` constructors have an EMPTY parameter-name intersection,
+    // and the no-arg `Metrics()` matches it, so that one keeps the plain name
+    // `new` and every sibling is suffixed with its full Rust parameter list
+    // (CLAUDE.md §2). The two `MetricsContext` overloads are not translated —
+    // `MetricsContext` itself is untranslated.
     //
-    // `Metrics(defaultConfig, reporters, time, boolean enableExpiration)` (`:145`)
-    // is likewise not translated. Its one distinguishing parameter exists solely to
+    // `Metrics(defaultConfig, reporters, time, boolean enableExpiration)` is
+    // likewise not translated. Its one distinguishing parameter exists solely to
     // decide whether the constructor starts a `ScheduledThreadPoolExecutor` running
-    // `ExpireSensorTask` every 30s (`:171-176`); it does not gate whether sensors
-    // *can* expire — Java's own `MetricsTest.testRemoveInactiveMetrics` builds a
-    // `Metrics` through the `enableExpiration = false` path (`:122` passes `false`)
-    // and drives the task by hand. This translation has no scheduler at all: it
+    // `ExpireSensorTask` every 30s; it does not gate whether sensors *can* expire
+    // — Java's own `MetricsTest.testRemoveInactiveMetrics` builds a `Metrics`
+    // through the `enableExpiration = false` path (the
+    // `Metrics(defaultConfig, reporters, time)` overload passes `false`) and drives the task by hand. This translation has no scheduler at all: it
     // exposes the task as `expire_sensors()` (below) for the caller to drive, which
     // is exactly that Java test's shape. So a Rust `enable_expiration` parameter
     // would select nothing, and an ignored parameter is a worse contract than an
     // absent overload.
 
     /// Create a metrics repository with the supplied default config and clock,
-    /// no reporters. Mirrors Java's `Metrics(MetricConfig defaultConfig, Time time)`
-    /// (`:101`).
+    /// no reporters.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub(crate) fn with_default_config_time(default_config: Arc<MetricConfig>, time: Arc<dyn Time>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), time)
     }
 
     /// Create a metrics repository with a default config, no reporters, and the
-    /// system clock. Mirrors Java's `Metrics()` (`Metrics.java:85`).
+    /// system clock.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn new() -> Self {
         Self::with_default_config_reporters_time(Arc::new(MetricConfig::new()), Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied default config.
-    /// Mirrors Java's `Metrics(MetricConfig defaultConfig)` (`:111`).
+    ///
+    /// # Arguments
+    ///
+    /// - `default_config` - The default config to use for all metrics that don't override their
+    ///   config
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub fn with_default_config(default_config: Arc<MetricConfig>) -> Self {
         Self::with_default_config_reporters_time(default_config, Vec::new(), Arc::new(SystemTime))
     }
 
     /// Create a metrics repository with the supplied clock.
-    /// Mirrors Java's `Metrics(Time time)` (`:93`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     #[cfg_attr(not(test), expect(dead_code))] // translated overload; only tests pass a clock
     pub(crate) fn with_time(time: Arc<dyn Time>) -> Self {
@@ -295,9 +340,6 @@ impl Metrics {
     }
 
     /// Create a metrics repository with a default config, reporters, and clock.
-    /// Mirrors Java's
-    /// `Metrics(MetricConfig defaultConfig, List<MetricsReporter> reporters, Time time)`
-    /// (`:122`).
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#Metrics")]
     pub(crate) fn with_default_config_reporters_time(
         default_config: Arc<MetricConfig>,
@@ -314,8 +356,7 @@ impl Metrics {
             children_sensors: Mutex::new(HashMap::new()),
             time,
         };
-        // Java registers a "count" gauge in kafka-metrics-count group
-        // (`Metrics.java:190-191`). The gauge is stored in the very map it
+        // Java registers a "count" gauge in kafka-metrics-count group. The gauge is stored in the very map it
         // reads, so it holds the shared state weakly: a strong `Arc` would be a
         // cycle keeping the registry, and everything its metrics' providers
         // capture, allocated after the last `Metrics` is dropped (Java's
@@ -343,18 +384,20 @@ impl Metrics {
         metrics
     }
 
-    // Java's five `metricName` overloads (`Metrics.java:194,208,218,231,243`)
-    // intersect on `{name, group}`, and `metricName(String name, String group)`
-    // (`:218`) is exactly that pair — so it keeps the plain name and the others
+    // Java's five `metricName` overloads intersect on `{name, group}`, and
+    // `metricName(String name, String group)` is exactly that pair — so it keeps the plain name and the others
     // are suffixed with their Rust parameters beyond it (CLAUDE.md §2).
 
-    /// Create a `MetricName` with the given name, group, description and tags,
+    /// Returns a `MetricName` with the given name, group, description and tags,
     /// plus default tags specified in the metric configuration. Tags in `tags`
     /// take precedence over default tags with the same key.
     ///
-    /// Mirrors Java's
-    /// `metricName(String name, String group, String description, Map<String, String> tags)`
-    /// (`:194`).
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
+    /// - `description` - A human-readable description to include in the metric
+    /// - `tags` - additional key/value attributes of the metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name_with_description_tags(
         &self,
@@ -368,11 +411,14 @@ impl Metrics {
         MetricName::new(name, group, description, combined)
     }
 
-    /// Create a `MetricName` with the given name, group and description, plus the
+    /// Returns a `MetricName` with the given name, group and description, plus the
     /// default tags specified in the metric configuration.
     ///
-    /// Mirrors Java's `metricName(String name, String group, String description)`
-    /// (`:208`).
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
+    /// - `description` - A human-readable description to include in the metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name_with_description(
         &self,
@@ -383,12 +429,15 @@ impl Metrics {
         self.metric_name_with_description_tags(name, group, description, BTreeMap::new())
     }
 
-    /// Create a `MetricName` with the given name, group and tags, plus the default
+    /// Returns a `MetricName` with the given name, group and tags, plus the default
     /// tags specified in the metric configuration. Tags in `tags` take precedence
     /// over default tags with the same key.
     ///
-    /// Mirrors Java's
-    /// `metricName(String name, String group, Map<String, String> tags)` (`:243`).
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
+    /// - `tags` - additional key/value attributes of the metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name_with_tags(
         &self,
@@ -399,22 +448,29 @@ impl Metrics {
         self.metric_name_with_description_tags(name, group, "", tags)
     }
 
-    /// Create a `MetricName` with name and group (empty description, default tags).
+    /// Returns a `MetricName` with name and group (empty description, default tags).
     ///
-    /// Mirrors Java's `metricName(String name, String group)` (`:218`), whose
-    /// parameters are the group's intersection — hence the plain name.
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name(&self, name: impl Into<String>, group: impl Into<String>) -> MetricName {
         self.metric_name_with_description_tags(name, group, "", BTreeMap::new())
     }
 
-    /// Create a `MetricName` from `key, value` tag pairs, plus default tags.
-    /// Returns an error if the pairs are not in twos (Java
-    /// `IllegalArgumentException`).
+    /// Returns a `MetricName` from `key, value` tag pairs, plus default tags.
     ///
-    /// Mirrors Java's
-    /// `metricName(String name, String group, String description, String... keyValue)`
-    /// (`:231`).
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
+    /// - `description` - A human-readable description to include in the metric
+    /// - `key_value` - additional key/value attributes of the metric (must come in pairs)
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if `key_value` has an odd length
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricName")]
     pub fn metric_name_with_description_key_value(
         &self,
@@ -426,37 +482,72 @@ impl Metrics {
         Ok(self.metric_name_with_description_tags(name, group, description, MetricsUtils::get_tags(key_value)?))
     }
 
-    /// The default config of this registry.
+    /// Returns the default config of this registry.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#config")]
     pub fn config(&self) -> &Arc<MetricConfig> {
         &self.config
     }
 
     /// Get the sensor with the given name if it exists.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor
+    ///
+    /// # Returns
+    ///
+    /// Return the sensor or None if no such sensor exists
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#getSensor")]
     pub fn get_sensor(&self, name: &str) -> Option<Arc<Sensor>> {
         self.sensors.lock().expect("sensors mutex poisoned").get(name).cloned()
     }
 
-    // Java's eight `sensor` overloads (`Metrics.java:325,336,348,360,372,386,401,427`)
-    // intersect on `{name}`, and `sensor(String name)` (`:325`) is exactly that —
-    // so it keeps the plain name and the others name their parameters beyond it
-    // after `_with_` (CLAUDE.md §2). Only `:401` would need more than three
-    // parameters in its name, so it alone takes the `Options` shape: [`SensorOptions`]
-    // is that method's only parameter and carries every Java parameter including
-    // `name`, which is why it is `sensor_with_options`, naming no parameter at
-    // all. `:427` keeps four parameters spelled out because its name needs only
-    // three of them.
+    // Java's eight `sensor` overloads intersect on `{name}`, and
+    // `sensor(String name)` is exactly that — so it keeps the plain name and the
+    // others name their parameters beyond it after `_with_` (CLAUDE.md §2). Only
+    // `sensor(String, MetricConfig, long, RecordingLevel, Sensor...)` would need
+    // more than three parameters in its name, so it alone takes the `Options`
+    // shape: `SensorOptions` is that method's only parameter and carries every
+    // Java parameter including `name`, which is why it is `sensor_with_options`,
+    // naming no parameter at all. `sensor(String, MetricConfig, long, Sensor...)`
+    // keeps four parameters spelled out because its name needs only three of
+    // them.
 
     /// Get or create a sensor with the given unique name and no parents at INFO
-    /// recording level. Mirrors Java's `sensor(String name)` (`:325`).
+    /// recording level.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The sensor name
+    ///
+    /// # Returns
+    ///
+    /// The sensor
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
         self.sensor_with_options(SensorOptionsBuilder::new().set_name(name).build()?)
     }
 
     /// Get or create a sensor with the given name, recording level, and no parents.
-    /// Mirrors Java's `sensor(String name, Sensor.RecordingLevel recordingLevel)` (`:336`).
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The sensor name.
+    /// - `recording_level` - The recording level.
+    ///
+    /// # Returns
+    ///
+    /// The sensor
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_recording_level(
         &self,
@@ -472,16 +563,41 @@ impl Metrics {
     }
 
     /// Get or create a sensor with parents at INFO recording level.
-    /// Mirrors Java's `sensor(String name, Sensor... parents)` (`:348`).
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor
+    /// - `parents` - The parent sensors
+    ///
+    /// # Returns
+    ///
+    /// The sensor that is created
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
         self.sensor_with_options(SensorOptionsBuilder::new().set_name(name).set_parents(parents).build()?)
     }
 
     /// Get or create a sensor with the given name, recording level and parents.
-    /// Mirrors Java's
-    /// `sensor(String name, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
-    /// (`:360`).
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor.
+    /// - `recording_level` - The recording level.
+    /// - `parents` - The parent sensors.
+    ///
+    /// # Returns
+    ///
+    /// The sensor that is created
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_recording_level_parents(
         &self,
@@ -499,8 +615,22 @@ impl Metrics {
     }
 
     /// Get or create a sensor with a config and parents, at INFO recording level.
-    /// Mirrors Java's `sensor(String name, MetricConfig config, Sensor... parents)`
-    /// (`:372`).
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor
+    /// - `config` - A default configuration to use for this sensor for metrics that don't have
+    ///   their own config
+    /// - `parents` - The parent sensors
+    ///
+    /// # Returns
+    ///
+    /// The sensor that is created
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_config_parents(
         &self,
@@ -512,9 +642,23 @@ impl Metrics {
     }
 
     /// Get or create a sensor with a config, recording level and parents.
-    /// Mirrors Java's
-    /// `sensor(String name, MetricConfig config, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
-    /// (`:386`).
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor
+    /// - `config` - A default configuration to use for this sensor for metrics that don't have
+    ///   their own config
+    /// - `recording_level` - The recording level.
+    /// - `parents` - The parent sensors
+    ///
+    /// # Returns
+    ///
+    /// The sensor that is created
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_config_recording_level_parents(
         &self,
@@ -534,9 +678,25 @@ impl Metrics {
     }
 
     /// Get or create a sensor with a config, expiration and parents, at INFO
-    /// recording level. Mirrors Java's
-    /// `sensor(String name, MetricConfig config, long inactiveSensorExpirationTimeSeconds, Sensor... parents)`
-    /// (`:427`).
+    /// recording level.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor
+    /// - `config` - A default configuration to use for this sensor for metrics that don't have
+    ///   their own config
+    /// - `inactive_sensor_expiration_time_seconds` - If no value is recorded on the Sensor for this
+    ///   duration of time, it is eligible for removal
+    /// - `parents` - The parent sensors
+    ///
+    /// # Returns
+    ///
+    /// The sensor that is created
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_config_inactive_sensor_expiration_time_seconds_parents(
         &self,
@@ -557,14 +717,23 @@ impl Metrics {
 
     /// Get or create a sensor with a config, expiration, recording level and parents.
     ///
-    /// Mirrors Java's
-    /// `sensor(String name, MetricConfig config, long inactiveSensorExpirationTimeSeconds, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
-    /// (`:401`). Every parameter, `name` included, is carried by
-    /// [`SensorOptions`] — see the note above this overload group.
+    /// # Arguments
+    ///
+    /// - `options` - every parameter, `name` included
+    ///
+    /// # Returns
+    ///
+    /// The sensor
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the sensor would be its own
+    ///   ancestor
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#sensor")]
     pub fn sensor_with_options(&self, options: SensorOptions<'_>) -> Result<Arc<Sensor>, Error> {
         let SensorOptions { name, config, inactive_sensor_expiration_time_seconds, recording_level, parents } = options;
-        // Java's double-checked locking (`Metrics.java:410-429`): a lock-free
+        // Java's double-checked locking in
+        // `org.apache.kafka.common.metrics.Metrics#sensor`: a lock-free
         // (here: briefly locked) fast path, then ONE critical section that
         // re-checks, creates, inserts and registers the children, so two
         // concurrent callers for the same name always get the same sensor and
@@ -606,6 +775,10 @@ impl Metrics {
     }
 
     /// Remove a sensor (if it exists), its associated metrics, and its children.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - The name of the sensor to be removed
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#removeSensor")]
     pub fn remove_sensor(&self, name: &str) {
         let sensor = self.get_sensor(name);
@@ -643,15 +816,27 @@ impl Metrics {
         }
     }
 
-    // Java's four `addMetric` overloads (`Metrics.java:470,485,498,518`) intersect
+    // Java's four `addMetric` overloads intersect
     // on `{metricName}` alone, and no overload takes just a metric name — so
     // under CLAUDE.md §2's strict reading NOBODY keeps the plain `add_metric`,
     // and each translated form carries its Rust parameters beyond the metric
     // name.
 
-    /// Add a metric to monitor a measurable. This metric won't be associated
-    /// with any sensor. Mirrors Java's
-    /// `addMetric(MetricName metricName, Measurable measurable)` (`:470`).
+    /// Add a metric to monitor an object that implements measurable. This
+    /// metric won't be associated with any sensor. This is a way to expose
+    /// existing values as metrics.
+    ///
+    /// This method is kept for binary compatibility purposes, it has the same
+    /// behaviour as [`Self::add_metric_with_metric_value_provider`].
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    /// - `measurable` - The measurable that will be measured by this metric
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric with same name already exists.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addMetric")]
     pub fn add_metric_with_measurable(
         &self,
@@ -662,9 +847,18 @@ impl Metrics {
     }
 
     /// Add a metric to monitor an object that implements `MetricValueProvider`.
-    /// This metric won't be associated with any sensor. Mirrors Java's
-    /// `addMetric(MetricName metricName, MetricValueProvider<?> metricValueProvider)`
-    /// (`:518`), which passes a `null` config.
+    /// This metric won't be associated with any sensor. This is a way to expose
+    /// existing values as metrics. User is expected to add any additional
+    /// synchronization to update and access metric values, if required.
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    /// - `metric_value_provider` - The metric value provider associated with this metric
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric with same name already exists.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addMetric")]
     pub fn add_metric_with_metric_value_provider(
         &self,
@@ -674,12 +868,21 @@ impl Metrics {
         self.add_metric_with_config_metric_value_provider(metric_name, None, metric_value_provider)
     }
 
-    /// Add a metric backed by a value provider with an optional config.
+    /// Add a metric to monitor an object that implements `MetricValueProvider`.
+    /// This metric won't be associated with any sensor. This is a way to expose
+    /// existing values as metrics. User is expected to add any additional
+    /// synchronization to update and access metric values, if required.
     ///
-    /// Mirrors Java's
-    /// `addMetric(MetricName metricName, MetricConfig config, MetricValueProvider<?> metricValueProvider)`
-    /// (`:498`); `config: None` uses the registry's default config, as Java's
-    /// `null` does.
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    /// - `config` - The configuration to use when measuring this measurable, `None`
+    ///   for the registry's default config
+    /// - `provider` - The metric value provider associated with this metric
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric with same name already exists.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addMetric")]
     pub fn add_metric_with_config_metric_value_provider(
         &self,
@@ -702,12 +905,22 @@ impl Metrics {
         Ok(())
     }
 
-    /// Register a metric backed by a value provider only if it is not already
-    /// present. Returns the existing metric if one is already registered under
-    /// the same name, otherwise the newly registered metric. Translates Java's
-    /// `Metrics.addMetricIfAbsent(MetricName, MetricConfig, MetricValueProvider)`
-    /// — idempotent registration (the consumer's preferred-read-replica gauge
-    /// re-registers across assignment updates without error).
+    /// Create or get an existing metric to monitor an object that implements
+    /// `MetricValueProvider`. This metric won't be associated with any sensor.
+    /// This is a way to expose existing values as metrics. This method takes
+    /// care of synchronisation while updating/accessing metrics by concurrent
+    /// threads.
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    /// - `config` - The configuration to use when measuring this metric, `None`
+    ///   for the registry's default config
+    /// - `provider` - The metric value provider associated with this metric
+    ///
+    /// # Returns
+    ///
+    /// Existing KafkaMetric if already registered or else a newly created one
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addMetricIfAbsent")]
     pub fn add_metric_if_absent(
         &self,
@@ -725,12 +938,24 @@ impl Metrics {
 
     /// Remove a metric if it exists and return it. `metric_removal` is invoked
     /// on each reporter when a metric is removed.
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    ///
+    /// # Returns
+    ///
+    /// the removed `KafkaMetric` or None if no such metric exists
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#removeMetric")]
     pub fn remove_metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
         self.shared.remove_metric(metric_name)
     }
 
-    /// Add a metrics reporter, initializing it with all existing metrics.
+    /// Add a `MetricsReporter`
+    ///
+    /// # Arguments
+    ///
+    /// - `reporter` - the reporter, initialized with every existing metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addReporter")]
     pub fn add_reporter(&self, reporter: Arc<dyn MetricsReporter>) {
         let existing: Vec<Arc<KafkaMetric>> = self
@@ -745,13 +970,17 @@ impl Metrics {
         self.shared.reporters.lock().expect("reporters mutex poisoned").push(reporter);
     }
 
-    /// Get all the metrics currently maintained, indexed by metric name.
+    /// Returns all the metrics currently maintained, indexed by metric name.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metrics")]
     pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
         self.shared.metrics.lock().expect("metrics mutex poisoned").clone()
     }
 
-    /// Get a single metric by name.
+    /// Returns the metric with the given name, if registered.
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - the name of the metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metric")]
     pub fn metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
         self.shared
@@ -774,12 +1003,21 @@ impl Metrics {
             .cloned()
     }
 
-    // Java's two `metricInstance` overloads (`Metrics.java:651,655`) intersect on
+    // Java's two `metricInstance` overloads intersect on
     // `{template}`, and neither takes just a template — so nobody keeps the plain
     // `metric_instance` (CLAUDE.md §2, strict reading).
 
-    /// Create a `MetricName` from a template and tag pairs. Mirrors Java's
-    /// `metricInstance(MetricNameTemplate template, String... keyValue)` (`:651`).
+    /// Returns a `MetricName` built from a template and tag pairs.
+    ///
+    /// # Arguments
+    ///
+    /// - `template` - the template of the metric name
+    /// - `key_value` - the tags, as key and value pairs
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if `key_value` has an odd length,
+    ///   or if the tags, with the default config's tags, are not the template's
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricInstance")]
     pub fn metric_instance_with_key_value(
         &self,
@@ -789,8 +1027,17 @@ impl Metrics {
         self.metric_instance_with_tags(template, MetricsUtils::get_tags(key_value)?)
     }
 
-    /// Create a `MetricName` from a template and a tags map. Mirrors Java's
-    /// `metricInstance(MetricNameTemplate template, Map<String, String> tags)` (`:655`).
+    /// Returns a `MetricName` built from a template and a tags map.
+    ///
+    /// # Arguments
+    ///
+    /// - `template` - the template of the metric name
+    /// - `tags` - the tags
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if the tags, with the default
+    ///   config's tags, are not the template's
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metricInstance")]
     pub fn metric_instance_with_tags(
         &self,
@@ -827,7 +1074,7 @@ impl Metrics {
         }
     }
 
-    /// Close this metrics repository, closing all reporters.
+    /// Close this metrics repository.
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#close")]
     pub fn close(&self) {
         let reporters = self.shared.reporters.lock().expect("reporters mutex poisoned");
@@ -1636,7 +1883,7 @@ mod tests {
     // forwards to — not merely that it returns.
     // ---------------------------------------------------------------------
 
-    // Metrics(MetricConfig defaultConfig, Time time) -> Metrics.java:101
+    // Metrics(MetricConfig defaultConfig, Time time)
     #[test]
     fn test_new_default_config_time_forwards() {
         let config = Arc::new(MetricConfig::new().set_samples(7));
@@ -1657,7 +1904,7 @@ mod tests {
         assert!(s.has_expired());
     }
 
-    // metricName(String name, String group, String description) -> Metrics.java:208
+    // metricName(String name, String group, String description)
     #[test]
     fn test_metric_name_description_forwards() {
         let mut default_tags = BTreeMap::new();
@@ -1675,7 +1922,7 @@ mod tests {
         assert_eq!(added.tags().get("client-id").map(String::as_str), Some("c1"));
     }
 
-    // metricName(String name, String group, Map<String, String> tags) -> Metrics.java:243
+    // metricName(String name, String group, Map<String, String> tags)
     #[test]
     fn test_metric_name_tags_forwards() {
         let mut default_tags = BTreeMap::new();
@@ -1792,7 +2039,7 @@ mod tests {
     }
 
     /// Rust-only regression for the double-checked locking in
-    /// `Metrics.sensor(...)` (`Metrics.java:410-429`): concurrent creators of
+    /// `Metrics.sensor(...)`: concurrent creators of
     /// the same sensor name through one shared `Metrics` must all get the SAME
     /// sensor, the registry must hold it, and the parent's children list must
     /// hold it exactly once. Before the fix the create-and-insert ran unlocked,

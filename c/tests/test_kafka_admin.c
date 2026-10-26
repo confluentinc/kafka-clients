@@ -321,8 +321,9 @@ static long now_ms(void) {
 /* `destroy` with an RPC still waiting for a broker that never answers (the
  * default 60 s `default.api.timeout.ms`): the background task fails it on
  * exit, as Java's `KafkaAdminClient` does when its thread exits
- * (`KafkaAdminClient.java:1573`), so a blocking `get` on another thread and a
- * queued `get_cb` both see the timeout instead of hanging. */
+ * (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#run`), so a
+ * blocking `get` on another thread and a queued `get_cb` both see the timeout instead
+ * of hanging. */
 static void test_kafka_admin_destroy_fails_the_rpc_still_waiting(void) {
     kafka_Map_t *props = kafka_Map_new();
     kafka_Map_put(props, (void *)"bootstrap.servers", (void *)NO_BROKER_BOOTSTRAP);
@@ -762,9 +763,9 @@ static void test_kafka_admin_scram_empty_batch_needs_no_broker(void) {
 }
 
 /* An upsertion with an empty password is NOT a whole-call rejection.
- * KafkaAdminClient records `UnacceptableCredentialException("Password must not
- * be empty")` against that user only (KafkaAdminClient.java:4414-4416) and
- * still builds and sends every other user's alteration. What this asserts is
+ * `org.apache.kafka.clients.admin.KafkaAdminClient#alterUserScramCredentials` records
+ * `UnacceptableCredentialException("Password must not be empty")` against that user
+ * only and still builds and sends every other user's alteration. What this asserts is
  * exactly that: the call is accepted and yields a per-user future for BOTH
  * users, and alice's fails. Which error bob's carries depends on whether
  * anything is listening on localhost:9092 (a timeout without a broker, the

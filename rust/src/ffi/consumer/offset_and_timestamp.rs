@@ -95,13 +95,24 @@ unsafe fn deliver(
     unsafe { deliver_value(oat, out_err, box_offset_and_timestamp) }
 }
 
-/// `new OffsetAndTimestamp(long offset, long timestamp)`: returns an owned
-/// handle. A negative offset stores the Java `IllegalArgumentException` in
+/// `new OffsetAndTimestamp(long offset, long timestamp)`. A negative offset stores the Java `IllegalArgumentException` in
 /// `*out_err` and returns `NULL`.
+///
+/// # Parameters
+///
+/// - `offset` - The offset
+/// - `timestamp` - The timestamp
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the offset or timestamp is negative
 ///
 /// # Safety
 ///
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndTimestamp_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
@@ -116,9 +127,22 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
 /// `new OffsetAndTimestamp(long offset, long timestamp, Optional<Integer> leaderEpoch)`;
 /// a negative `leader_epoch` is `Optional.empty()`.
 ///
+/// # Parameters
+///
+/// - `offset` - The offset
+/// - `timestamp` - The timestamp
+/// - `leader_epoch` - The leader epoch
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the offset or timestamp is negative
+///
 /// # Safety
 ///
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndTimestamp_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
@@ -133,11 +157,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
     unsafe { deliver(OffsetAndTimestamp::with_leader_epoch(offset, timestamp, leader_epoch), out_err) }
 }
 
-/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
@@ -149,6 +179,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
 }
 
 /// `offset()`.
+///
+/// # Returns
+///
+/// The offset
 ///
 /// # Safety
 ///
@@ -164,6 +198,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 }
 
 /// `timestamp()`: milliseconds since the epoch.
+///
+/// # Returns
+///
+/// The timestamp
 ///
 /// # Safety
 ///
@@ -181,6 +219,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
 /// A caught Rust panic returns -2, which is no leader epoch.
+///
+/// # Returns
+///
+/// The leader epoch or empty if it is not known
 ///
 /// # Safety
 ///

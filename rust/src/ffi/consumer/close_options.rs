@@ -112,7 +112,7 @@ fn duration_ms(timeout: i64) -> Duration {
     Duration::from_millis(u64::try_from(timeout).unwrap_or(0))
 }
 
-/// `GroupMembershipOperation.LEAVE_GROUP`.
+/// Returns `GroupMembershipOperation.LEAVE_GROUP`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_leave_group()
@@ -120,7 +120,7 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_leave_gro
     singleton(GroupMembershipOperation::LeaveGroup)
 }
 
-/// `GroupMembershipOperation.REMAIN_IN_GROUP`.
+/// Returns `GroupMembershipOperation.REMAIN_IN_GROUP`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in_group()
@@ -128,8 +128,8 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_remain_in
     singleton(GroupMembershipOperation::RemainInGroup)
 }
 
-/// `GroupMembershipOperation.DEFAULT`: static members remain in the group,
-/// dynamic members leave.
+/// Returns `GroupMembershipOperation.DEFAULT`, a static singleton never freed:
+/// static members remain in the group, dynamic members leave.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
@@ -137,7 +137,7 @@ pub extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_default()
     singleton(GroupMembershipOperation::Default)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_consumer_CloseOptions_GroupMembershipOperation_LEAVE_GROUP`,
 /// the first enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from
@@ -156,12 +156,16 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation__e
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// `toString()`, Java's inherited `Enum.toString()`.
+///
+/// # Returns
+///
+/// The constant's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is owned by the
+/// caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_to_string(
@@ -172,9 +176,20 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_GroupMembershipOperation_to
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
-/// `CloseOptions.timeout(Duration timeout)`, the static factory: an owned
-/// handle with `GroupMembershipOperation.DEFAULT`, freed with
-/// [`kafka_consumer_CloseOptions_destroy`].
+/// `CloseOptions.timeout(Duration timeout)`, the static factory: a handle
+/// with `GroupMembershipOperation.DEFAULT`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to wait for the consumer to close, in milliseconds.
+///
+/// # Returns
+///
+/// A new `CloseOptions` instance with the specified timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with [`kafka_consumer_CloseOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> *mut kafka_consumer_CloseOptions_t {
@@ -182,12 +197,23 @@ pub extern "C" fn kafka_consumer_CloseOptions_new_with_timeout(timeout: i64) -> 
 }
 
 /// `CloseOptions.groupMembershipOperation(GroupMembershipOperation)`, the
-/// static factory: an owned handle with no timeout (Java's default of
+/// static factory: a handle with no timeout (Java's default of
 /// `Long.MAX_VALUE` milliseconds applies at `close`).
+///
+/// # Parameters
+///
+/// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
+///   `REMAIN_IN_GROUP`, or `DEFAULT`.
+///
+/// # Returns
+///
+/// A new `CloseOptions` instance with the specified group membership operation.
 ///
 /// # Safety
 ///
 /// `operation` must be a singleton returned by this module.
+///
+/// The returned handle is owned by the caller, freed with [`kafka_consumer_CloseOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
@@ -200,6 +226,10 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_operation(
 }
 
 /// `withTimeout(Duration timeout)`, applied in place.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to wait for the consumer to close, in milliseconds.
 ///
 /// # Safety
 ///
@@ -220,6 +250,11 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_timeout(
 /// `withGroupMembershipOperation(GroupMembershipOperation)`, applied in
 /// place.
 ///
+/// # Parameters
+///
+/// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
+///   `REMAIN_IN_GROUP`, or `DEFAULT`.
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle that no other call uses at the same time,
@@ -239,9 +274,13 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_with_group_membership_opera
     *slot = slot.clone().with_group_membership_operation(unsafe { value_of(operation) });
 }
 
-/// `timeout()`: milliseconds, or `-1` when none was set.
+/// `timeout()`: the timeout configured for this close.
 ///
 /// A caught Rust panic returns -2, which is no close timeout: Java's `close` rejects a negative one.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` if using the default timeout
 ///
 /// # Safety
 ///
@@ -258,7 +297,12 @@ pub unsafe extern "C" fn kafka_consumer_CloseOptions_timeout(self_: *const kafka
         .map_or(-1, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// `groupMembershipOperation()`: a borrowed singleton.
+/// `groupMembershipOperation()`: the group membership operation configured for
+/// this close.
+///
+/// # Returns
+///
+/// The group membership operation, a borrowed singleton
 ///
 /// # Safety
 ///

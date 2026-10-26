@@ -54,13 +54,19 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `all()`: an owned `KafkaFuture<Void>` freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers `NULL` once every
-/// requested member has been removed, or the first member's error.
+/// Returns a future which indicates whether the request was 100% success, i.e. no either top level
+/// or member level error. If not, the first member error shall be returned.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>`; its `get` delivers `NULL` once every requested member has been removed,
+/// or the first member's error.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
@@ -72,16 +78,27 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// `memberResult(MemberToRemove member)`: returns an owned `KafkaFuture<Void>`
-/// (freed with `kafka_common_KafkaFuture_destroy`, `get` delivering `NULL` once
-/// that member has been removed), or stores the owned `IllegalArgumentError` in
-/// `*out_err` and returns `NULL` when the result is in `removeAll` mode or
-/// `member` was not part of the request. `member` is borrowed for the call.
+/// Returns the selected member future.
+///
+/// # Parameters
+///
+/// - `member` - the member, borrowed for the call
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` whose `get` delivers `NULL` once that member has been removed; `NULL` on
+/// failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - the result is in `removeAll` mode, or `member` was not
+///   part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `member` a valid member-to-remove
-/// handle and `out_err` a valid slot pointing at null.
+/// handle and `out_err` a valid slot pointing at `NULL`. The returned future is
+/// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member_result(
@@ -100,12 +117,12 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_member
     unsafe { deliver_value(h.result.member_result(member), out_err, |f| h.ctx.void_future(&f)) }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

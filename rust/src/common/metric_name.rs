@@ -30,8 +30,7 @@ use std::collections::BTreeMap;
 /// reporting in any custom reporting.
 ///
 /// Two `MetricName`s are equal if their `name`, `group`, and `tags` match;
-/// `description` is intentionally excluded from equality and hashing, matching
-/// the Java implementation.
+/// `description` is intentionally excluded from equality and hashing.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.MetricName")]
 pub struct MetricName {
@@ -49,10 +48,12 @@ impl MetricName {
     ///
     /// Please create `MetricName` via [`crate::common::metrics::Metrics::metric_name_with_description_tags`].
     ///
-    /// * `name` - The name of the metric
-    /// * `group` - logical group name of the metrics to which this metric belongs
-    /// * `description` - A human-readable description to include in the metric
-    /// * `tags` - additional key/value attributes of the metric
+    /// # Arguments
+    ///
+    /// - `name` - The name of the metric
+    /// - `group` - logical group name of the metrics to which this metric belongs
+    /// - `description` - A human-readable description to include in the metric
+    /// - `tags` - additional key/value attributes of the metric
     #[doc(alias = "org.apache.kafka.common.MetricName#MetricName")]
     pub fn new(
         name: impl Into<String>,
@@ -63,25 +64,25 @@ impl MetricName {
         Self { name: name.into(), group: group.into(), description: description.into(), tags }
     }
 
-    /// The name of the metric.
+    /// Returns the name of the metric.
     #[doc(alias = "org.apache.kafka.common.MetricName#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The logical group name of the metrics to which this metric belongs.
+    /// Returns the logical group name of the metrics to which this metric belongs.
     #[doc(alias = "org.apache.kafka.common.MetricName#group")]
     pub fn group(&self) -> &str {
         &self.group
     }
 
-    /// The additional key/value attributes of the metric.
+    /// Returns the additional key/value attributes of the metric.
     #[doc(alias = "org.apache.kafka.common.MetricName#tags")]
     pub fn tags(&self) -> &BTreeMap<String, String> {
         &self.tags
     }
 
-    /// A human-readable description of the metric.
+    /// Returns a human-readable description of the metric.
     #[doc(alias = "org.apache.kafka.common.MetricName#description")]
     pub fn description(&self) -> &str {
         &self.description

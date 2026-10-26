@@ -44,7 +44,7 @@ pub enum kafka_common_acl_AclPermissionType_e {
     kafka_common_acl_AclPermissionType_ALLOW,
 }
 
-/// One static instance per value, indexed by [`kafka_common_acl_AclPermissionType_e`].
+/// One static instance per value, indexed by `kafka_common_acl_AclPermissionType_e`.
 static VARIANTS: [AclPermissionType; 4] = [
     AclPermissionType::Unknown,
     AclPermissionType::Any,
@@ -81,6 +81,10 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclPermissionType_t
 }
 
 /// `AclPermissionType.UNKNOWN`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_unknown() -> *const kafka_common_acl_AclPermissionType_t {
@@ -88,6 +92,10 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_unknown() -> *const kafka_c
 }
 
 /// `AclPermissionType.ANY`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_any() -> *const kafka_common_acl_AclPermissionType_t {
@@ -95,6 +103,10 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_any() -> *const kafka_commo
 }
 
 /// `AclPermissionType.DENY`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_deny() -> *const kafka_common_acl_AclPermissionType_t {
@@ -102,13 +114,17 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_deny() -> *const kafka_comm
 }
 
 /// `AclPermissionType.ALLOW`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_allow() -> *const kafka_common_acl_AclPermissionType_t {
     singleton(AclPermissionType::Allow)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_acl_AclPermissionType_UNKNOWN`.
 ///
@@ -125,10 +141,11 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `code()`: the wire-protocol byte.
+/// Returns the code of this permission type.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
+/// # Returns
+///
+/// The code, or -1 for a Rust panic caught at the FFI boundary, which is no code of this enum.
 ///
 /// # Safety
 ///
@@ -143,8 +160,15 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_code(
     unsafe { value_of(self_) }.code()
 }
 
-/// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
-/// for one this client does not know.
+/// Return the AclPermissionType with the provided code or `UNKNOWN` if one cannot be found.
+///
+/// # Parameters
+///
+/// - `code` - The wire-protocol code.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclPermissionType_from_code(
@@ -155,6 +179,14 @@ pub extern "C" fn kafka_common_acl_AclPermissionType_from_code(
 
 /// `fromString(String)`: the singleton named by `str` (Java's constant name),
 /// `UNKNOWN` for any other string.
+///
+/// # Parameters
+///
+/// - `str` - The string to parse.
+///
+/// # Returns
+///
+/// The AclPermissionType, or UNKNOWN if the string could not be matched.
 ///
 /// # Safety
 ///
@@ -170,7 +202,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_from_string(
     singleton(AclPermissionType::from_string(&unsafe { c_str_to_string(str) }))
 }
 
-/// `isUnknown()`: whether this is the `UNKNOWN` value.
+/// Returns 1 if this permission type is UNKNOWN, else 0.
 ///
 /// # Safety
 ///
@@ -185,12 +217,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_is_unknown(
     i8::from(unsafe { value_of(self_) }.is_unknown())
 }
 
-/// `toString()`: Java's constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the constant's name.
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclPermissionType_to_string(

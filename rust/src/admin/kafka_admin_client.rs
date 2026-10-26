@@ -214,10 +214,10 @@ const DEFAULT_LEAVE_GROUP_REASON: &str = "member was removed by an admin";
 
 /// Process-wide counter for deriving a default `client.id`.
 ///
-/// Corresponds to Java's `static AtomicInteger ADMIN_CLIENT_ID_SEQUENCE`
-/// (`KafkaAdminClient.java:325`), which starts at 1. Crate-level (not
-/// per-instance) to match Java's static scope, so successive admin clients in
-/// one process get distinct ids.
+/// Corresponds to Java's `static AtomicInteger`
+/// `KafkaAdminClient#ADMIN_CLIENT_ID_SEQUENCE`, which starts at 1. Crate-level
+/// (not per-instance) to match Java's static scope, so successive admin clients
+/// in one process get distinct ids.
 static ADMIN_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
 
 /// The `RETRY_BACKOFF_EXP_BASE` used by the admin retry backoff (Java constant).
@@ -257,16 +257,18 @@ struct Shared {
     log_context: LogContext,
 }
 
-/// The administrative client for Kafka.
+/// The default implementation of [`Admin`](crate::admin::Admin). An instance of this class is
+/// created by invoking [`AdminClient::create`](crate::admin::AdminClient::create).
+/// Users should not refer to this class directly.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.KafkaAdminClient`.
+/// This class is thread-safe.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient")]
 pub struct KafkaAdminClient {
     shared: Arc<Shared>,
 }
 
 impl std::fmt::Debug for KafkaAdminClient {
-    /// The client id only, never the configuration.
+    // The client id only, never the configuration.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaAdminClient")
             .field("client_id", &self.shared.client_id)
@@ -368,10 +370,9 @@ impl KafkaAdminClient {
 
     /// Sentinel for "no hard-shutdown deadline set".
     ///
-    /// Translates Java's `KafkaAdminClient.INVALID_SHUTDOWN_TIME`
-    /// (`KafkaAdminClient.java:335`): it is lower than every reachable deadline,
-    /// so the "is an earlier deadline already installed?" comparison in
-    /// [`close`](Self::close) orders the same way.
+    /// Translates Java's `KafkaAdminClient#INVALID_SHUTDOWN_TIME`: it is lower
+    /// than every reachable deadline, so the "is an earlier deadline already
+    /// installed?" comparison in [`close`](Self::close) orders the same way.
     pub(crate) const NO_HARD_SHUTDOWN: i64 = i64::MIN;
 
     /// Creates a network-backed admin client from configuration, spawning the
@@ -392,7 +393,8 @@ impl KafkaAdminClient {
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient")]
     pub(crate) fn new(config: AdminClientConfig) -> Result<Self, Error> {
         // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
-        // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
+        // every failure, in both overloads of
+        // `org.apache.kafka.clients.admin.KafkaAdminClient#createInternal`:
         //
         //     throw new KafkaException("Failed to create new KafkaAdminClient", exc);
         //
@@ -412,9 +414,8 @@ impl KafkaAdminClient {
     /// Returns the configured `client.id`, or generates `adminclient-<n>` when
     /// it is empty.
     ///
-    /// Translated from `KafkaAdminClient.generateClientId`
-    /// (`KafkaAdminClient.java:478-483`); `<n>` comes from the process-wide
-    /// [`ADMIN_CLIENT_ID_SEQUENCE`], starting at 1.
+    /// Translated from `KafkaAdminClient#generateClientId`; `<n>` comes from
+    /// the process-wide [`ADMIN_CLIENT_ID_SEQUENCE`], starting at 1.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#generateClientId")]
     pub(crate) fn generate_client_id(config: &AdminClientConfig) -> String {
         let client_id = config.client_id();
@@ -428,25 +429,25 @@ impl KafkaAdminClient {
     }
 
     fn new_inner(config: AdminClientConfig) -> Result<Self, Error> {
-        // `Admin.create` builds the configuration with `doLog = true`
-        // (`Admin.java:136`), which logs every value; a Rust caller builds the
-        // `AdminClientConfig` itself, so the client logs them here.
+        // `org.apache.kafka.clients.admin.Admin#create(Properties)` builds the
+        // configuration with `doLog = true`, which logs every value; a Rust
+        // caller builds the `AdminClientConfig` itself, so the client logs them
+        // here.
         config.log_values();
         let client_id = Self::generate_client_id(&config);
         let log_context = LogContext::new(format!("[AdminClient clientId={client_id}] "));
 
-        // Java's `bootstrapAddressesToUse`, chosen by `determineBootstrapType`
-        // (`KafkaAdminClient.java:533-560`, called at `:582`). `bootstrap.controllers`
-        // is not defined, so it is always `bootstrap.servers`. Java fails an
-        // empty list there, before it looks at `bootstrap.resolve.timeout.ms`
-        // (`:597`), so construction fails in both resolution modes; so does
-        // this one. Deviation: Java's message is "You must set either
-        // bootstrap.servers or bootstrap.controllers", which names a key this
-        // client does not define; this one is `ClientUtils`'s "No resolvable
-        // bootstrap urls given in bootstrap.servers", which the synchronous
-        // mode gives for an empty list anyway, as the producer and the
-        // consumer do. A whitespace-only value is an empty list, as Java's
-        // `ConfigDef` parses it.
+        // Java's `bootstrapAddressesToUse`, chosen by
+        // `org.apache.kafka.clients.admin.KafkaAdminClient#determineBootstrapType`,
+        // called from `KafkaAdminClient#createInternal`. `bootstrap.controllers` is
+        // not defined, so it is always `bootstrap.servers`. Java fails an empty list
+        // there, before it looks at `bootstrap.resolve.timeout.ms`, so construction
+        // fails in both resolution modes; so does this one. Deviation: Java's message
+        // is "You must set either bootstrap.servers or bootstrap.controllers", which
+        // names a key this client does not define; this one is `ClientUtils`'s "No
+        // resolvable bootstrap urls given in bootstrap.servers", which the synchronous
+        // mode gives for an empty list anyway, as the producer and the consumer do. A
+        // whitespace-only value is an empty list, as Java's `ConfigDef` parses it.
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
         if bootstrap.is_empty() {
             return Err(Error::config_message(format!(
@@ -487,9 +488,11 @@ impl KafkaAdminClient {
             &client_id,
             log_context.clone(),
         )
-        // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
-        // `KafkaException` hierarchy; `illegal_argument` put it outside, where
-        // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::new`.
+        // `ConfigException` in Java
+        // (`org.apache.kafka.common.security.ssl.SslFactory#configure`), i.e.
+        // inside the `KafkaException` hierarchy; `illegal_argument` put it
+        // outside, where `is_kafka_error()` answers `false`. Same fix as
+        // `KafkaProducer::new`.
         .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
@@ -509,9 +512,9 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
-        // `ClientUtils.createNetworkClient` passes `metadata.cluster.check.enable`
-        // to the `NetworkClient` constructor (`ClientUtils.java:309`, KIP-1242).
-        // It has no effect here, as in Java: see
+        // `org.apache.kafka.clients.ClientUtils#createNetworkClient` passes
+        // `metadata.cluster.check.enable` to the `NetworkClient` constructor
+        // (KIP-1242). It has no effect here, as in Java: see
         // `AdminClientConfig::metadata_cluster_check_enable`.
         client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable());
         // `ClientUtils.createNetworkClient` passes
@@ -527,7 +530,8 @@ impl KafkaAdminClient {
         crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
         // Java's constructor reads its settings through the config's getters,
-        // then logs what it did not read (`KafkaAdminClient.java:702`).
+        // then logs what it did not read
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#KafkaAdminClient`).
         config.mark_read_keys_used();
         config.log_unused();
         admin.spawn(runnable);
@@ -535,9 +539,10 @@ impl KafkaAdminClient {
     }
 
     /// Builds the admin `NetworkClient` with the arguments
-    /// `KafkaAdminClient.createInternal` passes to `ClientUtils.createNetworkClient`
-    /// (`KafkaAdminClient.java:617-631`, `ClientUtils.java:291-317`): the socket
-    /// buffers, `metadata.recovery.strategy` and
+    /// `KafkaAdminClient#createInternal` passes to
+    /// `org.apache.kafka.clients.ClientUtils#createNetworkClient`, the overload
+    /// taking a `MetadataUpdater`: the socket buffers,
+    /// `metadata.recovery.strategy` and
     /// `metadata.recovery.rebootstrap.trigger.ms` come from the config.
     ///
     /// `maxInFlightRequestsPerConnection` is `1` (`:625`). The admin loop sends at
@@ -647,9 +652,10 @@ impl KafkaAdminClient {
         let wakeup = client.wakeup_notify();
         let shutdown = Arc::new(ShutdownSignal::new());
         // Propagated rather than `expect`ed: Java's constructor-wide
-        // `catch (Throwable exc)` (`KafkaAdminClient.java:569-573`) converts every
-        // construction failure into a `KafkaException`, and `new` is where
-        // that wrap happens. `ExponentialBackoff::new` only rejects an
+        // `catch (Throwable exc)` (in the `HostResolver` overload of
+        // `org.apache.kafka.clients.admin.KafkaAdminClient#createInternal`)
+        // converts every construction failure into a `KafkaException`, and `new` is
+        // where that wrap happens. `ExponentialBackoff::new` only rejects an
         // out-of-range jitter, so this is unreachable with the constant above — but
         // panicking on the admin construction path is precisely what Java does not.
         let retry_backoff = ExponentialBackoff::new(
@@ -728,10 +734,10 @@ impl KafkaAdminClient {
     /// left.
     ///
     /// Translated from
-    /// `KafkaAdminClient.handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`
-    /// (`KafkaAdminClient.java:2435-2475`). The follow-up call is chained on the
-    /// `describeCluster` nodes future as Java chains it with `whenComplete`, so it
-    /// is issued from the I/O task through `runnable.call` ([`DriverContext::call`]).
+    /// `KafkaAdminClient#handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`.
+    /// The follow-up call is chained on the `describeCluster` nodes future as Java
+    /// chains it with `whenComplete`, so it is issued from the I/O task through
+    /// `runnable.call` ([`DriverContext::call`]).
     fn handle_describe_topics_by_names_with_describe_topic_partitions_api(
         &self,
         topic_names: &[String],
@@ -796,10 +802,10 @@ impl KafkaAdminClient {
     ///
     /// `describeTopics` by name chains its `DescribeTopicPartitions` call on
     /// `describeCluster(..).nodes().whenComplete(..)`
-    /// (`KafkaAdminClient.java:2458-2472`). Java's public `KafkaFuture` has
-    /// `whenComplete`; the Rust one does not (`admin-client.md` §4 keeps it on the
-    /// crate-internal `KafkaFutureImpl`), so the handle is returned alongside the
-    /// public result.
+    /// (`KafkaAdminClient#handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`).
+    /// Java's public `KafkaFuture` has `whenComplete`; the Rust one does not
+    /// (`admin-client.md` §4 keeps it on the crate-internal `KafkaFutureImpl`), so
+    /// the handle is returned alongside the public result.
     fn describe_cluster_with_nodes_handle(
         &self,
         options: DescribeClusterOptions,
@@ -995,7 +1001,7 @@ impl KafkaAdminClient {
         let fail_all = all.clone();
         let handle_failure = Box::new(move |error: &Error| {
             // `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-            // (`KafkaAdminClient.java:3565`). A *bare*
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient#listGroups`). A *bare*
             // `KafkaException`: `is_kafka_error()` true, `is_api_error()` /
             // `is_retriable_error()` / `is_authorization_error()` all false, the cause
             // reachable through `source()`, and the message fixed — it does not carry
@@ -1239,17 +1245,17 @@ struct CallSender {
 
 impl CallSender {
     /// Hands a call to the background task, or fails it at once. Translated
-    /// from `AdminClientRunnable.call(Call, long)` and the `enqueue` it
-    /// forwards to (`KafkaAdminClient.java:1668-1717`), in Java's order:
-    /// hard shutdown → `bootstrap.controllers` endpoint check → (`enqueue`)
-    /// retry budget → permanent bootstrap failure (KIP-909) → the task has
-    /// exited.
+    /// from `KafkaAdminClient.AdminClientRunnable#call` and the
+    /// `KafkaAdminClient.AdminClientRunnable#enqueue` it forwards to, in Java's
+    /// order: hard shutdown → `bootstrap.controllers` endpoint check →
+    /// (`enqueue`) retry budget → permanent bootstrap failure (KIP-909) → the
+    /// task has exited.
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient$AdminClientRunnable#call")]
     fn call(&self, call: Call) {
-        // `call`'s two rejections (`KafkaAdminClient.java:1706-1713`): once
-        // `close()` has set a hard-shutdown time, and an endpoint a
-        // `bootstrap.controllers` client cannot serve. The I/O task applies the
-        // same gate to the follow-ups a response hook returns.
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#call`'s
+        // two rejections: once `close()` has set a hard-shutdown time, and an
+        // endpoint a `bootstrap.controllers` client cannot serve. The I/O task
+        // applies the same gate to the follow-ups a response hook returns.
         let Some(call) = self.shutdown.admit_new_call(
             self.metadata_manager.using_bootstrap_controllers(),
             &self.retry_backoff,
@@ -1258,9 +1264,10 @@ impl CallSender {
         ) else {
             return;
         };
-        // Java's `enqueue` begins with the retry budget
-        // (`KafkaAdminClient.java:1669-1674`). A call reaches it already tried
-        // when the `AdminApiDriver` re-issues a request spec, which carries its
+        // Java's
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#enqueue`
+        // begins with the retry budget. A call reaches it already tried when
+        // the `AdminApiDriver` re-issues a request spec, which carries its
         // `tries` into the new call (`new_driver_call`).
         if call.tries > self.max_retries {
             let mut call = call;
@@ -1283,12 +1290,12 @@ impl CallSender {
             Ok(()) => self.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
                 // `new TimeoutException("The AdminClient thread has exited.")`
-                // (`KafkaAdminClient.java:1693-1694`). `handleTimeoutFailure`
-                // short-circuits on `cause instanceof TimeoutException` (`:1040-1042`),
-                // so the user sees exactly a `TimeoutException` — a
-                // `RetriableException`. `illegal_state` sits outside the
-                // `KafkaException` hierarchy entirely, so it answered `false` to both
-                // `is_retriable_error()` and `is_kafka_error()`.
+                // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#enqueue`).
+                // `KafkaAdminClient.Call#handleTimeoutFailure` short-circuits on
+                // `cause instanceof TimeoutException`, so the user sees exactly a
+                // `TimeoutException` — a `RetriableException`. `illegal_state` sits
+                // outside the `KafkaException` hierarchy entirely, so it answered
+                // `false` to both `is_retriable_error()` and `is_kafka_error()`.
                 call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
             },
         }
@@ -1348,7 +1355,8 @@ where
     let specs = driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).poll();
     for spec in specs {
         let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
-        // Java: `runnable.call(newCall(driver, spec), now)` (`KafkaAdminClient.java:5279-5283`).
+        // Java: `runnable.call(newCall(driver, spec), now)`
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#maybeSendRequests`).
         ctx.sender.call(call);
     }
 }
@@ -1506,8 +1514,9 @@ where
     let mr_keys = keys;
     call.set_maybe_retry_fn(Box::new(move |error: &Error, now: i64| {
         // `throwable instanceof DisconnectException`
-        // (`KafkaAdminClient.java:5127`), raised as `Error::Disconnect` by the
-        // runnable — not `Errors::NetworkError`, which is a broker-reported code.
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#newCall`), raised as
+        // `Error::Disconnect` by the runnable — not `Errors::NetworkError`, which
+        // is a broker-reported code.
         if matches!(error, Error::Disconnect(_)) {
             mr_driver.lock().unwrap().on_failure(now, &mr_scope, &mr_keys, error);
             maybe_send_requests(&mr_driver, &mr_ctx, now);
@@ -1607,12 +1616,12 @@ impl ListGroupsResults {
 /// Java's `ApiError.exception()`.
 fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
-    // `Errors.exception(String)` (`Errors.java:462-469`) falls back to the code's
-    // default text ONLY when the broker sent `null`; a non-null EMPTY message is
-    // passed through verbatim. The generated decoders keep the two apart
-    // (`len == 0` -> `None`, `len == 1` -> `Some("")`), so treating `Some("")` as
-    // absent substituted the code's default text where Java reports `""`
-    // (finding 245). Same shape as `message_with_fallback` below.
+    // `org.apache.kafka.common.protocol.Errors#exception(String)` falls back to
+    // the code's default text ONLY when the broker sent `null`; a non-null EMPTY
+    // message is passed through verbatim. The generated decoders keep the two
+    // apart (`len == 0` -> `None`, `len == 1` -> `Some("")`), so treating
+    // `Some("")` as absent substituted the code's default text where Java reports
+    // `""` (finding 245). Same shape as `message_with_fallback` below.
     match message {
         Some(m) => Error::with_message(error, m.clone()),
         None => Error::new(error),
@@ -2104,10 +2113,13 @@ fn get_alter_user_scram_credentials_call(
         // (mirrors completeUnrealizedFutures).
         for (user, future) in resp_futures.iter() {
             if !future.is_done() {
-                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
-                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
-                // `UnknownServerException` subclass it uses elsewhere for
-                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                // Java's
+                // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures`
+                // throws `new ApiException(..)` — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for response
+                // sanity checks (in `KafkaAdminClient#createAcls`,
+                // `KafkaAdminClient#deleteAcls` and
+                // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
                 future.complete_with_error(Error::Api(ApiError::new(format!(
                     "The broker response did not contain a result for user {user}"
                 ))));
@@ -2472,9 +2484,10 @@ fn get_delete_acls_call(
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#handleNotControllerError")]
 fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap<Errors, i32>) -> Option<Error> {
     // Java dispatches on which code was present and rethrows `error.exception()`
-    // for *that* code (`KafkaAdminClient.java:4145-4153`), so a
-    // `NOT_LEADER_OR_FOLLOWER` seen by a `bootstrap.controllers` client surfaces
-    // as `NotLeaderOrFollower`, not `NotController` (finding 247).
+    // for *that* code (in both overloads of
+    // `org.apache.kafka.clients.admin.KafkaAdminClient#handleNotControllerError`),
+    // so a `NOT_LEADER_OR_FOLLOWER` seen by a `bootstrap.controllers` client
+    // surfaces as `NotLeaderOrFollower`, not `NotController` (finding 247).
     let matched = if error_counts.contains_key(&Errors::NotController) {
         Some(Errors::NotController)
     } else if mm.using_bootstrap_controllers() && error_counts.contains_key(&Errors::NotLeaderOrFollower) {
@@ -2822,10 +2835,13 @@ fn get_describe_configs_call(
         // Complete any future for which the node did not return a result.
         for (resource, future) in resp_unified.iter() {
             if !future.is_done() {
-                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
-                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
-                // `UnknownServerException` subclass it uses elsewhere for
-                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                // Java's
+                // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures`
+                // throws `new ApiException(..)` — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for response
+                // sanity checks (in `KafkaAdminClient#createAcls`,
+                // `KafkaAdminClient#deleteAcls` and
+                // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
                 future.complete_with_error(Error::Api(ApiError::new(format!(
                     "The node response did not contain a result for config resource {resource}"
                 ))));
@@ -2865,10 +2881,12 @@ fn complete_unrealized<T: Clone + Send + Sync + 'static>(
 ) {
     for (name, future) in futures {
         if !future.is_done() {
-            // Java throws `new ApiException(messageFormatter.apply(key))`
-            // (`KafkaAdminClient.java:1748`) — the concrete base class, NOT the
-            // `UnknownServerException` subclass Java uses for the *other* response
-            // sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+            // Java throws `new ApiException(messageFormatter.apply(key))` in
+            // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures` —
+            // the concrete base class, NOT the `UnknownServerException` subclass
+            // Java uses for the *other* response sanity checks (in
+            // `KafkaAdminClient#createAcls`, `KafkaAdminClient#deleteAcls` and
+            // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
             future.complete_with_error(Error::Api(ApiError::new(message(name))));
         }
     }
@@ -3009,10 +3027,13 @@ fn get_alter_replica_log_dirs_call(
         // check anyway (mirrors `completeUnrealizedFutures`).
         for (replica, future) in resp_futures.iter() {
             if replica.broker_id() == broker_id && !future.is_done() {
-                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
-                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
-                // `UnknownServerException` subclass it uses elsewhere for
-                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                // Java's
+                // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures`
+                // throws `new ApiException(..)` — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for response
+                // sanity checks (in `KafkaAdminClient#createAcls`,
+                // `KafkaAdminClient#deleteAcls` and
+                // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
                 future.complete_with_error(Error::Api(ApiError::new(format!(
                     "The response from broker {broker_id} did not contain a result for replica {replica}"
                 ))));
@@ -3622,10 +3643,13 @@ fn get_delete_topics_with_ids_call(
         if retry_ids.is_empty() {
             for (id, future) in resp_futures.iter() {
                 if !future.is_done() {
-                    // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
-                    // (`KafkaAdminClient.java:1748`) — the concrete base, not the
-                    // `UnknownServerException` subclass it uses elsewhere for
-                    // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                    // Java's
+                    // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures`
+                    // throws `new ApiException(..)` — the concrete base, not the
+                    // `UnknownServerException` subclass it uses elsewhere for response
+                    // sanity checks (in `KafkaAdminClient#createAcls`,
+                    // `KafkaAdminClient#deleteAcls` and
+                    // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
                     future.complete_with_error(Error::Api(ApiError::new(format!(
                         "The controller response did not contain a result for topic {id}"
                     ))));
@@ -4749,9 +4773,10 @@ impl Admin for KafkaAdminClient {
             // Mirrors `getMembersFromGroup`: describe the group, then chain the
             // `LeaveGroup` driver once the membership is known.
             //
-            // The describe step is issued via `describeConsumerGroups(
-            // Collections.singleton(groupId))` with a *default*
-            // `DescribeConsumerGroupsOptions` (Java `KafkaAdminClient.java:4172`),
+            // The describe step is issued via
+            // `describeConsumerGroups(Collections.singleton(groupId))` with a
+            // *default* `DescribeConsumerGroupsOptions` (Java
+            // `org.apache.kafka.clients.admin.KafkaAdminClient#getMembersFromGroup`),
             // whose `timeoutMs` is `null`. Its deadline is therefore
             // `now + defaultApiTimeoutMs`, independent of the removeMembers
             // request's `options.timeout_ms()`.
@@ -4776,14 +4801,14 @@ impl Admin for KafkaAdminClient {
             let key_for_cb = key.clone();
             describe_handle.when_complete(move |result| match result {
                 Err(error) => {
-                    // `new KafkaException("Encounter exception when trying to get
-                    // members from group: " + groupId, ex)`
-                    // (`KafkaAdminClient.java:4174`) — a bare `KafkaException`
-                    // carrying the cause, NOT the inner class. Inheriting it made a
-                    // `GroupAuthorizationError` cause answer `is_authorization_error()`
-                    // (and so `is_fatal_error()`) where Java answers `false`, and lost
-                    // the cause entirely (finding 243). "exception" is reworded to
-                    // "error" per CLAUDE.md §2; the rest is Java's text verbatim.
+                    // `new KafkaException("Encounter exception when trying to get members from group: " + groupId, ex)`
+                    // (`org.apache.kafka.clients.admin.KafkaAdminClient#getMembersFromGroup`) —
+                    // a bare `KafkaException` carrying the cause, NOT the inner class.
+                    // Inheriting it made a `GroupAuthorizationError` cause answer
+                    // `is_authorization_error()` (and so `is_fatal_error()`) where Java
+                    // answers `false`, and lost the cause entirely (finding 243).
+                    // "exception" is reworded to "error" per CLAUDE.md §2; the rest is
+                    // Java's text verbatim.
                     admin_future.complete_with_error(HashMap::from([(
                         key_for_cb,
                         Error::kafka_message_source(
@@ -4812,9 +4837,10 @@ impl Admin for KafkaAdminClient {
                         .collect();
                     let handler =
                         RemoveMembersFromConsumerGroupHandler::new(&group_id_owned, members, log_context.clone());
-                    // Recompute the `LeaveGroup` deadline from the *current* time,
-                    // now that the describe future has resolved. This mirrors Java's
-                    // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
+                    // Recompute the `LeaveGroup` deadline from the *current* time, now
+                    // that the describe future has resolved. This mirrors Java's
+                    // `memFuture.whenComplete(...)` (in
+                    // `org.apache.kafka.clients.admin.KafkaAdminClient#removeMembersFromConsumerGroup`)
                     // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
                     // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
                     // this later moment — giving `LeaveGroup` a fresh full timeout
@@ -5250,10 +5276,13 @@ impl Admin for KafkaAdminClient {
                         // for every feature (mirrors completeUnrealizedFutures).
                         for (feature, future) in resp_handles.iter() {
                             if !future.is_done() {
-                                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
-                                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
-                                // `UnknownServerException` subclass it uses elsewhere for
-                                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                                // Java's
+                                // `org.apache.kafka.clients.admin.KafkaAdminClient#completeUnrealizedFutures`
+                                // throws `new ApiException(..)` — the concrete base, not the
+                                // `UnknownServerException` subclass it uses elsewhere for response
+                                // sanity checks (in `KafkaAdminClient#createAcls`,
+                                // `KafkaAdminClient#deleteAcls` and
+                                // `KafkaAdminClient#alterPartitionReassignments`). Finding 246.
                                 future.complete_with_error(Error::Api(ApiError::new(format!(
                                     "The controller response did not contain a result for feature {feature}"
                                 ))));
@@ -5377,11 +5406,12 @@ impl Admin for KafkaAdminClient {
         if let Some(join_handle) = handle.as_mut() {
             let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle).await;
             // Java's counterpart logs when the join does not complete cleanly
-            // (`KafkaAdminClient.java:707-710`, `catch (InterruptedException e)`).
-            // `InterruptedException` has no Tokio analogue, but a `JoinError` — the
-            // task panicked or was aborted — is the same class of "the I/O task did
-            // not shut down normally" signal, and discarding it left `close()`
-            // returning as if nothing had happened.
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient#close`,
+            // `catch (InterruptedException e)`). `InterruptedException` has no
+            // Tokio analogue, but a `JoinError` — the task panicked or was
+            // aborted — is the same class of "the I/O task did not shut down
+            // normally" signal, and discarding it left `close()` returning as if
+            // nothing had happened.
             match joined {
                 Ok(Ok(())) => kafka_debug!(self.shared.log_context, "Kafka admin client closed."),
                 Ok(Err(join_error)) => kafka_error!(
@@ -5505,8 +5535,8 @@ struct DescribeTopicPartitionsState {
 /// Builds the paginated `describeTopicPartitions` [`Call`] for
 /// `describeTopics` by name (KIP-966).
 ///
-/// Translated from `KafkaAdminClient.generateDescribeTopicsCallWithDescribeTopicPartitionsApi`
-/// (`KafkaAdminClient.java:2328-2433`):
+/// Translated from
+/// `KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`:
 ///
 /// - Every request names the topics not yet completed, sorted, with
 ///   `ResponsePartitionLimit = partitionSizeLimitPerResponse`. While a topic is
@@ -5657,13 +5687,13 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
     let handle_failure = Box::new(move |error: &Error| {
         // An UnsupportedVersionException is not the user's failure: the
         // Metadata-API call issued by the hook below completes the futures
-        // (`KafkaAdminClient.java:2427-2431`). Detected by code, because
-        // `Error::unsupported_version` builds the generic code-35 error, as
-        // `AdminClientRunnable::fail_call` does. As in Java, this failure is only
-        // reached after `handleUnsupportedVersionException` issued the fallback:
-        // `fail_call` skips that hook only once `ShutdownSignal::closing` is set,
-        // which happens when the I/O task exits and no response is handled any
-        // more.
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`).
+        // Detected by code, because `Error::unsupported_version` builds the
+        // generic code-35 error, as `AdminClientRunnable::fail_call` does. As in
+        // Java, this failure is only reached after
+        // `handleUnsupportedVersionException` issued the fallback: `fail_call`
+        // skips that hook only once `ShutdownSignal::closing` is set, which
+        // happens when the I/O task exits and no response is handled any more.
         if error.error() == Errors::UnsupportedVersion {
             return;
         }
@@ -5672,7 +5702,8 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
-    // `handleUnsupportedVersionException` (`KafkaAdminClient.java:2419-2424`):
+    // `handleUnsupportedVersionException` in
+    // `KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`:
     // issue the Metadata-API call through `runnable.call`, and return `false`.
     let handle_uv = Box::new(move || {
         let now = ctx.time.milliseconds();
@@ -5751,8 +5782,9 @@ fn get_describe_topics_by_ids_call(
         };
         let cluster = metadata_response.build_cluster();
         // Java's `errorsByTopicId()` throws `IllegalStateException` on a zero topic
-        // id, and `handleResponses` catches it with `call.fail(now, t)`
-        // (`KafkaAdminClient.java:1471-1480`). `Retry` routes the error through
+        // id, and
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+        // catches it with `call.fail(now, t)`. `Retry` routes the error through
         // `fail_call` the same way; it is not retriable, so only this call fails.
         let errors = match metadata_response.errors_by_topic_id() {
             Ok(errors) => errors,
@@ -5886,7 +5918,7 @@ mod tests {
         );
     }
 
-    /// Mirrors Java `Errors.exception(String)` (`Errors.java:462-469`), which
+    /// Mirrors Java `Errors#exception(String)`, which
     /// `ApiError.exception()` delegates to: the code's default text is used ONLY
     /// when the broker sent `null`; a non-null empty message is used verbatim.
     #[test]
@@ -6319,7 +6351,8 @@ mod tests {
         );
         let err = result.values().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidRequest);
-        // Java's text (`KafkaAdminClient.java:2573-2574`).
+        // Java's text
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#describeAcls`).
         assert_eq!(err.message(), "The AclBindingFilter must not contain UNKNOWN elements.");
     }
 
@@ -6780,12 +6813,12 @@ mod tests {
     }
 
     /// Java records an empty upsertion password against **that user only** —
-    /// `userIllegalAlterationExceptions.put(user, new
-    /// UnacceptableCredentialException(passwordMustNotBeEmptyMsg))`
-    /// (`KafkaAdminClient.java:4414-4416`) — and still builds and sends every
-    /// other user's alteration. No Java test covers that branch, but the C and
-    /// Python bindings depend on it: their marshaling layer deliberately passes
-    /// an empty password through rather than failing the whole call.
+    /// `userIllegalAlterationExceptions.put(user, new UnacceptableCredentialException(passwordMustNotBeEmptyMsg))`
+    /// (`KafkaAdminClient#alterUserScramCredentials`) — and still builds and
+    /// sends every other user's alteration. No Java test covers that branch,
+    /// but the C and Python bindings depend on it: their marshaling layer
+    /// deliberately passes an empty password through rather than failing the
+    /// whole call.
     #[tokio::test]
     async fn test_alter_user_scram_credentials_empty_password_fails_only_that_user() {
         let (admin, mut runnable, _time, _nodes) = env();
@@ -6911,21 +6944,20 @@ mod tests {
         assert_eq!(result.topic_id("myTopic").get().await.unwrap(), Uuid::new(0, 7));
     }
 
-    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServer`
-    /// (`KafkaAdminClientTest.java:399`).
+    /// Translated from `KafkaAdminClientTest#testUnreachableBootstrapServer`.
     #[tokio::test]
     async fn test_unreachable_bootstrap_server() {
         verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::Rebootstrap).await;
     }
 
-    /// Translated from `KafkaAdminClientTest.testUnreachableBootstrapServerNoRebootstrap`
-    /// (`KafkaAdminClientTest.java:404`).
+    /// Translated from
+    /// `KafkaAdminClientTest#testUnreachableBootstrapServerNoRebootstrap`.
     #[tokio::test]
     async fn test_unreachable_bootstrap_server_no_rebootstrap() {
         verify_unreachable_bootstrap_server(crate::MetadataRecoveryStrategy::None).await;
     }
 
-    /// Java `verifyUnreachableBootstrapServer` (`KafkaAdminClientTest.java:1546-1574`).
+    /// Java `KafkaAdminClientTest#verifyUnreachableBootstrapServer`.
     ///
     /// Java runs it over `Time.SYSTEM`, where the 200 ms of unreachability pass
     /// in real time while `future.get()` waits; here the runnable is driven by
@@ -7727,10 +7759,11 @@ mod tests {
         assert_eq!(err3.error(), Errors::UnknownTopicId);
     }
 
-    /// `KafkaAdminClient.java:1693-1694` fails a call submitted after the I/O
-    /// thread is gone with `new TimeoutException("The AdminClient thread has
-    /// exited.")`, and `handleTimeoutFailure` short-circuits on
-    /// `cause instanceof TimeoutException` (`:1040-1042`) so the user sees exactly a
+    /// `KafkaAdminClient.AdminClientRunnable#enqueue` fails a call submitted after
+    /// the I/O thread is gone with
+    /// `new TimeoutException("The AdminClient thread has exited.")`, and
+    /// `KafkaAdminClient.Call#handleTimeoutFailure` short-circuits on
+    /// `cause instanceof TimeoutException` so the user sees exactly a
     /// `TimeoutException` — i.e. a `RetriableException`.
     ///
     /// This used to be `Error::local_illegal_state`, whose `ErrorHierarchy` is empty, so
@@ -7756,16 +7789,16 @@ mod tests {
         );
     }
 
-    /// `KafkaAdminClient.java:1377-1379` cancels a call whose node disconnected with
-    /// `new DisconnectException(...)`. It used to be built as
+    /// `KafkaAdminClient.AdminClientRunnable#handleResponses` cancels a call whose
+    /// node disconnected with `new DisconnectException(...)`. It used to be built as
     /// `Errors::NetworkError`, so the user got protocol code 13 for a purely
     /// client-side event and a caller matching `Error::Disconnect(_)` never fired.
     ///
     /// The driver's `t instanceof DisconnectException` retry-lookup branch
-    /// (`AdminApiDriver.java:265`) keys off the same class, so the wrong class was
-    /// load-bearing — hence this asserts the class, not just the message.
+    /// (`AdminApiDriver#onFailure`) keys off the same class, so the wrong class
+    /// was load-bearing — hence this asserts the class, not just the message.
     ///
-    /// It also pins `Call.handleTimeoutFailure` (`KafkaAdminClient.java:959-964`),
+    /// It also pins `KafkaAdminClient.Call#handleTimeoutFailure`,
     /// which is what the retry-exhausted disconnect reaches:
     ///
     /// ```java
@@ -7774,9 +7807,9 @@ mod tests {
     /// ```
     ///
     /// The Rust message used to gain an invented `"Aborted due to timeout: "`
-    /// prefix, drop the `Call(...)` rendering of `this` (`:1082-1085`), and append
-    /// the cause as text — leaving `Error::source()` empty where Java's
-    /// `getCause()` is populated.
+    /// prefix, drop the `Call(...)` rendering of `this`
+    /// (`KafkaAdminClient.Call#toString`), and append the cause as text — leaving
+    /// `Error::source()` empty where Java's `getCause()` is populated.
     #[tokio::test]
     async fn a_disconnect_fails_the_call_with_a_disconnect_error() {
         // One retry attempt only, so the call fails terminally rather than looping.
@@ -7820,8 +7853,9 @@ mod tests {
             error.message()
         );
 
-        // The cause is the `DisconnectException` Java builds at
-        // `KafkaAdminClient.java:1377-1379`, attached rather than stringified.
+        // The cause is the `DisconnectException` Java builds in
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`,
+        // attached rather than stringified.
         let cause = error.source().expect("handleTimeoutFailure passes the cause through");
         assert!(
             matches!(cause, Error::Disconnect(_)),
@@ -7883,10 +7917,10 @@ mod tests {
         }
 
         // Rust-side (Critic 92, Issue 1): the `AdminApiDriver` RPCs reach Java's
-        // `enqueue` through `runnable.call` too (`maybeSendRequests`,
-        // `KafkaAdminClient.java:5279-5283`), so they fail with the same
-        // non-retriable error — not with the retriable "thread has exited"
-        // timeout — and every future completes.
+        // `enqueue` through `runnable.call` too
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#maybeSendRequests`),
+        // so they fail with the same non-retriable error — not with the
+        // retriable "thread has exited" timeout — and every future completes.
         let groups = vec!["group".to_string()];
         let bounded = Duration::from_secs(5);
         let driver_results = [
@@ -7958,9 +7992,10 @@ mod tests {
             HashMap::new(),
             HashMap::from([("bootstrap.servers".to_string(), " ".to_string())]),
             HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]),
-            // Java checks before the `bootstrap.resolve.timeout.ms` branch
-            // (`KafkaAdminClient.java:582` before `:597`), so the asynchronous
-            // mode fails at construction too.
+            // Java checks before the `bootstrap.resolve.timeout.ms` branch (in
+            // the `HostResolver` overload of
+            // `org.apache.kafka.clients.admin.KafkaAdminClient#createInternal`),
+            // so the asynchronous mode fails at construction too.
             positive_timeout(),
             with_positive_timeout("bootstrap.servers", " "),
             with_positive_timeout("bootstrap.controllers", "c:9093"),
@@ -8239,14 +8274,14 @@ mod tests {
         assert_eq!(error.message(), "The AdminClient thread has exited.");
     }
 
-    /// Java's `enqueue` starts with the retry budget
-    /// (`KafkaAdminClient.java:1669-1674`): a call whose `tries` already exceed
-    /// `maxRetries` is failed through `handleTimeoutFailure` with
+    /// Java's `KafkaAdminClient.AdminClientRunnable#enqueue` starts with the
+    /// retry budget: a call whose `tries` already exceed `maxRetries` is failed
+    /// through `handleTimeoutFailure` with
     /// `TimeoutException("Exceeded maxRetries after N tries.")` — passed through
-    /// unwrapped, being a timeout — and never handed to the task. `tries ==
-    /// maxRetries` is still accepted. The check precedes the bootstrap-failure
-    /// check (`:1680`), so an exhausted call reports the retry budget even after
-    /// a bootstrap failure.
+    /// unwrapped, being a timeout — and never handed to the task.
+    /// `tries == maxRetries` is still accepted. The check precedes the
+    /// bootstrap-failure check, so an exhausted call reports the retry budget
+    /// even after a bootstrap failure.
     #[test]
     fn test_call_sender_fails_a_call_past_its_retry_budget() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -8331,8 +8366,8 @@ mod tests {
 
     /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
     /// rethrows `new KafkaException("Failed to create new KafkaAdminClient", exc)`
-    /// (`KafkaAdminClient.java:569-573` / `:592-595`), so a caller has one class and
-    /// one message for "admin client construction failed".
+    /// (in both overloads of `KafkaAdminClient#createInternal`), so a caller has one
+    /// class and one message for "admin client construction failed".
     ///
     /// The three failure points used to surface in three different shapes, none of
     /// them Java's: a leaked underlying error, an `illegal_argument`
@@ -8360,7 +8395,7 @@ mod tests {
         assert_eq!(cause.message(), "Invalid url in bootstrap.servers: not-a-host-port");
     }
 
-    /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1550-1569`)
+    /// `KafkaAdminClient.AdminClientRunnable#run`'s `finally`
     /// fails every pending call with
     /// `TimeoutException("The AdminClient thread has exited. Call: <name>")`,
     /// **however** `processRequests` terminated.
@@ -8416,7 +8451,8 @@ mod tests {
         );
     }
 
-    /// `KafkaAdminClient.java:1292-1298` wraps a `createRequest` failure as
+    /// `KafkaAdminClient.AdminClientRunnable#sendEligibleCalls` wraps a
+    /// `createRequest` failure as
     ///
     /// ```java
     /// new KafkaException(String.format("Internal error sending %s to %s.", call.callName, node), t)
@@ -8467,9 +8503,9 @@ mod tests {
         );
     }
 
-    /// `makeBrokerMetadataCall.handleResponse` does
-    /// `(MetadataResponse) abstractResponse` unguarded
-    /// (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+    /// `KafkaAdminClient.AdminClientRunnable#makeBrokerMetadataCall`'s
+    /// `handleResponse` does `(MetadataResponse) abstractResponse` unguarded
+    /// and relies on `KafkaAdminClient.AdminClientRunnable#handleResponses`'s
     /// `catch (Throwable t)` → `call.fail(now, t)` → non-retriable →
     /// `handleFailure` → `metadataManager.updateFailed(e)`.
     ///
@@ -8512,10 +8548,11 @@ mod tests {
         );
     }
 
-    /// `makeBrokerMetadataCall.handleResponse` (`KafkaAdminClient.java:1792-1795`):
-    /// a top-level `REBOOTSTRAP_REQUIRED` calls `initiateRebootstrap()` instead of
-    /// `update(response.buildCluster(), now)`, so the next `NetworkClient` poll
-    /// rebootstraps at once whatever `metadata.recovery.rebootstrap.trigger.ms` is.
+    /// `KafkaAdminClient.AdminClientRunnable#makeBrokerMetadataCall`'s
+    /// `handleResponse`: a top-level `REBOOTSTRAP_REQUIRED` calls
+    /// `initiateRebootstrap()` instead of `update(response.buildCluster(), now)`,
+    /// so the next `NetworkClient` poll rebootstraps at once whatever
+    /// `metadata.recovery.rebootstrap.trigger.ms` is.
     #[tokio::test]
     async fn a_rebootstrap_required_metadata_response_initiates_a_rebootstrap() {
         let (_admin, mut runnable, time, nodes) = env();
@@ -9075,8 +9112,9 @@ mod tests {
     /// On `UnsupportedVersionException` (a broker without KIP-966)
     /// `describeTopicPartitions` issues the Metadata-API `describeTopics` call
     /// and fails itself without failing the futures
-    /// (`KafkaAdminClient.java:2419-2431`). The Metadata call then completes
-    /// them, including its own "not found" for a topic missing from the cluster.
+    /// (`KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`).
+    /// The Metadata call then completes them, including its own "not found" for
+    /// a topic missing from the cluster.
     #[tokio::test]
     async fn describe_topics_falls_back_to_metadata_on_unsupported_version() {
         let (admin, mut runnable, _time, nodes) = env();
@@ -9119,15 +9157,17 @@ mod tests {
     /// Regression for COMMENTS.66 Issue 6: an `UnsupportedVersionException` for
     /// `describeTopicPartitions` during the `close(timeout)` grace period.
     ///
-    /// In Java `Call.fail` still reaches `handleUnsupportedVersionException`
-    /// then (`runnable.closing` is only set once the I/O thread exits), which
-    /// issues the Metadata fallback through `runnable.call`; `call()` rejects it
-    /// because the hard-shutdown deadline is set, and every topic future fails
-    /// with `IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")` (`KafkaAdminClient.java:970-986`, `:2419-2431`, `:1706-1709`).
-    /// Rust's `fail_call` reaches the hook too, since `close()` only publishes
-    /// the deadline and `closing` is set once the loop exits. Before that fix
-    /// the code-35 error was swallowed and the futures never completed.
+    /// In Java `Call.fail` still reaches `handleUnsupportedVersionException` then
+    /// (`runnable.closing` is only set once the I/O thread exits), which issues
+    /// the Metadata fallback through `runnable.call`; `call()` rejects it because
+    /// the hard-shutdown deadline is set, and every topic future fails with
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is closing.")`
+    /// (`KafkaAdminClient.Call#fail`,
+    /// `KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`,
+    /// `KafkaAdminClient.AdminClientRunnable#call`). Rust's `fail_call` reaches
+    /// the hook too, since `close()` only publishes the deadline and `closing` is
+    /// set once the loop exits. Before that fix the code-35 error was swallowed
+    /// and the futures never completed.
     #[tokio::test]
     async fn an_unsupported_version_during_close_fails_the_by_name_describe() {
         let (admin, mut runnable, _time, nodes) = env();
@@ -9339,13 +9379,13 @@ mod tests {
     /// `describeTopics` is being answered: it resolves the id to a name, then
     /// finds the topic gone and builds the entry with
     /// `metadataCache.getTopicId(topic)` (`KafkaApis.scala:875-880`), which is
-    /// now the zero id. Java's `MetadataResponse.errorsByTopicId()` throws
-    /// `IllegalStateException("Use errors() when managing topic using topic
-    /// name")` (`MetadataResponse.java:118-120`), and `handleResponses` catches
-    /// it with `call.fail(now, t)` (`KafkaAdminClient.java:1471-1480`). The
-    /// error is not retriable, so only that call fails and the client goes on.
-    /// Rust used to `assert!`, which ended the whole I/O task: the call never
-    /// resolved, and every later call was rejected.
+    /// now the zero id. Java's `MetadataResponse#errorsByTopicId` throws
+    /// `IllegalStateException("Use errors() when managing topic using topic name")`,
+    /// and `KafkaAdminClient.AdminClientRunnable#handleResponses` catches it
+    /// with `call.fail(now, t)`. The error is not retriable, so only that call
+    /// fails and the client goes on. Rust used to `assert!`, which ended the
+    /// whole I/O task: the call never resolved, and every later call was
+    /// rejected.
     #[tokio::test]
     async fn a_zero_topic_id_in_a_by_id_describe_fails_only_that_call() {
         let (admin, mut runnable, _time, nodes) = env();
@@ -10152,12 +10192,12 @@ mod tests {
     }
 
     /// A driver call (here the `FindCoordinator` lookup of `describeTransactions`)
-    /// honours `retries`: `AdminClientRunnable.enqueue` fails a call whose
-    /// `tries` exceed `maxRetries` with `TimeoutException("Exceeded maxRetries
-    /// after " + tries + " tries.")` (`KafkaAdminClient.java:1668-1673`). With
-    /// `retries=2` and a coordinator that is never available, Java sends
-    /// exactly three `FindCoordinator` requests (tries 0, 1, 2) and fails the key
-    /// when the driver offers the fourth.
+    /// honours `retries`: `KafkaAdminClient.AdminClientRunnable#enqueue` fails a
+    /// call whose `tries` exceed `maxRetries` with
+    /// `TimeoutException("Exceeded maxRetries after " + tries + " tries.")`. With
+    /// `retries=2` and a coordinator that is never available, Java sends exactly
+    /// three `FindCoordinator` requests (tries 0, 1, 2) and fails the key when the
+    /// driver offers the fourth.
     ///
     /// Rust-side test, no Java counterpart: it was added with this port to check
     /// the retry bound on a coordinator lookup directly. The translated Java tests
@@ -12920,11 +12960,12 @@ mod tests {
     }
 
     /// Translated from `testListOffsetsHandlesFulfillmentTimeouts`: a partition
-    /// whose `ListOffsets` keeps answering `REQUEST_TIMED_OUT` is retried until
-    /// its fulfillment `tries` exceed `retries`, when `AdminClientRunnable.enqueue`
-    /// fails it with `TimeoutException("Exceeded maxRetries after " + tries +
-    /// " tries.")` (`KafkaAdminClient.java:1668-1673`), while the partition that
-    /// succeeded keeps its result. One timeout fewer lets both partitions succeed.
+    /// whose `ListOffsets` keeps answering `REQUEST_TIMED_OUT` is retried until its
+    /// fulfillment `tries` exceed `retries`, when
+    /// `KafkaAdminClient.AdminClientRunnable#enqueue` fails it with
+    /// `TimeoutException("Exceeded maxRetries after " + tries + " tries.")`, while
+    /// the partition that succeeded keeps its result. One timeout fewer lets both
+    /// partitions succeed.
     ///
     /// Java asserts only the exception class; the message is asserted here as
     /// well, so the failure cannot be the API timeout's.
@@ -13739,7 +13780,8 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // Java hardcodes "ListGroups" in the message
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#listGroups`),
         // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
@@ -13764,7 +13806,8 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        // Java hardcodes "ListGroups" in the message (`KafkaAdminClient.java:3565`),
+        // Java hardcodes "ListGroups" in the message
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient#listGroups`),
         // and `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
         // assert only `KafkaException.class`. The Rust message used to substitute
         // the lower-cased Rust call name and append the cause's text (finding 243).
@@ -14630,11 +14673,11 @@ mod tests {
         ));
     }
 
-    /// The failure Java's `AdminClientRunnable.enqueue` gives a coordinator
-    /// re-lookup once `retries=0` is used up (`KafkaAdminClient.java:1668-1673`):
-    /// the second `FindCoordinator` carries `tries == 1`. The `*NumRetries` tests
-    /// assert only `TimeoutException.class`; the message is asserted as well, so
-    /// the failure cannot be the API timeout's. The future must already be done:
+    /// The failure Java's `KafkaAdminClient.AdminClientRunnable#enqueue` gives a
+    /// coordinator re-lookup once `retries=0` is used up: the second
+    /// `FindCoordinator` carries `tries == 1`. The `*NumRetries` tests assert
+    /// only `TimeoutException.class`; the message is asserted as well, so the
+    /// failure cannot be the API timeout's. The future must already be done:
     /// awaiting a pending one would hang the test rather than fail it.
     async fn assert_exceeded_max_retries_after_one_try<T: Send + 'static>(future: &KafkaFuture<T>) {
         assert!(future.is_done(), "the coordinator re-lookup must fail once out of retries");
@@ -15363,14 +15406,15 @@ mod tests {
 
     /// Regression test for the `removeAll` describe step's timeout source.
     ///
-    /// Java issues the describe via `describeConsumerGroups(Collections
-    /// .singleton(groupId))` with a *default* `DescribeConsumerGroupsOptions`
-    /// (its `timeoutMs` is `null`), so the describe driver's deadline is
-    /// `now + defaultApiTimeoutMs` — INDEPENDENT of the removeMembers request's
-    /// `options.timeout_ms()` (`KafkaAdminClient.java:4172`). This asserts the first
-    /// describe request (the coordinator lookup) carries the default-API-timeout
-    /// budget, not the small `options.timeout_ms()` budget, and so fails against
-    /// code that ties the describe deadline to `options.timeout_ms()`.
+    /// Java issues the describe via
+    /// `describeConsumerGroups(Collections.singleton(groupId))` with a *default*
+    /// `DescribeConsumerGroupsOptions` (its `timeoutMs` is `null`), so the describe
+    /// driver's deadline is `now + defaultApiTimeoutMs` — INDEPENDENT of the
+    /// removeMembers request's `options.timeout_ms()`
+    /// (`KafkaAdminClient#getMembersFromGroup`). This asserts the first describe
+    /// request (the coordinator lookup) carries the default-API-timeout budget, not
+    /// the small `options.timeout_ms()` budget, and so fails against code that ties
+    /// the describe deadline to `options.timeout_ms()`.
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
         use crate::common::protocol::ApiKeys;
@@ -15415,14 +15459,15 @@ mod tests {
     ///
     /// Java computes the `LeaveGroup` driver's deadline INSIDE
     /// `memFuture.whenComplete(...)`, after the describe future resolves
-    /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
-    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
-    /// fresh full timeout window starting when describe completes. Here the mock
-    /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
-    /// before describe completes: the fix recomputes the LeaveGroup deadline from
-    /// the post-describe time (so its coordinator lookup is issued with a fresh
-    /// 5000ms budget), whereas code that baked the pre-describe deadline would
-    /// have the LeaveGroup window already expired and issue no request at all.
+    /// (`KafkaAdminClient#removeMembersFromConsumerGroup` →
+    /// `invokeDriver(..., options.timeoutMs())` →
+    /// `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a fresh
+    /// full timeout window starting when describe completes. Here the mock clock is
+    /// advanced past the ORIGINAL (call-time) `options.timeout` window before
+    /// describe completes: the fix recomputes the LeaveGroup deadline from the
+    /// post-describe time (so its coordinator lookup is issued with a fresh 5000ms
+    /// budget), whereas code that baked the pre-describe deadline would have the
+    /// LeaveGroup window already expired and issue no request at all.
     #[tokio::test]
     async fn test_remove_all_leave_group_deadline_computed_after_describe() {
         use crate::common::protocol::ApiKeys;
@@ -15562,7 +15607,7 @@ mod tests {
     /// `createPendingAuthenticationError`. `MockClient` (outside this module)
     /// always answers `None`, and the trait method is the only way the admin
     /// runnable learns about an authentication failure
-    /// (`KafkaAdminClient.java:1373`).
+    /// (`KafkaAdminClient.AdminClientRunnable#handleResponses`).
     struct AuthFailingClient {
         inner: MockClient,
         error: Option<Error>,
@@ -15704,12 +15749,12 @@ mod tests {
     /// Regression for finding 242. Java propagates the exception **object** —
     /// `AuthenticationException authException = client.authenticationException(call.curNode());
     /// if (authException != null) call.fail(now, authException);`
-    /// (`KafkaAdminClient.java:1373-1376`) — so whichever `AuthenticationException`
-    /// subclass the channel raised is what the admin future fails with. Rust
-    /// hardcoded `Errors::SaslAuthenticationFailed`, reporting code 58 for a TLS
-    /// certificate rejection (`KafkaChannel.java:463-467`'s
-    /// `catch (SslAuthenticationException e)`), on a connection that never
-    /// performed a SASL exchange.
+    /// (`KafkaAdminClient.AdminClientRunnable#handleResponses`) — so whichever
+    /// `AuthenticationException` subclass the channel raised is what the admin
+    /// future fails with. Rust hardcoded `Errors::SaslAuthenticationFailed`,
+    /// reporting code 58 for a TLS certificate rejection (the
+    /// `catch (SslAuthenticationException e)` of `KafkaChannel#receive`), on a
+    /// connection that never performed a SASL exchange.
     ///
     /// It also pins finding 231's other half: the reason must be the
     /// authenticator's own text, with no second class prefix baked into
@@ -15779,7 +15824,7 @@ mod tests {
     /// Regression for finding 243(a). `handleFailure` on the `findAllBrokers`
     /// metadata call builds
     /// `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
-    /// (`KafkaAdminClient.java:3565`) — a **bare** `KafkaException`, which is a
+    /// (`KafkaAdminClient#listGroups`) — a **bare** `KafkaException`, which is a
     /// *sibling* of `ApiException`, not a subclass. So:
     ///
     ///   * `is_kafka_error()` is `true`, `is_api_error()` / `is_retriable_error()`
@@ -15832,13 +15877,13 @@ mod tests {
         );
     }
 
-    /// Regression for finding 243(b). `getMembersFromGroup`'s `whenComplete`
-    /// builds `new KafkaException("Encounter exception when trying to get members
-    /// from group: " + groupId, ex)` (`KafkaAdminClient.java:4174`) — again a bare
-    /// `KafkaException` carrying the cause, NOT the inner class. Inheriting the
-    /// inner class turned a `GroupAuthorizationException` cause into an
-    /// `is_authorization_error()` (and therefore `is_fatal_error()`) wrapper where
-    /// Java answers `false` to both, and dropped the cause.
+    /// Regression for finding 243(b). `KafkaAdminClient#getMembersFromGroup`'s
+    /// `whenComplete` builds
+    /// `new KafkaException("Encounter exception when trying to get members from group: " + groupId, ex)` —
+    /// again a bare `KafkaException` carrying the cause, NOT the inner class.
+    /// Inheriting the inner class turned a `GroupAuthorizationException` cause
+    /// into an `is_authorization_error()` (and therefore `is_fatal_error()`)
+    /// wrapper where Java answers `false` to both, and dropped the cause.
     ///
     /// ("exception" is reworded to "error" in the Rust message per CLAUDE.md §2.)
     #[tokio::test]
@@ -15880,15 +15925,16 @@ mod tests {
         assert!(cause.is_authorization_error(), "the cause keeps its own class: {cause:?}");
     }
 
-    /// Regression for finding 246. `completeUnrealizedFutures` throws
-    /// `new ApiException(messageFormatter.apply(key))`
-    /// (`KafkaAdminClient.java:1744-1749`) — the concrete base class. It was
-    /// spelled `Errors::UnknownServerError`, which resolves to the
+    /// Regression for finding 246. `KafkaAdminClient#completeUnrealizedFutures`
+    /// throws `new ApiException(messageFormatter.apply(key))` — the concrete base
+    /// class. It was spelled `Errors::UnknownServerError`, which resolves to the
     /// `UnknownServerException` *subclass*, so `Display` read
     /// `"UnknownServerError: .."` and `matches!(e, Error::Api(_))` never matched.
     ///
     /// Java uses `new UnknownServerException(..)` for its *other* response sanity
-    /// checks (`:2631`, `:2684`, `:4020`), so this is not a blanket sweep.
+    /// checks (in `KafkaAdminClient#createAcls`, `KafkaAdminClient#deleteAcls`
+    /// and `KafkaAdminClient#alterPartitionReassignments`), so this is not a
+    /// blanket sweep.
     #[tokio::test]
     async fn an_unrealized_future_fails_with_a_bare_api_error() {
         let (admin, mut runnable, _time, _nodes) = env();
@@ -15937,9 +15983,9 @@ mod tests {
 
     /// Regression for finding 247(a). Java rejects a call submitted once the
     /// client is closing with
-    /// `new IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")` (`KafkaAdminClient.java:1709`). The Rust text had drifted to
-    /// "The AdminClient is closed.", which is not the sanctioned
+    /// `new IllegalStateException("Cannot accept new calls when AdminClient is closing.")`
+    /// (`KafkaAdminClient.AdminClientRunnable#call`). The Rust text had drifted
+    /// to "The AdminClient is closed.", which is not the sanctioned
     /// "exception"->"error" rewording.
     #[tokio::test]
     async fn a_call_submitted_while_closing_uses_javas_message() {
@@ -15960,11 +16006,10 @@ mod tests {
         assert!(!error.is_kafka_error(), "got {error:?}");
     }
 
-    /// Regression for finding 247. `handleNotControllerError` rethrows
-    /// `error.exception()` for the code it matched
-    /// (`KafkaAdminClient.java:4145-4153`), so a `NOT_LEADER_OR_FOLLOWER` seen by a
-    /// `bootstrap.controllers` client surfaces as `NotLeaderOrFollower`. Rust
-    /// always reported `NotController`.
+    /// Regression for finding 247. `KafkaAdminClient#handleNotControllerError`
+    /// rethrows `error.exception()` for the code it matched, so a
+    /// `NOT_LEADER_OR_FOLLOWER` seen by a `bootstrap.controllers` client surfaces
+    /// as `NotLeaderOrFollower`. Rust always reported `NotController`.
     #[test]
     fn handle_not_controller_error_reports_the_matched_code() {
         let with_controllers = AdminMetadataManager::new(100, 1000, true, LogContext::empty());
@@ -15997,12 +16042,11 @@ mod tests {
         ExponentialBackoff::new(100, RETRY_BACKOFF_EXP_BASE, 1000, 0.0).expect("a valid backoff")
     }
 
-    /// `AdminClientRunnable.call` hands a call that a `bootstrap.controllers`
-    /// client cannot serve to `call.fail(now, ..)` (`KafkaAdminClient.java:1710-1713`).
-    /// `fail` counts the try and advances `nextAllowedTryMs` (`:989`), then fails
-    /// with `handleTimeoutFailure` when the deadline has already passed (`:996-999`)
-    /// and with `handleFailure` otherwise (`:1001-1008`); a `closing` runnable fails
-    /// it at once (`:975-978`).
+    /// `KafkaAdminClient.AdminClientRunnable#call` hands a call that a
+    /// `bootstrap.controllers` client cannot serve to `call.fail(now, ..)`.
+    /// `KafkaAdminClient.Call#fail` counts the try and advances `nextAllowedTryMs`,
+    /// then fails with `handleTimeoutFailure` when the deadline has already passed and
+    /// with `handleFailure` otherwise; a `closing` runnable fails it at once.
     #[test]
     fn a_call_rejected_for_bootstrap_controllers_goes_through_call_fail() {
         fn rejected(deadline_ms: i64, captured: &Arc<Mutex<Option<Error>>>) -> Call {
@@ -16266,9 +16310,9 @@ mod tests {
 
     // --- shutdown ------------------------------------------------------------
 
-    /// `AdminClientRunnable.enqueue` accepts a call only while the runnable is not
-    /// `closing` and otherwise fails it with `TimeoutException("The AdminClient
-    /// thread has exited.")` (`KafkaAdminClient.java:1679-1695`). A follow-up a
+    /// `KafkaAdminClient.AdminClientRunnable#enqueue` accepts a call only while
+    /// the runnable is not `closing` and otherwise fails it with
+    /// `TimeoutException("The AdminClient thread has exited.")`. A follow-up a
     /// response hook issues goes through it too (`runnable.call(call, now)`), so
     /// once the `finally` has set `closing` it fails instead of being queued
     /// where no loop iteration will ever drain it.
@@ -16305,9 +16349,9 @@ mod tests {
         assert!(error.is_retriable_error(), "Java's TimeoutException is a RetriableException");
     }
 
-    /// Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which
-    /// skips every `Call` with `internal == true`
-    /// (`KafkaAdminClient.java:1419-1441`). The metadata refresh
+    /// Java's `threadShouldExit` consults
+    /// `KafkaAdminClient.AdminClientRunnable#hasActiveExternalCalls(Collection)`,
+    /// which skips every `Call` with `internal == true`. The metadata refresh
     /// (`makeMetadataCall`) is internal and is recreated on every backoff
     /// expiry, so counting it would keep the I/O task alive for as long as the
     /// bootstrap brokers stay unreachable: `close(timeout)` would block for the
@@ -16614,7 +16658,7 @@ mod tests {
 
     /// Java bounds every `client.poll(...)` by the time left until the
     /// hard-shutdown deadline once `close()` has been called
-    /// (`KafkaAdminClient.java:1589-1592`):
+    /// (`KafkaAdminClient.AdminClientRunnable#processRequests`):
     ///
     /// ```java
     /// long pollTimeout = Math.min(1200000, timeoutProcessor.nextTimeoutMs());
@@ -16755,8 +16799,8 @@ mod tests {
     }
 
     /// A call submitted just before `close()` must still run. Java's
-    /// `processRequests` drains `newCalls` and checks `threadShouldExit` back to
-    /// back at the top of every iteration (`KafkaAdminClient.java:1575-1581`):
+    /// `KafkaAdminClient.AdminClientRunnable#processRequests` drains `newCalls`
+    /// and checks `threadShouldExit` back to back at the top of every iteration:
     ///
     /// ```java
     /// // Copy newCalls into pendingCalls.
@@ -16850,7 +16894,8 @@ mod tests {
             runnable.run_once().await;
         }
         // A few more iterations: the driver must NOT issue the second key's
-        // request while the first is outstanding (`AdminApiDriver.java:381-383`).
+        // request while the first is outstanding
+        // (`org.apache.kafka.clients.admin.internals.AdminApiDriver#collectRequests`).
         for _ in 0..5 {
             runnable.run_once().await;
         }
@@ -16861,15 +16906,16 @@ mod tests {
     /// one whose fulfillment request had not been issued yet.
     ///
     /// The driver issues at most one fulfillment request per broker at a time
-    /// (`AdminApiDriver.java:381-383`), so with one broker `b`'s `InitProducerId`
-    /// is only created once `a`'s completes or fails. `close(0)` makes the I/O
-    /// task exit with `a`'s call in flight; the `finally` fails it, and its
-    /// failure hook asks the driver for the next request. Java routes that
-    /// through `runnable.call(..)` (`KafkaAdminClient.java:5281`), which rejects
-    /// it once the shutdown deadline is set (`:1707-1709`), so `b` fails with
-    /// "Cannot accept new calls when AdminClient is closing." Rust used to send
-    /// it straight into the submission channel after the final drain; the
-    /// runnable was then dropped with it inside and `b` never resolved.
+    /// (`AdminApiDriver#collectRequests`), so with one broker `b`'s
+    /// `InitProducerId` is only created once `a`'s completes or fails. `close(0)`
+    /// makes the I/O task exit with `a`'s call in flight; the `finally` fails it,
+    /// and its failure hook asks the driver for the next request. Java routes
+    /// that through `runnable.call(..)` in `KafkaAdminClient#maybeSendRequests`;
+    /// `KafkaAdminClient.AdminClientRunnable#call` rejects it once the shutdown
+    /// deadline is set, so `b` fails with "Cannot accept new calls when
+    /// AdminClient is closing." Rust used to send it straight into the submission
+    /// channel after the final drain; the runnable was then dropped with it
+    /// inside and `b` never resolved.
     #[tokio::test]
     async fn close_resolves_a_driver_key_whose_fulfillment_was_not_yet_issued() {
         let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
@@ -16928,8 +16974,8 @@ mod tests {
     }
 
     /// A driver RPC issued after `close()` fails with Java's
-    /// `IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")` (`KafkaAdminClient.java:1707-1709`, reached through
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is closing.")`
+    /// (`KafkaAdminClient.AdminClientRunnable#call`, reached through
     /// `invokeDriver` → `maybeSendRequests` → `runnable.call`), exactly like a
     /// plain call. It used to bypass the gate: with the I/O task gone the
     /// channel send failed and the key got a retriable
@@ -16959,12 +17005,13 @@ mod tests {
     /// shutdown tail resolves instead of hanging, even when the loop ended
     /// without `close()` having set the closing gate.
     ///
-    /// Java's `finally` starts with `closing = true` (`KafkaAdminClient.java:1551`),
-    /// so `enqueue` rejects anything submitted from then on with
-    /// `TimeoutException("The AdminClient thread has exited.")` (`:1679-1695`).
-    /// Here the loop ends in a panic, so only that flag can stop the follow-up
-    /// the driver issues when the `finally` fails the in-flight key: without it
-    /// the call was queued after the final drain and dropped with the runnable.
+    /// Java's `finally` in `KafkaAdminClient.AdminClientRunnable#run` starts with
+    /// `closing = true`, so `KafkaAdminClient.AdminClientRunnable#enqueue` rejects
+    /// anything submitted from then on with
+    /// `TimeoutException("The AdminClient thread has exited.")`. Here the loop ends
+    /// in a panic, so only that flag can stop the follow-up the driver issues when
+    /// the `finally` fails the in-flight key: without it the call was queued after
+    /// the final drain and dropped with the runnable.
     #[tokio::test]
     async fn a_follow_up_issued_in_the_shutdown_tail_after_a_panic_resolves() {
         let (admin, mut runnable, time, nodes) = env_nodes_with_props(1, &[]);
@@ -17032,14 +17079,15 @@ mod tests {
     /// Regression for COMMENTS.66.md Issue 2: a quota-retry follow-up passes the
     /// same `runnable.call` gate as every other new call.
     ///
-    /// Java resubmits the throttled topics with `runnable.call(call, now)`
-    /// (`KafkaAdminClient.java:1988`), which rejects the retry once `close()` has
-    /// set the hard-shutdown deadline (`:1707-1709`). The retry's
-    /// `handleFailure` leaves a non-timeout cause alone
-    /// (`maybeCompleteQuotaExceededException`), so the topic fails with
-    /// `IllegalStateException("Cannot accept new calls when AdminClient is
-    /// closing.")`. Rust used to push the retry straight into `pending_calls`,
-    /// where it kept the loop alive and was sent again during `close()`.
+    /// Java resubmits the throttled topics with `runnable.call(call, now)` (in
+    /// `KafkaAdminClient#getCreateTopicsCall`);
+    /// `KafkaAdminClient.AdminClientRunnable#call` rejects the retry once
+    /// `close()` has set the hard-shutdown deadline. The retry's `handleFailure`
+    /// leaves a non-timeout cause alone (`maybeCompleteQuotaExceededException`),
+    /// so the topic fails with
+    /// `IllegalStateException("Cannot accept new calls when AdminClient is closing.")`.
+    /// Rust used to push the retry straight into `pending_calls`, where it kept
+    /// the loop alive and was sent again during `close()`.
     #[tokio::test]
     async fn a_quota_retry_during_close_is_rejected_by_the_closing_gate() {
         let (admin, mut runnable, _time, _nodes) = env();

@@ -1141,8 +1141,8 @@ void test_close_async(void) {
 }
 
 /* close_with_timeout_cb closes the mock producer, a negative timeout too:
- * Java's MockProducer.close(Duration) never reads the timeout
- * (MockProducer.java:438-444); only a KafkaProducer rejects it
+ * Java's `org.apache.kafka.clients.producer.MockProducer#close(Duration)` never reads
+ * the timeout; only a KafkaProducer rejects it
  * (test_kafka_producer.c). */
 void test_close_with_timeout_async(void) {
     int64_t timeouts[] = { 1000, -1 };
@@ -1571,9 +1571,11 @@ void test_transaction_send_offsets_zero_count_outside_transaction(void) {
      * and both behaviours are faithful to their Java counterpart:
      *
      *   - MockProducer verifies transaction state before the empty-map check
-     *     (Java MockProducer:186-193 then :194-196), so this errors.
+     *     (`org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransaction`),
+     *     so this errors.
      *   - KafkaProducer short-circuits the empty map before consulting transaction
-     *     state (Java KafkaProducer:738), so the same call returns success there.
+     *     state (`org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction`),
+     *     so the same call returns success there.
      *
      * This pins the mock half. */
     fixture_t f;
@@ -1789,7 +1791,8 @@ void test_transaction_commit_flushes_pending_sends(void) {
 void test_transaction_fenced_producer(void) {
     /* `fenceProducer()`: every later control call fails with
      * `ProducerFencedException`, a `send` with a `KafkaException` whose cause
-     * is the fenced error (Java MockProducer:293). */
+     * is the fenced error
+     * (`org.apache.kafka.clients.producer.MockProducer#send(ProducerRecord,Callback)`). */
     fixture_t f;
     fixture_init(&f, 1);
 

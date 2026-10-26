@@ -480,7 +480,8 @@ impl ApplicationEventProcessor {
         };
         if !has_membership {
             // Java: `new KafkaException("MembershipManager is not available
-            // when processing a subscribe event")` (`:386`) — a *bare*
+            // when processing a subscribe event")` (in
+            // `ApplicationEventProcessor#process(TopicRe2JPatternSubscriptionChangeEvent)`) — a *bare*
             // `KafkaException`, so `is_kafka_error()` must answer true.
             handle.complete_with_error(Error::kafka_message(
                 "MembershipManager is not available when processing a subscribe event",
@@ -716,7 +717,8 @@ impl ApplicationEventProcessor {
                 }
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to async commit offset
-                // because ...")` (`:246`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(AsyncCommitEvent)`) — a bare `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -786,7 +788,8 @@ impl ApplicationEventProcessor {
                 }
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to sync commit offset
-                // because ...")` (`:264`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(SyncCommitEvent)`) — a bare `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -830,7 +833,9 @@ impl ApplicationEventProcessor {
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
                 // Java: `new KafkaException("Unable to fetch committed offset
-                // because ...")` (`:282`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(FetchCommittedOffsetsEvent)`) — a bare
+                // `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -1293,14 +1298,14 @@ impl ApplicationEventProcessor {
                 // reconciliations before moving on to update positions", and —
                 // crucially — `mark_reconciliation_check_complete()` below now
                 // fires WHILE the auto-commit is still in flight, matching Java
-                // `ApplicationEventProcessor.java:732-736`, so the app-thread
+                // `ApplicationEventProcessor#process(AsyncPollEvent)`, so the app-thread
                 // `poll()` keeps returning records from RETAINED partitions
                 // during a slow commit instead of stalling until it resolves.
                 //
                 // Pass `can_commit = true`: this is the poll-time entry
                 // point, before any new fetching starts (Java
-                // `ApplicationEventProcessor.process(AsyncPollEvent)`
-                // line 715-718). At this site any pending offsets can
+                // `ApplicationEventProcessor#process(AsyncPollEvent)`).
+                // At this site any pending offsets can
                 // be safely flushed via the commit manager's
                 // auto-commit-before-rebalance path inside
                 // `maybeReconcile`, so Java passes `true` to permit
@@ -1349,7 +1354,7 @@ impl ApplicationEventProcessor {
                         // `pollTimer.isExpired()` BEFORE the reset and
                         // calls `membershipManager().maybeRejoinStaleMember()`
                         // when expired
-                        // (`AbstractHeartbeatRequestManager.java:265-274`).
+                        // (`AbstractHeartbeatRequestManager#resetPollTimer`).
                         // Required for fence-rejoin recovery: when the
                         // poll timer expires the heartbeat manager
                         // transitions the member to STALE via leave
@@ -2409,9 +2414,10 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:251`), so
-        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
-        // false and flip every §10.4 gate the app side consults.
+        // `KafkaException` here
+        // (`org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(AsyncCommitEvent)`),
+        // so `is_kafka_error()` must be true — `Error::local_illegal_state` would answer false and flip every §10.4
+        // gate the app side consults.
         assert_eq!(
             err.message(),
             "Unable to async commit offset because the CommitRequestManager is not available. \
@@ -2531,9 +2537,10 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:269`), so
-        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
-        // false and flip every §10.4 gate the app side consults.
+        // `KafkaException` here
+        // (`org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(SyncCommitEvent)`), so
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer false and flip every §10.4 gate
+        // the app side consults.
         assert_eq!(
             err.message(),
             "Unable to sync commit offset because the CommitRequestManager is not available. \
@@ -2607,7 +2614,8 @@ mod tests {
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:287`), so
+        // `KafkaException` here
+        // (`ApplicationEventProcessor#process(FetchCommittedOffsetsEvent)`), so
         // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
@@ -2867,8 +2875,7 @@ mod tests {
     // C2-01: the Unsubscribe / LeaveGroupOnClose event future follows the
     // membership manager's leave-in-progress future. Java
     // `process(UnsubscribeEvent)` / `process(LeaveGroupOnCloseEvent)` chain
-    // the event future onto `leaveGroup()` / `leaveGroupOnClose(...)`
-    // (`ApplicationEventProcessor.java:427-430,491-495`), which completes
+    // the event future onto `leaveGroup()` / `leaveGroupOnClose(...)`, which completes
     // only when the leave heartbeat's response (or failure / skip / fence /
     // fatal) is observed; and they start the leave synchronously, inside
     // `process(...)` on the network thread.
@@ -3075,7 +3082,7 @@ mod tests {
     }
 
     /// A second Unsubscribe while the first leave is in progress gets the
-    /// SAME leave future (`AbstractMembershipManager.java:637-643`): neither
+    /// SAME leave future (`AbstractMembershipManager#leaveGroup(boolean)`): neither
     /// event completes before the leave response, and both complete with it.
     /// A LeaveGroupOnClose arriving during an unsubscribe joins the same
     /// leave.

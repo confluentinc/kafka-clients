@@ -63,7 +63,7 @@ pub type kafka_common_metrics_MetricsReporter_metric_removal_fn_t =
 pub type kafka_common_metrics_MetricsReporter_close_fn_t = Option<unsafe extern "C" fn(self_: *mut c_void)>;
 
 /// A C implementation of [`MetricsReporter`] registered through
-/// [`kafka_common_metrics_MetricsReporter_new`]; a null method is the Java
+/// `kafka_common_metrics_MetricsReporter_new`; a null method is the Java
 /// default. Every method of the Java interface has a default, so each
 /// typedef is `Option<..>`: the nullable form cbindgen emits as a plain C
 /// function pointer, while an `Option<alias>` in the exported signature
@@ -180,14 +180,31 @@ pub(crate) unsafe fn take_metrics_reporter(
     unsafe { Interface::take(reporter as *mut Interface<dyn MetricsReporter>) }
 }
 
-/// Registers a C implementation of `MetricsReporter`; each method pointer
-/// may be `NULL` for the Java default (a no-op). The caller owns `self_` and
-/// keeps it alive until the handle is destroyed with
-/// [`kafka_common_metrics_MetricsReporter_destroy`] or, once
-/// `Metrics_add_reporter` consumed it, until that registry is destroyed.
-/// The methods run on whichever thread calls the registry, possibly
-/// concurrently, so the C caller is responsible for their thread-safety on
-/// `self_`.
+/// Registers a C implementation of `MetricsReporter`, a plugin interface to allow things to listen
+/// as new metrics are created so they can be reported.
+///
+/// # Parameters
+///
+/// - `init` - Implements `kafka_common_metrics_MetricsReporter_init`, or `NULL` for the Java
+///   default (a no-op).
+/// - `metric_change` - Implements `kafka_common_metrics_MetricsReporter_metric_change`, or `NULL`
+///   for the Java default.
+/// - `metric_removal` - Implements `kafka_common_metrics_MetricsReporter_metric_removal`, or `NULL`
+///   for the Java default.
+/// - `close` - Implements `kafka_common_metrics_MetricsReporter_close`, or `NULL` for the Java
+///   default.
+///
+/// # Returns
+///
+/// The implementation's handle.
+///
+/// # Safety
+///
+/// The caller owns `self_` and keeps it alive until the handle is destroyed with
+/// `kafka_common_metrics_MetricsReporter_destroy` or, once
+/// `kafka_common_metrics_Metrics_add_reporter` consumed it, until that registry is destroyed. The methods run on whichever thread calls the
+/// registry, possibly concurrently, so the C caller is responsible for their thread-safety on
+/// `self_`. The returned handle is owned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
@@ -204,6 +221,10 @@ pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
 
 /// `init(List<KafkaMetric> metrics)`: `metrics` holds
 /// `const kafka_common_metrics_KafkaMetric_t *` elements, borrowed.
+///
+/// # Parameters
+///
+/// - `metrics` - All currently existing metrics
 ///
 /// # Safety
 ///
@@ -232,6 +253,10 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
 
 /// `metricChange(KafkaMetric metric)`.
 ///
+/// # Parameters
+///
+/// - `metric` - The metric that has been added or changed
+///
 /// # Safety
 ///
 /// `self_` must be a valid metrics-reporter handle and `metric` a valid
@@ -249,6 +274,10 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_change(
 }
 
 /// `metricRemoval(KafkaMetric metric)`.
+///
+/// # Parameters
+///
+/// - `metric` - The metric that has been removed
 ///
 /// # Safety
 ///

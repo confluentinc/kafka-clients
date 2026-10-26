@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::delete_acls`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteAclsResult`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -27,8 +25,6 @@ use crate::common::{Error, KafkaFuture};
 
 /// A class containing either the deleted ACL binding or an exception if the
 /// delete failed.
-///
-/// Corresponds to `DeleteAclsResult.FilterResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult")]
 pub struct FilterResult {
@@ -43,13 +39,13 @@ impl FilterResult {
         Self { binding, error }
     }
 
-    /// Return the deleted ACL binding, or `None` if there was an error.
+    /// Returns the deleted ACL binding, or `None` if there was an error.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult#binding")]
     pub fn binding(&self) -> Option<&AclBinding> {
         self.binding.as_ref()
     }
 
-    /// Return an exception if the ACL delete was not successful, or `None` if it
+    /// Returns an exception if the ACL delete was not successful, or `None` if it
     /// was.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResult#exception")]
     pub fn error(&self) -> Option<&Error> {
@@ -58,8 +54,6 @@ impl FilterResult {
 }
 
 /// A class containing the results of the delete ACLs operation.
-///
-/// Corresponds to `DeleteAclsResult.FilterResults`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResults")]
 pub struct FilterResults {
@@ -73,7 +67,7 @@ impl FilterResults {
         Self { values }
     }
 
-    /// Return a list of delete ACLs results for a given filter.
+    /// Returns a list of delete ACLs results for a given filter.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult$FilterResults#values")]
     pub fn values(&self) -> &[FilterResult] {
         &self.values
@@ -81,8 +75,6 @@ impl FilterResults {
 }
 
 /// The result of the `Admin::delete_acls` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteAclsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult")]
 pub struct DeleteAclsResult {
@@ -96,19 +88,16 @@ impl DeleteAclsResult {
         Self { futures }
     }
 
-    /// Return a map from ACL filters to futures which can be used to check the
+    /// Returns a map from ACL filters to futures which can be used to check the
     /// status of the deletions by each filter.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult#values")]
     pub fn values(&self) -> &HashMap<AclBindingFilter, KafkaFuture<FilterResults>> {
         &self.futures
     }
 
-    /// Return a future which succeeds only if all the ACL deletions succeed, and
+    /// Returns a future which succeeds only if all the ACL deletions succeed, and
     /// which contains all the deleted ACLs. Note that if the filters don't match
     /// any ACLs, this is not considered an error.
-    ///
-    /// Mirrors `DeleteAclsResult.all` /
-    /// `DeleteAclsResult.getAclBindings`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<AclBinding>> {
         KafkaFuture::new(Arc::new(AclBindingsFuture {

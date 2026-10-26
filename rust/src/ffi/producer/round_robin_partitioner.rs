@@ -51,7 +51,11 @@ unsafe fn inner<'a>(self_: *const kafka_producer_RoundRobinPartitioner_t) -> &'a
     unsafe { &*(self_ as *const RoundRobinPartitionerInner) }
 }
 
-/// `new RoundRobinPartitioner()`: owned, freed with
+/// `new RoundRobinPartitioner()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
 /// [`kafka_producer_RoundRobinPartitioner_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -61,15 +65,19 @@ pub extern "C" fn kafka_producer_RoundRobinPartitioner_new() -> *mut kafka_produ
         as *mut kafka_producer_RoundRobinPartitioner_t
 }
 
-/// The class as a `Partitioner`: a borrowed view valid until the class
-/// handle is destroyed, never passed to `kafka_producer_Partitioner_destroy`
-/// (CLAUDE.md §4 rule 3). A `*mut kafka_producer_Partitioner_t` parameter
-/// that receives it shares the implementation and leaves the class handle
-/// in place, which the caller keeps alive until the producer is destroyed.
+/// The class as a `Partitioner`.
+///
+/// # Returns
+///
+/// The `Partitioner` view of the class.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class
+/// handle is destroyed, and never passed to `kafka_producer_Partitioner_destroy`.
+/// A `*mut kafka_producer_Partitioner_t` parameter that receives it shares the
+/// implementation and leaves the class handle in place, which the caller keeps
+/// alive until the producer is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner__as_Partitioner(

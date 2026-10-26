@@ -44,7 +44,7 @@ pub enum kafka_common_IsolationLevel_e {
     kafka_common_IsolationLevel_READ_COMMITTED,
 }
 
-/// One static instance per value, indexed by [`kafka_common_IsolationLevel_e`].
+/// One static instance per value, indexed by `kafka_common_IsolationLevel_e`.
 static VARIANTS: [IsolationLevel; 2] = [IsolationLevel::ReadUncommitted, IsolationLevel::ReadCommitted];
 
 /// Exhaustive, so a value Java adds fails to compile until it has its C
@@ -73,21 +73,29 @@ pub(crate) unsafe fn value_of(level: *const kafka_common_IsolationLevel_t) -> Is
     unsafe { *(level as *const IsolationLevel) }
 }
 
-/// `IsolationLevel.READ_UNCOMMITTED`.
+/// Returns the `IsolationLevel.READ_UNCOMMITTED` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_IsolationLevel_read_uncommitted() -> *const kafka_common_IsolationLevel_t {
     singleton(IsolationLevel::ReadUncommitted)
 }
 
-/// `IsolationLevel.READ_COMMITTED`.
+/// Returns the `IsolationLevel.READ_COMMITTED` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_IsolationLevel_read_committed() -> *const kafka_common_IsolationLevel_t {
     singleton(IsolationLevel::ReadCommitted)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_IsolationLevel_READ_UNCOMMITTED`, the first
 /// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
@@ -106,7 +114,7 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `id()`: the wire-protocol byte.
+/// Returns the wire-protocol id of the level (`id()`).
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`
 /// enum: its 0 is the valid `READ_UNCOMMITTED`.
@@ -122,13 +130,21 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_id(self_: *const kafka_comm
     unsafe { value_of(self_) }.id() as i8
 }
 
-/// `IsolationLevel.forId(byte id)`: returns the singleton, or stores the owned
-/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` for
-/// an unknown id.
+/// Returns the level whose wire-protocol id is `id` (`IsolationLevel.forId(byte id)`).
+///
+/// # Parameters
+///
+/// - `id` - The wire-protocol id.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `id` is not the id of a level.
+/// - `kafka_common_Error_is_local_illegal_state_error` if a Rust panic is caught.
 ///
 /// # Safety
 ///
-/// `out_err` must be a valid slot pointing at null.
+/// `out_err` must be a valid slot pointing at `NULL`. The returned singleton is static, never freed, and comparable
+/// with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
@@ -142,11 +158,12 @@ pub unsafe extern "C" fn kafka_common_IsolationLevel_for_id(
     }
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the level (`toString()`).
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_IsolationLevel_to_string(

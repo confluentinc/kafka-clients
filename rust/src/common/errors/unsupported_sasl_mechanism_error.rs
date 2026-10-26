@@ -18,13 +18,12 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The broker does not support the requested SASL mechanism.
+    /// This error indicates that the SASL mechanism requested by the client is not enabled on the
+    /// broker.
     ///
-    /// Corresponds to Java's `UnsupportedSaslMechanismException`, error code `Errors::UnsupportedSaslMechanism`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnsupportedSaslMechanismException` -> `AuthenticationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnsupportedSaslMechanism`.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedSaslMechanismException")]
     UnsupportedSaslMechanismError,
     code: Errors::UnsupportedSaslMechanism,

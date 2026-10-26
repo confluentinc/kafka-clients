@@ -151,22 +151,30 @@ _NULL_ARGUMENT: dict[str, tuple[type[TypeError] | type[IllegalArgumentError], st
     # partitions.isEmpty() and TopicMetadataEvent's Objects.requireNonNull(topic).
     "committed": (TypeError, "partitions must not be None", False),
     "partitions_for": (TypeError, "topic must not be None", False),
-    # subscribe(topics / pattern, listener): the listener's check precedes
-    # subscribeInternal / subscribeToRegex (AsyncKafkaConsumer.java:2152,2175),
-    # the topics' and the pattern's follow acquireAndEnsureOpen() (2289, 2269).
+    # subscribe(topics / pattern, listener): the listener's check
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
+    # #subscribe(Collection,ConsumerRebalanceListener),
+    # #subscribe(SubscriptionPattern,ConsumerRebalanceListener)) precedes
+    # subscribeInternal / subscribeToRegex, the topics' and the pattern's follow
+    # acquireAndEnsureOpen() (#subscribeInternal(Collection,Optional),
+    # #subscribeToRegex).
     "subscribe_callback": (IllegalArgumentError, "RebalanceListener cannot be None", True),
     "subscribe_topics": (IllegalArgumentError,
                          "Topic collection to subscribe to cannot be None", False),
     "subscribe_pattern": (IllegalArgumentError,
                           "Topic pattern to subscribe to cannot be None", False),
     # Java's commitSync(Map) / commitAsync(Map, callback) copy the map before
-    # acquire() (new HashMap<>(offsets), AsyncKafkaConsumer.java:1113,1801);
-    # seek(tp, OffsetAndMetadata) reads offsetAndMetadata.offset() first (1177);
-    # close(CloseOptions) reads option.timeout() first (1562).
+    # acquire() (new HashMap<>(offsets),
+    # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
+    # #commitAsync(Map,OffsetCommitCallback), #commitSync(Map));
+    # seek(tp, OffsetAndMetadata) reads offsetAndMetadata.offset() first
+    # (#seek(TopicPartition,OffsetAndMetadata)); close(CloseOptions) reads
+    # option.timeout() first (#close(CloseOptions)).
     "offsets": (TypeError, "offsets must not be None", True),
     "offset_and_metadata": (TypeError, "offset_and_metadata must not be None", True),
     "option": (TypeError, "option must not be None", True),
-    # currentLag: CurrentLagEvent's Objects.requireNonNull(partition) (CurrentLagEvent.java:34).
+    # currentLag: Objects.requireNonNull(partition) in
+    # org.apache.kafka.clients.consumer.internals.events.CurrentLagEvent#CurrentLagEvent.
     "current_lag": (TypeError, "topic_partition must not be None", False),
 }
 
@@ -412,8 +420,9 @@ def abandoned_call_wait_s(close_timeout_ms: int) -> float:
 def empty_input_timeout(collection: object, timeout: Any) -> Any:
     """The ``timeout`` of ``committed`` / ``beginning_offsets`` / ``end_offsets``
     / ``offsets_for_times`` for an empty input: Java returns the empty map
-    before it reads the ``Duration`` (``AsyncKafkaConsumer.java:1270-1272``,
-    ``1419``, ``1476``), so a ``None`` there is never dereferenced and the call
+    before it reads the ``Duration``
+    (``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#committed(Set,Duration)``,
+    ``#offsetsForTimes(Map,Duration)``, ``#beginningOrEndOffset``), so a ``None`` there is never dereferenced and the call
     takes the overload without it, whose answer is the same empty map."""
     if timeout is None and isinstance(collection, Sized) and len(collection) == 0:
         return MISSING
@@ -889,8 +898,9 @@ class _ConsumerState:
 
         - ``close`` (``_AT_CLOSE``) throws ``new KafkaException("Failed to close
           kafka consumer", e)`` for every exception but an
-          ``InterruptException`` (``AsyncKafkaConsumer.java:1669-1675``): the
-          core's wrap, with the original as its ``__cause__``, or a
+          ``InterruptException``
+          (``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean)``):
+          the core's wrap, with the original as its ``__cause__``, or a
           ``KeyboardInterrupt`` as it is;
         - elsewhere, as it is when the client reported it unwrapped (code
           ``LOCAL_CALLBACK``: a commit callback's from ``commit`` and
@@ -1351,7 +1361,8 @@ class _ConsumerState:
         or interceptor it runs for it. A lookup is sent again. A commit has
         taken its offsets by then: its wakeup is checked only after the
         offsets-ready wait, as Java's ``commitSync`` registers it
-        (``AsyncKafkaConsumer.java:1136-1138``, ``:1801-1804``), at the wait
+        (``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit``,
+        ``#commitSync(Optional,Duration)``), at the wait
         for the pending async commits (before their callbacks run) or for its
         own result (before ``onCommit``). Its offsets are committed again, the
         same ones since nothing is polled in between, and the first commit
@@ -1419,11 +1430,11 @@ class _ConsumerState:
     # although the user never called ``wakeup()``.
     #
     # A wakeable operation consumes a wakeup sent at any time before it ends,
-    # its expired ``poll`` included: Java's ``pollForFetches`` calls
+    # its expired ``poll`` included: Java's
+    # ``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#pollForFetches`` calls
     # ``wakeupTrigger.setFetchAction`` after an empty ``collectFetch()`` also
-    # when no time is left (``AsyncKafkaConsumer.java:1964-2016``), so a wakeup
-    # sent while a commit callback the poll delivers runs is raised by that
-    # poll. A wake does not end the operation, and stays armed, as a user's
+    # when no time is left, so a wakeup sent while a commit callback the poll
+    # delivers runs is raised by that poll. A wake does not end the operation, and stays armed, as a user's
     # ``wakeup()`` there does in Java, when the operation's result is ready
     # before the core checks for it: Java's ``setActiveTask`` leaves a wakeup
     # pending for a future already done (``commit(offsets={})``, a ``commit``
@@ -1481,7 +1492,8 @@ class _ConsumerState:
     def _commit_nowait_spec(self, spec: Any, adapter: Any) -> tuple[Any, Any, Any, bool]:
         # Not wakeable: Java's commitAsync waits for its offsets through
         # ConsumerUtils.getResult, without the WakeupTrigger
-        # (AsyncKafkaConsumer.java:1126-1140), so it never throws WakeupException.
+        # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit), so it
+        # never throws WakeupException.
         return self._void_spec(_lib.Consumer_commit_async_cb, spec, adapter)
 
     def _position_spec(self, partition: TopicPartition, timeout_ms: int = _NO_TIMEOUT
@@ -1710,7 +1722,8 @@ class _ConsumerState:
         """``partitionsFor(null, timeout)``: the cluster has no partitions for a
         null topic, so a zero timeout throws ``new TimeoutException()``; any
         other reaches ``TopicMetadataEvent``'s ``Objects.requireNonNull(topic)``
-        (``TypeError``) (``AsyncKafkaConsumer.java:1311-1325``)."""
+        (``TypeError``)
+        (``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#partitionsFor(String,Duration)``)."""
         if topic is None and timeout_ms == 0:
             from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeout
 
@@ -1901,7 +1914,9 @@ class _ConsumerState:
                 result_t.setdefault(tp, None)
             return result_t
         if op == "partitions_for":
-            # Wakeable, as Java's partitionsFor (AsyncKafkaConsumer.java:1324):
+            # Wakeable, as Java's
+            # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
+            # #partitionsFor(String,Duration):
             # the consumer's own leftover wakeup is consumed and the call made
             # again, as for committed and position.
             topic, timeout_ms = args
@@ -1911,7 +1926,8 @@ class _ConsumerState:
             raise_if_error(error)
             return to_partition_info_list(infos or [])
         if op == "list_topics":
-            # Wakeable, as Java's listTopics (AsyncKafkaConsumer.java:1352).
+            # Wakeable, as Java's
+            # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#listTopics(Duration).
             (timeout_ms,) = args
             topics, error = _lib.ConsumerHandle_list_topics(handle, timeout_ms)
             while self._own_wake_raised(error):

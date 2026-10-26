@@ -339,8 +339,8 @@ async fn test_consumer_bootstrap_resolution_error_propagated_to_poll() {
 /// `KafkaException`, and no consumer instance is created.
 ///
 /// The constructor's `catch` also runs `close(Duration.ZERO, LEAVE_GROUP,
-/// true)` (`AsyncKafkaConsumer.java:596-602`), which closes the deserializers
-/// it had already wrapped (`:1679`, KAFKA-2121): each is closed exactly once.
+/// true)`, which closes the deserializers it had already wrapped (KAFKA-2121):
+/// each is closed exactly once.
 #[tokio::test(flavor = "multi_thread")]
 #[doc(
     alias = "org.apache.kafka.clients.consumer.KafkaConsumerTest#testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero"

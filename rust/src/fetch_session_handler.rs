@@ -205,8 +205,8 @@ impl FetchSessionHandler {
     pub fn handle_response(&mut self, response: &FetchResponse, version: i16) -> bool {
         if response.error() != Errors::None {
             // Both branches log at DEBUG since KAFKA-20713 (85b0e80272,
-            // `FetchSessionHandler.java:528-548`): every fetch-session error is
-            // recoverable and self-healing.
+            // `org.apache.kafka.clients.FetchSessionHandler#handleResponse`): every fetch-session
+            // error is recoverable and self-healing.
             if response.error() == Errors::FetchSessionIdNotFound {
                 // Session does not exist on the broker anymore. Recoverable and
                 // self-healing, the client re-sends a full fetch request.
@@ -548,7 +548,7 @@ fn join_ids(set: &HashSet<Uuid>) -> String {
 }
 
 /// The DEBUG text `handleResponse` logs when the broker no longer has the
-/// session (`FetchSessionHandler.java:532-534`). The error renders as Java's
+/// session. The error renders as Java's
 /// `Errors.toString()`, the enum name (`FETCH_SESSION_ID_NOT_FOUND`). A
 /// function so the exact text can be tested; `debug!` evaluates it only when
 /// the level is enabled.
@@ -559,8 +559,8 @@ fn session_not_found_log(node: i32, error: Errors, session_id: i32) -> String {
     )
 }
 
-/// The DEBUG text `handleResponse` logs for every other fetch-session error
-/// (`FetchSessionHandler.java:542-544`), with the error as Java's enum name.
+/// The DEBUG text `handleResponse` logs for every other fetch-session error,
+/// with the error as Java's enum name.
 fn session_error_log(node: i32, next_metadata: &FetchMetadata, error: Errors) -> String {
     format!(
         "Node {node} was unable to process the fetch request with {next_metadata}: {error}. Re-sending a full fetch \
@@ -1392,7 +1392,7 @@ mod tests {
     }
 
     /// The two KAFKA-20713 (85b0e80272) DEBUG texts, exactly as Java renders
-    /// them (`FetchSessionHandler.java:532-534`, `:542-544`): the error is
+    /// them in `FetchSessionHandler#handleResponse`: the error is
     /// `Errors.toString()`, the enum name, not the Rust variant name.
     #[test]
     fn test_fetch_session_error_log_texts() {

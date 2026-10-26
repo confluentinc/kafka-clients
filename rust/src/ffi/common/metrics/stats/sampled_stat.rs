@@ -83,14 +83,18 @@ pub(crate) unsafe fn sampled_stat_ref<'a>(
     unsafe { handle(stat) }.stat()
 }
 
-/// `new SampledStat(double initialValue)` plus the subclass behaviour: the
-/// stat takes over `kind` (an owned handle is consumed, a view is shared).
-/// Owned, freed with [`kafka_common_metrics_stats_SampledStat_destroy`].
+/// `new SampledStat(double initialValue)` plus the subclass behaviour.
+///
+/// # Parameters
+///
+/// - `initial_value` - The value each sample starts from.
+/// - `kind` - The subclass behaviour; taken over (an owned handle is consumed, a view is shared).
 ///
 /// # Safety
 ///
 /// `kind` must be a valid kind handle, not used again by the caller when it
-/// was owned.
+/// was owned. The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_SampledStat_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
@@ -105,12 +109,14 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_new(
         as *mut kafka_common_metrics_stats_SampledStat_t
 }
 
-/// The stat as the `Stat` interface: a borrowed view valid as long as the
-/// handle, never passed to an interface `_destroy`.
+/// Returns the stat as the `Stat` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to an interface
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
@@ -122,12 +128,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Stat(
     unsafe { handle(self_) }.as_stat()
 }
 
-/// The stat as the `Measurable` interface: a borrowed view valid as long as
-/// the handle.
+/// Returns the stat as the `Measurable` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
@@ -139,12 +146,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_Measurable(
     unsafe { handle(self_) }.as_measurable()
 }
 
-/// The stat as the `MetricValueProvider` interface (Java's `Measurable`
-/// extends it): a borrowed view valid as long as the handle.
+/// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MetricValueProvider(
@@ -156,12 +164,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MetricValueP
     unsafe { handle(self_) }.as_metric_value_provider()
 }
 
-/// The stat as the `MeasurableStat` interface: a borrowed view valid as
-/// long as the handle; a sensor it is added to shares the stat.
+/// Returns the stat as the `MeasurableStat` interface; a sensor it is added to shares the stat.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableStat(
@@ -173,11 +182,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat__as_MeasurableSt
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_to_string(
@@ -386,14 +397,30 @@ pub(crate) unsafe fn sampled_stat_kind_ref<'a>(
 
 /// Builds a kind from a C implementation. The caller owns `self_` and keeps
 /// it alive until the handle is destroyed with
-/// [`kafka_common_metrics_stats_SampledStatKind_destroy`] or, once
-/// [`kafka_common_metrics_stats_SampledStat_new`] consumed it, until the stat
+/// `kafka_common_metrics_stats_SampledStatKind_destroy` or, once
+/// `kafka_common_metrics_stats_SampledStat_new` consumed it, until the stat
 /// built over it is destroyed together with every sensor, rate or meter it
 /// was shared with. The two `is_*` methods may be null for the Java default
 /// (`false`). The functions may be called from any thread, concurrently, so
-/// the C caller is responsible for their thread-safety on `self_`. Owned,
-/// consumed by [`kafka_common_metrics_stats_SampledStat_new`] or freed with
-/// [`kafka_common_metrics_stats_SampledStatKind_destroy`].
+/// the C caller is responsible for their thread-safety on `self_`.
+///
+/// # Parameters
+///
+/// - `self_` - The implementation's state, passed back to every function.
+/// - `update` - Its `update(Sample, MetricConfig, double, long)`.
+/// - `combine` - Its `combine(List<Sample>, MetricConfig, long)`.
+/// - `is_windowed_count` - Its `isWindowedCount()`, or `NULL` for the Java default.
+/// - `is_windowed_sum` - Its `isWindowedSum()`, or `NULL` for the Java default.
+///
+/// # Returns
+///
+/// A kind handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller: consumed by
+/// `kafka_common_metrics_stats_SampledStat_new` or freed with
+/// `kafka_common_metrics_stats_SampledStatKind_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
@@ -410,6 +437,13 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStatKind_new(
 }
 
 /// Invokes `update` on the kind behind `self_`.
+///
+/// # Parameters
+///
+/// - `sample` - The current sample, mutated in place.
+/// - `config` - The metric configuration.
+/// - `value` - The value to record.
+/// - `time_ms` - The time of the recording in milliseconds.
 ///
 /// # Safety
 ///
@@ -442,9 +476,18 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_update(
     )
 }
 
-/// Invokes `combine` on the kind behind `self_`; `samples` holds
-/// `const kafka_common_metrics_stats_SampledStat_Sample_t *` elements, read
-/// during the call.
+/// Invokes `combine` on the kind behind `self_`.
+///
+/// # Parameters
+///
+/// - `samples` - The samples, `const kafka_common_metrics_stats_SampledStat_Sample_t *`
+///   elements read during the call; `NULL` reads as empty.
+/// - `config` - The metric configuration.
+/// - `now` - The current time in milliseconds.
+///
+/// # Returns
+///
+/// The measurement over every sample.
 ///
 /// # Safety
 ///
@@ -476,6 +519,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_combine(
 
 /// Invokes `isWindowedCount` on the kind behind `self_`.
 ///
+/// # Returns
+///
+/// 1 if the kind counts events like `WindowedCount`, 0 otherwise.
+///
 /// # Safety
 ///
 /// `self_` must be a valid kind handle.
@@ -490,6 +537,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStatKind_is_windowed_
 }
 
 /// Invokes `isWindowedSum` on the kind behind `self_`.
+///
+/// # Returns
+///
+/// 1 if the kind is a `WindowedSum`, 0 otherwise.
 ///
 /// # Safety
 ///
@@ -559,8 +610,17 @@ unsafe fn sample_mut<'a>(self_: *mut kafka_common_metrics_stats_SampledStat_Samp
     unsafe { &mut *(self_ as *mut Sample) }
 }
 
-/// `new Sample(double initialValue, long now)`. Owned, freed with
-/// [`kafka_common_metrics_stats_SampledStat_Sample_destroy`].
+/// `new Sample(double initialValue, long now)`.
+///
+/// # Parameters
+///
+/// - `initial_value` - The value the sample starts from and resets to.
+/// - `now` - The time the sample starts, in milliseconds.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_SampledStat_Sample_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_new(
@@ -571,6 +631,17 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_new(
 }
 
 /// `new Sample(double initialValue, long now, long timeWindowMs)`.
+///
+/// # Parameters
+///
+/// - `initial_value` - The value the sample starts from and resets to.
+/// - `now` - The time the sample starts, in milliseconds.
+/// - `time_window_ms` - The sample's own time window, -1 for the config's.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_SampledStat_Sample_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_with_time_window_ms(
@@ -583,6 +654,10 @@ pub extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_with_time_window
 }
 
 /// `reset(long now)`: clears the sample to start recording again at `now`.
+///
+/// # Parameters
+///
+/// - `now` - The time the sample restarts, in milliseconds.
 ///
 /// # Safety
 ///
@@ -601,8 +676,16 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_reset(
     unsafe { sample_mut(self_) }.reset(now)
 }
 
-/// `isComplete(long timeMs, MetricConfig config)`: whether the sample's
-/// event or time window has elapsed.
+/// `isComplete(long timeMs, MetricConfig config)`.
+///
+/// # Parameters
+///
+/// - `time_ms` - The current time in milliseconds.
+/// - `config` - The metric configuration.
+///
+/// # Returns
+///
+/// 1 if the sample's event or time window has elapsed, 0 otherwise.
 ///
 /// # Safety
 ///
@@ -621,7 +704,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_is_comple
     i8::from(unsafe { sample_ref(self_) }.is_complete(time_ms, unsafe { metric_config_ref(config) }))
 }
 
-/// The value the sample resets to.
+/// Returns the value the sample resets to.
 ///
 /// # Safety
 ///
@@ -636,7 +719,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_initial_v
     unsafe { sample_ref(self_) }.initial_value()
 }
 
-/// The number of events recorded into the sample.
+/// Returns the number of events recorded into the sample.
 ///
 /// A caught Rust panic returns -1, which no count is.
 ///
@@ -653,7 +736,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_event_cou
     unsafe { sample_ref(self_) }.event_count()
 }
 
-/// When the sample started.
+/// Returns when the sample started, in milliseconds.
 ///
 /// # Safety
 ///
@@ -668,7 +751,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_start_tim
     unsafe { sample_ref(self_) }.start_time_ms()
 }
 
-/// When the last event was recorded into the sample.
+/// Returns when the last event was recorded into the sample, in milliseconds.
 ///
 /// # Safety
 ///
@@ -683,7 +766,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_last_even
     unsafe { sample_ref(self_) }.last_event_ms()
 }
 
-/// The accumulated value of the sample.
+/// Returns the accumulated value of the sample.
 ///
 /// # Safety
 ///
@@ -698,7 +781,7 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_value(
     unsafe { sample_ref(self_) }.value()
 }
 
-/// The sample's own time window, `-1` for the config's.
+/// Returns the sample's own time window, `-1` for the config's.
 ///
 /// # Safety
 ///
@@ -714,6 +797,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_time_wind
 }
 
 /// Sets the number of events recorded into the sample.
+///
+/// # Parameters
+///
+/// - `event_count` - The number of events.
 ///
 /// # Safety
 ///
@@ -734,6 +821,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_event
 
 /// Sets when the last event was recorded into the sample.
 ///
+/// # Parameters
+///
+/// - `last_event_ms` - The time of the last event, in milliseconds.
+///
 /// # Safety
 ///
 /// `self_` must be a valid sample handle that no other call uses at the
@@ -753,6 +844,10 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_last_
 
 /// Sets the accumulated value of the sample.
 ///
+/// # Parameters
+///
+/// - `value` - The accumulated value.
+///
 /// # Safety
 ///
 /// `self_` must be a valid sample handle that no other call uses at the
@@ -770,11 +865,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_set_value
     unsafe { sample_mut(self_) }.set_value(value)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid sample handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SampledStat_Sample_to_string(

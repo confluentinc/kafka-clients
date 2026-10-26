@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::list_consumer_group_offsets_with_group_specs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult`.
 
 use std::collections::HashMap;
 
@@ -31,8 +29,6 @@ use crate::consumer::OffsetAndMetadata;
 pub(crate) type GroupOffsets = HashMap<TopicPartition, Option<OffsetAndMetadata>>;
 
 /// The result of `Admin::list_consumer_group_offsets_with_group_specs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult")]
 pub struct ListConsumerGroupOffsetsResult {
@@ -51,18 +47,16 @@ impl ListConsumerGroupOffsetsResult {
         Self { futures }
     }
 
-    /// Returns a future which yields a map of topic partitions to
-    /// `OffsetAndMetadata` for the single requested group. A `None` value
-    /// indicates the group has no committed offset for that partition.
-    ///
-    /// Mirrors `partitionsToOffsetAndMetadata()`.
+    /// Returns a future which yields a map of topic partitions to `OffsetAndMetadata` objects. If
+    /// the group does not have a committed offset for this partition, the corresponding value in
+    /// the returned map will be `None`.
     ///
     /// # Errors
     ///
-    /// Returns an error (Java's `IllegalStateException`) if offsets from
-    /// multiple groups were requested — use
-    /// [`partitions_to_offset_and_metadata_with_group_id`](Self::partitions_to_offset_and_metadata_with_group_id)
-    /// instead.
+    /// - `Error::is_local_illegal_state_error` if offsets from multiple consumer groups were
+    ///   requested: use
+    ///   [`partitions_to_offset_and_metadata_with_group_id`](Self::partitions_to_offset_and_metadata_with_group_id)
+    ///   instead.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata")]
     pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, Error> {
         if self.futures.len() != 1 {
@@ -78,11 +72,13 @@ impl ListConsumerGroupOffsetsResult {
     /// `OffsetAndMetadata` for the specified group. A `None` value indicates
     /// the group has no committed offset for that partition.
     ///
-    /// Mirrors `partitionsToOffsetAndMetadata(String groupId)`.
+    /// # Arguments
+    ///
+    /// - `group_id` - the group id.
     ///
     /// # Errors
     ///
-    /// Returns an error (Java's `IllegalArgumentException`) if offsets for the
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if offsets for the
     /// given group were not requested.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#partitionsToOffsetAndMetadata")]
     pub fn partitions_to_offset_and_metadata_with_group_id(
@@ -96,8 +92,6 @@ impl ListConsumerGroupOffsetsResult {
 
     /// Returns a future which yields all group offsets, if requests for all the
     /// groups succeed.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, GroupOffsets>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())

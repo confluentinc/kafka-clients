@@ -35,7 +35,7 @@ fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, St
 // Tests translated from MockProducerTest.java
 // ---------------------------------------------------------------------------
 
-/// Translated from `MockProducerTest.testAutoCompleteMock` (line 73).
+/// Translated from `MockProducerTest#testAutoCompleteMock`.
 ///
 /// Creates a MockProducer with `auto_complete=true`, sends a record, and
 /// verifies:
@@ -67,7 +67,7 @@ async fn test_auto_complete_mock() {
     assert!(producer.history().is_empty(), "Clear should erase our history");
 }
 
-/// Translated from `MockProducerTest.testManualCompletion` (line 107).
+/// Translated from `MockProducerTest#testManualCompletion`.
 ///
 /// Creates a MockProducer with `auto_complete=false`, sends two records, and
 /// verifies:
@@ -109,7 +109,7 @@ async fn test_manual_completion() {
     assert!(md3.is_done() && md4.is_done(), "Requests should be completed.");
 }
 
-/// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords` (line 696).
+/// Translated from `MockProducerTest#shouldBeFlushedIfNoBufferedRecords`.
 ///
 /// Creates a MockProducer with `auto_complete=true` and verifies that
 /// `flushed()` returns `true` before any sends (no pending completions).
@@ -119,7 +119,7 @@ fn test_should_be_flushed_if_no_buffered_records() {
     assert!(producer.flushed());
 }
 
-/// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords` (line 702).
+/// Translated from `MockProducerTest#shouldBeFlushedWithAutoCompleteIfBufferedRecords`.
 ///
 /// Creates a MockProducer with `auto_complete=true`, sends a record, and
 /// verifies that `flushed()` is still `true` because auto-complete resolves
@@ -131,7 +131,7 @@ async fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
     assert!(producer.flushed());
 }
 
-/// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords` (line 709).
+/// Translated from `MockProducerTest#shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords`.
 ///
 /// Creates a MockProducer with `auto_complete=false`, sends a record, and
 /// verifies that `flushed()` returns `false` because the send is pending.
@@ -142,7 +142,7 @@ async fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() 
     assert!(!producer.flushed());
 }
 
-/// Translated from `MockProducerTest.shouldNotBeFlushedAfterFlush` (line 716).
+/// Translated from `MockProducerTest#shouldNotBeFlushedAfterFlush`.
 ///
 /// Note: The Java test name is misleading -- it actually asserts that after
 /// calling `flush()`, `flushed()` returns `true`. The Rust version matches
@@ -159,7 +159,7 @@ async fn test_should_be_flushed_after_flush() {
     assert!(producer.flushed(), "Should be flushed after flush()");
 }
 
-/// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed` (line 624).
+/// Translated from `MockProducerTest#shouldThrowOnSendIfProducerIsClosed`.
 ///
 /// Creates a MockProducer, closes it, then sends a record and verifies
 /// the send returns `Err` with a message indicating the producer is closed.
@@ -177,7 +177,7 @@ async fn test_should_throw_on_send_if_producer_is_closed() {
     );
 }
 
-/// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed` (line 673).
+/// Translated from `MockProducerTest#shouldThrowOnFlushProducerIfProducerIsClosed`.
 ///
 /// Creates a MockProducer, closes it, then calls `flush()` and verifies
 /// it returns `Err` with a message indicating the producer is closed.

@@ -17,8 +17,7 @@
 //! Translates the one scenario both Java homes of the "base consumer" test
 //! share, so the per-protocol suites stay thin exactly as they are in Java:
 //!
-//! - `org.apache.kafka.clients.ClientsTestUtils.BaseConsumerTestcase.testSimpleConsumption`
-//!   (`ClientsTestUtils.java:376-392`), driven by
+//! - `org.apache.kafka.clients.ClientsTestUtils.BaseConsumerTestcase#testSimpleConsumption`, driven by
 //!   `SaslPlainPlaintextConsumerTest` → [`super::sasl_plain_plaintext_consumer_test`].
 //! - `kafka.api.BaseConsumerTest.testSimpleConsumption`
 //!   (`BaseConsumerTest.scala:60-76`), driven by `SslConsumerTest` →
@@ -72,7 +71,7 @@ type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>
 /// `AbstractConsumerTest.brokerCount`.
 const BROKER_COUNT: i16 = 3;
 
-/// Java's `KEY_PREFIX` / `VALUE_PREFIX` (`ClientsTestUtils.java:62-63`).
+/// Java's `ClientsTestUtils#KEY_PREFIX` / `ClientsTestUtils#VALUE_PREFIX`.
 const KEY_PREFIX: &str = "key ";
 const VALUE_PREFIX: &str = "value ";
 
@@ -136,8 +135,8 @@ fn current_time_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// `ClientsTestUtils.sendRecords(producer, tp, numRecords, startingTimestamp)`
-/// (`ClientsTestUtils.java:266-276`) / Scala `AbstractConsumerTest.sendRecords`
+/// `ClientsTestUtils#sendRecords(Producer,TopicPartition,int,long)` called as
+/// `sendRecords(producer, tp, numRecords, startingTimestamp)` / Scala `AbstractConsumerTest.sendRecords`
 /// (`AbstractConsumerTest.scala:186-201`): record `i` carries timestamp
 /// `startingTimestamp + i`, key `"key i"`, value `"value i"`; then `flush()`.
 async fn send_records(
@@ -171,9 +170,8 @@ async fn send_records(
 
 /// `ClientsTestUtils.consumeAndVerifyRecords(consumer, tp, numRecords,
 /// startingOffset, startingKeyAndValueIndex, startingTimestamp)`
-/// (`ClientsTestUtils.java:166-196`, `timestampIncrement = -1`) over
-/// `consumeRecords` (`:74-87`): 100 ms polls until at least `num_records`
-/// records arrive within 60 s, then the full per-record assertion set.
+/// (`timestampIncrement = -1`) over `ClientsTestUtils#consumeRecords(Consumer,int,int)`:
+/// 100 ms polls until at least `num_records` records arrive within 60 s, then the full per-record assertion set.
 /// Records are verified as they arrive because `ConsumerRecord` is not `Clone`.
 async fn consume_and_verify_records(
     consumer: &mut BytesConsumer,
@@ -221,7 +219,7 @@ async fn consume_and_verify_records(
     }
 }
 
-/// `ClientsTestUtils.RetryCommitCallback` (`ClientsTestUtils.java:500`):
+/// `ClientsTestUtils.RetryCommitCallback`:
 /// resend on `RetriableCommitFailedException`, otherwise record completion and
 /// the error. Java's callback resends itself through the consumer it holds; a
 /// Rust callback cannot own the `&mut` consumer, so
@@ -254,8 +252,8 @@ impl OffsetCommitCallback for RetryCommitCallback {
     }
 }
 
-/// `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer, Optional.empty())`
-/// (`ClientsTestUtils.java:309-322`): `commitAsync(callback)`, poll until the
+/// `ClientsTestUtils#sendAndAwaitAsyncCommit`, called as
+/// `sendAndAwaitAsyncCommit(consumer, Optional.empty())`: `commitAsync(callback)`, poll until the
 /// callback fires (`waitForCondition`'s 15 s default), then
 /// `assertEquals(Optional.empty(), commitCallback.error)`.
 async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
@@ -283,7 +281,7 @@ async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
     panic!("Failed to observe commit callback before timeout");
 }
 
-/// `BaseConsumerTestcase.testSimpleConsumption` (`ClientsTestUtils.java:376-392`)
+/// `ClientsTestUtils.BaseConsumerTestcase#testSimpleConsumption`
 /// / `BaseConsumerTest.testSimpleConsumption` (`BaseConsumerTest.scala:60-76`),
 /// including the suites' `@BeforeEach` topic creation
 /// (`cluster.createTopic(TOPIC, 2, BROKER_COUNT)`,

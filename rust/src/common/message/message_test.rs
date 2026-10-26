@@ -466,8 +466,8 @@ fn test_tagged_field_count_rejected_when_exceeding_hard_cap() {
 }
 
 /// Java's string reader rejects a declared length above `0x7fff` before reading
-/// (`MessageDataGenerator.java:653-657`, "string field X had invalid length N"). The
-/// buffer really holds the declared bytes, so only that guard can reject it.
+/// (`MessageDataGenerator#generateVariableLengthReader`, "string field X had invalid length N").
+/// The buffer really holds the declared bytes, so only that guard can reject it.
 #[test]
 fn test_tagged_string_longer_than_0x7fff_is_rejected() {
     let version: i16 = 1;
@@ -1778,9 +1778,9 @@ fn test_non_ignorable_field_with_default_null() {
 
 /// The guard on a **tagged** field.
 ///
-/// Java guards tagged fields too: the version conditional at
-/// `MessageDataGenerator.java:721` wraps both the tagged and untagged branches, and
-/// `cond.ifNotMember` (`:792`) sits outside it. This generator writes tagged fields
+/// Java guards tagged fields too: the version conditional in
+/// `MessageDataGenerator#generateClassWriter` wraps both the tagged and untagged branches, and
+/// `cond.ifNotMember` sits outside it. This generator writes tagged fields
 /// from a separate block, so their guard comes from a second emission site with its
 /// own hand-built "unsupported version" expression — untested until now, while the
 /// other guard tests (`producerId`, `processId`, and the two above) are all on
@@ -1811,9 +1811,9 @@ fn test_tagged_non_ignorable_field_raises_uve_below_its_version() {
 /// from v1 but **not** at v0. Java's generated `write` throws `NullPointerException`
 /// there: `IsNullConditional`'s `ifNull` arm emits the length marker only for
 /// versions inside `nullableVersions`, and `ifNotMember` emits the throw
-/// (`MessageDataGenerator.java:967-969`). Java's builder does not gate it either
-/// (`MetadataRequest.java:57-65` sets null unconditionally), so the generated check
-/// is the only thing standing between an all-topics request and a v0 broker.
+/// (`MessageDataGenerator#generateVariableLengthWriter`). Java's builder does not gate it either
+/// (`MetadataRequest.Builder#requestTopicNamesOrAllTopics` sets null unconditionally), so the
+/// generated check is the only thing standing between an all-topics request and a v0 broker.
 ///
 /// # `#[ignore]`: PLAN §9.32, a generator-wide gap
 ///

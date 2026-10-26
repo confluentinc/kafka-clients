@@ -58,11 +58,11 @@ pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &st
 /// ## Java's structural guarantee vs Rust's behavioral guarantee
 ///
 /// Java's `ConsumerRecords` is **structurally immutable** (see
-/// `ConsumerRecords.java:41-50, 78`: `private final` fields, `Map.copyOf`,
-/// `Collections.unmodifiableList(...)` views). When an interceptor
+/// `ConsumerRecords#ConsumerRecords(Map,Map)` and `ConsumerRecords#records(TopicPartition)`: `private final`
+/// fields, `Map.copyOf`, `Collections.unmodifiableList(...)` views). When an interceptor
 /// throws in Java, the input batch **cannot** have been mutated —
 /// `interceptRecords` retains its previous-good value because the
-/// assignment in `ConsumerInterceptors.java:70` evaluates the RHS
+/// assignment in `ConsumerInterceptors#onConsume` evaluates the RHS
 /// before assigning, and a thrown exception aborts the assignment.
 /// The "previous-good batch" guarantee is a property of the *input
 /// type*, not of interceptor implementations.
@@ -325,10 +325,9 @@ mod tests {
                 panic!("Injected failure in FilterConsumerInterceptor.on_consume.");
             }
 
-            // Mirror Java's `FilterConsumerInterceptor.onConsume`
-            // (ConsumerInterceptorsTest.java:71-86): build a fresh
-            // `recordMap` from the surviving partitions, then commit it
-            // wholesale at the end.
+            // Mirror Java's `ConsumerInterceptorsTest.FilterConsumerInterceptor#onConsume`:
+            // build a fresh `recordMap` from the surviving partitions, then
+            // commit it wholesale at the end.
             //
             // Build the replacement off to the side using a borrowed
             // view of `*records` — no `std::mem::take` up front. This
@@ -555,7 +554,8 @@ mod tests {
         let baseline = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
         interceptors.on_consume(&mut none_intercepted);
         // Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
-        // (ConsumerInterceptorsTest.java:162) holds because `onConsume` hands
+        // (`org.apache.kafka.clients.consumer.internals.ConsumerInterceptorsTest#testOnConsumeChain`)
+        // holds because `onConsume` hands
         // back its own argument: `ConsumerRecords` does not override
         // `equals`. Rust's `on_consume` works in place, so the translation
         // checks that the batch kept every record and its `next_offsets`.

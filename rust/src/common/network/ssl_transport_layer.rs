@@ -71,17 +71,18 @@ const MAX_TLS_COALESCE: usize = 256 * 1024;
 struct SslConnection {
     tcp: TcpStream,
     conn: rustls::ClientConnection,
-    /// Java's `State.POST_HANDSHAKE` (`SslTransportLayer.java:67`), as a flag
+    /// Java's `SslTransportLayer.State#POST_HANDSHAKE`, as a flag
     /// rather than a state so the existing `Handshaking`/`Ready` match arms are
     /// untouched.
     ///
     /// TLS 1.3 only: the handshake completes before the peer has necessarily
     /// accepted our certificate, so a rejection arrives as a post-handshake
     /// alert. Java converts an `SSLException` seen in this window into
-    /// `SslAuthenticationException` (`:591-598`) — a fatal `AuthenticationException`
+    /// `SslAuthenticationException` (`SslTransportLayer#read(ByteBuffer)`) — a fatal
+    /// `AuthenticationException`
     /// — instead of a transport error, which is what stops the client retrying a
     /// rejected mTLS certificate forever. Cleared once real application data has
-    /// been decrypted (Java `:587-589`, "we are now processing data").
+    /// been decrypted (Java's `SslTransportLayer#read(ByteBuffer)`, "we are now processing data").
     post_handshake: bool,
 }
 
@@ -157,13 +158,13 @@ impl SslTransportLayer {
     /// the actually-negotiated suite rules in/out the cipher as a CPU-gap cause.
     /// Whether the negotiated protocol is TLS 1.3, which decides whether Java
     /// enters `State.POST_HANDSHAKE` after the handshake
-    /// (`SslTransportLayer.java:464`).
+    /// (`SslTransportLayer#handshakeFinished`).
     fn is_tls13(conn: &rustls::ClientConnection) -> bool {
         conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3)
     }
 
     /// Close Java's `POST_HANDSHAKE` window once there is application data to
-    /// read: `SslTransportLayer.java:587-589` moves to `READY` because "we have
+    /// read: `SslTransportLayer#read(ByteBuffer)` moves to `READY` because "we have
     /// finished processing post-handshake messages since we are now processing
     /// data". After this a TLS failure is a transport error again, not an
     /// authentication failure.
@@ -176,7 +177,7 @@ impl SslTransportLayer {
     /// Turn a `process_new_packets` failure into the error Java would throw.
     ///
     /// Inside the TLS 1.3 post-handshake window Java raises
-    /// `SslAuthenticationException` (`SslTransportLayer.java:591-598`), an
+    /// `SslAuthenticationException` (`SslTransportLayer#read(ByteBuffer)`), an
     /// `AuthenticationException` — fatal, so the client stops instead of
     /// reconnecting. That window is how a rejected client certificate surfaces
     /// under TLS 1.3, where the server can only reject *after* the handshake.
@@ -297,8 +298,8 @@ impl TransportLayer for SslTransportLayer {
                         // broken pipe, etc.) — this is a network disconnect,
                         // NOT an authentication failure. Preserve the original
                         // error kind so the selector / network client treat it
-                        // as a retriable disconnect (Java re-throws the
-                        // original `IOException` at SslTransportLayer.java:324).
+                        // as a retriable disconnect (Java re-throws the original
+                        // `IOException` in `org.apache.kafka.common.network.SslTransportLayer#handshake`).
                         Err(e) => return Err(e),
                     }
                 }
@@ -346,8 +347,8 @@ impl TransportLayer for SslTransportLayer {
                     // unexpected EOF, etc.) — a network disconnect, NOT an
                     // authentication failure. Preserve the original error kind so
                     // it is treated as a retriable disconnect downstream (Java
-                    // re-throws the original `IOException` at
-                    // SslTransportLayer.java:324).
+                    // re-throws the original `IOException` in
+                    // `org.apache.kafka.common.network.SslTransportLayer#handshake`).
                     Err(e) => return Err(e),
                 }
                 // A failure from `process_new_packets` is a genuine TLS
@@ -357,9 +358,9 @@ impl TransportLayer for SslTransportLayer {
                 // AUTHENTICATION_FAILED (fatal), mirroring Java's
                 // `maybeProcessHandshakeFailure` -> `SslAuthenticationException`.
                 if let Err(e) = boxed.conn.process_new_packets() {
-                    // Java's `handshakeFailure` flushes the outgoing alert before
-                    // throwing — `if (!flush || handshakeWrapAfterFailure(flush))`
-                    // (`SslTransportLayer.java:890-909`) — "so the peer is notified
+                    // Java's `org.apache.kafka.common.network.SslTransportLayer#handshakeFailure`
+                    // flushes the outgoing alert before throwing —
+                    // `if (!flush || handshakeWrapAfterFailure(flush))` — "so the peer is notified
                     // of the failure". rustls has queued a fatal alert describing
                     // the rejection; without this the broker sees only a bare TCP
                     // FIN and cannot attribute the failure. Best-effort: the

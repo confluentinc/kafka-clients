@@ -62,7 +62,7 @@ pub struct kafka_common_header_Header_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_header_Header_t`] points at: the implementation,
+/// What a `kafka_common_header_Header_t` points at: the implementation,
 /// owned by the class handle that produced this view, plus the
 /// NUL-terminated copy of its key the string getter borrows out.
 pub(crate) struct HeaderInner {
@@ -107,11 +107,17 @@ unsafe impl Send for HeaderInner {}
 // interior mutability.
 unsafe impl Sync for HeaderInner {}
 
-/// `key()`: borrowed from the handle, valid as long as it is.
+/// `key()`.
+///
+/// # Returns
+///
+/// the header's key; must not be `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid header handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_common_header_Header_t) -> *const c_char {
@@ -123,12 +129,16 @@ pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_comm
     unsafe { &*(self_ as *const HeaderInner) }.key_c.as_ptr()
 }
 
-/// `value()`: a view over the header's bytes, valid as long as the handle;
-/// `data` is null for Java's null value.
+/// Returns the header's value.
+///
+/// # Returns
+///
+/// the header's value; may be `NULL` (`data` is `NULL`).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid header handle.
+/// `self_` must be a valid header handle. The value is a view over the
+/// header's bytes, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Header_value(self_: *const kafka_common_header_Header_t) -> kafka_Bytes_t {
@@ -151,7 +161,7 @@ pub struct kafka_common_header_Headers_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_header_Headers_t`] points at: the implementation,
+/// What a `kafka_common_header_Headers_t` points at: the implementation,
 /// owned by the class handle that produced this view
 /// (`RecordHeaders__as_Headers`), plus the header handles its getters hand
 /// out.
@@ -278,6 +288,15 @@ unsafe fn headers_mut<'a>(self_: *mut kafka_common_header_Headers_t) -> &'a mut 
 /// `add(Header header)`: appends a copy of `header`. Stores the translation
 /// of `IllegalStateException` in `*out_err` when the headers are read-only.
 ///
+/// # Parameters
+///
+/// - `header` - the Header to be added.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
+///   state.
+///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
@@ -307,6 +326,16 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_header(
 /// `key` and `value` (`value.data == NULL` is Java's null). Stores the
 /// translation of `IllegalStateException` in `*out_err` when the headers are
 /// read-only.
+///
+/// # Parameters
+///
+/// - `key` - of the header to be added; must not be `NULL`.
+/// - `value` - of the header to be added; may be `NULL`.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
+///   state.
 ///
 /// # Safety
 ///
@@ -340,6 +369,15 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
 /// the rest. Stores the translation of `IllegalStateException` in
 /// `*out_err` when the headers are read-only.
 ///
+/// # Parameters
+///
+/// - `key` - to remove all headers for; must not be `NULL`.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` is thrown if headers are in a read-only
+///   state.
+///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle whose headers may be mutated (not a
@@ -365,13 +403,22 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     unsafe { result(removed, out_err) }
 }
 
-/// `lastHeader(String key)`: the last header with `key`, borrowed from the
-/// handle until its next mutation, or null.
+/// `lastHeader(String key)`: the last header with `key`, or null.
+///
+/// # Parameters
+///
+/// - `key` - to get the last header for; must not be `NULL`.
+///
+/// # Returns
+///
+/// this last header matching the given key, returns `NULL` if not present.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle and `key` a valid NUL-terminated
 /// string.
+///
+/// The returned header is borrowed from `self_`, valid until its next mutation.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
@@ -395,14 +442,24 @@ pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
         .map_or(ptr::null(), |view| view.as_ptr())
 }
 
-/// `headers(String key)`: every header with `key`, in insertion order, as an
-/// owned list of borrowed `kafka_common_header_internals_RecordHeader_t *`
-/// freed with `kafka_List_destroy`.
+/// `headers(String key)`: every header with `key`, in insertion order, as a list of borrowed
+/// `kafka_common_header_internals_RecordHeader_t *`.
+///
+/// # Parameters
+///
+/// - `key` - to return the headers for; must not be `NULL`.
+///
+/// # Returns
+///
+/// all headers for the given key, in the order they were added in, if NO headers are present an
+/// empty iterable is returned.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle and `key` a valid NUL-terminated
 /// string.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_headers(
@@ -426,13 +483,19 @@ pub unsafe extern "C" fn kafka_common_header_Headers_headers(
     )
 }
 
-/// `toArray()`: every header, in insertion order, as an owned list of
-/// borrowed `kafka_common_header_internals_RecordHeader_t *` freed with
-/// `kafka_List_destroy`.
+/// `toArray()`: every header, in insertion order, as a list of borrowed
+/// `kafka_common_header_internals_RecordHeader_t *`.
+///
+/// # Returns
+///
+/// the headers as a Header[], mutating this array will not affect the Headers, if NO headers are
+/// present an empty array is returned.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_to_array(
@@ -446,12 +509,18 @@ pub unsafe extern "C" fn kafka_common_header_Headers_to_array(
     view_list(unsafe { headers_ref(self_) }.views().iter())
 }
 
-/// `iterator()`: the same list as [`kafka_common_header_Headers_to_array`],
+/// `iterator()`: the same list as `kafka_common_header_Headers_to_array`,
 /// standing for the Rust-only `iter()`.
+///
+/// # Returns
+///
+/// A `kafka_List_t` of the headers.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid headers handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Headers_iter(

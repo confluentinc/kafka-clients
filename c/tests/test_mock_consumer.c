@@ -1331,7 +1331,7 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     fixture_t f;
     make_assigned_mock(&f, "test", 0);
     kafka_common_TopicPartition_t *tp = kafka_common_TopicPartition_new("test", 0);
-    /* Java's MockConsumer.currentLag (MockConsumer.java:764-771): with no end
+    /* Java's `org.apache.kafka.clients.consumer.MockConsumer#currentLag`: with no end
      * offset set the test models being caught up (0); with one it is
      * end - position(tp). */
     TEST_ASSERT_EQUAL_INT64(0, consumer_current_lag(f.consumer, tp));

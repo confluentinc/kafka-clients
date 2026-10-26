@@ -57,8 +57,12 @@ fn boxed(rate: Rate) -> *mut kafka_common_metrics_stats_Rate_t {
     StatHandle::boxed(rate) as *mut kafka_common_metrics_stats_Rate_t
 }
 
-/// `new Rate()`: per second, over a `WindowedSum`. Owned, freed with
-/// [`kafka_common_metrics_stats_Rate_destroy`].
+/// `new Rate()`: per second, over a `WindowedSum`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_Rate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_Rate_new() -> *mut kafka_common_metrics_stats_Rate_t {
@@ -67,9 +71,16 @@ pub extern "C" fn kafka_common_metrics_stats_Rate_new() -> *mut kafka_common_met
 
 /// `new Rate(TimeUnit unit)`.
 ///
+/// # Parameters
+///
+/// - `unit` - The time unit the rate is reported in.
+///
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_Rate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
@@ -80,11 +91,18 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit(
     boxed(Rate::with_unit(unsafe { time_unit_of(unit) }))
 }
 
-/// `new Rate(SampledStat stat)`: shares `stat`.
+/// `new Rate(SampledStat stat)`.
+///
+/// # Parameters
+///
+/// - `stat` - The sampled stat the rate is computed over; shared, the caller keeps its handle.
 ///
 /// # Safety
 ///
 /// `stat` must be a valid sampled-stat handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_Rate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_stat(
@@ -96,12 +114,20 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_stat(
     boxed(Rate::with_stat(Arc::clone(unsafe { sampled_stat_ref(stat) })))
 }
 
-/// `new Rate(TimeUnit unit, SampledStat stat)`: shares `stat`.
+/// `new Rate(TimeUnit unit, SampledStat stat)`.
+///
+/// # Parameters
+///
+/// - `unit` - The time unit the rate is reported in.
+/// - `stat` - The sampled stat the rate is computed over; shared, the caller keeps its handle.
 ///
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton and `stat` a valid sampled-stat
 /// handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_Rate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
@@ -119,12 +145,21 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat(
     ))
 }
 
-/// `new Rate(TimeUnit unit, SampledStat stat, long window)`: shares `stat`.
+/// `new Rate(TimeUnit unit, SampledStat stat, long window)`.
+///
+/// # Parameters
+///
+/// - `unit` - The time unit the rate is reported in.
+/// - `stat` - The sampled stat the rate is computed over; shared, the caller keeps its handle.
+/// - `window` - A fixed time window, in `unit`, for the rate and its samples; 0 or less for none.
 ///
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton and `stat` a valid sampled-stat
 /// handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_Rate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
@@ -144,11 +179,12 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_with_unit_stat_window(
     ))
 }
 
-/// `unitName()`: an owned string freed with `kafka_string_destroy`.
+/// Returns `unitName()`, the name of the time unit the rate is reported in.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle of this class.
+/// `self_` must be a valid handle of this class. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_unit_name(
@@ -160,10 +196,16 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_unit_name(
     into_c_string(&unsafe { handle(self_) }.stat().unit_name())
 }
 
-/// `windowSize(MetricConfig config, long now)`: the elapsed window in
-/// milliseconds.
+/// `windowSize(MetricConfig config, long now)`.
 ///
-/// A caught Rust panic returns -1, which no window size is.
+/// # Parameters
+///
+/// - `config` - The metric configuration.
+/// - `now` - The current time in milliseconds.
+///
+/// # Returns
+///
+/// The elapsed window in milliseconds; -1 on a caught Rust panic, which no window size is.
 ///
 /// # Safety
 ///
@@ -185,12 +227,14 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_window_size(
         .window_size(unsafe { metric_config_ref(config) }, now)
 }
 
-/// The stat as the `Stat` interface: a borrowed view valid as long as the
-/// handle, never passed to an interface `_destroy`.
+/// Returns the stat as the `Stat` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to an interface
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
@@ -202,12 +246,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Stat(
     unsafe { handle(self_) }.as_stat()
 }
 
-/// The stat as the `Measurable` interface: a borrowed view valid as long as
-/// the handle.
+/// Returns the stat as the `Measurable` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
@@ -219,12 +264,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_Measurable(
     unsafe { handle(self_) }.as_measurable()
 }
 
-/// The stat as the `MetricValueProvider` interface (Java's `Measurable`
-/// extends it): a borrowed view valid as long as the handle.
+/// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MetricValueProvider(
@@ -236,12 +282,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MetricValueProvider
     unsafe { handle(self_) }.as_metric_value_provider()
 }
 
-/// The stat as the `MeasurableStat` interface: a borrowed view valid as
-/// long as the handle; a sensor it is added to shares the stat.
+/// Returns the stat as the `MeasurableStat` interface; a sensor it is added to shares the stat.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
@@ -253,11 +300,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Rate__as_MeasurableStat(
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Rate_to_string(

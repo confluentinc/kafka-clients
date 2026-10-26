@@ -309,8 +309,8 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Enter the authentication failed state for the given node.
     ///
-    /// `error` is Java's `AuthenticationException exception` parameter
-    /// (`ClusterConnectionStates.java:272`) — the object the channel raised, so
+    /// `error` is Java's `AuthenticationException exception` parameter of
+    /// `ClusterConnectionStates#authenticationFailed` — the object the channel raised, so
     /// the concrete subclass (`SaslAuthenticationException`,
     /// `SslAuthenticationException`, or the base class) reaches
     /// [`authentication_error`](Self::authentication_error) intact. It used to be
@@ -360,8 +360,8 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 
     /// Return the authentication error if an authentication error occurred.
     ///
-    /// Java's `authenticationException(String id)`
-    /// (`ClusterConnectionStates.java:331`), which returns the
+    /// Java's `ClusterConnectionStates#authenticationException(String id)`, which
+    /// returns the
     /// `AuthenticationException` object — hence the whole [`Error`], not its
     /// message: every caller (`NetworkClient.authenticationException` and from
     /// there the admin, consumer and producer) needs the class, not just the
@@ -863,7 +863,8 @@ mod tests {
             connection_states.connection_state(NODE_ID1)
         );
         // Java stores the `AuthenticationException` object
-        // (`ClusterConnectionStates.java:274`), so the subclass survives the hop:
+        // (`org.apache.kafka.clients.ClusterConnectionStates#authenticationFailed`), so the subclass
+        // survives the hop:
         // a TLS certificate rejection must not read back as a SASL failure. The
         // message is the channel's own bare text, with no second class prefix.
         let stored = connection_states

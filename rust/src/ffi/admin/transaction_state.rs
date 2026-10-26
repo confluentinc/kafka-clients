@@ -95,63 +95,63 @@ pub(crate) unsafe fn transaction_state_value_of(state: *const kafka_admin_Transa
     unsafe { *(state as *const TransactionState) }
 }
 
-/// `TransactionState.ONGOING`.
+/// Returns `TransactionState.ONGOING`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_ongoing() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Ongoing)
 }
 
-/// `TransactionState.PREPARE_ABORT`.
+/// Returns `TransactionState.PREPARE_ABORT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_abort() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareAbort)
 }
 
-/// `TransactionState.PREPARE_COMMIT`.
+/// Returns `TransactionState.PREPARE_COMMIT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_commit() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareCommit)
 }
 
-/// `TransactionState.COMPLETE_ABORT`.
+/// Returns `TransactionState.COMPLETE_ABORT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_complete_abort() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::CompleteAbort)
 }
 
-/// `TransactionState.COMPLETE_COMMIT`.
+/// Returns `TransactionState.COMPLETE_COMMIT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_complete_commit() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::CompleteCommit)
 }
 
-/// `TransactionState.EMPTY`.
+/// Returns `TransactionState.EMPTY`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_empty() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Empty)
 }
 
-/// `TransactionState.PREPARE_EPOCH_FENCE`.
+/// Returns `TransactionState.PREPARE_EPOCH_FENCE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_prepare_epoch_fence() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::PrepareEpochFence)
 }
 
-/// `TransactionState.UNKNOWN`.
+/// Returns `TransactionState.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_TransactionState_unknown() -> *const kafka_admin_TransactionState_t {
     transaction_state_singleton(TransactionState::Unknown)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_TransactionState_UNKNOWN`.
 ///
@@ -168,12 +168,16 @@ pub unsafe extern "C" fn kafka_admin_TransactionState__enum(
     enum_of(unsafe { transaction_state_value_of(self_) })
 }
 
-/// `TransactionState.parse(String name)`: the borrowed singleton named
-/// `name`, `UNKNOWN` for a name Java does not know.
+/// Returns the state with the given name, `UNKNOWN` for a name Java does not know.
+///
+/// # Parameters
+///
+/// - `name` - the Java name of the state (`"CompleteCommit"`, ...).
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string.
+/// `name` must be a valid NUL-terminated string. The returned singleton is borrowed and never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
@@ -184,12 +188,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionState_parse(
     transaction_state_singleton(TransactionState::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// `toString()`: the Java name of the state (`"CompleteCommit"`, ...), as an
-/// owned string freed with `kafka_string_destroy`.
+/// Returns the Java name of the state (`"CompleteCommit"`, ...).
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionState_to_string(

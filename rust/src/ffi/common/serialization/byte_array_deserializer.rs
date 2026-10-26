@@ -100,8 +100,12 @@ unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArrayDeseriali
     unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
 }
 
-/// `new ByteArrayDeserializer()`. Owned, freed with
-/// [`kafka_common_serialization_ByteArrayDeserializer_destroy`].
+/// `new ByteArrayDeserializer()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_ByteArrayDeserializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_ByteArrayDeserializer_new()
@@ -111,14 +115,15 @@ pub extern "C" fn kafka_common_serialization_ByteArrayDeserializer_new()
     ))) as *mut kafka_common_serialization_ByteArrayDeserializer_t
 }
 
-/// The deserializer as a `Deserializer`: a borrowed view valid as long as
-/// the handle, never passed to `Deserializer_destroy`; `*mut` because the
-/// interface mutates. The `void *` it produces is an owned `kafka_Bytes_t *`
+/// Returns the deserializer as a `Deserializer`; `*mut` because the interface mutates. The `void *` it produces is an owned `kafka_Bytes_t *`
 /// freed with `kafka_Bytes_destroy`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-deserializer handle.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to
+/// `kafka_common_serialization_Deserializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArrayDeserializer__as_Deserializer(

@@ -20,17 +20,23 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The version of API is not supported.
+    /// Indicates that a request API or version needed by the client is not supported by the broker.
+    /// This is typically a fatal error as Kafka clients will downgrade request versions as needed
+    /// except in cases where a needed feature is not available in old versions. Fatal errors can
+    /// generally only be handled by closing the client instance, although in some cases it may be
+    /// possible to continue without relying on the underlying feature. For example, when the
+    /// producer is used with idempotence enabled, this error is fatal since the producer does not
+    /// support reverting to weaker semantics. On the other hand, if this error is raised from
+    /// `KafkaConsumer::offsets_for_times`, it would be possible to revert to alternative logic to
+    /// set the consumer's position.
     ///
-    /// Corresponds to Java's `UnsupportedVersionException`, error code `Errors::UnsupportedVersion`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnsupportedVersionException` -> `InvalidConfigurationException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnsupportedVersion`. Java `extends` chain: `UnsupportedVersionException`
+    /// -> `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
     ///
-    /// Java's crate-private subclass `common.internals.UnsupportedProtocolFieldException`
-    /// (Kafka 4.4) is this same type with a different crate-private kind, so the
-    /// public `Error` surface keeps the one variant Java's public API shows.
+    /// Java's internal subclass `UnsupportedProtocolFieldException` is this same type with a
+    /// different crate-private kind.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedVersionException")]
     UnsupportedVersionError,
     code: Errors::UnsupportedVersion,
@@ -65,7 +71,7 @@ impl UnsupportedVersionError {
     /// kind, through [`Self::from_io_error`].
     ///
     /// Java's builders throw the exception object and `NetworkClient.send`
-    /// catches it whole (`NetworkClient.java:648-663`); the Rust builder trait
+    /// catches it whole (`org.apache.kafka.clients.NetworkClient#doSend`); the Rust builder trait
     /// reports through `io::Error`, so the object rides inside it.
     pub(crate) fn into_io_error(self) -> io::Error {
         io::Error::new(io::ErrorKind::Unsupported, self)

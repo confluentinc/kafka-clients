@@ -1872,22 +1872,22 @@ impl Selectable for Selector {
 }
 
 /// The level and text with which the error closing a channel is logged: the
-/// `catch` in Java's `Selector.pollSelectionKeys` (`Selector.java:600-626`),
+/// `catch` in Java's `Selector#pollSelectionKeys`,
 /// shared by the read and the write path, which Java handles in one block.
 ///
 /// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
 /// `instanceof`:
 ///
-///   - an authentication failure logs "Failed authentication" (Java: INFO,
-///     `:622`; this client logs it at ERROR, left as it was);
-///   - an invalid receive logs "Unexpected error" at WARN (`:625`). Java gets
+///   - an authentication failure logs "Failed authentication" (Java: INFO;
+///     this client logs it at ERROR, left as it was);
+///   - an invalid receive logs "Unexpected error" at WARN. Java gets
 ///     there because `InvalidReceiveException` is a `KafkaException`, not an
 ///     `IOException`, and it is the one such payload the receive path raises
 ///     here, so the `else` of the Java chain reduces to it. At DEBUG, as it
 ///     was, a size header the client refuses left no trace: the client closed,
 ///     reconnected and refetched with nothing in the logs;
 ///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
-///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
+///     I/O disconnect, DEBUG, as the error is retriable.
 fn channel_error_log(desc: &str, e: &io::Error) -> (log::Level, String) {
     if is_authentication_error(e) {
         (log::Level::Error, format!("Failed authentication with {desc} ({e})"))
@@ -4202,10 +4202,10 @@ mod tests {
         selector.poll(0).await.unwrap();
     }
 
-    /// The `catch` in Java's `pollSelectionKeys` logs the error closing a channel
-    /// at one of three levels (`Selector.java:600-626`). An invalid receive is a
-    /// `KafkaException`, so it takes the WARN "Unexpected error" branch (`:625`),
-    /// not the DEBUG disconnect every `IOException` gets (`:612`). Both selector
+    /// The `catch` in Java's `Selector#pollSelectionKeys` logs the error closing a channel
+    /// at one of three levels. An invalid receive is a
+    /// `KafkaException`, so it takes the WARN "Unexpected error" branch,
+    /// not the DEBUG disconnect every `IOException` gets. Both selector
     /// paths log through `channel_error_log`, so this pins the level and the text.
     #[test]
     fn test_channel_error_log_routes_as_java_does() {

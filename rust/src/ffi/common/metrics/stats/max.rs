@@ -45,19 +45,25 @@ unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_Max_t) -> &'a Stat
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<Max>) }
 }
 
-/// `new Max()`. Owned, freed with [`kafka_common_metrics_stats_Max_destroy`].
+/// `new Max()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_common_metrics_stats_Max_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_Max_new() -> *mut kafka_common_metrics_stats_Max_t {
     StatHandle::boxed(Max::new()) as *mut kafka_common_metrics_stats_Max_t
 }
 
-/// The stat as the `Stat` interface: a borrowed view valid as long as the
-/// handle, never passed to an interface `_destroy`.
+/// Returns the stat as the `Stat` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to an interface
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_Stat(
@@ -69,12 +75,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_Stat(
     unsafe { handle(self_) }.as_stat()
 }
 
-/// The stat as the `Measurable` interface: a borrowed view valid as long as
-/// the handle.
+/// Returns the stat as the `Measurable` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_Measurable(
@@ -86,12 +93,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_Measurable(
     unsafe { handle(self_) }.as_measurable()
 }
 
-/// The stat as the `MetricValueProvider` interface (Java's `Measurable`
-/// extends it): a borrowed view valid as long as the handle.
+/// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_MetricValueProvider(
@@ -103,14 +111,15 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_MetricValueProvider(
     unsafe { handle(self_) }.as_metric_value_provider()
 }
 
-/// The stat as the `MeasurableStat` interface (what
-/// `kafka_common_metrics_Sensor_add_with_metric_name` takes): a borrowed
-/// view valid as long as the handle; the sensor shares the stat and the
+/// Returns the stat as the `MeasurableStat` interface (what
+/// `kafka_common_metrics_Sensor_add_with_metric_name` takes); the sensor shares the stat and the
 /// handle stays valid.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_MeasurableStat(
@@ -122,11 +131,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Max__as_MeasurableStat(
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Max_to_string(

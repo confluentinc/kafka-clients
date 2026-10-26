@@ -73,9 +73,9 @@ impl PartitionLeaderStrategy {
                 kafka_error!(self.log_context, "Received unknown topic error for topic {}", topic);
                 // Java's closure parameter is `tp` and it fills the *partition*
                 // slot; the topic appears only inside the backticks
-                // (`PartitionLeaderStrategy.java:88-90`). Printing the topic in
-                // both slots left every per-partition future with the same message
-                // (finding 244).
+                // (`org.apache.kafka.clients.admin.internals.PartitionLeaderStrategy#handleTopicError`).
+                // Printing the topic in both slots left every per-partition future
+                // with the same message (finding 244).
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
                     Error::with_message(
                         topic_error,
@@ -228,9 +228,10 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<TopicPartition> {
         let ConcreteResponse::Metadata(response) = response else {
-            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
-            // result would silently re-issue the lookup until the deadline. See
-            // `LookupResult::failed_all`.
+            // Java fails the call once
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`);
+            // an empty result would silently re-issue the lookup until the deadline.
+            // See `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 request_partitions,
                 Error::local_illegal_state("PartitionLeaderStrategy received an unexpected response type"),
@@ -564,8 +565,8 @@ mod tests {
     /// Regression for finding 244: Java's closure parameter is `tp` and it fills
     /// the *partition* slot, while the topic appears only inside the backticks:
     /// `topicError.exception("Failed to fetch metadata for partition " + tp + " because metadata for topic \`" + topic + "\` could not be found")`
-    /// (`PartitionLeaderStrategy.java:88-90`). Printing the topic in both slots
-    /// left every per-partition future with an indistinguishable message.
+    /// (`PartitionLeaderStrategy#handleTopicError`). Printing the topic in both
+    /// slots left every per-partition future with an indistinguishable message.
     #[test]
     fn intolerant_unknown_topic_names_the_partition() {
         let strategy = PartitionLeaderStrategy::with_tolerate_unknown_topics(LogContext::new("[test] "), false);

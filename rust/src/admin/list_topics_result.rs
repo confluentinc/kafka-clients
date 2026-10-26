@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::list_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListTopicsResult`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,8 +20,6 @@ use crate::admin::TopicListing;
 use crate::common::KafkaFuture;
 
 /// The result of `Admin::list_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListTopicsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult")]
 pub struct ListTopicsResult {
@@ -37,21 +33,21 @@ impl ListTopicsResult {
         Self { future }
     }
 
-    /// Return a future which yields a map of topic names to `TopicListing`
+    /// Returns a future which yields a map of topic names to `TopicListing`
     /// objects.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#namesToListings")]
     pub fn names_to_listings(&self) -> KafkaFuture<HashMap<String, TopicListing>> {
         self.future.clone()
     }
 
-    /// Return a future which yields a collection of `TopicListing` objects.
+    /// Returns a future which yields a collection of `TopicListing` objects.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#listings")]
     pub fn listings(&self) -> KafkaFuture<Vec<TopicListing>> {
         self.future
             .then_apply(|map: HashMap<String, TopicListing>| Ok(map.into_values().collect()))
     }
 
-    /// Return a future which yields a set of topic names.
+    /// Returns a future which yields a set of topic names.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsResult#names")]
     pub fn names(&self) -> KafkaFuture<HashSet<String>> {
         self.future

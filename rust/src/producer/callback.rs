@@ -23,49 +23,28 @@ use crate::producer::RecordMetadata;
 /// when the request is complete. This callback will generally execute in the
 /// background I/O task so it should be fast.
 ///
-/// Java declares `Callback` as a functional interface, and a lambda is the
-/// usual implementation. In Rust, [`callback::new`](new) turns a closure of
-/// the method's shape into a `Callback`, inferring the closure's parameter
-/// types:
+/// # Translation notes
 ///
-/// ```
-/// use confluent_kafka::producer::{callback, Callback};
-///
-/// let callback: Box<dyn Callback> = Box::new(callback::new(|metadata, error| {
-///     if let Some(error) = error {
-///         eprintln!("send failed: {error}");
-///     } else if let Some(metadata) = metadata {
-///         println!("sent at offset {}", metadata.offset());
-///     }
-/// }));
-/// # callback.on_completion(None, None);
-/// ```
-///
-/// Every `FnOnce(Option<&RecordMetadata>, Option<&Error>) + Send + Sync` also
-/// implements `Callback` directly, but then the closure's parameter types must
-/// be written out: Rust infers a closure's signature only from an `Fn` bound,
-/// not from a trait it gets through a blanket impl.
-///
-/// [`on_completion`](Callback::on_completion) takes `self: Box<Self>`: the
-/// producer invokes each record's callback exactly once, when its batch
-/// completes, fails or is aborted, so the callback may consume what it
-/// captures (a `oneshot::Sender`, for example).
+/// [`callback::new`](new) builds one from a closure, invoked exactly once.
 #[doc(alias = "org.apache.kafka.clients.producer.Callback")]
 pub trait Callback: Send + Sync {
     /// A callback method the user can implement to provide asynchronous
     /// handling of request completion. This method will be called when the
-    /// record sent to the server has been acknowledged. When `error` is
-    /// `Some`, `metadata` will contain the special -1 value for all fields. If
-    /// the topic partition cannot be chosen, a -1 value will be assigned.
+    /// record sent to the server has been acknowledged. When `error` is not
+    /// `None` in the callback, `metadata` will contain the special -1 value for
+    /// all fields. If the topic partition cannot be chosen, a -1 value will be
+    /// assigned.
     ///
-    /// * `metadata` - The metadata for the record that was sent (i.e. the
+    /// # Arguments
+    ///
+    /// - `metadata` - The metadata for the record that was sent (i.e. the
     ///   partition and offset). An empty metadata with -1 value for all fields
     ///   will be returned if an error occurred.
-    /// * `error` - The error raised during processing of this record.
-    ///   `None` if no error occurred. Possible errors include:
+    /// - `error` - The error raised during processing of this record. `None` if
+    ///   no error occurred. Possible errors include:
     ///
     ///   Non-retriable errors (fatal, the message will never be sent):
-    ///   `InvalidTopicError`, `OffsetMetadataTooLarge`,
+    ///   `InvalidTopicError`, `OffsetMetadataTooLargeError`,
     ///   `RecordBatchTooLargeError`, `RecordTooLargeError`,
     ///   `UnknownServerError`, `UnknownProducerIdError`,
     ///   `InvalidProducerEpochError`, `AuthenticationError`,
@@ -89,12 +68,35 @@ where
     }
 }
 
-/// A [`Callback`] that calls `function`, standing in for a Java lambda
+/// Returns a [`Callback`] that calls `function`, standing in for a Java lambda
 /// implementing `Callback`: `function` is
 /// [`on_completion`](Callback::on_completion), and every other method keeps
 /// its default. A method Java adds later as an overload of `onCompletion` gets
 /// its own factory, `with_<parameter>`, taking a function of that overload's
-/// shape.
+/// shape. The closure's parameter types are inferred:
+///
+/// ```
+/// use confluent_kafka::producer::{callback, Callback};
+///
+/// let callback: Box<dyn Callback> = Box::new(callback::new(|metadata, error| {
+///     if let Some(error) = error {
+///         eprintln!("send failed: {error}");
+///     } else if let Some(metadata) = metadata {
+///         println!("sent at offset {}", metadata.offset());
+///     }
+/// }));
+/// # callback.on_completion(None, None);
+/// ```
+///
+/// Every `FnOnce(Option<&RecordMetadata>, Option<&Error>) + Send + Sync` also
+/// implements `Callback` directly, but then the closure's parameter types must
+/// be written out: Rust infers a closure's signature only from an `Fn` bound,
+/// not from a trait it gets through a blanket impl.
+///
+/// # Arguments
+///
+/// - `function` - the body of [`on_completion`](Callback::on_completion),
+///   called once with the record's metadata and error.
 // stands in for a Java lambda implementing `Callback` (CLAUDE.md §3)
 #[doc(alias = "rust-only")]
 pub fn new<F>(function: F) -> impl Callback

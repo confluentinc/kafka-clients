@@ -18,12 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Requested credential would not meet criteria for acceptability.
+    /// Error thrown when attempting to define a credential that does not meet the criteria for
+    /// acceptability (for example, attempting to create a SCRAM credential with an empty username
+    /// or password or too few/many iterations).
     ///
-    /// Corresponds to Java's `UnacceptableCredentialException`, error code `Errors::UnacceptableCredential`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnacceptableCredentialException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnacceptableCredential`. Java `extends` chain:
+    /// `UnacceptableCredentialException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnacceptableCredentialException")]
     UnacceptableCredentialError,
     code: Errors::UnacceptableCredential,

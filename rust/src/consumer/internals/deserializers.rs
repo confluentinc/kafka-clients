@@ -148,7 +148,7 @@ impl<K, V> Deserializers<K, V> {
 }
 
 /// The error `Utils.closeQuietly` records for a deserializer whose `close`
-/// panicked, logged as `closeQuietly` logs it (`Utils.java:1143`).
+/// panicked, logged as `closeQuietly` logs it (`Utils#closeQuietly(AutoCloseable,String,AtomicReference)`).
 fn close_failure(name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
     let message = panic_payload_message(payload);
     log::error!("Failed to close {name}: {message}");

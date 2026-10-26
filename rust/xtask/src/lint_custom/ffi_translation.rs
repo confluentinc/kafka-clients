@@ -168,6 +168,7 @@ use std::rc::Rc;
 use quote::ToTokens;
 use syn::ext::IdentExt;
 
+use super::baseline::{Baseline, Waivable};
 use super::{
     compact, ffi_class, has_tag, is_cfg_test, is_no_mangle, java_markers, type_ident, variant_payload, Context, Crate,
     ModPath, Rule, RUST_ONLY,
@@ -366,78 +367,22 @@ impl Finding {
     }
 }
 
-/// The keys [`FFI_BASELINE`] waives.
-struct Baseline {
-    file: String,
-    keys: BTreeSet<String>,
-    /// The `prefix:` lines: every symbol starting with one is waived.
-    prefixes: Vec<String>,
-    /// Lines listed twice.
-    duplicates: Vec<String>,
-}
-
-impl Baseline {
-    fn load(path: &Path) -> Self {
-        let mut keys = BTreeSet::new();
-        let mut prefixes = Vec::new();
-        let mut duplicates = Vec::new();
-        let text = fs::read_to_string(path).unwrap_or_default();
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            if let Some(prefix) = line.strip_prefix("prefix:") {
-                if prefixes.iter().any(|p| p == prefix) {
-                    duplicates.push(line.to_string());
-                } else {
-                    prefixes.push(prefix.to_string());
-                }
-            } else if !keys.insert(line.to_string()) {
-                duplicates.push(line.to_string());
-            }
-        }
-        Baseline { file: path.display().to_string(), keys, prefixes, duplicates }
+impl Waivable for Finding {
+    fn key(&self) -> String {
+        Finding::key(self)
     }
 
-    /// Drops the waived findings and adds one per stale or duplicated line.
-    fn apply(&self, findings: Vec<Finding>) -> Vec<Finding> {
-        let mut used_keys = BTreeSet::new();
-        let mut used_prefixes = BTreeSet::new();
-        let mut kept = Vec::new();
-        for f in findings {
-            let key = f.key();
-            if self.keys.contains(&key) {
-                used_keys.insert(key);
-                continue;
-            }
-            if let Some(p) = self.prefixes.iter().find(|p| f.symbol.starts_with(p.as_str())) {
-                used_prefixes.insert(p.clone());
-                continue;
-            }
-            kept.push(f);
+    fn subject(&self) -> &str {
+        &self.symbol
+    }
+
+    fn baseline_finding(file: &str, line: String, detail: &str) -> Self {
+        Finding {
+            kind: "baseline",
+            symbol: line,
+            file: file.to_string(),
+            detail: detail.to_string(),
         }
-        for key in self.keys.difference(&used_keys) {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: key.clone(),
-                file: self.file.clone(),
-                detail: "stale entry: no finding matches it any more; delete the line".to_string(),
-            });
-        }
-        for prefix in self.prefixes.iter().filter(|p| !used_prefixes.contains(*p)) {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: format!("prefix:{prefix}"),
-                file: self.file.clone(),
-                detail: "stale entry: no finding starts with it any more; delete the line".to_string(),
-            });
-        }
-        for line in &self.duplicates {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: line.clone(),
-                file: self.file.clone(),
-                detail: "listed twice; delete one".to_string(),
-            });
-        }
-        kept
     }
 }
 
@@ -895,12 +840,31 @@ struct Expected {
 struct Expectations {
     items: BTreeMap<String, Expected>,
     findings: Vec<Finding>,
+    /// The Rust method the symbols being added translate, if any.
+    origin: Option<COrigin>,
+    /// Each symbol a Rust method implies, with that method.
+    origins: BTreeMap<String, COrigin>,
 }
 
 impl Expectations {
     fn add(&mut self, name: String, shape: Shape, file: &str) {
+        if let Some(origin) = &self.origin {
+            self.origins.entry(name.clone()).or_insert_with(|| origin.clone());
+        }
         self.items.entry(name).or_insert(Expected { shape, file: file.to_string() });
     }
+}
+
+/// The Rust method a C export translates, as `check-api-docs` needs
+/// it: the export's doc is measured against that method's Java member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct COrigin {
+    /// `Type::method`.
+    pub(super) rust: String,
+    /// The method's Java markers.
+    pub(super) markers: Vec<String>,
+    /// Whether the method is tagged `rust-only`.
+    pub(super) rust_only: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +926,9 @@ struct RustMethod {
     sig: syn::Signature,
     /// A trait method with a body: Java's default method, a nullable pointer in C.
     has_default: bool,
+    /// Its Java markers, and whether it is tagged `rust-only`.
+    markers: Vec<String>,
+    rust_only: bool,
 }
 
 /// A public Rust type outside the FFI.
@@ -1215,6 +1182,11 @@ impl FfiTranslation {
         findings.sort();
         findings.dedup();
         (findings, checked)
+    }
+
+    /// The Rust method each C export translates, keyed by symbol.
+    pub(super) fn c_origins(&self, krate: &Crate) -> BTreeMap<String, COrigin> {
+        self.expectations(&self.rust_surface(krate)).origins
     }
 
     /// The C prefix of public type `name` defined in `module` with `attrs`.
@@ -1781,7 +1753,13 @@ impl FfiTranslation {
                         CType::Handle { prefix: prefix.clone(), mutable: self_mutable(recv) }.render(),
                     )
                 });
+                out.origin = Some(COrigin {
+                    rust: format!("{}::{}", ty.name, m.name),
+                    markers: m.markers.clone(),
+                    rust_only: m.rust_only,
+                });
                 expect_method(&mut out, &mapper, prefix, m, self_param, file);
+                out.origin = None;
             }
 
             if let Kind::Trait { .. } = &ty.kind {
@@ -2029,6 +2007,8 @@ fn trait_methods(
             name: f.sig.ident.unraw().to_string(),
             sig: f.sig.clone(),
             has_default: f.default.is_some(),
+            markers: java_markers(&f.attrs),
+            rust_only: has_tag(&f.attrs, RUST_ONLY),
         });
     }
     out
@@ -2093,7 +2073,13 @@ fn inherent_methods(items: &[syn::Item], name: &str) -> Vec<RustMethod> {
             if !matches!(f.vis, syn::Visibility::Public(_)) || is_cfg_test(&f.attrs) || is_hidden(&f.attrs) {
                 continue;
             }
-            out.push(RustMethod { name: f.sig.ident.unraw().to_string(), sig: f.sig.clone(), has_default: false });
+            out.push(RustMethod {
+                name: f.sig.ident.unraw().to_string(),
+                sig: f.sig.clone(),
+                has_default: false,
+                markers: java_markers(&f.attrs),
+                rust_only: has_tag(&f.attrs, RUST_ONLY),
+            });
         }
     }
     out
@@ -2996,6 +2982,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 
@@ -3055,7 +3043,12 @@ mod tests {
         let lib = format!("{rust}\npub mod ffi {{\n use std::ffi::{{c_char, c_void}};\n{ffi}\n}}\n");
         fs::write(dir.join("lib.rs"), lib).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
+        let ctx = Context {
+            java: Rc::new(index()),
+            ffi_baseline: None,
+            doc_baseline: None,
+            cbindgen_config: None,
+        };
         let rule = FfiTranslation::new(&ctx);
         let (findings, _) = rule.findings(&krate);
         fs::remove_dir_all(&dir).unwrap();
@@ -4647,7 +4640,12 @@ mod tests {
 
     #[test]
     fn test_prefixes_from_markers_nested_errors_and_rust_only() {
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
+        let ctx = Context {
+            java: Rc::new(index()),
+            ffi_baseline: None,
+            doc_baseline: None,
+            cbindgen_config: None,
+        };
         let rule = FfiTranslation::new(&ctx);
         let attrs = |alias: &str| -> Vec<syn::Attribute> {
             let item: syn::ItemStruct = syn::parse_str(&format!("#[doc(alias = \"{alias}\")] struct S;")).unwrap();

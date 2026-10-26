@@ -18,12 +18,17 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The broker received an out of order sequence number.
+    /// This error indicates that the broker received an unexpected sequence number from the
+    /// producer, which means that data may have been lost. If the producer is configured for
+    /// idempotence only (i.e. if `enable.idempotence` is set and no `transactional.id` is
+    /// configured), it is possible to continue sending with the same producer instance, but doing
+    /// so risks reordering of sent records. For transactional producers, this is a fatal error and
+    /// you should close the producer.
     ///
-    /// Corresponds to Java's `OutOfOrderSequenceException`, error code `Errors::OutOfOrderSequenceNumber`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `OutOfOrderSequenceException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::OutOfOrderSequenceNumber`. Java `extends` chain:
+    /// `OutOfOrderSequenceException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.OutOfOrderSequenceException")]
     OutOfOrderSequenceError,
     code: Errors::OutOfOrderSequenceNumber,

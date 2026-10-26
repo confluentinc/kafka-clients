@@ -425,8 +425,9 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
                     &mut groups_to_unmap,
                 );
             },
-            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
-            // mismatch; see `ApiResult::failed_all`.
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // fails this one call on a response-type mismatch; see
+            // `ApiResult::failed_all`.
             _ => {
                 return ApiResult::failed_all(
                     keys,

@@ -36,7 +36,7 @@ pub struct kafka_common_acl_AccessControlEntryFilter_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_acl_AccessControlEntryFilter_t`] points at: the
+/// What a `kafka_common_acl_AccessControlEntryFilter_t` points at: the
 /// filter plus the NUL-terminated strings its getters borrow out (`None`
 /// for Java's null).
 pub(crate) struct AccessControlEntryFilterInner {
@@ -89,7 +89,7 @@ pub(crate) unsafe fn access_control_entry_filter_ref<'a>(
 }
 
 /// Hands `filter` to C as an owned handle, freed with
-/// [`kafka_common_acl_AccessControlEntryFilter_destroy`].
+/// `kafka_common_acl_AccessControlEntryFilter_destroy`.
 pub(crate) fn box_access_control_entry_filter(
     filter: AccessControlEntryFilter,
 ) -> *mut kafka_common_acl_AccessControlEntryFilter_t {
@@ -97,14 +97,20 @@ pub(crate) fn box_access_control_entry_filter(
         as *mut kafka_common_acl_AccessControlEntryFilter_t
 }
 
-/// `new AccessControlEntryFilter(String principal, String host, AclOperation operation, AclPermissionType permissionType)`:
-/// a null `principal` or `host` matches any. Owned, freed with
-/// [`kafka_common_acl_AccessControlEntryFilter_destroy`].
+/// Create an instance of an access control entry filter with the provided parameters.
+///
+/// # Parameters
+///
+/// - `principal` - the principal or `NULL`
+/// - `host` - the host or `NULL`
+/// - `operation` - non-`NULL` operation
+/// - `permission_type` - non-`NULL` permission type
 ///
 /// # Safety
 ///
-/// `principal` and `host` must be null or valid NUL-terminated strings,
-/// `operation` and `permission_type` singletons of their enums.
+/// `principal` and `host` must be `NULL` or valid NUL-terminated strings,
+/// `operation` and `permission_type` singletons of their enums. The returned
+/// filter is owned, freed with `kafka_common_acl_AccessControlEntryFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_new(
@@ -133,19 +139,28 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_new(
     ))
 }
 
-/// `AccessControlEntryFilter.ANY`: a filter matching every entry. Owned, as
-/// every handle of this type.
+/// Matches any access control entry.
+///
+/// # Returns
+///
+/// The filter.
+///
+/// # Safety
+///
+/// The returned filter is owned, freed with
+/// `kafka_common_acl_AccessControlEntryFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AccessControlEntryFilter_any() -> *mut kafka_common_acl_AccessControlEntryFilter_t {
     box_access_control_entry_filter(AccessControlEntryFilter::any())
 }
 
-/// `principal()`: borrowed from the handle, or null for Java's null.
+/// Returns the principal or `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_principal(
@@ -160,12 +175,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_principal(
         .map_or(ptr::null(), |s| s.as_ptr())
 }
 
-/// `host()`: borrowed from the handle, or null for Java's null. The value
-/// `*` means any host.
+/// Returns the host or `NULL`. The value `*` means any host.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_host(
@@ -177,11 +192,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_host(
     unsafe { inner_ref(self_) }.host_c.as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
-/// `operation()`: the borrowed `AclOperation` singleton.
+/// Returns the AclOperation.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_operation(
@@ -193,11 +209,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_operation(
     operation_singleton(unsafe { access_control_entry_filter_ref(self_) }.operation())
 }
 
-/// `permissionType()`: the borrowed `AclPermissionType` singleton.
+/// Returns the AclPermissionType.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_permission_type(
@@ -209,7 +226,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_permission_ty
     permission_type_singleton(unsafe { access_control_entry_filter_ref(self_) }.permission_type())
 }
 
-/// `isUnknown()`: whether the operation or the permission type is `UNKNOWN`.
+/// Returns 1 if there are any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -225,12 +242,16 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_is_unknown(
     i8::from(unsafe { access_control_entry_filter_ref(self_) }.is_unknown())
 }
 
-/// `matches(AccessControlEntry other)`: whether the filter matches `other`.
+/// Returns 1 if this filter matches the given AccessControlEntry, else 0.
+///
+/// # Parameters
+///
+/// - `other` - The entry to match.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid access-control-entry-filter handle and `other` a
-/// valid access-control-entry handle.
+/// `self_` must be a valid access-control-entry-filter handle.
+/// `other` must be a valid access-control-entry handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches(
@@ -243,8 +264,8 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches(
     i8::from(unsafe { access_control_entry_filter_ref(self_) }.matches(unsafe { access_control_entry_ref(other) }))
 }
 
-/// `matchesAtMostOne()`: whether the filter can match at most one entry
-/// (no `ANY`, `UNKNOWN` or null field).
+/// Returns 1 if this filter could only match one ACE -- in other words, if
+/// there are no ANY or UNKNOWN fields -- else 0.
 ///
 /// # Safety
 ///
@@ -260,13 +281,13 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_matches_at_mo
     i8::from(unsafe { access_control_entry_filter_ref(self_) }.matches_at_most_one())
 }
 
-/// `findIndefiniteField()`: a description of the first field that keeps
-/// the filter from matching at most one entry, as an owned string freed
-/// with `kafka_string_destroy`, or null when there is none.
+/// Returns a string describing an ANY or UNKNOWN field, or `NULL` if there is
+/// no such field.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_find_indefinite_field(
@@ -280,11 +301,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_find_indefini
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntryFilter_to_string(

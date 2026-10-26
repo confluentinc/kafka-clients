@@ -29,7 +29,7 @@ pub struct kafka_common_TopicIdPartition_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_TopicIdPartition_t`] points at: the value plus a
+/// What a `kafka_common_TopicIdPartition_t` points at: the value plus a
 /// cached topic-partition handle, which also carries the NUL-terminated
 /// topic the string getter borrows out.
 struct TopicIdPartitionInner {
@@ -61,14 +61,18 @@ fn boxed(tip: TopicIdPartition) -> *mut kafka_common_TopicIdPartition_t {
     Box::into_raw(Box::new(TopicIdPartitionInner::new(tip))) as *mut kafka_common_TopicIdPartition_t
 }
 
-/// `new TopicIdPartition(Uuid topicId, TopicPartition topicPartition)`; both
-/// arguments are copied out of the caller's handles. Owned, freed with
-/// [`kafka_common_TopicIdPartition_destroy`].
+/// Create an instance with the provided parameters.
+///
+/// # Parameters
+///
+/// - `topic_id` - the topic id
+/// - `topic_partition` - the topic partition
 ///
 /// # Safety
 ///
 /// `topic_id` must be a valid uuid handle and `topic_partition` a valid
-/// topic-partition handle.
+/// topic-partition handle; both are copied. The returned handle is owned, freed with
+/// `kafka_common_TopicIdPartition_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
@@ -86,12 +90,19 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_new(
     ))
 }
 
-/// `new TopicIdPartition(Uuid topicId, int partition, String topic)`.
+/// Create an instance with the provided parameters.
+///
+/// # Parameters
+///
+/// - `topic_id` - the topic id
+/// - `partition` - the partition id
+/// - `topic` - the topic name, empty or `NULL` if unknown
 ///
 /// # Safety
 ///
-/// `topic_id` must be a valid uuid handle and `topic` a valid NUL-terminated
-/// string.
+/// `topic_id` must be a valid uuid handle and `topic` `NULL` or a valid NUL-terminated
+/// string; both are copied. The returned handle is owned, freed with
+/// `kafka_common_TopicIdPartition_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
@@ -111,11 +122,14 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_with_partition_topic(
     ))
 }
 
-/// `topicId()`: an owned uuid handle freed with `kafka_common_Uuid_destroy`.
+/// # Returns
+///
+/// Universally unique id representing this topic partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-id-partition handle.
+/// `self_` must be a valid topic-id-partition handle. The returned handle is owned, freed with
+/// `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
@@ -126,11 +140,14 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_id(
     box_uuid(unsafe { inner_ref(self_) }.tip.topic_id())
 }
 
-/// `topic()`: borrowed from the handle, valid until it is destroyed.
+/// # Returns
+///
+/// the topic name, or an empty string if it is unknown.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-id-partition handle.
+/// `self_` must be a valid topic-id-partition handle. The string is borrowed from the handle,
+/// valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
@@ -143,7 +160,9 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic(
     unsafe { inner_ref(self_) }.topic_partition.topic_ptr()
 }
 
-/// `partition()`.
+/// # Returns
+///
+/// the partition id.
 ///
 /// # Safety
 ///
@@ -156,11 +175,14 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_partition(self_: *const k
     unsafe { inner_ref(self_) }.tip.partition()
 }
 
-/// `topicPartition()`: borrowed from the handle, valid until it is destroyed.
+/// # Returns
+///
+/// Topic partition representing this instance.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-id-partition handle.
+/// `self_` must be a valid topic-id-partition handle. The returned handle is borrowed from it,
+/// valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
@@ -173,12 +195,12 @@ pub unsafe extern "C" fn kafka_common_TopicIdPartition_topic_partition(
     unsafe { inner_ref(self_) }.topic_partition.as_ptr()
 }
 
-/// `toString()`: `topicId:topic-partition`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns `topicId:topic-partition`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-id-partition handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicIdPartition_to_string(

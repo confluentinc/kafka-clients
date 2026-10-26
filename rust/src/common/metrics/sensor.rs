@@ -51,7 +51,7 @@ impl std::fmt::Display for RecordingLevel {
 }
 
 impl RecordingLevel {
-    /// The permanent and immutable id of this level.
+    /// Returns the permanent and immutable id of this level.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#id")]
     pub fn id(&self) -> i16 {
         match self {
@@ -61,7 +61,7 @@ impl RecordingLevel {
         }
     }
 
-    /// An English description of the level.
+    /// Returns an English description of the level.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#name")]
     pub fn name(&self) -> &'static str {
         match self {
@@ -71,8 +71,19 @@ impl RecordingLevel {
         }
     }
 
-    /// Lookup by id. Returns an error for an unknown id, mirroring Java's
-    /// `IllegalArgumentException`.
+    /// Lookup by id.
+    ///
+    /// # Arguments
+    ///
+    /// - `id` - the level's id
+    ///
+    /// # Returns
+    ///
+    /// The level with that id.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if `id` is not between `0` and `2`
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#forId")]
     pub fn for_id(id: i16) -> Result<RecordingLevel, Error> {
         match id {
@@ -85,8 +96,19 @@ impl RecordingLevel {
         }
     }
 
-    /// Case-insensitive lookup by name. Returns an error for an unknown name,
-    /// mirroring Java's `valueOf` `IllegalArgumentException`.
+    /// Case insensitive lookup by protocol name
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the level's name, in any case
+    ///
+    /// # Returns
+    ///
+    /// The level with that name.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if no level has that name
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#forName")]
     pub fn for_name(name: &str) -> Result<RecordingLevel, Error> {
         match name.to_uppercase().as_str() {
@@ -99,7 +121,17 @@ impl RecordingLevel {
         }
     }
 
-    /// Whether a sensor at this level should record given the config's level id.
+    /// Returns whether a sensor at this level should record given the config's
+    /// level id.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_id` - the id of the config's recording level
+    ///
+    /// # Panics
+    ///
+    /// If `config_id` is not the id of a level, with the message of Java's
+    /// `IllegalStateException`.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor$RecordingLevel#shouldRecord")]
     pub fn should_record(&self, config_id: i16) -> bool {
         if config_id == RecordingLevel::Info.id() {
@@ -187,7 +219,7 @@ struct SensorInner {
 }
 
 impl std::fmt::Debug for Sensor {
-    /// The sensor's name, its identifier in the registry.
+    // The sensor's name, its identifier in the registry.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sensor").field("name", &self.name).finish_non_exhaustive()
     }
@@ -242,7 +274,8 @@ impl Sensor {
         Ok(())
     }
 
-    /// The name this sensor is registered with.
+    /// Returns the name this sensor is registered with. This name will be unique
+    /// among all registered sensors.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#name")]
     pub fn name(&self) -> &str {
         &self.name
@@ -254,24 +287,19 @@ impl Sensor {
         &self.parents
     }
 
-    /// Whether the sensor's record level indicates that the metric will be
-    /// recorded.
+    /// Returns true if the sensor's record level indicates that the metric will
+    /// be recorded, false otherwise.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#shouldRecord")]
     pub fn should_record(&self) -> bool {
         self.recording_level.should_record(self.config.record_level().id())
     }
 
-    // Java's `record` overloads (`Sensor.java:183,195,209`, plus the
-    // `checkQuotas` form deferred below) have an EMPTY parameter-name
-    // intersection, and the no-arg `record()` (`:183`) matches it — so that one
-    // keeps the plain name and the others carry their Rust parameters
-    // (CLAUDE.md §2). Note this is the reverse of the pre-rule shape, where the
-    // one-argument form held the plain name and the no-arg form was called
-    // `record_occurrence`.
+    // Java's `record` overloads (plus the `checkQuotas` form deferred below)
+    // have an EMPTY parameter-name intersection, and the no-arg `record()`
+    // matches it, so that one keeps the plain name and the others carry their
+    // Rust parameters.
 
-    /// Record an occurrence; short-hand for `record_with_value(1.0)`.
-    ///
-    /// Mirrors Java's `record()` (`Sensor.java:183`).
+    /// Record an occurrence, this is just short-hand for `record_with_value(1.0)`.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
     pub fn record(&self) {
         if self.should_record() {
@@ -279,9 +307,20 @@ impl Sensor {
         }
     }
 
-    /// Record a value with this sensor at the current time.
+    /// Record a value with this sensor
     ///
-    /// Mirrors Java's `record(double value)` (`Sensor.java:195`).
+    /// # Arguments
+    ///
+    /// - `value` - The value to record
+    ///
+    /// # Panics
+    ///
+    /// - `QuotaViolationError` never: see the notes.
+    ///
+    /// # Translation notes
+    ///
+    /// WARNING: no quota is checked, so a violation is never reported; call
+    /// `check_quotas` after recording.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
     pub fn record_with_value(&self, value: f64) {
         if self.should_record() {
@@ -289,9 +328,22 @@ impl Sensor {
         }
     }
 
-    /// Record a value at a known time.
+    /// Record a value at a known time. This method is slightly faster than
+    /// `record_with_value` since it will reuse the time stamp.
     ///
-    /// Mirrors Java's `record(double value, long timeMs)` (`Sensor.java:209`).
+    /// # Arguments
+    ///
+    /// - `value` - The value we are recording
+    /// - `time_ms` - The current POSIX time in milliseconds
+    ///
+    /// # Panics
+    ///
+    /// - `QuotaViolationError` never: see the notes.
+    ///
+    /// # Translation notes
+    ///
+    /// WARNING: no quota is checked, so a violation is never reported; call
+    /// `check_quotas` after recording.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
     pub fn record_with_value_time_ms(&self, value: f64, time_ms: i64) {
         if self.should_record() {
@@ -309,8 +361,7 @@ impl Sensor {
                 stat_and_config.record(value, time_ms);
             }
         }
-        // Java runs `if (checkQuotas) checkQuotas(timeMs);` here
-        // (`Sensor.java:239-240`) and lets the `QuotaViolationException`
+        // Java runs `if (checkQuotas) checkQuotas(timeMs);` here and lets the `QuotaViolationException`
         // propagate out of `record`. The check itself IS translated — see
         // [`check_quotas`](Self::check_quotas) / [`check_quotas_with_time_ms`] — but it
         // cannot be called from here yet, and the blocker is the signature, not
@@ -332,33 +383,33 @@ impl Sensor {
         }
     }
 
-    /// Check whether any metric with a configured quota has been violated, at
-    /// the current time.
+    /// Check if we have violated our quota for any metric that has a configured
+    /// quota
     ///
-    /// Mirrors Java's `checkQuotas()` (`Sensor.java:247-249`). The group's
-    /// parameter-name intersection is empty and this no-arg form matches it, so
-    /// it keeps the plain name and its sibling is suffixed (CLAUDE.md §2).
+    /// # Errors
+    ///
+    /// - `Error::is_quota_violation_error` if a metric's value is outside its quota
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkQuotas")]
     pub fn check_quotas(&self) -> Result<(), Error> {
         self.check_quotas_with_time_ms(self.time.milliseconds())
     }
 
-    /// Check whether any metric with a configured quota has been violated, as of
-    /// `time_ms`.
+    /// Check if we have violated our quota for any metric that has a configured
+    /// quota, as of `time_ms`.
     ///
-    /// Mirrors Java's `checkQuotas(long timeMs)` (`Sensor.java:251-268`). Two
-    /// differences, both forced by what exists on the Rust side:
+    /// # Arguments
     ///
-    ///  - Java guards on `config != null`; a Rust [`MetricConfig`] is always
-    ///    present (each metric holds an `Arc<MetricConfig>`), so only the
-    ///    `quota != null` guard survives as `Option<Quota>`.
-    ///  - Java special-cases `metric.measurable() instanceof TokenBucket`,
-    ///    treating any negative value as a violation regardless of the bound's
-    ///    direction. `TokenBucket` is not translated (there is no
-    ///    `common::metrics::stats::TokenBucket`), so no metric can take that
-    ///    branch and only `Quota::acceptable` is consulted. The branch must be
-    ///    restored together with `TokenBucket`.
+    /// - `time_ms` - the POSIX time in milliseconds to measure the metrics at
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_quota_violation_error` if a metric's value is outside its quota
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#checkQuotas")]
+    // Java guards on `config != null`; a Rust `MetricConfig` is always present,
+    // so only the `quota != null` guard survives as `Option<Quota>`. Java also
+    // special-cases `metric.measurable() instanceof TokenBucket`, treating any
+    // negative value as a violation; `TokenBucket` is not translated, so no
+    // metric can take that branch. It must be restored together with it.
     pub fn check_quotas_with_time_ms(&self, time_ms: i64) -> Result<(), Error> {
         // The metrics are cloned out of the guard rather than measured under it:
         // `measurable_value` calls into user-supplied `Measurable` code, and
@@ -385,33 +436,51 @@ impl Sensor {
         Ok(())
     }
 
-    // Java's four `add` overloads (`Sensor.java:279,290,316,328`) all name their
-    // statistic parameter `stat`, so the parameter-name intersection is `{stat}`
-    // — and the overload whose parameters are exactly that is the COMPOUND form
-    // `add(CompoundStat stat)` (`:279`). So the compound form keeps the plain
-    // name `add` and the metric-name forms are suffixed with their Rust
-    // parameters beyond the intersection (CLAUDE.md §2). The two families differ
+    // Java's four `add` overloads all name their statistic parameter `stat`, so
+    // the parameter-name intersection is `{stat}`, and the overload whose
+    // parameters are exactly that is the COMPOUND form `add(CompoundStat stat)`.
+    // So the compound form keeps the plain name `add` and the metric-name forms
+    // are suffixed with their Rust parameters beyond the intersection. The two families differ
     // in type as well as arity, but the derived names are already distinct, so
     // §2's type tie-break does not fire.
 
-    /// Register a metric with this sensor.
+    /// Register a metric with this sensor
     ///
-    /// Mirrors Java's `add(MetricName metricName, MeasurableStat stat)`
-    /// (`Sensor.java:316`). Suffixed per the note above.
+    /// # Arguments
     ///
-    /// Returns `Ok(true)` if added, `Ok(false)` if the sensor is expired,
-    /// `Err` if the metric name already exists in the registry under a
-    /// different sensor (Java's `IllegalArgumentException`).
+    /// - `metric_name` - The name of the metric
+    /// - `stat` - The statistic to keep
+    ///
+    /// # Returns
+    ///
+    /// true if metric is added to sensor, false if sensor is expired
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric of the same name is
+    ///   already registered in the registry by another sensor
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
     pub fn add_with_metric_name(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
         self.add_with_metric_name_config(metric_name, stat, None)
     }
 
-    /// Register a metric with this sensor with an optional per-metric config.
+    /// Register a metric with this sensor
     ///
-    /// Mirrors Java's
-    /// `add(MetricName metricName, MeasurableStat stat, MetricConfig config)`
-    /// (`Sensor.java:328`).
+    /// # Arguments
+    ///
+    /// - `metric_name` - The name of the metric
+    /// - `stat` - The statistic to keep
+    /// - `config` - A special configuration for this metric. If None use the sensor default
+    ///   configuration.
+    ///
+    /// # Returns
+    ///
+    /// true if metric is added to sensor, false if sensor is expired
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric of the same name is
+    ///   already registered in the registry by another sensor
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
     pub fn add_with_metric_name_config(
         &self,
@@ -457,25 +526,46 @@ impl Sensor {
         Ok(true)
     }
 
-    /// Register a compound statistic with this sensor with no config override.
+    /// Register a compound statistic with this sensor with no config override
     ///
-    /// Mirrors Java's `add(CompoundStat stat)` (`Sensor.java:279`), whose
-    /// parameter list is exactly the `add` group's intersection `{stat}` — so
-    /// this form keeps the plain name (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `stat` - The stat to register
+    ///
+    /// # Returns
+    ///
+    /// true if stat is added to sensor, false if sensor is expired
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric of the same name is
+    ///   already registered in the registry by another sensor
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
     pub fn add(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
         self.add_with_config(stat, None)
     }
 
     /// Register a compound statistic with this sensor which yields multiple
-    /// measurable quantities (like a histogram). Mirrors Java's
-    /// `add(CompoundStat stat, MetricConfig config)` (`Sensor.java:290`).
+    /// measurable quantities (like a histogram)
     ///
-    /// The compound stat is recorded once per `record`; each `NamedMeasurable`
-    /// child gets its own `KafkaMetric` reading the (constant) `statConfig`. The
-    /// child measurables share state with the compound stat, so a record is
-    /// reflected in every child's measured value.
+    /// # Arguments
+    ///
+    /// - `stat` - The stat to register
+    /// - `config` - The configuration for this stat. If None then the stat will use the default
+    ///   configuration for this sensor.
+    ///
+    /// # Returns
+    ///
+    /// true if stat is added to sensor, false if sensor is expired
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if a metric of the same name is
+    ///   already registered in the registry by another sensor
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#add")]
+    // The compound stat is recorded once per `record`; each `NamedMeasurable`
+    // child gets its own `KafkaMetric` reading the (constant) `statConfig`, and
+    // shares state with the compound stat.
     pub fn add_with_config(
         &self,
         stat: Box<dyn CompoundStat>,
@@ -520,12 +610,16 @@ impl Sensor {
     }
 
     /// Return if metrics were registered with this sensor.
+    ///
+    /// # Returns
+    ///
+    /// true if metrics were registered, false otherwise
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#hasMetrics")]
     pub fn has_metrics(&self) -> bool {
         !self.inner.lock().expect("sensor mutex poisoned").metrics.is_empty()
     }
 
-    /// Return true if the sensor is eligible for removal due to inactivity.
+    /// Returns true if the sensor is eligible for removal due to inactivity.
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#hasExpired")]
     pub fn has_expired(&self) -> bool {
         (self.time.milliseconds() - self.last_record_time.load(Ordering::SeqCst))

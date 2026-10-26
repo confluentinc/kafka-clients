@@ -108,6 +108,11 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
 
     /// See [`Producer::send_offsets_to_transaction`].
     ///
+    /// # Arguments
+    ///
+    /// - `offsets` - as [`Producer::send_offsets_to_transaction`].
+    /// - `group_metadata` - as [`Producer::send_offsets_to_transaction`].
+    ///
     /// # Errors
     ///
     /// As [`Producer::send_offsets_to_transaction`].
@@ -142,6 +147,14 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
 
     /// See [`Producer::send`].
     ///
+    /// # Arguments
+    ///
+    /// - `record` - as [`Producer::send`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Producer::send`].
+    ///
     /// # Errors
     ///
     /// As [`Producer::send`].
@@ -151,6 +164,15 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
         V: 'a;
 
     /// See [`Producer::send_with_callback`].
+    ///
+    /// # Arguments
+    ///
+    /// - `record` - as [`Producer::send_with_callback`].
+    /// - `callback` - as [`Producer::send_with_callback`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Producer::send_with_callback`].
     ///
     /// # Errors
     ///
@@ -176,6 +198,14 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
 
     /// See [`Producer::partitions_for`].
     ///
+    /// # Arguments
+    ///
+    /// - `topic` - as [`Producer::partitions_for`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Producer::partitions_for`].
+    ///
     /// # Errors
     ///
     /// As [`Producer::partitions_for`].
@@ -185,6 +215,10 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
         V: 'a;
 
     /// See [`Producer::metrics`].
+    ///
+    /// # Returns
+    ///
+    /// As [`Producer::metrics`].
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     /// See [`Producer::close`].
@@ -198,6 +232,10 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
         V: 'a;
 
     /// See [`Producer::close_with_timeout`].
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout` - as [`Producer::close_with_timeout`].
     ///
     /// # Errors
     ///

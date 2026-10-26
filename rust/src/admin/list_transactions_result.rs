@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::list_transactions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListTransactionsResult`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -29,11 +27,9 @@ use crate::common::{KafkaFuture, KafkaFutureOps};
 type BrokerFutures = HashMap<i32, KafkaFuture<Vec<TransactionListing>>>;
 
 /// The result of `Admin::list_transactions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsResult`. The
-/// wrapped future completes when the broker list is discovered, yielding a map
-/// from broker id to that broker's per-request future (mirroring Java's
-/// `KafkaFuture<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>>`).
+// The wrapped future completes when the broker list is discovered, yielding a map from broker id
+// to that broker's per-request future (mirroring Java's `KafkaFuture<Map<Integer,
+// KafkaFutureImpl<Collection<TransactionListing>>>>`).
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult")]
 pub struct ListTransactionsResult {
@@ -50,7 +46,10 @@ impl ListTransactionsResult {
     /// Get all transaction listings. If any of the underlying requests fail,
     /// the returned future also fails with the first encountered error.
     ///
-    /// Mirrors `ListTransactionsResult.all`.
+    /// # Returns
+    ///
+    /// A future containing the collection of transaction listings. The future completes when all
+    /// transaction listings are available and fails after any non-retriable error.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<TransactionListing>> {
         self.all_by_broker_id()
@@ -62,7 +61,12 @@ impl ListTransactionsResult {
     /// Get a future returning the per-broker listing futures. Useful for a
     /// partial listing or more granular error details.
     ///
-    /// Mirrors `ListTransactionsResult.byBrokerId`.
+    /// # Returns
+    ///
+    /// A future containing a map of futures by broker which complete individually when their
+    /// respective transaction listings are available. The top-level future returned from this
+    /// method may fail if the admin client is unable to lookup the available brokers in the
+    /// cluster.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#byBrokerId")]
     pub fn by_broker_id(&self) -> KafkaFuture<BrokerFutures> {
         self.future.clone()
@@ -71,7 +75,11 @@ impl ListTransactionsResult {
     /// Get all transaction listings keyed by the broker id currently managing
     /// them. If any underlying request fails, the returned future also fails.
     ///
-    /// Mirrors `ListTransactionsResult.allByBrokerId`.
+    /// # Returns
+    ///
+    /// A future containing a map from the broker ID to the transactions hosted by that broker
+    /// respectively. This future completes when all transaction listings are available and fails
+    /// after any non-retriable error.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#allByBrokerId")]
     pub fn all_by_broker_id(&self) -> KafkaFuture<HashMap<i32, Vec<TransactionListing>>> {
         KafkaFuture::new(std::sync::Arc::new(AllByBrokerIdFuture { source: self.future.clone() }))

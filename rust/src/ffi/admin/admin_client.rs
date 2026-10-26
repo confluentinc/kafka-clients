@@ -24,9 +24,21 @@ use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
 
-/// `AdminClient.create(AdminClientConfig)`: builds a `KafkaAdminClient` and
-/// delivers it as an owned `Admin_t`, freed with `kafka_admin_Admin_destroy`.
-/// The configuration stays the caller's and can build further clients.
+/// Create a new Admin with the given configuration.
+///
+/// # Parameters
+///
+/// - `config` - The configuration.
+///
+/// # Returns
+///
+/// The new KafkaAdminClient.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_kafka_error` (`Failed to create new KafkaAdminClient`, the cause as
+///   its source) if the bootstrap addresses cannot be resolved or the channel builder cannot be
+///   created.
 ///
 /// # Errors
 ///
@@ -39,7 +51,9 @@ use crate::ffi::ffi_guard;
 ///
 /// # Safety
 ///
-/// `config` must be a live handle and `out_err` a valid slot pointing at null.
+/// `config` must be a live handle and `out_err` a valid slot pointing at `NULL`. The configuration
+/// stays the caller's and can build further clients. The client is owned by the caller, freed with
+/// `kafka_admin_Admin_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_create(

@@ -13,18 +13,19 @@
 // limitations under the License.
 
 //! The entry point that creates an [`Admin`] client.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AdminClient`.
 
 use crate::admin::{Admin, AdminClientConfig, KafkaAdminClient};
 use crate::common::Error;
 
 /// The base class for in-built admin clients.
 ///
-/// Java's `AdminClient` is an abstract class implementing `Admin` whose only
-/// members are its static `create` factories. Rust has no abstract classes, so
-/// it is an uninhabited type: a namespace for [`AdminClient::create`], never a
-/// value. The client it creates is an `Admin` trait object.
+/// Client code should use the newer `Admin` interface in preference to this
+/// class.
+///
+/// # Translation notes
+///
+/// An uninhabited type: a namespace for [`AdminClient::create`], never a
+/// value.
 #[derive(Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.AdminClient")]
@@ -33,28 +34,31 @@ pub enum AdminClient {}
 impl AdminClient {
     /// Create a new Admin with the given configuration.
     ///
-    /// Java's two overloads, `create(Properties)` and
-    /// `create(Map<String, Object>)`, differ only in the container the
-    /// configuration comes in; both parse it into an `AdminClientConfig`, which
-    /// Rust takes directly, as `KafkaProducer::new` takes a `ProducerConfig`.
+    /// # Arguments
     ///
-    /// ```no_run
-    /// use std::collections::HashMap;
+    /// - `config` - The configuration.
     ///
-    /// use confluent_kafka::admin::{AdminClient, AdminClientConfig};
+    /// # Returns
     ///
-    /// let props = HashMap::from([("bootstrap.servers".to_string(), "localhost:9092".to_string())]);
-    /// let config = AdminClientConfig::new(&props).expect("valid config");
-    /// let admin = AdminClient::create(config).expect("admin client");
-    /// ```
+    /// The new KafkaAdminClient.
     ///
     /// # Errors
     ///
-    /// Returns a Kafka error, `Failed to create new KafkaAdminClient`, whose
-    /// source is the failure: the bootstrap addresses cannot be resolved, the
-    /// channel builder cannot be created, or `default.api.timeout.ms` is set
-    /// explicitly below `request.timeout.ms` (an [`Error::Config`], as Java's
-    /// `KafkaAdminClient.configureDefaultApiTimeoutMs` throws).
+    /// - `Error::is_kafka_error` (`Failed to create new KafkaAdminClient`, the
+    ///   cause as its source) if the bootstrap addresses cannot be resolved, the
+    ///   channel builder cannot be created, or `default.api.timeout.ms` is set
+    ///   explicitly below `request.timeout.ms` (the source answering
+    ///   `Error::is_config_error`, as Java's
+    ///   `KafkaAdminClient.configureDefaultApiTimeoutMs` throws).
+    ///
+    /// # Panics
+    ///
+    /// If called outside a Tokio runtime, which runs the client's background
+    /// task.
+    ///
+    /// # Translation notes
+    ///
+    /// Takes the parsed `AdminClientConfig`, not Java's map.
     #[doc(alias = "org.apache.kafka.clients.admin.AdminClient#create")]
     pub fn create(config: AdminClientConfig) -> Result<Box<dyn Admin>, Error> {
         Ok(Box::new(KafkaAdminClient::new(config)?))

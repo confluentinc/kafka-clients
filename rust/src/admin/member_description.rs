@@ -13,19 +13,14 @@
 // limitations under the License.
 
 //! A detailed description of a single group member.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.MemberDescription`.
 
 use crate::admin::MemberAssignment;
 
 /// A detailed description of a single group member in the cluster.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.MemberDescription`.
-///
-/// Note: Java's four `@Deprecated(forRemoval = true)` convenience constructors
-/// (which only supply default values already expressible through [`new`](Self::new)) are
-/// omitted; the full-field [`new`](Self::new) constructor is the sole entry point and no
-/// in-scope caller or test uses the deprecated overloads.
+// Note: Java's four `@Deprecated(forRemoval = true)` convenience constructors
+// (which only supply default values already expressible through [`new`](Self::new)) are
+// omitted; the full-field [`new`](Self::new) constructor is the sole entry point and no
+// in-scope caller or test uses the deprecated overloads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription")]
 pub struct MemberDescription {
@@ -43,11 +38,17 @@ pub struct MemberDescription {
 impl MemberDescription {
     /// Creates a member description with all fields.
     ///
-    /// Mirrors the primary
-    /// `MemberDescription(String, Optional, Optional, String, String,
-    /// MemberAssignment, Optional, Optional, Optional)` constructor. `null`
-    /// member id / client id / host are normalized to empty strings, matching
-    /// Java.
+    /// # Arguments
+    ///
+    /// - `member_id` - the consumer id of the group member.
+    /// - `group_instance_id` - the instance id of the group member, or `None` if not set.
+    /// - `rack_id` - the rack id of the group member, or `None` if not set.
+    /// - `client_id` - the client id of the group member.
+    /// - `host` - the host where the group member is running.
+    /// - `assignment` - the assignment of the group member.
+    /// - `target_assignment` - the target assignment of the member (consumer groups only).
+    /// - `member_epoch` - the epoch of the member (consumer groups only).
+    /// - `upgraded` - whether the member uses the consumer protocol (consumer groups only).
     #[expect(clippy::too_many_arguments)]
     #[doc(
         alias = "org.apache.kafka.clients.admin.MemberDescription#MemberDescription(String,Optional,Optional,String,String,MemberAssignment,Optional,Optional,Optional)"
@@ -76,57 +77,65 @@ impl MemberDescription {
         }
     }
 
-    /// The consumer id of the group member. Mirrors `consumerId()`.
+    /// Returns the consumer id of the group member.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#consumerId")]
     pub fn consumer_id(&self) -> &str {
         &self.member_id
     }
 
-    /// The instance id of the group member. Mirrors `groupInstanceId()`.
+    /// Returns the instance id of the group member.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#groupInstanceId")]
     pub fn group_instance_id(&self) -> Option<&str> {
         self.group_instance_id.as_deref()
     }
 
-    /// The rack id of the group member. Mirrors `rackId()`.
+    /// Returns the rack id of the group member.
+    ///
+    /// It is only available for consumer groups using the new consumer group protocol
+    /// (`group.protocol=consumer`).
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#rackId")]
     pub fn rack_id(&self) -> Option<&str> {
         self.rack_id.as_deref()
     }
 
-    /// The client id of the group member. Mirrors `clientId()`.
+    /// Returns the client id of the group member.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#clientId")]
     pub fn client_id(&self) -> &str {
         &self.client_id
     }
 
-    /// The host where the group member is running. Mirrors `host()`.
+    /// Returns the host where the group member is running.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#host")]
     pub fn host(&self) -> &str {
         &self.host
     }
 
-    /// The assignment of the group member. Mirrors `assignment()`.
+    /// Returns the assignment of the group member. Provided for both classic group and consumer
+    /// group.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#assignment")]
     pub fn assignment(&self) -> &MemberAssignment {
         &self.assignment
     }
 
-    /// The target assignment of the member (consumer groups only). Mirrors
-    /// `targetAssignment()`.
+    /// Returns the target assignment of the member (consumer groups only).
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#targetAssignment")]
     pub fn target_assignment(&self) -> Option<&MemberAssignment> {
         self.target_assignment.as_ref()
     }
 
-    /// The epoch of the group member. Mirrors `memberEpoch()`.
+    /// Returns the epoch of the group member. The optional is set to an integer if the member is
+    /// in a [`GroupType::Consumer`](crate::common::GroupType::Consumer) group, and to `None` if
+    /// it is in a [`GroupType::Classic`](crate::common::GroupType::Classic) group.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#memberEpoch")]
     pub fn member_epoch(&self) -> Option<i32> {
         self.member_epoch
     }
 
-    /// Whether a member within a consumer group uses the consumer protocol.
-    /// Mirrors `upgraded()`.
+    /// Returns the flag indicating whether a member within a
+    /// [`GroupType::Consumer`](crate::common::GroupType::Consumer) group uses the
+    /// [`GroupType::Consumer`](crate::common::GroupType::Consumer) protocol. The optional is set
+    /// to true if it does, to false if it does not, and to `None` if it is unknown or if the
+    /// group is a [`GroupType::Classic`](crate::common::GroupType::Classic) group.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberDescription#upgraded")]
     pub fn upgraded(&self) -> Option<bool> {
         self.upgraded

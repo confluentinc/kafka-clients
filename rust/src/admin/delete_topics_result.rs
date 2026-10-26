@@ -13,18 +13,14 @@
 // limitations under the License.
 
 //! The result of `Admin::delete_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`.
 
 use std::collections::HashMap;
 
 use crate::common::{KafkaFuture, Uuid};
 
 /// The result of the `Admin::delete_topics` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`.
-/// Exactly one of the two maps is present, the one matching the kind of
-/// `TopicCollection` the request used.
+// Exactly one of the two maps is present, the one matching the kind of
+// `TopicCollection` the request used.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult")]
 pub struct DeleteTopicsResult {
@@ -70,9 +66,10 @@ impl DeleteTopicsResult {
     /// Use when `Admin::delete_topics_with_options` used a `TopicCollection`
     /// of ids.
     ///
-    /// Returns a map from topic IDs to futures which can be used to check the
-    /// status of individual deletions if the delete topics request used topic
-    /// IDs, otherwise `None`.
+    /// # Returns
+    ///
+    /// a map from topic IDs to futures which can be used to check the status of individual
+    /// deletions if the deleteTopics request used topic IDs. Otherwise return `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#topicIdValues")]
     pub fn topic_id_values(&self) -> Option<&HashMap<Uuid, KafkaFuture<()>>> {
         self.topic_id_futures.as_ref()
@@ -81,15 +78,16 @@ impl DeleteTopicsResult {
     /// Use when `Admin::delete_topics_with_options` used a `TopicCollection`
     /// of names.
     ///
-    /// Returns a map from topic names to futures which can be used to check
-    /// the status of individual deletions if the delete topics request used
-    /// topic names, otherwise `None`.
+    /// # Returns
+    ///
+    /// a map from topic names to futures which can be used to check the status of individual
+    /// deletions if the deleteTopics request used topic names. Otherwise return `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#topicNameValues")]
     pub fn topic_name_values(&self) -> Option<&HashMap<String, KafkaFuture<()>>> {
         self.name_futures.as_ref()
     }
 
-    /// A future which succeeds only if all the topic deletions succeed.
+    /// Returns a future which succeeds only if all the topic deletions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         match &self.topic_id_futures {

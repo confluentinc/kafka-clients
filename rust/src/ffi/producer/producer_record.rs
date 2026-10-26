@@ -133,12 +133,19 @@ unsafe fn deliver(
 // ProducerRecord
 // ---------------------------------------------------------------------------
 
-/// `new ProducerRecord(String topic, V value)`: owned, freed with
-/// [`kafka_producer_ProducerRecord_destroy`].
+/// `new ProducerRecord(String topic, V value)`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
+/// - `value` - The record contents
 ///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with
+/// [`kafka_producer_ProducerRecord_destroy`]; `value` stays the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
@@ -152,9 +159,18 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_new(
 
 /// `new ProducerRecord(String topic, K key, V value)`.
 ///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
+/// - `key` - The key that will be included in the record
+/// - `value` - The record contents
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_ProducerRecord_destroy`.
+/// `key` and `value` stay the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
@@ -175,10 +191,28 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_key(
 /// `partition < 0` is Java's `null`. Fails with the translation of Java's
 /// `IllegalArgumentException` the constructor throws.
 ///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
+/// - `partition` - The partition to which the record should be sent
+/// - `key` - The key that will be included in the record
+/// - `value` - The record contents
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if Java's constructor rejects
+///   the parameters; a negative partition reads as Java's `null`, so this export
+///   passes none it rejects
+/// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
+///   FFI boundary
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string and `out_err` a valid slot pointing
 /// at null.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_ProducerRecord_destroy`.
+/// `key` and `value` stay the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
@@ -206,10 +240,29 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key(
 /// Iterable<Header> headers)`: the headers are copied, `partition < 0` is
 /// Java's `null`.
 ///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
+/// - `partition` - The partition to which the record should be sent
+/// - `key` - The key that will be included in the record
+/// - `value` - The record contents
+/// - `headers` - the headers that will be included in the record
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if Java's constructor rejects
+///   the parameters; a negative partition reads as Java's `null`, so this export
+///   passes none it rejects
+/// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
+///   FFI boundary
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string, `headers` a live handle and
 /// `out_err` a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_ProducerRecord_destroy`.
+/// `key` and `value` stay the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_headers(
@@ -242,10 +295,30 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_key_header
 /// key, V value)`: `partition < 0` and `timestamp < 0` are Java's `null`
 /// (Java rejects a negative timestamp, so no value is lost).
 ///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
+/// - `partition` - The partition to which the record should be sent
+/// - `timestamp` - The timestamp of the record, in milliseconds since epoch. If negative, the
+///   producer will assign the timestamp using System.currentTimeMillis().
+/// - `key` - The key that will be included in the record
+/// - `value` - The record contents
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if Java's constructor rejects
+///   the parameters; a negative partition or timestamp reads as Java's `null`, so this export
+///   passes none it rejects
+/// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the
+///   FFI boundary
+///
 /// # Safety
 ///
 /// `topic` must be a NUL-terminated string and `out_err` a valid slot pointing
 /// at null.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_ProducerRecord_destroy`.
+/// `key` and `value` stay the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_key(
@@ -271,13 +344,26 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_partition_timestamp_
     unsafe { deliver(result, out_err) }
 }
 
-/// `ProducerRecord::with_options`: the six-parameter constructor through a
-/// built [`kafka_producer_ProducerRecordOptions_t`], which stays the
-/// caller's.
+/// Creates a record with a specified timestamp to be sent to a specified topic and partition
+///
+/// # Parameters
+///
+/// - `options` - the topic, partition, timestamp, key, value and headers
+///
+/// # Returns
+///
+/// The record.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if Java's constructor rejects
+///   the parameters
 ///
 /// # Safety
 ///
-/// `options` must be a live handle and `out_err` a valid slot pointing at null.
+/// `options` must be a live handle, which stays the caller's, and `out_err` a valid
+/// slot pointing at null. The record is owned by the caller, freed with
+/// [`kafka_producer_ProducerRecord_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_options(
@@ -297,11 +383,14 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_with_options(
     }
 }
 
-/// `ProducerRecord.topic()`: borrowed, valid until the handle is destroyed.
+/// # Returns
+///
+/// The topic this record is being sent to
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is borrowed, valid until the handle
+/// is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_topic(
@@ -313,12 +402,14 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_topic(
     unsafe { inner(self_) }.topic_c.as_ptr()
 }
 
-/// `ProducerRecord.headers()`: a borrowed view valid until the handle is
-/// destroyed. It is handed out `const`: only read through it.
+/// # Returns
+///
+/// The headers
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the handle is
+/// destroyed, and handed out `const`: only read through it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_headers(
@@ -335,11 +426,13 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_headers(
         as *const kafka_common_header_internals_RecordHeaders_t
 }
 
-/// `ProducerRecord.key()`: the application's `void *`, `NULL` for `null`.
+/// # Returns
+///
+/// The key (or `NULL` if no key is specified)
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The key is the application's `void *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_key(
@@ -350,11 +443,14 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_key(
     generic_ptr(unsafe { producer_record_ref(self_) }.key())
 }
 
-/// `ProducerRecord.value()`: the application's `void *`, `NULL` for `null`.
+/// # Returns
+///
+/// The value
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The value is the application's `void *`, `NULL`
+/// for `null`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
@@ -365,13 +461,14 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_value(
     generic_ptr(unsafe { producer_record_ref(self_) }.value())
 }
 
-/// `ProducerRecord.timestamp()`: `-1` for `null`.
+/// # Returns
 ///
-/// A caught Rust panic returns -2, which is no record timestamp: Java's `ProducerRecord` rejects a negative one.
+/// The timestamp, which is in milliseconds since epoch, or -1 if none.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
+/// record timestamp: Java's `ProducerRecord` rejects a negative one.
 #[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const kafka_producer_ProducerRecord_t) -> i64 {
@@ -380,13 +477,14 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_timestamp(self_: *const k
     unsafe { producer_record_ref(self_) }.timestamp().unwrap_or(-1)
 }
 
-/// `ProducerRecord.partition()`: `-1` for `null`.
+/// # Returns
 ///
-/// A caught Rust panic returns -2, which is no partition: Java's `ProducerRecord` rejects a negative one.
+/// The partition to which the record will be sent (or -1 if no partition was specified)
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. A caught Rust panic returns -2, which is no
+/// partition: Java's `ProducerRecord` rejects a negative one.
 #[ffi_guard(fallback = -2)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const kafka_producer_ProducerRecord_t) -> i32 {
@@ -395,12 +493,16 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecord_partition(self_: *const k
     unsafe { producer_record_ref(self_) }.partition().unwrap_or(-1)
 }
 
-/// `ProducerRecord.toString()`: owned, freed with `kafka_string_destroy`.
-/// Key and value print as the addresses they are.
+/// `ProducerRecord.toString()`. Key and value print as the addresses they are.
+///
+/// # Returns
+///
+/// The record as a string.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecord_to_string(
@@ -488,7 +590,15 @@ unsafe fn with_builder(
     }
 }
 
-/// `ProducerRecordOptionsBuilder::new()`: owned, freed with
+/// `ProducerRecordOptionsBuilder::new()`.
+///
+/// # Returns
+///
+/// A new builder.
+///
+/// # Safety
+///
+/// The builder is owned by the caller, freed with
 /// [`kafka_producer_ProducerRecordOptionsBuilder_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -498,6 +608,10 @@ pub extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_new() -> *mut kafk
 }
 
 /// `set_topic`: mandatory.
+///
+/// # Parameters
+///
+/// - `topic` - The topic the record will be appended to
 ///
 /// # Safety
 ///
@@ -517,7 +631,12 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_topic(
     unsafe { with_builder(self_, |b| b.set_topic(topic)) };
 }
 
-/// `set_partition`: `partition < 0` is Java's `null`.
+/// `set_partition`.
+///
+/// # Parameters
+///
+/// - `partition` - The partition to which the record should be sent; negative is
+///   Java's `null`
 ///
 /// # Safety
 ///
@@ -533,7 +652,12 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_partiti
     unsafe { with_builder(self_, |b| b.set_partition(optional_partition(partition))) };
 }
 
-/// `set_timestamp`: `timestamp < 0` is Java's `null`.
+/// `set_timestamp`.
+///
+/// # Parameters
+///
+/// - `timestamp` - The timestamp of the record, in milliseconds since epoch;
+///   negative is Java's `null`, the producer then assigning the current time
 ///
 /// # Safety
 ///
@@ -549,11 +673,15 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_timesta
     unsafe { with_builder(self_, |b| b.set_timestamp(optional_timestamp(timestamp))) };
 }
 
-/// `set_key`: the application's `void *`, `NULL` for `null`.
+/// `set_key`.
+///
+/// # Parameters
+///
+/// - `key` - The key that will be included in the record, `NULL` for `null`
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle that no other call uses at the same time.
+/// `self_` must be a live handle that no other call uses at the same time. The key is the application's `void *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_key(
@@ -565,11 +693,15 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_key(
     unsafe { with_builder(self_, |b| b.set_key(generic(key))) };
 }
 
-/// `set_value`: mandatory (`NULL` is the `null` value, still "set").
+/// `set_value`: mandatory.
+///
+/// # Parameters
+///
+/// - `value` - The record contents; `NULL` is the `null` value, still set
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle that no other call uses at the same time.
+/// `self_` must be a live handle that no other call uses at the same time. The value is the application's `void *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_value(
@@ -589,7 +721,12 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_value(
     };
 }
 
-/// `set_headers`: copied; `NULL` leaves the record with empty headers.
+/// `set_headers`.
+///
+/// # Parameters
+///
+/// - `headers` - the headers that will be included in the record, copied; `NULL`
+///   leaves the record with empty headers
 ///
 /// # Safety
 ///
@@ -610,15 +747,23 @@ pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_set_headers
     unsafe { with_builder(self_, |b| b.set_headers(headers)) };
 }
 
-/// `build`: validates the mandatory parameters (`topic`, `value`) and
-/// delivers the options, owned by the caller
-/// ([`kafka_producer_ProducerRecordOptions_destroy`]). The builder is
+/// `build`: validates the mandatory parameters (`topic`, `value`). The builder is
 /// consumed: a second `build` on the same handle fails as if nothing was set.
+///
+/// # Returns
+///
+/// The options.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error`, naming the first
+///   mandatory parameter that was not set
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time, and
-/// `out_err` a valid slot pointing at null.
+/// `out_err` a valid slot pointing at null. The options are owned by the caller,
+/// freed with [`kafka_producer_ProducerRecordOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerRecordOptionsBuilder_build(

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::update_features`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::common::KafkaFuture;
 
 /// The result of the [`update_features_with_options`](crate::admin::Admin::update_features_with_options)
 /// call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult")]
 pub struct UpdateFeaturesResult {
@@ -37,18 +33,14 @@ impl UpdateFeaturesResult {
         Self { futures }
     }
 
-    /// Return a map from feature name to future, which can be used to check the
+    /// Returns a map from feature name to future, which can be used to check the
     /// status of individual feature updates.
-    ///
-    /// Mirrors `values()`.
     #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.futures
     }
 
-    /// Return a future which succeeds if all the feature updates succeed.
-    ///
-    /// Mirrors `all()`.
+    /// Returns a future which succeeds if all the feature updates succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

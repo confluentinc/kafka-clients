@@ -20,8 +20,8 @@
 //!
 //! ## Translated (KIP-848 server-side assignors)
 //!
-//! - `testRemoteAssignorInvalid` (line 239) → `test_remote_assignor_invalid`
-//! - `testRemoteAssignorRange` (line 267) → `test_remote_assignor_range`
+//! - `testRemoteAssignorInvalid` → `test_remote_assignor_invalid`
+//! - `testRemoteAssignorRange` → `test_remote_assignor_range`
 //!
 //! ## SKIPped (client-side assignors — `consumer-threading.md` §20)
 //!
@@ -71,8 +71,8 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
-/// `createConsumer()` with `AbstractConsumerTest`'s class-level
-/// `consumerConfig` (lines 62-67) plus the test's own `setProperty` overrides,
+/// `createConsumer()` with the class-level `consumerConfig` settings of
+/// `kafka.api.AbstractConsumerTest` plus the test's own `setProperty` overrides,
 /// on the consumer group protocol (the only parameter these tests run with).
 fn create_consumer(ctx: &TestContext, overrides: &[(&str, &str)]) -> BytesConsumer {
     let mut props = HashMap::from([
@@ -97,8 +97,8 @@ fn create_consumer(ctx: &TestContext, overrides: &[(&str, &str)]) -> BytesConsum
     )
 }
 
-/// `createProducer()` with `AbstractConsumerTest`'s `producerConfig`
-/// (lines 60-61).
+/// `createProducer()` with the `producerConfig` settings of
+/// `kafka.api.AbstractConsumerTest`.
 fn create_producer(ctx: &TestContext) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
@@ -120,7 +120,7 @@ fn current_time_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// `AbstractConsumerTest.sendRecords` (line 186) with the default
+/// `kafka.api.AbstractConsumerTest#sendRecords` with the default
 /// `startingTimestamp = System.currentTimeMillis()` and 1 ms increments.
 async fn send_records(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, num_records: usize, tp: &TopicPartition) {
     let starting_timestamp = current_time_ms();
@@ -140,7 +140,7 @@ async fn send_records(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, num_records: u
     producer.flush().await.expect("producer flush");
 }
 
-/// `AbstractConsumerTest.createTopicAndSendRecords` (line 262).
+/// `kafka.api.AbstractConsumerTest#createTopicAndSendRecords`.
 async fn create_topic_and_send_records(
     admin: &dyn Admin,
     producer: &KafkaProducer<Vec<u8>, Vec<u8>>,
@@ -158,7 +158,7 @@ async fn create_topic_and_send_records(
     parts
 }
 
-/// `AbstractConsumerTest.awaitAssignment` (line 87) through
+/// `kafka.api.AbstractConsumerTest#awaitAssignment` through
 /// `TestUtils.pollUntilTrue`: `poll(100ms)` until the assignment equals
 /// `expected_assignment`, propagating any `poll` error (Java's `assertThrows`
 /// in `testRemoteAssignorInvalid` relies on that) and failing after 15 s.

@@ -64,15 +64,24 @@ fn boxed(options: DescribeConfigsOptions) -> *mut kafka_admin_DescribeConfigsOpt
 }
 
 /// `new DescribeConfigsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_DescribeConfigsOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_DescribeConfigsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeConfigsOptions_new() -> *mut kafka_admin_DescribeConfigsOptions_t {
     boxed(DescribeConfigsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -90,8 +99,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -107,7 +120,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_timeout_ms(
     unsafe { describe_configs_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `DescribeConfigsOptions.includeSynonyms(boolean includeSynonyms)`: whether each config entry carries its synonyms.
+/// `DescribeConfigsOptions.includeSynonyms(boolean includeSynonyms)`.
+///
+/// # Parameters
+///
+/// - `include_synonyms` - whether each config entry carries its synonyms.
 ///
 /// # Safety
 ///
@@ -125,7 +142,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_include_synonyms
     *options = std::mem::take(options).set_include_synonyms(include_synonyms != 0);
 }
 
-/// `DescribeConfigsOptions.includeSynonyms()`: whether each config entry carries its synonyms.
+/// `DescribeConfigsOptions.includeSynonyms()`.
+///
+/// # Returns
+///
+/// Whether each config entry carries its synonyms.
 ///
 /// # Safety
 ///
@@ -141,7 +162,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_include_synonyms(
     i8::from(unsafe { describe_configs_options_ref(self_) }.include_synonyms())
 }
 
-/// `DescribeConfigsOptions.includeDocumentation(boolean includeDocumentation)`: whether each config entry carries its documentation.
+/// `DescribeConfigsOptions.includeDocumentation(boolean includeDocumentation)`.
+///
+/// # Parameters
+///
+/// - `include_documentation` - whether each config entry carries its documentation.
 ///
 /// # Safety
 ///
@@ -159,7 +184,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_include_document
     *options = std::mem::take(options).set_include_documentation(include_documentation != 0);
 }
 
-/// `DescribeConfigsOptions.includeDocumentation()`: whether each config entry carries its documentation.
+/// `DescribeConfigsOptions.includeDocumentation()`.
+///
+/// # Returns
+///
+/// Whether each config entry carries its documentation.
 ///
 /// # Safety
 ///

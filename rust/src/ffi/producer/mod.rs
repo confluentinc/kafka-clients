@@ -329,10 +329,10 @@ pub(crate) struct Client {
     /// the submission task left waiting, awaited by `destroy`.
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Whether `close(Duration)` checks its timeout as `KafkaProducer.close`
-    /// does: it rejects a negative one (`KafkaProducer.java:1392-1393`) and, called
+    /// does: it rejects a negative one (`KafkaProducer#close`) and, called
     /// from a delivery callback, overrides a positive one to zero
-    /// (`KafkaProducer.java:1399-1403`). Java's `MockProducer.close(Duration)`
-    /// never reads the timeout (`MockProducer.java:436-442`), so the mock's
+    /// (`KafkaProducer#close`). Java's `MockProducer.close(Duration)`
+    /// never reads the timeout (`MockProducer#close(Duration)`), so the mock's
     /// view passes a negative one on as zero and never overrides it.
     follows_kafka_producer_close: bool,
     /// Whether `send_cb` tries the producer on the calling thread before
@@ -376,14 +376,14 @@ impl Client {
 
     /// Whether the calling thread is running one of this producer's queued
     /// callbacks: Java's `Thread.currentThread() == this.ioThread`, the
-    /// thread Java's delivery callbacks run on (`KafkaProducer.java:1217`,
-    /// `:1398`).
+    /// thread Java's delivery callbacks run on (`KafkaProducer#flush`,
+    /// `KafkaProducer#close(Duration)`).
     fn in_callback(&self) -> bool {
         self.queue.is_executing_on_current_thread()
     }
 
     /// Fails as `KafkaProducer.flush()` does when called from a delivery
-    /// callback (`KafkaProducer.java:1217-1220`), logging the message as Java
+    /// callback (`KafkaProducer#flush`), logging the message as Java
     /// does; `MockProducer.flush()` makes no such check. A flush there would
     /// wait for the report of the callback it runs in, which cannot come
     /// before the callback returns.
@@ -522,7 +522,7 @@ enum ReportWait {
     /// `abortTransaction`).
     OnSuccess,
     /// Whatever the operation's outcome, without a bound: Java's `close`
-    /// joins the I/O thread after `forceClose()` (`KafkaProducer.java:1426-1437`),
+    /// joins the I/O thread after `forceClose()` (`KafkaProducer#close`),
     /// a failure being thrown after it.
     Always,
 }
@@ -1219,6 +1219,20 @@ pub type kafka_producer_Producer_callbacks_notify_fn_t = unsafe extern "C" fn(op
 
 /// `Producer.initTransactions()`, blocking.
 ///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no `transactional.id` has been configured
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` error indicating that the configured
+///   transactional.id is not authorized, or the idempotent producer id is unavailable. See the
+///   error for more details. User may retry this function call after fixing the permission.
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for initialize the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
+///
 /// # Safety
 ///
 /// `self_` must be a live view. `out_err` must be a valid slot pointing at
@@ -1239,6 +1253,25 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
 }
 
 /// `Producer.initTransactions()`, completion queued.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no `transactional.id` has been configured
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` error indicating that the configured
+///   transactional.id is not authorized, or the idempotent producer id is unavailable. See the
+///   error for more details. User may retry this function call after fixing the permission.
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for initialize the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
 ///
 /// # Safety
 ///
@@ -1273,6 +1306,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_cb(
 /// `Producer.beginTransaction()`: synchronous in Java and Rust, still
 /// ordered after the queued `send_cb`s like every control operation.
 ///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no `transactional.id` has been configured
+///   or if `kafka_producer_Producer_init_transactions` has not yet been invoked
+/// - `kafka_common_Error_is_producer_fenced_error` if another producer with the same
+///   transactional.id is active
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   `transactional.id` is not authorized. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
+///
 /// # Safety
 ///
 /// `self_` must be a live view. `out_err` must be a valid slot pointing at
@@ -1297,6 +1345,26 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
 
 /// `Producer.beginTransaction()`, completion queued: ordered after the queued
 /// `send_cb`s like the blocking form, without blocking the caller on them.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no `transactional.id` has been configured
+///   or if `kafka_producer_Producer_init_transactions` has not yet been invoked
+/// - `kafka_common_Error_is_producer_fenced_error` if another producer with the same
+///   transactional.id is active
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   `transactional.id` is not authorized. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
 ///
 /// # Safety
 ///
@@ -1333,6 +1401,42 @@ pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_cb(
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// and is copied during the call.
 ///
+/// # Parameters
+///
+/// - `offsets` - the offsets to commit, the next message your application will consume for each
+///   partition
+/// - `group_metadata` - the consumer group metadata, extracted from the consumer via
+///   `kafka_consumer_Consumer_group_metadata`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started.
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0) or the broker doesn't
+///   support the latest version of transactional API with all consumer group metadata (i.e. if its
+///   version is lower than 2.5.0).
+/// - `kafka_common_Error_is_unsupported_for_message_format_error` fatal error indicating the
+///   message format used for the offsets topic on the broker does not support transactions
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized, or the consumer group id is not authorized.
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried (e.g. if the consumer has been kicked out of the group). Users should handle this by
+///   aborting the transaction.
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this producer instance gets fenced by
+///   broker due to a mis-configured consumer instance id within group metadata.
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal or
+///   abortable error, or for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the combined time taken for resolving topic metadata
+///   and sending the offsets has surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+///
 /// # Safety
 ///
 /// `self_` must be a live view, `offsets` a live map of
@@ -1364,6 +1468,44 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
 }
 
 /// `Producer.sendOffsetsToTransaction(...)`, completion queued.
+///
+/// # Parameters
+///
+/// - `offsets` - the offsets to commit, the next message your application will consume for each
+///   partition
+/// - `group_metadata` - the consumer group metadata, extracted from the consumer via
+///   `kafka_consumer_Consumer_group_metadata`
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started.
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0) or the broker doesn't
+///   support the latest version of transactional API with all consumer group metadata (i.e. if its
+///   version is lower than 2.5.0).
+/// - `kafka_common_Error_is_unsupported_for_message_format_error` fatal error indicating the
+///   message format used for the offsets topic on the broker does not support transactions
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized, or the consumer group id is not authorized.
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried (e.g. if the consumer has been kicked out of the group). Users should handle this by
+///   aborting the transaction.
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this producer instance gets fenced by
+///   broker due to a mis-configured consumer instance id within group metadata.
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal or
+///   abortable error, or for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the combined time taken for resolving topic metadata
+///   and sending the offsets has surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
@@ -1415,8 +1557,26 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_cb(
 /// [`kafka_producer_Producer__set_callback_result`], running the queued
 /// callbacks on the calling thread meanwhile, as Java's `commitTransaction` returns
 /// after the callbacks of the records it flushes; called from inside a
-/// delivery callback it does not wait for them (see "Delivery callbacks
-/// report" in the module docs).
+/// delivery callback it does not wait for them, since that callback cannot
+/// report before it returns.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized. See the error for more details
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal or
+///   abortable error, or for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for committing the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
 ///
 /// # Safety
 ///
@@ -1440,8 +1600,31 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 /// `Producer.commitTransaction()`, completion queued.
 ///
 /// Once the commit succeeded the completion waits for the reports of the
-/// delivery callbacks queued before it ended (see "Delivery callbacks
-/// report" in the module docs); it does not run them.
+/// delivery callbacks queued before it ended, made through
+/// [`kafka_producer_Producer__set_callback_result`]; it does not run them.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized. See the error for more details
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal or
+///   abortable error, or for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for committing the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
 ///
 /// # Safety
 ///
@@ -1480,8 +1663,26 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_cb(
 /// [`kafka_producer_Producer__set_callback_result`], running the queued
 /// callbacks on the calling thread meanwhile, as Java's `abortTransaction` returns
 /// after the callbacks of the records it aborts; called from inside a
-/// delivery callback it does not wait for them (see "Delivery callbacks
-/// report" in the module docs).
+/// delivery callback it does not wait for them, since that callback cannot
+/// report before it returns.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for aborting the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
 ///
 /// # Safety
 ///
@@ -1505,8 +1706,31 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
 /// `Producer.abortTransaction()`, completion queued.
 ///
 /// Once the abort succeeded the completion waits for the reports of the
-/// delivery callbacks queued before it ended (see "Delivery callbacks
-/// report" in the module docs); it does not run them.
+/// delivery callbacks queued before it ended, made through
+/// [`kafka_producer_Producer__set_callback_result`]; it does not run them.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if no transactional.id has been configured
+///   or no transaction has been started
+/// - `kafka_common_Error_is_producer_fenced_error` fatal error indicating another producer with the
+///   same transactional.id is active
+/// - `kafka_common_Error_is_invalid_producer_epoch_error` if the producer has attempted to produce
+///   with an old epoch to the partition leader. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` fatal error indicating the broker does not
+///   support transactions (i.e. if its version is lower than 0.11.0.0)
+/// - `kafka_common_Error_is_authorization_error` fatal error indicating that the configured
+///   transactional.id is not authorized. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` if the producer has encountered a previous fatal error or
+///   for any other unexpected error
+/// - `kafka_common_Error_is_timeout_error` if the time taken for aborting the transaction has
+///   surpassed `max.block.ms`.
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
 ///
 /// # Safety
 ///
@@ -1543,15 +1767,40 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_cb(
 // ---------------------------------------------------------------------------
 
 /// `Producer.send(ProducerRecord)`, blocking until the record is registered
-/// (serialized, partitioned and appended to a batch): delivers the owned
+/// (serialized, partitioned and appended to a batch): returns a
 /// `kafka_common_KafkaFuture_t` resolving to a
-/// `kafka_producer_RecordMetadata_t *` borrowed from the future. The record
-/// stays the caller's; its key and value `void *` are read during the call.
+/// `kafka_producer_RecordMetadata_t *`.
+///
+/// # Parameters
+///
+/// - `record` - The record to send. If the topic or the partition specified in it cannot be found
+///   in metadata within `max.block.ms`, the returned future will time out when retrieved.
+///
+/// # Returns
+///
+/// A future which will eventually contain the response information.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if a transactional.id has been configured
+///   and no transaction has been started, or when send is invoked after producer has been closed.
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_serialization_error` If the key or value are not valid objects given
+///   the configured serializers
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` If a Kafka related error occurs that does not belong to
+///   the public API errors.
 ///
 /// # Safety
 ///
 /// `self_` and `record` must be live handles and `out_err` a valid slot
 /// pointing at null.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`; the
+/// `kafka_producer_RecordMetadata_t *` it resolves to is borrowed from the future, valid until the
+/// future is destroyed. The record stays the caller's; its key and value `void *` are read during
+/// the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send(
@@ -1572,11 +1821,30 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 /// and every record of a producer with a C serializer, is copied and queued
 /// for the submission task, and `cb` fires later, through the callback
 /// vector, once the record was handed to the producer (see
-/// [`kafka_producer_Producer_send_with_callback_cb`] and the module docs). A
+/// [`kafka_producer_Producer_send_with_callback_cb`]). A
 /// C serializer is thus never invoked on the calling thread, and an
 /// asynchronous one may report from it once this call returned. The
 /// record's key and value `void *` are read during the call in the first
 /// case and stay borrowed until `cb` fires in the second.
+///
+/// # Parameters
+///
+/// - `record` - The record to send. If the topic or the partition specified in it cannot be found
+///   in metadata within `max.block.ms`, the returned future will time out when retrieved.
+/// - `cb` - the completion, receiving the future or the error
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if a transactional.id has been configured
+///   and no transaction has been started, or when send is invoked after producer has been closed.
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_serialization_error` If the key or value are not valid objects given
+///   the configured serializers
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` If a Kafka related error occurs that does not belong to
+///   the public API errors.
 ///
 /// # Safety
 ///
@@ -1629,10 +1897,37 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_cb(
 /// it. The caller cannot tell the two apart, so after an error the callback's
 /// `self` must stay alive until `_destroy`.
 ///
+/// # Parameters
+///
+/// - `record` - The record to send. If the topic or the partition specified in it cannot be found
+///   in metadata within `max.block.ms`, the returned future will time out when retrieved.
+/// - `callback` - A user-supplied callback to execute when the record has been acknowledged by the
+///   server (`NULL` indicates no callback)
+///
+/// # Returns
+///
+/// A future which will eventually contain the response information.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if a transactional.id has been configured
+///   and no transaction has been started, or when send is invoked after producer has been closed.
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_serialization_error` If the key or value are not valid objects given
+///   the configured serializers
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` If a Kafka related error occurs that does not belong to
+///   the public API errors.
+///
 /// # Safety
 ///
 /// `self_` and `record` must be live handles, `callback` null or a live handle
 /// (consumed), `out_err` a valid slot pointing at null.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`; the
+/// `kafka_producer_RecordMetadata_t *` it resolves to is borrowed from the future, valid until the
+/// future is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
@@ -1673,8 +1968,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// vector, once the submission task handed it over. When either serializer
 /// is a C implementation, every record is queued that way, so a C serializer
 /// is never invoked or waited for on the calling thread: an asynchronous one
-/// may report from it after this call returned (see the module docs,
-/// "`send_cb` tries the producer first").
+/// may report from it after this call returned.
 ///
 /// When `cb` receives an error, `callback` may still fire later, exactly
 /// once, if the record had reached the accumulator, as for
@@ -1688,6 +1982,27 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
 /// As there, the registration handle `callback` is consumed by the call,
 /// whatever its outcome (an error delivered to `cb` included): the caller must
 /// not use it or pass it to `kafka_producer_Callback_destroy` afterwards.
+///
+/// # Parameters
+///
+/// - `record` - The record to send. If the topic or the partition specified in it cannot be found
+///   in metadata within `max.block.ms`, the returned future will time out when retrieved.
+/// - `callback` - A user-supplied callback to execute when the record has been acknowledged by the
+///   server (`NULL` indicates no callback)
+/// - `cb` - the completion, receiving the future or the error
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if a transactional.id has been configured
+///   and no transaction has been started, or when send is invoked after producer has been closed.
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_serialization_error` If the key or value are not valid objects given
+///   the configured serializers
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` If a Kafka related error occurs that does not belong to
+///   the public API errors.
 ///
 /// # Safety
 ///
@@ -1857,6 +2172,11 @@ unsafe fn delivery_callback(
 /// Java; a `MockProducer`, whose Java `flush()` makes no such check,
 /// completes its records and returns without waiting for the reports.
 ///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_kafka_error` If the method is invoked inside a `kafka_producer_Producer_send_with_callback` callback
+///
 /// # Safety
 ///
 /// `self_` must be a live view. `out_err` must be a valid slot pointing at
@@ -1892,6 +2212,16 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 /// the queued callbacks: the caller pumps them. Called from inside a
 /// delivery callback of a `KafkaProducer`, `cb` receives the error the
 /// blocking form returns there.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked
+/// - `kafka_common_Error_is_kafka_error` If the method is invoked inside a `kafka_producer_Producer_send_with_callback` callback
 ///
 /// # Safety
 ///
@@ -1930,13 +2260,38 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush_cb(
     );
 }
 
-/// `Producer.partitionsFor(String)`, blocking: delivers an owned
-/// `kafka_List_t` of owned `kafka_common_PartitionInfo_t *`.
+/// Get the partition metadata for the given topic. This can be used for custom partitioning.
+///
+/// This will attempt to refresh metadata until it finds the topic in it, or the configured
+/// `max.block.ms` expires.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+///
+/// # Returns
+///
+/// The list of partitions, of `kafka_common_PartitionInfo_t *`.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
+/// - `kafka_common_Error_is_timeout_error` if the topic cannot be found in metadata within
+///   `max.block.ms`
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` for all Kafka-related errors, including the case where
+///   this method is called after producer close
 ///
 /// # Safety
 ///
 /// `self_` must be a live view, `topic` a NUL-terminated string and `out_err` a
-/// valid slot pointing at null.
+/// valid slot pointing at null. The returned list and its elements are owned by
+/// the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
@@ -1960,11 +2315,35 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     }
 }
 
-/// `Producer.partitionsFor(String)`, completion queued.
+/// Get the partition metadata for the given topic. This can be used for custom partitioning.
+///
+/// This will attempt to refresh metadata until it finds the topic in it, or the configured
+/// `max.block.ms` expires.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+/// - `cb` - the completion, receiving the list of partitions or the error
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_interrupt_error` if the thread is interrupted while blocked
+/// - `kafka_common_Error_is_timeout_error` if the topic cannot be found in metadata within
+///   `max.block.ms`
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` for all Kafka-related errors, including the case where
+///   this method is called after producer close
 ///
 /// # Safety
 ///
-/// `self_` must be a live view and `topic` a NUL-terminated string.
+/// `self_` must be a live view and `topic` a NUL-terminated string. The list `cb`
+/// receives and its elements are owned by `cb`.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading `self_` and `topic`
@@ -2033,13 +2412,23 @@ unsafe fn destroy_partition_info(element: *mut c_void) {
     unsafe { kafka_common_PartitionInfo_destroy(element as *mut _) }
 }
 
-/// `Producer.metrics()`: an owned `kafka_Map_t` of owned
-/// `kafka_common_MetricName_t *` to owned `kafka_common_metrics_KafkaMetric_t *`;
-/// `kafka_Map_get` compares names by value.
+/// Get the full set of internal metrics maintained by the producer.
+///
+/// # Returns
+///
+/// The map of metrics currently maintained by the producer, from
+/// `kafka_common_MetricName_t *` to `kafka_common_metrics_KafkaMetric_t *`.
+///
+/// # Translation notes
+///
+/// WARNING: the map is a snapshot, not Java's live view: metrics registered or
+/// removed after the call are not reflected in it. `kafka_Map_get` compares names
+/// by value.
 ///
 /// # Safety
 ///
-/// `self_` must be a live view.
+/// `self_` must be a live view. The returned map, its keys and its values are
+/// owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_producer_Producer_t) -> *mut kafka_Map_t {
@@ -2062,6 +2451,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_pro
 /// does. From inside a delivery callback it does not wait, and a
 /// `KafkaProducer` closes as for a zero timeout, as Java does there (see
 /// [`kafka_producer_Producer_close_with_timeout`]).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked.
+/// - `kafka_common_Error_is_kafka_error` If an unexpected error occurs while trying to close the
+///   client, this error should be treated as fatal and indicate the client is no longer usable.
 ///
 /// # Safety
 ///
@@ -2103,6 +2498,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
 /// callbacks, which the caller pumps. Called from inside a delivery
 /// callback, `cb` does not wait for the reports, and a `KafkaProducer`
 /// closes as for a zero timeout.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked.
+/// - `kafka_common_Error_is_kafka_error` If an unexpected error occurs while trying to close the
+///   client, this error should be treated as fatal and indicate the client is no longer usable.
 ///
 /// # Safety
 ///
@@ -2151,24 +2557,36 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_cb(
 
 /// `Producer.close(Duration timeout)`, blocking; `timeout` in milliseconds.
 ///
-/// The timeout bounds the close itself, as in Java: the queued `send_cb`s
-/// are drained for at most `timeout`, and the producer is closed with the
-/// time left, then force-closed. A record the drain did not reach fails
-/// through its `send_cb` completion, as a Java `send` after `close` does.
-/// Then, as Java's `close` joins its I/O thread after `forceClose()` without
-/// a bound, it waits until every delivery callback queued by then reported
-/// through [`kafka_producer_Producer__set_callback_result`], running the
-/// queued callbacks on the calling thread meanwhile.
+/// This method waits up to `timeout` for the producer to complete the sending of all incomplete
+/// requests.
 ///
-/// A negative `timeout` is rejected with
-/// `kafka_common_Error_LOCAL_ILLEGAL_ARGUMENT` ("The timeout cannot be
-/// negative.") on a `KafkaProducer`, as in Java; a `MockProducer`, whose Java
-/// `close(Duration)` never reads the timeout, closes as for zero.
+/// If the producer is unable to complete all requests before the timeout expires, this method will
+/// fail any unsent and unacknowledged records immediately. It will also abort the ongoing transaction
+/// if it's not already completing.
 ///
-/// From inside a delivery callback it does not wait for the reports, and a
-/// `KafkaProducer` closes with a positive `timeout` overridden to zero,
-/// logging Java's warning ("Overriding close timeout {} ms to 0 ms in order
-/// to prevent useless blocking due to self-join. ...").
+/// If invoked from within a `Callback` this method will not block and will be equivalent to a zero
+/// `timeout`. This is done since no further sending will happen while blocking the I/O thread of the
+/// producer.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to wait for producer to complete any pending requests. The value
+///   should be non-negative. Specifying a timeout of zero means do not wait for pending send
+///   requests to complete.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked.
+/// - `kafka_common_Error_is_kafka_error` If an unexpected error occurs while trying to close the
+///   client, this error should be treated as fatal and indicate the client is no longer usable.
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the `timeout` is negative.
+///
+/// # Translation notes
+///
+/// The queued `send_cb`s are drained within `timeout`, then the producer is closed with the time
+/// left. It then waits without a bound for the delivery callbacks queued by then to report through
+/// [`kafka_producer_Producer__set_callback_result`], running them on the calling thread meanwhile,
+/// except from inside one. A `MockProducer` reads a negative `timeout` as zero.
 ///
 /// # Safety
 ///
@@ -2206,6 +2624,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout(
 /// handled as by [`kafka_producer_Producer_close_with_timeout`], a rejected
 /// timeout delivered through `cb`. The wait for the reports does not run the
 /// queued callbacks: the caller pumps them.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to wait for producer to complete any pending requests. The value
+///   should be non-negative. Specifying a timeout of zero means do not wait for pending send
+///   requests to complete.
+/// - `cb` - the completion, receiving the error or `NULL`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_interrupt_error` If the thread is interrupted while blocked.
+/// - `kafka_common_Error_is_kafka_error` If an unexpected error occurs while trying to close the
+///   client, this error should be treated as fatal and indicate the client is no longer usable.
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the `timeout` is negative.
 ///
 /// # Safety
 ///
@@ -2249,7 +2682,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_close_with_timeout_cb(
 
 /// The `Duration` for a `close(Duration)` timeout in milliseconds, as
 /// `KafkaProducer.close(Duration, boolean)` reads it
-/// (`KafkaProducer.java:1390-1404`): a negative one is an error, and a
+/// (`KafkaProducer#close`): a negative one is an error, and a
 /// positive one from inside a delivery callback is overridden to zero, with
 /// Java's warning. The mock passes a negative one on as zero and never
 /// overrides (see [`Client::follows_kafka_producer_close`]).
@@ -2269,7 +2702,7 @@ fn close_timeout(client: &Client, timeout: i64, in_callback: bool) -> Result<Dur
 
 /// The timeout an untimed `close()` closes with instead, if any: Java's
 /// `close()` is `close(Duration.ofMillis(Long.MAX_VALUE))`
-/// (`KafkaProducer.java:1362-1364`), so from inside a delivery callback of a
+/// (`KafkaProducer#close`), so from inside a delivery callback of a
 /// `KafkaProducer` it is overridden to zero like any positive timeout.
 fn untimed_close_override(client: &Client, in_callback: bool) -> Option<Duration> {
     (in_callback && client.follows_kafka_producer_close).then(|| {
@@ -2279,7 +2712,7 @@ fn untimed_close_override(client: &Client, in_callback: bool) -> Option<Duration
 }
 
 /// Java's warning when a delivery callback closes its producer with a
-/// positive timeout (`KafkaProducer.java:1399-1403`).
+/// positive timeout (`KafkaProducer#close(Duration)`).
 fn warn_close_timeout_override(timeout_ms: i64) {
     log::warn!(
         "Overriding close timeout {timeout_ms} ms to 0 ms in order to prevent useless blocking due to self-join. \
@@ -2291,8 +2724,11 @@ fn warn_close_timeout_override(timeout_ms: i64) {
 // Callback pump
 // ---------------------------------------------------------------------------
 
-/// Runs the queued callbacks serially on the calling thread and returns how
-/// many ran (CLAUDE.md §4 rule 5).
+/// Runs the queued callbacks serially on the calling thread.
+///
+/// # Returns
+///
+/// How many callbacks ran.
 ///
 /// # Safety
 ///
@@ -2308,6 +2744,11 @@ pub unsafe extern "C" fn kafka_producer_Producer__execute_callbacks(self_: *cons
 /// Installs the hook fired once each time the callback vector goes from
 /// empty to non-empty (see
 /// [`kafka_producer_Producer_callbacks_notify_fn_t`]).
+///
+/// # Parameters
+///
+/// - `notify` - the hook
+/// - `opaque` - passed to `notify`
 ///
 /// # Safety
 ///
@@ -2328,8 +2769,8 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
     unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
 }
 
-/// Reports the result of a delivery callback invoked with `callback_id`
-/// (CLAUDE.md §4): the `kafka_producer_Callback_on_completion_fn_t` of a
+/// Reports the result of a delivery callback invoked with `callback_id`:
+/// the `kafka_producer_Callback_on_completion_fn_t` of a
 /// `send_with_callback` / `send_with_callback_cb`. The double underscore
 /// marks a function derived by convention, with no Java counterpart.
 ///
@@ -2357,6 +2798,12 @@ pub unsafe extern "C" fn kafka_producer_Producer__set_callbacks_notify(
 /// callbacks still unreported as if each had reported success. A second
 /// report for the same id, or one for an id the producer did not issue, is
 /// ignored: its error is freed.
+///
+/// # Parameters
+///
+/// - `callback_id` - the id the callback was invoked with
+/// - `result` - ignored, as `Callback.onCompletion` is `void`: pass `NULL`
+/// - `error` - `NULL`, or the error the callback raised
 ///
 /// # Safety
 ///
@@ -2431,7 +2878,7 @@ mod tests {
     }
 
     /// Java's `MockProducer.close(Duration)` never reads the timeout
-    /// (`MockProducer.java:436-442`), so the mock closes on a negative one
+    /// (`MockProducer#close(Duration)`), so the mock closes on a negative one
     /// instead of rejecting it as `KafkaProducer` does; both forms.
     #[test]
     fn mock_close_with_timeout_treats_a_negative_timeout_as_zero() {

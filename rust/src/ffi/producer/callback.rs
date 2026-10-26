@@ -68,8 +68,11 @@ pub struct kafka_producer_Callback_t {
 }
 
 /// `void onCompletion(RecordMetadata metadata, Exception exception)` of a C
-/// implementation: `metadata` and `error` are borrowed for the call, as the
-/// module documentation describes. The method reports that it finished with
+/// implementation, invoked on the thread running
+/// `kafka_producer_Producer__execute_callbacks`. `metadata` is always the
+/// record's metadata (for a failed record, a placeholder whose offset is -1)
+/// and `error` is `NULL` on success, the record's failure otherwise; both are
+/// borrowed for the call. The method reports that it finished with
 /// `kafka_producer_Producer__set_callback_result(producer, callback_id, NULL, error)`,
 /// inside the call or later, from any thread; `error` is `NULL`, or an owned
 /// `kafka_common_Error_t *` standing for Java's `onCompletion` throwing,
@@ -150,7 +153,7 @@ impl CallbackRegistration {
 
 /// The sink of a delivery callback's report: a reported error is Java's
 /// `onCompletion` throwing, logged as `ProducerBatch.completeFutureAndFireCallbacks`
-/// logs it (`ProducerBatch.java:319`) and then dropped; either way
+/// logs it (`ProducerBatch#completeFutureAndFireCallbacks`) and then dropped; either way
 /// `completion` then completes with the record's own outcome, its `error`
 /// when it failed. A sink drained by the producer's `_destroy` completes it
 /// the same way.
@@ -194,10 +197,21 @@ pub(crate) unsafe fn take_callback(callback: *mut kafka_producer_Callback_t) -> 
     *unsafe { Box::from_raw(callback as *mut CallbackRegistration) }
 }
 
-/// Registers a C implementation of `Callback`. The caller owns `self_` and
-/// keeps it alive until the callback fired. The handle is owned until a
-/// function consumes it — a `send` taking a callback, or
-/// [`kafka_producer_Callback_on_completion`] and its `_cb` twin, whatever
+/// Registers a C implementation of `Callback`.
+///
+/// # Parameters
+///
+/// - `on_completion` - `onCompletion`
+///
+/// # Returns
+///
+/// The callback handle.
+///
+/// # Safety
+///
+/// The caller owns `self_` and keeps it alive until the callback fired. The
+/// handle is owned until a function consumes it — a `send` taking a callback,
+/// or [`kafka_producer_Callback_on_completion`] and its `_cb` twin, whatever
 /// their outcome — and is freed with [`kafka_producer_Callback_destroy`] only
 /// when none did.
 #[ffi_guard]
@@ -210,17 +224,29 @@ pub extern "C" fn kafka_producer_Callback_new(
         as *mut kafka_producer_Callback_t
 }
 
-/// `Callback.onCompletion(metadata, exception)`: invokes the C implementation
-/// on the calling thread with the borrowed arguments and waits for its
+/// A callback method the user can implement to provide asynchronous handling of
+/// request completion. This method will be called when the record sent to the server
+/// has been acknowledged. When `error` is not `NULL` in the callback, metadata will
+/// contain the special -1 value for all fields. If topicPartition cannot be chosen,
+/// a -1 value will be assigned.
+///
+/// # Parameters
+///
+/// - `metadata` - The metadata for the record that was sent (i.e. the partition and offset). An
+///   empty metadata with -1 value for all fields will be returned if an error occurred.
+/// - `error` - The error thrown during processing of this record. `NULL` if no error occurred.
+///
+/// # Translation notes
+///
+/// Invokes the C implementation on the calling thread and waits for its
 /// `kafka_producer_Producer__set_callback_result` report. No producer is
 /// involved: the report's `producer` argument is not read, so it may be any
-/// producer or `NULL`, and a reported error is freed. The callback fires once,
-/// so `self_` is consumed, as the Rust `on_completion` takes `self: Box<Self>`.
+/// producer or `NULL`, and a reported error is freed.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, not used again; `metadata` and `error` null
-/// or live handles.
+/// `self_` must be a live handle and is consumed, as the callback fires once;
+/// `metadata` and `error` null or live handles, borrowed for the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
@@ -246,10 +272,25 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
 /// `onCompletion` is void, so only `opaque` is passed.
 pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
 
-/// Non-blocking `on_completion`: the method runs on the calling thread and
-/// `cb` fires when its completion is reported (a standalone callback has no
-/// callbacks vector to queue on, so `cb` runs on the reporting thread). The
-/// report is made as for [`kafka_producer_Callback_on_completion`].
+/// Non-blocking `kafka_producer_Callback_on_completion`.
+///
+/// # Parameters
+///
+/// - `metadata` - The metadata for the record that was sent (i.e. the partition and offset). An
+///   empty metadata with -1 value for all fields will be returned if an error occurred.
+/// - `error` - The error thrown during processing of this record. `NULL` if no error occurred.
+/// - `cb` - the completion, fired when the method reports
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// None: `cb` receives only `opaque`; a failure the method reports, or a caught Rust
+/// panic, is dropped.
+///
+/// # Translation notes
+///
+/// The method runs on the calling thread. A standalone callback has no callbacks
+/// vector to queue on, so `cb` runs on the reporting thread.
 ///
 /// # Safety
 ///

@@ -86,7 +86,7 @@ pub struct kafka_common_serialization_Deserializer_t {
 /// `&mut self` methods (`configure`, `close`) need.
 pub(crate) enum FfiDeserializer {
     /// A C implementation registered with
-    /// [`kafka_common_serialization_Deserializer_new_async`].
+    /// `kafka_common_serialization_Deserializer_new_async`.
     C(CDeserializer),
     /// `kafka_common_serialization_StringDeserializer_t`.
     String(GenericStringDeserializer),
@@ -179,7 +179,7 @@ pub(crate) type Locked = tokio::sync::Mutex<FfiDeserializer>;
 /// `T deserialize(String topic, byte[] data)` of an asynchronous C
 /// implementation: returns at once and reports the `void *` value (owned by
 /// the C side) or an owned error through
-/// [`kafka_common_serialization_Deserializer__set_callback_result`] with
+/// `kafka_common_serialization_Deserializer__set_callback_result` with
 /// `callback_id`, from any thread, during the call or later. `topic` and
 /// `data` stay valid until it reports.
 pub type kafka_common_serialization_Deserializer_deserialize_async_fn_t =
@@ -187,7 +187,7 @@ pub type kafka_common_serialization_Deserializer_deserialize_async_fn_t =
 
 /// `T deserialize(String topic, Headers headers, byte[] data)` of an
 /// asynchronous C implementation, reporting as
-/// [`kafka_common_serialization_Deserializer_deserialize_async_fn_t`];
+/// `kafka_common_serialization_Deserializer_deserialize_async_fn_t`;
 /// `headers` are the record's own headers, shared and read-only, valid like
 /// the other arguments until it reports.
 /// `NULL` is the Java default: `deserialize(topic, data)`.
@@ -203,7 +203,7 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_async_
 
 /// `T deserialize(String topic, Headers headers, ByteBuffer data)` of an
 /// asynchronous C implementation (KIP-863), reporting as
-/// [`kafka_common_serialization_Deserializer_deserialize_async_fn_t`]; the
+/// `kafka_common_serialization_Deserializer_deserialize_async_fn_t`; the
 /// arguments stay valid until it reports. `NULL` is the Java default:
 /// `deserialize(topic, headers, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_async_fn_t = Option<
@@ -228,7 +228,7 @@ pub type kafka_common_serialization_Deserializer_configure_async_fn_t =
 pub type kafka_common_serialization_Deserializer_close_async_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void, callback_id: i64)>;
 
-/// What a [`kafka_common_serialization_Deserializer_t`] points at: the
+/// What a `kafka_common_serialization_Deserializer_t` points at: the
 /// implementation behind its mutex, who owns the handle, and, for a C
 /// implementation, the registry its reports go to, reached
 /// without the mutex, which a consumer holds while it awaits a report.
@@ -338,7 +338,7 @@ struct AsyncFns {
 }
 
 /// A C implementation of [`Deserializer`], registered with
-/// [`kafka_common_serialization_Deserializer_new_async`], with the registry
+/// `kafka_common_serialization_Deserializer_new_async`, with the registry
 /// its reports go to, shared with its handle; a null optional method is the
 /// Java default.
 pub(crate) struct CDeserializer {
@@ -548,11 +548,11 @@ static EMPTY_HEADERS: std::sync::LazyLock<RecordHeaders> = std::sync::LazyLock::
 /// Registers an asynchronous C implementation of `Deserializer`;
 /// `deserialize` is required, the other pointers may be `NULL` for the Java
 /// default. Each function returns at once and reports its outcome through
-/// [`kafka_common_serialization_Deserializer__set_callback_result`] on this
+/// `kafka_common_serialization_Deserializer__set_callback_result` on this
 /// handle with the `callback_id` it was given, from any thread, during the
 /// call or later; the pointers it was given stay valid until it reports. The
 /// handle stays valid for that report until it is destroyed with
-/// [`kafka_common_serialization_Deserializer_destroy`], which every call made
+/// `kafka_common_serialization_Deserializer_destroy`, which every call made
 /// through its own invokers must report before. Once a client consumed it, it
 /// stays valid for the report of every call the client started, also when the
 /// client is destroyed, or its constructor fails, before the call reports: a
@@ -563,6 +563,24 @@ static EMPTY_HEADERS: std::sync::LazyLock<RecordHeaders> = std::sync::LazyLock::
 /// under the handle's lock, and awaits the report without holding a thread;
 /// the `_cb` twins do not take part in that lock, so the C caller is
 /// responsible for `self_` being usable from any thread, concurrently.
+///
+/// # Parameters
+///
+/// - `self_` - the caller's opaque pointer, passed first to every function
+/// - `deserialize` - the implementation of `deserialize`; required
+/// - `deserialize_with_headers` - the implementation of `deserialize_with_headers`, or `NULL` for the Java default
+/// - `deserialize_with_headers_bytes` - the implementation of `deserialize_with_headers_bytes`, or `NULL` for the Java default
+/// - `configure` - the implementation of `configure`, or `NULL` for the Java default
+/// - `close` - the implementation of `close`, or `NULL` for the Java default
+///
+/// # Returns
+///
+/// The new deserializer.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_Deserializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_Deserializer_new_async(
@@ -590,10 +608,10 @@ pub extern "C" fn kafka_common_serialization_Deserializer_new_async(
     )
 }
 
-/// Whether the handle stands for an asynchronous implementation, one that
+/// Returns whether the handle stands for an asynchronous implementation, one that
 /// reports through
-/// [`kafka_common_serialization_Deserializer__set_callback_result`]: 1 for a C
-/// implementation ([`kafka_common_serialization_Deserializer_new_async`], the
+/// `kafka_common_serialization_Deserializer__set_callback_result`: 1 for a C
+/// implementation (`kafka_common_serialization_Deserializer_new_async`, the
 /// only way to register one), 0 for a built-in class's view, which completes
 /// within the call.
 ///
@@ -621,6 +639,12 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer__is_async(
 /// returned). A report for an unknown id, or a second one for the same id,
 /// is ignored and its error freed; so is any report on a built-in class's
 /// view.
+///
+/// # Parameters
+///
+/// - `callback_id` - the id the reporting function was given
+/// - `result` - the value on success, `NULL` for `configure` / `close`
+/// - `error` - `NULL` on success, else the owned error, taken over
 ///
 /// # Safety
 ///
@@ -756,6 +780,20 @@ fn value_sink(cb: ValueCompletion, opaque: *mut c_void) -> impl FnOnce(Result<*m
 /// implementation's `void *`; on failure stores the owned error in
 /// `*out_err` and returns `NULL`. Blocks until a C implementation reports.
 ///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+///
+/// # Returns
+///
+/// deserialized typed data; may be `NULL`
+///
+/// # Errors
+///
+/// - The error the deserializer reports.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
+///
 /// # Safety
 ///
 /// `self_` must be a valid deserializer handle, `topic` a valid
@@ -781,15 +819,27 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
     unsafe { deliver(result, out_err) }
 }
 
-/// Completion of [`kafka_common_serialization_Deserializer_deserialize_cb`].
+/// Completion of `kafka_common_serialization_Deserializer_deserialize_cb`.
 pub type kafka_common_serialization_Deserializer_deserialize_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// Non-blocking [`kafka_common_serialization_Deserializer_deserialize`]:
+/// Non-blocking `kafka_common_serialization_Deserializer_deserialize`:
 /// `cb` receives the value or an owned error, with `opaque`. A built-in class
 /// runs on the calling thread and `cb` fires there before this returns; a C
 /// implementation is called at once and `cb` fires on the thread that reports (a deserializer has no
 /// callbacks vector to queue on). The arguments are copied.
+///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - The error the deserializer reports, delivered to `cb`.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, delivered to `cb`.
 ///
 /// # Safety
 ///
@@ -827,7 +877,26 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_cb(
 }
 
 /// `T deserialize(String topic, Headers headers, byte[] data)`; the value
-/// is delivered as for [`kafka_common_serialization_Deserializer_deserialize`].
+/// is delivered as for `kafka_common_serialization_Deserializer_deserialize`.
+///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `headers` - headers associated with the record
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+///
+/// # Returns
+///
+/// deserialized typed data; may be `NULL`
+///
+/// # Errors
+///
+/// - The error the deserializer reports.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
+///
+/// # Translation notes
+///
+/// WARNING: `headers` is `const`, so the implementation cannot modify them.
 ///
 /// # Safety
 ///
@@ -856,13 +925,30 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 }
 
 /// Completion of
-/// [`kafka_common_serialization_Deserializer_deserialize_with_headers_cb`].
+/// `kafka_common_serialization_Deserializer_deserialize_with_headers_cb`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// Non-blocking
-/// [`kafka_common_serialization_Deserializer_deserialize_with_headers`]; `cb`
-/// fires as for [`kafka_common_serialization_Deserializer_deserialize_cb`].
+/// `kafka_common_serialization_Deserializer_deserialize_with_headers`; `cb`
+/// fires as for `kafka_common_serialization_Deserializer_deserialize_cb`.
+///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `headers` - headers associated with the record
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - The error the deserializer reports, delivered to `cb`.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, delivered to `cb`.
+///
+/// # Translation notes
+///
+/// WARNING: `headers` is `const`, so the implementation cannot modify them.
 ///
 /// # Safety
 ///
@@ -895,7 +981,26 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 /// `T deserialize(String topic, Headers headers, ByteBuffer data)`
 /// (KIP-863): `data` is copied once into a buffer the implementation may
 /// keep a slice of, as a `BytesDeserializer` does; the value is delivered as
-/// for [`kafka_common_serialization_Deserializer_deserialize`].
+/// for `kafka_common_serialization_Deserializer_deserialize`.
+///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `headers` - headers associated with the record
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+///
+/// # Returns
+///
+/// deserialized typed data; may be `NULL`
+///
+/// # Errors
+///
+/// - The error the deserializer reports.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
+///
+/// # Translation notes
+///
+/// WARNING: `headers` is `const`, so the implementation cannot modify them.
 ///
 /// # Safety
 ///
@@ -924,14 +1029,31 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 }
 
 /// Completion of
-/// [`kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb`].
+/// `kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb_t =
     unsafe extern "C" fn(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
 /// Non-blocking
-/// [`kafka_common_serialization_Deserializer_deserialize_with_headers_bytes`];
+/// `kafka_common_serialization_Deserializer_deserialize_with_headers_bytes`;
 /// `cb` fires as for
-/// [`kafka_common_serialization_Deserializer_deserialize_cb`].
+/// `kafka_common_serialization_Deserializer_deserialize_cb`.
+///
+/// # Parameters
+///
+/// - `topic` - topic associated with the data
+/// - `headers` - headers associated with the record
+/// - `data` - serialized bytes; `data.data == NULL` is read as an empty array
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - The error the deserializer reports, delivered to `cb`.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, delivered to `cb`.
+///
+/// # Translation notes
+///
+/// WARNING: `headers` is `const`, so the implementation cannot modify them.
 ///
 /// # Safety
 ///
@@ -997,13 +1119,21 @@ unsafe fn invoke_void(
     }
 }
 
-/// `configure(Map<String, ?> configs, boolean isKey)`: `configs` maps
-/// NUL-terminated keys to NUL-terminated values, copied during the call.
-/// Blocks until a C implementation reports; a failure is logged.
+/// Configure this class. Blocks until a C implementation reports.
+///
+/// # Parameters
+///
+/// - `configs` - configs in key/value pairs
+/// - `is_key` - whether the deserializer is used for the key or the value
+///
+/// # Errors
+///
+/// - None: a failure is logged.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid deserializer handle and `configs` null or a
+/// `configs` maps NUL-terminated keys to NUL-terminated values, copied
+/// during the call. `self_` must be a valid deserializer handle and `configs` null or a
 /// valid map of NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -1026,13 +1156,24 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_configure(
     }
 }
 
-/// Completion of [`kafka_common_serialization_Deserializer_configure_cb`]:
+/// Completion of `kafka_common_serialization_Deserializer_configure_cb`:
 /// `configure` is void, so only `opaque` is passed.
 pub type kafka_common_serialization_Deserializer_configure_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
 
-/// Non-blocking [`kafka_common_serialization_Deserializer_configure`]: `cb`
-/// fires with `opaque` on the calling thread, or, for a C implementation's
-/// own `configure`, on the thread that reports. A failure is logged.
+/// Configure this class, without blocking.
+///
+/// # Parameters
+///
+/// - `configs` - configs in key/value pairs
+/// - `is_key` - whether the deserializer is used for the key or the value
+/// - `cb` - the completion, receiving only `opaque`; fired on the calling
+///   thread, or, for a C implementation's own `configure`, on the thread that
+///   reports
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - None: `cb` receives only `opaque`; a failure, a caught Rust panic included, is logged.
 ///
 /// # Safety
 ///
@@ -1084,12 +1225,21 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_close(
     unsafe { invoke_void(self_, "close", CDeserializer::start_close, async |d| d.close().await) }
 }
 
-/// Completion of [`kafka_common_serialization_Deserializer_close_cb`]:
+/// Completion of `kafka_common_serialization_Deserializer_close_cb`:
 /// `close` is void, so only `opaque` is passed.
 pub type kafka_common_serialization_Deserializer_close_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
 
-/// Non-blocking [`kafka_common_serialization_Deserializer_close`]: `cb`
-/// fires as for [`kafka_common_serialization_Deserializer_configure_cb`].
+/// Non-blocking `kafka_common_serialization_Deserializer_close`: `cb`
+/// fires as for `kafka_common_serialization_Deserializer_configure_cb`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving only `opaque`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - None: `cb` receives only `opaque`; a failure, a caught Rust panic included, is logged.
 ///
 /// # Safety
 ///

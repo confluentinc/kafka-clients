@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::delete_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
 
 /// Options for `Admin::delete_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions")]
 pub struct DeleteTopicsOptions {
@@ -40,8 +36,16 @@ impl DeleteTopicsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DeleteTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -49,14 +53,22 @@ impl DeleteTopicsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set to true if quota violation should be automatically retried.
+    ///
+    /// # Arguments
+    ///
+    /// - `retry_on_quota_violation` - `true` to retry on quota violation.
+    ///
+    /// # Returns
+    ///
+    /// This `DeleteTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions#retryOnQuotaViolation")]
     pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {

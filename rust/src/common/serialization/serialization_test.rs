@@ -41,7 +41,7 @@
 //!   `stringSerdeConfigureThrowsOnUnknownEncoding`: the Rust String serdes are
 //!   UTF-8 only and keep the trait's no-op `configure`, so they read no
 //!   `*.encoding` config. Java rejects an unknown charset by throwing from
-//!   `configure` (`StringSerializer.java:47`, `StringDeserializer.java:50`);
+//!   `configure` (`StringSerializer#configure`, `StringDeserializer#configure`);
 //!   the Rust `configure` returns `()`, so it has no way to report it. The
 //!   UTF-8 case is translated below.
 //! - Every `listSerde*` test: there is no `ListSerializer` /
@@ -73,7 +73,7 @@ fn wrap(serialized: &[u8]) -> Bytes {
 }
 
 /// The `String` entry of Java's `allSerdesShouldRoundtripInput`
-/// (`SerializationTest.java:72-91`), through both deserializer overloads.
+/// (`SerializationTest#allSerdesShouldRoundtripInput`), through both deserializer overloads.
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldRoundtripInput")]
 async fn all_serdes_should_roundtrip_input_with_string() {
@@ -165,7 +165,7 @@ async fn all_serdes_should_roundtrip_input_with_bytes() {
 }
 
 /// The serializer half of Java's `allSerdesShouldSupportNull`
-/// (`SerializationTest.java:93-105`) for the String and byte[] serdes (the
+/// (`SerializationTest#allSerdesShouldSupportNull`) for the String and byte[] serdes (the
 /// latter also serializes Java's `Bytes`).
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldSupportNull")]
@@ -201,7 +201,7 @@ async fn all_serdes_should_support_null() {
 }
 
 /// The UTF-8 case of Java's `stringSerdeShouldSupportDifferentEncodings`
-/// (`SerializationTest.java:119-132`), configured through `key.*.encoding` as
+/// (`SerializationTest#stringSerdeShouldSupportDifferentEncodings`), configured through `key.*.encoding` as
 /// Java's `getStringSerde` does.
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#stringSerdeShouldSupportDifferentEncodings")]
@@ -224,7 +224,7 @@ async fn string_serde_should_support_different_encodings() {
     );
 }
 
-/// Java's `stringDeserializerSupportByteBuffer` (`SerializationTest.java:393-407`):
+/// Java's `stringDeserializerSupportByteBuffer` (`SerializationTest#stringDeserializerSupportByteBuffer`):
 /// the KIP-863 overload decodes only the buffer's readable part, here a slice
 /// of a buffer twice its size, as Java's heap buffer of
 /// `serializedBytes.length << 1`.

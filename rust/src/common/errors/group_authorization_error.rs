@@ -27,14 +27,9 @@ use crate::common::protocol::Errors;
 
 /// Group authorization failure with the group ID.
 ///
-/// Corresponds to Java's `GroupAuthorizationException`, error code
-/// `Errors::GroupAuthorizationFailed`.
-///
-/// Java `extends` chain:
-///    `GroupAuthorizationException` -> `AuthorizationException` ->
-///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
-///
-/// Fatal per `RequestUtils.isFatalException`.
+/// Error code `Errors::GroupAuthorizationFailed`. Java `extends` chain:
+/// `GroupAuthorizationException` -> `AuthorizationException` -> `InvalidConfigurationException` ->
+/// `ApiException` -> `KafkaException`. Fatal per `common::requests::request_utils::is_fatal_error`.
 #[derive(Clone, Debug, Delegate)]
 // Two delegations to the same field. Ambassador takes one trait per
 // `#[delegate]`, so the repeated `target` key is unavoidable; clippy's
@@ -52,11 +47,12 @@ pub struct GroupAuthorizationError {
 }
 
 impl GroupAuthorizationError {
-    /// Create a group authorization error for a group ID, formatting the group
-    /// into the message.
+    /// Creates a group authorization error for a group ID, with the message
+    /// `"Not authorized to access group: <group_id>"`.
     ///
-    /// Mirrors Java's static `GroupAuthorizationException.forGroupId(String)`:
-    /// `new GroupAuthorizationException("Not authorized to access group: " + groupId, groupId)`.
+    /// # Arguments
+    ///
+    /// - `group_id` - the group ID that failed authorization
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#forGroupId")]
     pub fn for_group_id(group_id: impl Into<String>) -> Self {
         let group_id = group_id.into();
@@ -67,12 +63,9 @@ impl GroupAuthorizationError {
         }
     }
 
-    /// Create a group authorization error with the code's default message and no
-    /// group ID.
-    ///
-    /// Mirrors Java's `GroupAuthorizationException(String message)` reached via
-    /// the `Errors.GROUP_AUTHORIZATION_FAILED` builder (`exception()`), where the
-    /// message is the default constant and `groupId` is null.
+    /// Creates a group authorization error with the default message of
+    /// `Errors::GroupAuthorizationFailed` and no group ID, as the broker's error code is turned
+    /// into an error.
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException")]
     pub fn with_default_message() -> Self {
         Self {
@@ -81,17 +74,12 @@ impl GroupAuthorizationError {
         }
     }
 
-    /// Create a group authorization error carrying a custom message.
+    /// Creates a group authorization error carrying a custom message.
     ///
-    /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`
-    /// (`GroupAuthorizationException.java:22`), where the error message is
-    /// caller-supplied rather than the default error text.
+    /// # Arguments
     ///
-    /// It is the only Java constructor this struct translates as a constructor —
-    /// [`for_group_id`](Self::for_group_id) translates the `forGroupId` static
-    /// factory and [`with_default_message`](Self::with_default_message) the
-    /// `Errors` one — so the intersection is its own parameter list and it keeps
-    /// the plain name (CLAUDE.md §2).
+    /// - `group_id` - the group ID that failed authorization
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException")]
     pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -100,15 +88,22 @@ impl GroupAuthorizationError {
         }
     }
 
-    /// Access the base error.
-    // the embedded KafkaError base (CLAUDE.md §12.3)
+    /// Returns the embedded `KafkaError` base, holding the error code, message and source.
     #[doc(alias = "rust-only")]
     pub fn kafka_error(&self) -> &KafkaError {
         &self.kafka_error
     }
 
-    /// The group ID that failed authorization. Mirrors Java's
-    /// `GroupAuthorizationException.groupId()`.
+    /// Return the group ID that failed authorization. May be `None` if it is not known
+    /// in the context the error was raised in.
+    ///
+    /// # Returns
+    ///
+    /// nullable group_id
+    ///
+    /// # Translation notes
+    ///
+    /// WARNING: returns an empty string, not `None`, when unknown.
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
@@ -143,10 +138,8 @@ impl ErrorHierarchy for GroupAuthorizationError {
 }
 
 impl GroupAuthorizationError {
-    /// The underlying source, held by the embedded [`KafkaError`] base — Java's
-    /// subclass passes its `cause` up to `super(message, cause)`. Mirrors
-    /// `Throwable.getCause()`.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause, if any, held by the embedded [`KafkaError`] base: Java's
+    /// `getCause()`.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.kafka_error.source()

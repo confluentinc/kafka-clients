@@ -18,13 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The share session epoch is invalid.
+    /// Thrown when the share session epoch is invalid.
     ///
-    /// Corresponds to Java's `InvalidShareSessionEpochException`, error code `Errors::InvalidShareSessionEpoch`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidShareSessionEpochException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidShareSessionEpoch`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidShareSessionEpochException")]
     InvalidShareSessionEpochError,
     code: Errors::InvalidShareSessionEpoch,

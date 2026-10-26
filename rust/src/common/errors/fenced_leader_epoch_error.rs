@@ -18,14 +18,15 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The leader epoch in the request is older than the epoch on the broker.
+    /// The request contained a leader epoch which is smaller than that on the broker that received
+    /// the request. This can happen when an operation is attempted before a pending metadata update
+    /// has been received. Clients will typically refresh metadata before retrying.
     ///
-    /// Corresponds to Java's `FencedLeaderEpochException`, error code `Errors::FencedLeaderEpoch`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `FencedLeaderEpochException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::FencedLeaderEpoch`. Java `extends` chain: `FencedLeaderEpochException`
+    /// -> `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.FencedLeaderEpochException")]
     FencedLeaderEpochError,
     code: Errors::FencedLeaderEpoch,

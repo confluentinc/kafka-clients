@@ -158,12 +158,12 @@ mod tests {
         t
     }
 
-    /// `isAllTopicPartitions` is `data.topics() == null`
-    /// (`DescribeLogDirsRequest.java:66-68`), so only an *explicit* null selects all
+    /// `DescribeLogDirsRequest#isAllTopicPartitions` is `data.topics() == null`,
+    /// so only an *explicit* null selects all
     /// partitions. A default-constructed request does not: an unset nullable array is
-    /// the empty list, not null (`FieldSpec.fieldDefault`, `FieldSpec.java:465-475`),
+    /// the empty list, not null (`FieldSpec#fieldDefault`),
     /// which is why `KafkaAdminClient` spells the all-partitions case out as
-    /// `new DescribeLogDirsRequestData().setTopics(null)` (`KafkaAdminClient.java:3014`)
+    /// `new DescribeLogDirsRequestData().setTopics(null)` (`KafkaAdminClient#describeLogDirs`)
     /// rather than relying on the default.
     #[test]
     fn is_all_topic_partitions_when_topics_null() {

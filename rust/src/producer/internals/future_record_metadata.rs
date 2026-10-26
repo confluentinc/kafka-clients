@@ -197,7 +197,7 @@ impl FutureRecordMetadata {
             // Step 1: Await THIS node's result with timeout
             //
             // Java throws `java.util.concurrent.TimeoutException` here
-            // (`FutureRecordMetadata.java:25` imports it; the throw is at `:76`),
+            // (`org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get(long,TimeUnit)`),
             // which is what `Future.get(timeout, unit)` declares — NOT
             // `org.apache.kafka.common.errors.TimeoutException`. The two share a
             // simple name but are unrelated: the Kafka one is a
@@ -434,7 +434,7 @@ mod tests {
 
     /// Regression test with no Java counterpart: `Duration::MAX` must not overflow
     /// the deadline. Java saturates the deadline at `Long.MAX_VALUE`
-    /// (`FutureRecordMetadata.java:70-73`), so `get(Long.MAX_VALUE, MILLISECONDS)`
+    /// (`FutureRecordMetadata#get(long,TimeUnit)`), so `get(Long.MAX_VALUE, MILLISECONDS)`
     /// waits without limit; adding `Duration::MAX` to an `Instant` panics instead.
     #[tokio::test]
     async fn test_get_with_timeout_duration_max_does_not_overflow() {
@@ -583,7 +583,7 @@ mod tests {
 
         let err = future.get_with_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
         // Java throws `java.util.concurrent.TimeoutException` here
-        // (`FutureRecordMetadata.java:25` imports it, `:76` throws it), which
+        // (`org.apache.kafka.clients.producer.internals.FutureRecordMetadata#get(long,TimeUnit)`), which
         // `Future.get(timeout, unit)` declares — not the retriable Kafka
         // `TimeoutException`. So no predicate holds and there is no wire code.
         assert!(matches!(err, Error::LocalTimeout(_)), "got {err:?}");

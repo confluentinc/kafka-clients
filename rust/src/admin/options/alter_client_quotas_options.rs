@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::alter_client_quotas`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterClientQuotasOptions`.
 
 /// Options for `Admin::alter_client_quotas`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterClientQuotasOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasOptions")]
 pub struct AlterClientQuotasOptions {
@@ -33,8 +29,16 @@ impl AlterClientQuotasOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `AlterClientQuotasOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,17 +46,22 @@ impl AlterClientQuotasOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Sets whether the request should be validated without altering the
-    /// configs.
+    /// Sets whether the request should be validated without altering the configs.
     ///
-    /// Mirrors `AlterClientQuotasOptions.validateOnly(boolean)`.
+    /// # Arguments
+    ///
+    /// - `validate_only` - `true` to only validate the request.
+    ///
+    /// # Returns
+    ///
+    /// This `AlterClientQuotasOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
@@ -60,10 +69,7 @@ impl AlterClientQuotasOptions {
         self
     }
 
-    /// Returns whether the request should be validated without altering the
-    /// configs.
-    ///
-    /// Mirrors `AlterClientQuotasOptions.validateOnly()`.
+    /// Returns whether the request should be validated without altering the configs.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasOptions#validateOnly")]
     pub fn validate_only(&self) -> bool {
         self.validate_only

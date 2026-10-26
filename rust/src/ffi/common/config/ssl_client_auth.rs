@@ -42,7 +42,7 @@ pub enum kafka_common_config_SslClientAuth_e {
     kafka_common_config_SslClientAuth_NONE,
 }
 
-/// One static instance per value, indexed by [`kafka_common_config_SslClientAuth_e`].
+/// One static instance per value, indexed by `kafka_common_config_SslClientAuth_e`.
 static VARIANTS: [SslClientAuth; 3] = [SslClientAuth::Required, SslClientAuth::Requested, SslClientAuth::None];
 
 /// Exhaustive, so a value Java adds fails to compile until it has its C
@@ -72,28 +72,28 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_config_SslClientAuth_t)
     unsafe { *(value as *const SslClientAuth) }
 }
 
-/// `SslClientAuth.REQUIRED`.
+/// Returns `SslClientAuth.REQUIRED`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_required() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::Required)
 }
 
-/// `SslClientAuth.REQUESTED`.
+/// Returns `SslClientAuth.REQUESTED`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_requested() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::Requested)
 }
 
-/// `SslClientAuth.NONE`.
+/// Returns `SslClientAuth.NONE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_SslClientAuth_none() -> *const kafka_common_config_SslClientAuth_t {
     singleton(SslClientAuth::None)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_config_SslClientAuth_REQUIRED`, the first enumerator:
 /// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
@@ -112,13 +112,20 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `forConfig(String key)`: the singleton for a configuration value, case
-/// insensitively; a null `key` is Java's null, giving `NONE`, and a value
-/// Java does not know gives `NULL`.
+/// Returns the value for a configuration value, case insensitively.
+///
+/// # Parameters
+///
+/// - `key` - the configuration value, or `NULL`
+///
+/// # Returns
+///
+/// The value; `NONE` for a `NULL` `key`, `NULL` for a value Java does not know.
 ///
 /// # Safety
 ///
-/// `key` must be null or a valid NUL-terminated string.
+/// `key` must be `NULL` or a valid NUL-terminated string. The returned singleton is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
@@ -131,12 +138,12 @@ pub unsafe extern "C" fn kafka_common_config_SslClientAuth_for_config(
     SslClientAuth::for_config(key.as_deref()).map_or(std::ptr::null(), singleton)
 }
 
-/// `toString()`: Java's constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the constant's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_SslClientAuth_to_string(

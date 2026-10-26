@@ -55,11 +55,10 @@ pub struct ClientResponse {
     version_mismatch: Option<UnsupportedVersionError>,
     /// The authentication error, if there was one.
     ///
-    /// Java's `AuthenticationException authenticationException`
-    /// (`ClientResponse.java:38`) — the object, so the subclass the channel
-    /// raised survives to `NetworkClientDelegate.FutureCompletionHandler`, which
-    /// completes the request's future with it verbatim
-    /// (`NetworkClientDelegate.java:443-444`). Rust's flat [`Error`] cannot name
+    /// Java's `AuthenticationException` field `ClientResponse#authenticationException`
+    /// — the object, so the subclass the channel raised survives to
+    /// `NetworkClientDelegate.FutureCompletionHandler#onComplete`, which completes the
+    /// request's future with it verbatim. Rust's flat [`Error`] cannot name
     /// the intermediate `AuthenticationException` class in a type; whatever is
     /// carried here answers `true` to
     /// [`is_authentication_error`](Error::is_authentication_error).
@@ -188,7 +187,7 @@ impl ClientResponse {
     }
 
     /// Returns the authentication error, if any. Java's
-    /// `authenticationException()` (`ClientResponse.java:128`).
+    /// `ClientResponse#authenticationException()`.
     #[doc(alias = "org.apache.kafka.clients.ClientResponse#authenticationException")]
     pub fn authentication_error(&self) -> Option<&Error> {
         self.authentication_error.as_ref()
@@ -227,7 +226,7 @@ impl ClientResponse {
 
     /// Returns the request latency in milliseconds
     /// (`received_time_ms - created_time_ms`). Translates Java's
-    /// `ClientResponse.requestLatencyMs()` (`ClientResponse.java:148`), which is
+    /// `ClientResponse#requestLatencyMs`, which is
     /// the only latency accessor Java exposes.
     #[doc(alias = "org.apache.kafka.clients.ClientResponse#requestLatencyMs")]
     pub fn request_latency_ms(&self) -> i64 {

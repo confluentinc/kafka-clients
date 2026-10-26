@@ -116,8 +116,8 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
                 // `java.util.concurrent.TimeoutException`, which is what
-                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
-                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `Future.get(timeout, unit)` declares and what
+                // `org.apache.kafka.common.KafkaFuture` imports, not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
                 Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",

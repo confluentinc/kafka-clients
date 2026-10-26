@@ -289,7 +289,7 @@ where
                             // polling" case must push_front to restore.
                             //
                             // `fetch.isEmpty()` is Java's TWO-term predicate
-                            // (`Fetch.java:116-118`): `numRecords == 0 &&
+                            // (`org.apache.kafka.clients.consumer.internals.Fetch#isEmpty`): `numRecords == 0 &&
                             // !positionAdvanced`. Dropping the second term
                             // makes a fetch that advanced the position with
                             // zero records (an all-aborted batch under
@@ -358,9 +358,9 @@ where
                         .add(&cf_back.partition, partition_records, next_offset, part_position_advanced);
                     if cf_back.is_exhausted() && !cf_back.is_consumed() {
                         // Java drains an exhausted fetch right after moving its
-                        // partition's position (`FetchCollector.java:189-193`,
-                        // KAFKA-15529). Here the position moves only once the
-                        // whole call has read, so the fetch is held, still
+                        // partition's position
+                        // (`org.apache.kafka.clients.consumer.internals.FetchCollector#fetchRecords`, KAFKA-15529).
+                        // Here the position moves only once the whole call has read, so the fetch is held, still
                         // buffered, and drained after that (`drain_exhausted`).
                         fetch_buffer.hold_exhausted(cf_back);
                     } else {
@@ -373,7 +373,7 @@ where
                     // Java has no per-iteration `fetch.isEmpty()` test here:
                     // `fetchRecords` throws straight out of the `while` into
                     // the single `catch (KafkaException e)` at
-                    // `FetchCollector.java:138`, which is where the
+                    // `org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch`, which is where the
                     // swallow/propagate decision is taken. So there is exactly
                     // one thing to do on this path regardless of what has been
                     // collected: re-stash the completed fetch and stop.
@@ -413,11 +413,11 @@ where
         moved?;
         self.record_partition_lag_and_lead(&state.advanced);
 
-        // Java's outer `catch (KafkaException e)` (`FetchCollector.java:138`)
-        // swallows the error when we have records in hand (`!fetch.isEmpty()`).
-        // But the generic `java.lang` / `java.util` runtime exceptions are NOT
+        // Java's outer `catch (KafkaException e)`
+        // (`org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch`) swallows the error when we have
+        // records in hand (`!fetch.isEmpty()`). But the generic `java.lang` / `java.util` runtime exceptions are NOT
         // `KafkaException`s — they sit beside it in the hierarchy rather than
-        // below it (`common/KafkaException.java:22`), so they escape the catch
+        // below it (`org.apache.kafka.common.KafkaException`), so they escape the catch
         // unconditionally. Mirror that here: a generic error always propagates,
         // even with already-decoded records buffered.
         //
@@ -428,7 +428,7 @@ where
         // `LocalConcurrentModification`, both of which Java also lets escape.)
         //
         // `fetch.isEmpty()` is the two-term `numRecords == 0 &&
-        // !positionAdvanced` (`Fetch.java:116-118`), NOT "no records": a fetch
+        // !positionAdvanced` (`Fetch#isEmpty`), NOT "no records": a fetch
         // that advanced the consumed position without yielding a record is
         // non-empty to Java, so the error is swallowed and the advanced
         // next-offsets are returned to the caller.
@@ -446,7 +446,7 @@ where
     }
 
     /// Closes the key and value deserializers, as Java's consumer closes its
-    /// `Deserializers` on close (`AsyncKafkaConsumer.java:1679`).
+    /// `Deserializers` on close (`AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean)`).
     ///
     /// Has no Java counterpart in `FetchCollector`: Java's consumer and
     /// collector share one `Deserializers` object, which the consumer closes
@@ -471,7 +471,7 @@ where
     /// Returns whether it has: Java's `Fetch.positionAdvanced` for the
     /// partition.
     ///
-    /// Java moves the position here (`FetchCollector.java:177-187`); the Rust
+    /// Java moves the position here (`FetchCollector#fetchRecords`); the Rust
     /// collector records the move in `tp`'s entry of `advanced`, and
     /// [`Self::move_positions`] makes it once the call has read everything,
     /// since a deserializer `.await` may still follow (see [`CollectState`]).
@@ -495,10 +495,11 @@ where
     /// where the call has read `tp` up to.
     ///
     /// Java moves the position as soon as it has read a fetch
-    /// (`FetchCollector.java:177-185`), so a later fetch for the same partition
+    /// (`FetchCollector#fetchRecords`), so a later fetch for the same partition
     /// in the same `collectFetch` is checked against the moved position, both
-    /// when it is initialized (`:258-263`, `:346-353`) and when its records are
-    /// read (`:170`). Here the call moves the positions only at its end
+    /// when it is initialized (`FetchCollector#handleInitializeSuccess`,
+    /// `FetchCollector#handleInitializeErrors`) and when its records are
+    /// read (`FetchCollector#fetchRecords`). Here the call moves the positions only at its end
     /// ([`Self::move_positions`]), so each of those checks reads the position
     /// through this function. While `subscribed` is no longer the position
     /// the call read from (the user or the background task moved it), it wins,
@@ -520,16 +521,15 @@ where
 
     /// Moves the position of every partition in `advanced` the call has read
     /// past its position, under one `SubscriptionState` lock: the
-    /// `subscriptions.position(tp, nextPosition)` Java's `fetchRecords` makes
-    /// for each partition (`FetchCollector.java:177-187`).
+    /// `subscriptions.position(tp, nextPosition)` Java's `FetchCollector#fetchRecords` makes
+    /// for each partition.
     ///
     /// Java checks a partition and moves its position with no wait in
     /// between. Here the deserializers ran since the partition was checked,
     /// and the background task or a listener may have unassigned it, paused
     /// it, reset or validated it, or the user seeked it meanwhile. So each
-    /// partition is checked again first, as Java's `fetchRecords` checks it
-    /// (`FetchCollector.java:151-210`): one no longer assigned, no longer
-    /// fetchable, or whose position is no longer the one the call read from,
+    /// partition is checked again first, as Java's `FetchCollector#fetchRecords` checks it:
+    /// one no longer assigned, no longer fetchable, or whose position is no longer the one the call read from,
     /// keeps its position, and its records and next offset are dropped from
     /// `collected`, to be fetched again, so that no record is returned whose
     /// position does not move past it. `collected`'s `position_advanced` is
@@ -539,7 +539,7 @@ where
     ///
     /// The illegal-state error of a failed `set_position`, as Java's
     /// `subscriptions.position(tp, nextPosition)` throws
-    /// (`SubscriptionState.java:1208-1211`).
+    /// (`SubscriptionState.TopicPartitionState#position(FetchPosition)`).
     fn move_positions(&self, collected: &mut Collected<K, V>, advanced: &[AdvancedPosition]) -> Result<(), Error> {
         if advanced.is_empty() {
             return Ok(());
@@ -626,9 +626,8 @@ where
     }
 
     /// Records the lag and lead of every partition in `advanced` still
-    /// assigned, as Java's `fetchRecords` does after moving the position
-    /// (`FetchCollector.java:195-202`). The record methods update the
-    /// client-level INFO `records-lag-max` / `records-lead-min` sensors AND
+    /// assigned, as Java's `FetchCollector#fetchRecords` does after moving the position.
+    /// The record methods update the client-level INFO `records-lag-max` / `records-lead-min` sensors AND
     /// register + record the DETAILED per-partition sensors at INFO — full
     /// Java parity, no DEBUG gating (see `FetchMetricsManager`). This is
     /// per-partition per-poll, not per-record.
@@ -722,7 +721,7 @@ where
             },
             FetchabilityCheck::MissingPosition => {
                 // Java throws IllegalStateException here
-                // (`FetchCollector.java:166-167`), but that path is
+                // (`org.apache.kafka.clients.consumer.internals.FetchCollector#fetchRecords`), but that path is
                 // effectively dead code because Java's `isFetchable(tp)`
                 // already requires `hasValidPosition`. In Rust the
                 // analogous check inside `is_fetchable` covers the same
@@ -878,7 +877,7 @@ where
         let error = Errors::for_code(completed_fetch.partition_data.error_code);
 
         // Compute the result first; both of Java's finally statements then run
-        // below, mirroring `FetchCollector.java:237-245`.
+        // below, mirroring `org.apache.kafka.clients.consumer.internals.FetchCollector#initialize`.
         //
         // The aggregator is captured before `completed_fetch` is moved into the
         // handlers, because Java's finally still holds the reference and calls
@@ -902,8 +901,8 @@ where
         };
 
         // Finally, statement 1: `if (recordMetrics) completedFetch.recordAggregatedMetrics(0, 0);`
-        // (`FetchCollector.java:239-241`). Java sets `recordMetrics = ret == null` on
-        // the success path and leaves it `true` everywhere else — including when the
+        // (`org.apache.kafka.clients.consumer.internals.FetchCollector#initialize`). Java sets
+        // `recordMetrics = ret == null` on the success path and leaves it `true` everywhere else — including when the
         // try exits by throwing — so it records for every outcome except a fetch that
         // is handed back to the caller. A returned fetch reports its real totals from
         // `drain()` instead; a discarded one never drains, and the aggregator only
@@ -961,8 +960,8 @@ where
 
         // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
         // throw new KafkaException("Failed to make progress reading messages at ...")`
-        // (`FetchCollector.java:270-275`). Brokers before KIP-74 could return a
-        // non-empty payload containing no *complete* batch; without this check the
+        // (`org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeSuccess`). Brokers before KIP-74
+        // could return a non-empty payload containing no *complete* batch; without this check the
         // consumer re-fetches the same offset forever and reports nothing, because
         // no records are decoded so the position never advances.
         //
@@ -973,7 +972,7 @@ where
         // is the case this guard mainly exists for. A corrupt size or magic is a
         // different outcome: Java's `hasNext()` lets `nextBatchSize()`'s
         // `CorruptRecordException` propagate out of `initialize`
-        // (`ByteBufferLogInputStream.java:73`, `:76`, `:84`), so it must NOT be
+        // (`org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatchSize`), so it must NOT be
         // folded into "no batch" — that would relabel a retriable
         // `CORRUPT_MESSAGE` as a non-retriable bare `KafkaException` whose message
         // misdescribes the fault.
@@ -1106,10 +1105,10 @@ where
                 warn!("Unknown server error while fetching offset {fetch_offset} for topic-partition {tp}");
                 Ok(completed_fetch)
             },
-            // Java throws a *bare* `KafkaException` here (`FetchCollector.java:371-375`),
-            // not a `CorruptRecordException` — deliberately, because
-            // `CorruptRecordException extends RetriableException` and a corrupt
-            // message must reach the application rather than be retried at the same
+            // Java throws a *bare* `KafkaException` here
+            // (`org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeErrors`), not a
+            // `CorruptRecordException` — deliberately, because `CorruptRecordException extends RetriableException` and
+            // a corrupt message must reach the application rather than be retried at the same
             // offset forever. Building it from `Errors::CorruptMessage` would resolve
             // to that retriable class and invert the decision.
             Errors::CorruptMessage => Err(Box::new((
@@ -1128,8 +1127,8 @@ where
         }
     }
 
-    /// Java's `OFFSET_OUT_OF_RANGE` branch of `handleInitializeErrors`
-    /// (`FetchCollector.java:340-363`), with the position read through
+    /// Java's `OFFSET_OUT_OF_RANGE` branch of `FetchCollector#handleInitializeErrors`,
+    /// with the position read through
     /// [`Self::effective_position`]. A reset requested at a position the call
     /// has read up to is marked in `advanced`, so that
     /// [`Self::move_positions`] returns the records the call read, as Java
@@ -1281,7 +1280,7 @@ impl<K, V> Collected<K, V> {
     }
 
     /// Java's `Fetch.isEmpty()`, the two-term `numRecords == 0 &&
-    /// !positionAdvanced` (`Fetch.java:116-118`).
+    /// !positionAdvanced`.
     fn is_empty(&self) -> bool {
         ConsumerRecords::fetch_is_empty(&self.records_by_partition, self.position_advanced)
     }
@@ -1951,7 +1950,7 @@ mod tests {
     /// AWAIT_VALIDATION, a seek, or an unassignment — keeps the position it
     /// has then once the collect completes, and its records are not returned:
     /// the collect checks every partition again before it moves the positions
-    /// (Java's `fetchRecords` checks, `FetchCollector.java:151-210`), and
+    /// (Java's `FetchCollector#fetchRecords` checks), and
     /// drains its fetch, so it is fetched again from that position. The other
     /// partition's records are returned and its position moves past them.
     #[test]
@@ -2068,7 +2067,7 @@ mod tests {
 
     /// Critic 100 L1 (KAFKA-15529, the Rust ownership model): Java initializes
     /// the head fetch in place (`peek`, `initialize`, `setNextInLineFetch`,
-    /// `poll`, `FetchCollector.java:101-122`), so its partition stays buffered
+    /// `poll`, in `FetchCollector#collectFetch`), so its partition stays buffered
     /// throughout. The Rust collector takes the fetch out to initialize it;
     /// `buffered_partitions()`, which the background task reads to decide what
     /// to fetch, must still report the partition from inside `initialize`.
@@ -2260,13 +2259,13 @@ mod tests {
         assert_eq!(0, fetch.next_offsets().len());
     }
 
-    /// In-collect variant of Java's `FetchRequestManagerTest.testStaleOutOfRangeError`
-    /// (`FetchRequestManagerTest.java:1866`): the stale `OFFSET_OUT_OF_RANGE`
+    /// In-collect variant of Java's `FetchRequestManagerTest#testStaleOutOfRangeError`:
+    /// the stale `OFFSET_OUT_OF_RANGE`
     /// is made stale not by a seek but by a fetch read earlier in the same
     /// collect, as after a leader change with two fetches in flight. Java moves
     /// the position to 10 while reading the first fetch
-    /// (`FetchCollector.java:177-185`), so the error at 0 is discarded as stale
-    /// (`:346-350`): the ten records are returned, the position is 10 and no
+    /// (`FetchCollector#fetchRecords`), so the error at 0 is discarded as stale
+    /// (`FetchCollector#handleInitializeErrors`): the ten records are returned, the position is 10 and no
     /// reset is pending, which with `latest` would lose them.
     #[test]
     fn test_stale_out_of_range_error_within_one_collect() {
@@ -2293,7 +2292,7 @@ mod tests {
     /// The current counterpart of [`test_stale_out_of_range_error_within_one_collect`]:
     /// the `OFFSET_OUT_OF_RANGE` is at 10, where the first fetch leaves the
     /// position. Java has moved the position to 10, so the error is current
-    /// (`FetchCollector.java:351-356`): it requests a reset, which clears the
+    /// (`FetchCollector#handleInitializeErrors`): it requests a reset, which clears the
     /// position (AWAIT_RESET has none), and still returns the ten records it
     /// had read.
     #[test]
@@ -2321,7 +2320,7 @@ mod tests {
 
     /// A duplicate data response at the offset a fetch read earlier in the
     /// same collect is stale, as Java finds it against the position it has
-    /// already moved (`FetchCollector.java:258-263`): its high watermark,
+    /// already moved (`FetchCollector#handleInitializeSuccess`): its high watermark,
     /// last stable offset and log start offset are not applied
     /// (`updatePartitionState` is never reached), and its records are not
     /// returned.
@@ -2646,9 +2645,9 @@ mod tests {
     // ── the deferred-error escape clause ──────────────────────────────────
     //
     // Java's `catch (KafkaException e) { if (fetch.isEmpty()) throw e; }`
-    // (`FetchCollector.java:138`) can only catch `KafkaException`s. A generic
-    // `java.lang` / `java.util` runtime exception is a sibling of
-    // `KafkaException`, not a subclass (`common/KafkaException.java:22`), so
+    // (`org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch`) can only catch `KafkaException`s. A
+    // generic `java.lang` / `java.util` runtime exception is a sibling of
+    // `KafkaException`, not a subclass (`org.apache.kafka.common.KafkaException`), so
     // it flies straight past the catch even when records were collected.
     //
     // The cases below pin BOTH halves of that contract, so the escape clause
@@ -2736,8 +2735,9 @@ mod tests {
     /// `KafkaException`s, so this swallow guard applies to them.
     ///
     /// Java's `maybeEnsureValid` throws a bare `KafkaException`
-    /// (`CompletedFetch.java:157-162`) and the batch iterator throws
-    /// `InvalidRecordException` (`DefaultRecordBatch.java:307,607`) — both inside
+    /// (`CompletedFetch#maybeEnsureValid(FetchConfig,RecordBatch)`) and the batch iterator throws
+    /// `InvalidRecordException` (`DefaultRecordBatch#uncompressedIterator`,
+    /// `DefaultRecordBatch.RecordIterator#next`) — both inside
     /// `KafkaException`, so `collectFetch` returns the other partitions' records
     /// and re-reads the bad one next poll.
     ///
@@ -3464,19 +3464,19 @@ mod tests {
     // ── Java's two-term `Fetch.isEmpty()` (Issue 250) ─────────────────────
     //
     // `Fetch.isEmpty()` is `numRecords == 0 && !positionAdvanced`
-    // (`Fetch.java:116-118`), and BOTH of `collectFetch`'s guards use it: the
+    // (`org.apache.kafka.clients.consumer.internals.Fetch#isEmpty`), and BOTH of
+    // `org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch`'s guards use it: the
     // one that decides whether to drop the offending entry from the buffer
-    // (`FetchCollector.java:115`) and the one that decides whether to rethrow
-    // (`:138-139`). A records-only spelling makes an all-aborted READ_COMMITTED
-    // batch — zero records, position advanced — look empty, which loses BOTH
+    // and the one that decides whether to rethrow (the `catch`). A records-only spelling makes an all-aborted
+    // READ_COMMITTED batch — zero records, position advanced — look empty, which loses BOTH
     // the position progress and the queued entry Java keeps on purpose.
 
     /// One partition advances the position with zero records (all-aborted
     /// batch under READ_COMMITTED); a second partition's `initialize` then
     /// fails with a `KafkaException`.
     ///
-    /// Java: `fetch.isEmpty()` is FALSE, so `:139` does not rethrow (the error
-    /// is swallowed and surfaces on the next poll) and `:116`'s condition is
+    /// Java: `fetch.isEmpty()` is FALSE, so `FetchCollector#collectFetch`'s `catch` does not rethrow (the
+    /// error is swallowed and surfaces on the next poll) and its buffer-removal condition is
     /// also false, so the offending entry is left queued.
     #[test]
     fn test_kafka_error_swallowed_when_only_the_position_advanced() {
@@ -3513,7 +3513,8 @@ mod tests {
             ABORTED_PRODUCER_ID,
             0,
         ));
-        // Zero-byte payload, so Java's `:116` guard turns purely on
+        // Zero-byte payload, so Java's buffer-removal guard in
+        // `org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch` turns purely on
         // `fetch.isEmpty()` — the `recordsSize == 0` half is satisfied.
         h.fetch_buffer.add(build_completed_fetch_for_init_error(&h, failing.clone(), 0));
 
@@ -3563,11 +3564,11 @@ mod tests {
     // ── `batches.hasNext()` (Issues 253, 262 / finding 134) ───────────────
     //
     // Java's guard is `if (!batches.hasNext() && recordsSize(partition) > 0)`
-    // (`FetchCollector.java:265-270`). `hasNext()` is
-    // `ByteBufferLogInputStream.nextBatch() != null` (`:41-46`), i.e.
+    // (`org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeSuccess`). `hasNext()` is
+    // `org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatch` `!= null`, i.e.
     // `nextBatchSize()` PLUS the completeness test `remaining < batchSize`, and
     // `nextBatchSize()` itself throws `CorruptRecordException` for a bad size or
-    // magic (`:73`, `:76`, `:84`). Three distinct outcomes, all pinned here.
+    // magic. Three distinct outcomes, all pinned here.
 
     /// Builds a `CompletedFetch` whose payload is exactly `records`, so a test
     /// can hand `initialize` a malformed or truncated buffer.
@@ -3649,7 +3650,7 @@ mod tests {
 
     /// A payload whose length field is below the minimum record overhead:
     /// `nextBatchSize()` throws `CorruptRecordException`
-    /// (`ByteBufferLogInputStream.java:72-74`), which propagates out of
+    /// (`ByteBufferLogInputStream#nextBatchSize`), which propagates out of
     /// `initialize` INSTEAD of the "Failed to make progress" error. The class
     /// and the message both matter: `CORRUPT_MESSAGE` is retriable, a bare
     /// `KafkaException` is not, so folding the two would turn a transient
@@ -3668,7 +3669,7 @@ mod tests {
     }
 
     /// The magic-byte half of the same `CorruptRecordException`
-    /// (`ByteBufferLogInputStream.java:83-84`).
+    /// (`ByteBufferLogInputStream#nextBatchSize`).
     #[test]
     fn test_initialize_corrupt_magic_propagates_corrupt_record_error() {
         let mut buf = vec![0u8; AbstractRecords::HEADER_SIZE_UP_TO_MAGIC];
@@ -3696,7 +3697,7 @@ mod tests {
     // ── `initialize`'s finally: `recordAggregatedMetrics(0, 0)` (finding 132)
 
     /// Java's `finally` records a ZERO contribution for a fetch it is about to
-    /// discard (`FetchCollector.java:239-241`, `recordMetrics = ret == null`).
+    /// discard (`FetchCollector#initialize`, `recordMetrics = ret == null`).
     /// The aggregator publishes the fetch-level sensors only once EVERY
     /// partition of the response has reported, so skipping the zero record
     /// suppresses the metrics for the whole response — including the partitions

@@ -13,9 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::list_partition_reassignments`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.ListPartitionReassignmentsResult`.
 
 use std::collections::HashMap;
 
@@ -23,9 +20,6 @@ use crate::admin::PartitionReassignment;
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::list_partition_reassignments`.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.ListPartitionReassignmentsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult")]
 pub struct ListPartitionReassignmentsResult {
@@ -39,10 +33,8 @@ impl ListPartitionReassignmentsResult {
         Self { future }
     }
 
-    /// Return a future which yields a map containing each partition's
+    /// Returns a future which yields a map containing each partition's
     /// reassignments.
-    ///
-    /// Mirrors `reassignments()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListPartitionReassignmentsResult#reassignments")]
     pub fn reassignments(&self) -> KafkaFuture<HashMap<TopicPartition, PartitionReassignment>> {
         self.future.clone()

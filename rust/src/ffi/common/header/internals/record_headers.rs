@@ -41,7 +41,7 @@ pub struct kafka_common_header_internals_RecordHeaders_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_header_internals_RecordHeaders_t`] points at: the
+/// What a `kafka_common_header_internals_RecordHeaders_t` points at: the
 /// headers plus the lazily built `Headers` view.
 pub(crate) struct RecordHeadersInner {
     /// The headers the handle owns; empty, and unused, for a handle built by
@@ -217,7 +217,7 @@ impl Drop for RecordHeadersInner {
 }
 
 /// Hands `headers` to C as an owned handle, freed with
-/// [`kafka_common_header_internals_RecordHeaders_destroy`].
+/// `kafka_common_header_internals_RecordHeaders_destroy`.
 pub(crate) fn box_record_headers(headers: RecordHeaders) -> *mut kafka_common_header_internals_RecordHeaders_t {
     Box::into_raw(RecordHeadersInner::boxed(headers)) as *mut kafka_common_header_internals_RecordHeaders_t
 }
@@ -263,8 +263,12 @@ pub(crate) unsafe fn record_headers_mut<'a>(
     unsafe { &mut *RecordHeadersInner::headers_ptr(headers as *mut RecordHeadersInner) }
 }
 
-/// `new RecordHeaders()`: empty, mutable. Owned, freed with
-/// [`kafka_common_header_internals_RecordHeaders_destroy`].
+/// `new RecordHeaders()`: empty, mutable.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_header_internals_RecordHeaders_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafka_common_header_internals_RecordHeaders_t
@@ -272,12 +276,19 @@ pub extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafk
     box_record_headers(RecordHeaders::new())
 }
 
-/// `new RecordHeaders(Header[] headers)`: `headers` holds
-/// `const kafka_common_header_internals_RecordHeader_t *`, copied.
+/// `new RecordHeaders(Header[] headers)`.
+///
+/// # Parameters
+///
+/// - `headers` - a `kafka_List_t` of
+///   `const kafka_common_header_internals_RecordHeader_t *`, copied
 ///
 /// # Safety
 ///
 /// `headers` must be null or a valid list of record-header handles.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_header_internals_RecordHeaders_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header_slice(
@@ -289,12 +300,19 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
     box_record_headers(RecordHeaders::with_header_slice(&unsafe { list_record_headers(headers) }))
 }
 
-/// `new RecordHeaders(Iterable<Header> headers)`: `headers` holds
-/// `const kafka_common_header_internals_RecordHeader_t *`, copied.
+/// `new RecordHeaders(Iterable<Header> headers)`.
+///
+/// # Parameters
+///
+/// - `headers` - a `kafka_List_t` of
+///   `const kafka_common_header_internals_RecordHeader_t *`, copied
 ///
 /// # Safety
 ///
 /// `headers` must be null or a valid list of record-header handles.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_header_internals_RecordHeaders_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header_iter(
@@ -308,9 +326,16 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header
 
 /// `new RecordHeaders(RecordHeaders other)`: a mutable copy of `other`.
 ///
+/// # Parameters
+///
+/// - `other` - the headers to copy
+///
 /// # Safety
 ///
 /// `other` must be a valid record-headers handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_header_internals_RecordHeaders_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_record_headers(
@@ -344,7 +369,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_set_read_on
     unsafe { &mut *RecordHeadersInner::headers_ptr(self_ as *mut RecordHeadersInner) }.set_read_only();
 }
 
-/// `isReadOnly()`, as `0` / `1`.
+/// Returns `isReadOnly()`, as `0` / `1`.
 ///
 /// # Safety
 ///
@@ -359,11 +384,13 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_is_read_onl
     i8::from(unsafe { record_headers_ref(self_) }.is_read_only())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-headers handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
@@ -375,9 +402,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
     into_c_string(&unsafe { record_headers_ref(self_) }.to_string())
 }
 
-/// The handle as the `Headers` interface it implements: a borrowed view
-/// valid until the handle is destroyed, never passed to a `_destroy`
-/// (`Headers_t` has none). It takes a `const` handle, so the read-only
+/// Returns the handle as the `Headers` interface it implements. It takes a `const` handle, so the read-only
 /// handles (a deserializer's `headers`, a record's `headers()` getter) need no
 /// cast; the view is non-`const` because `Headers` mutates, and the mutating
 /// `Headers_*` functions may be called on it only when the handle was
@@ -387,6 +412,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 ///
 /// `self_` must be a valid record-headers handle that no other call uses at
 /// the same time.
+///
+/// The returned view is borrowed, valid until `self_` is destroyed, and is never passed to a
+/// `_destroy` (`kafka_common_header_Headers_t` has none).
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders__as_Headers(

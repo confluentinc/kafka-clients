@@ -17,8 +17,6 @@
 //! Corresponds to `org.apache.kafka.common.acl.AclPermissionType`.
 
 /// Represents whether an ACL grants or denies permissions.
-///
-/// Corresponds to `org.apache.kafka.common.acl.AclPermissionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType")]
@@ -35,7 +33,7 @@ pub enum AclPermissionType {
 }
 
 impl AclPermissionType {
-    /// Return the code of this permission type.
+    /// Returns the code of this permission type.
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#code")]
     pub fn code(&self) -> i8 {
         match self {
@@ -46,8 +44,12 @@ impl AclPermissionType {
         }
     }
 
-    /// Return the `AclPermissionType` with the provided code or
+    /// Returns the `AclPermissionType` with the provided code or
     /// [`AclPermissionType::Unknown`] if one cannot be found.
+    ///
+    /// # Arguments
+    ///
+    /// - `code` - the code to look up
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#fromCode")]
     pub fn from_code(code: i8) -> AclPermissionType {
         match code {
@@ -61,8 +63,13 @@ impl AclPermissionType {
 
     /// Parse the given string as an ACL permission.
     ///
-    /// Returns the `AclPermissionType`, or [`AclPermissionType::Unknown`] if the
-    /// string could not be matched (case-insensitive).
+    /// # Arguments
+    ///
+    /// - `str` - The string to parse.
+    ///
+    /// # Returns
+    ///
+    /// The `AclPermissionType`, or `UNKNOWN` if the string could not be matched.
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#fromString")]
     pub fn from_string(str: &str) -> AclPermissionType {
         match str.to_uppercase().as_str() {
@@ -74,7 +81,7 @@ impl AclPermissionType {
         }
     }
 
-    /// Return true if this permission type is [`AclPermissionType::Unknown`].
+    /// Returns true if this permission type is [`AclPermissionType::Unknown`].
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == AclPermissionType::Unknown

@@ -25,8 +25,8 @@
 //! The [`Producer`] trait's transactional methods are pure in-memory state:
 //! there is no coordinator, no `TransactionManager` and no network, matching
 //! Java's `MockProducer`. While a transaction is in flight, sends are staged in
-//! `uncommitted_sends` (Java `MockProducer.java:60`) and offsets in
-//! `uncommitted_consumer_group_offsets` (`:68`) rather than published;
+//! `uncommitted_sends` (Java `MockProducer`) and offsets in
+//! `uncommitted_consumer_group_offsets` (`MockProducer#sendOffsetsToTransaction`) rather than published;
 //! [`commit_transaction`](Producer::commit_transaction) moves both into the
 //! visible [`history()`](MockProducer::history) and
 //! [`consumer_group_offsets_history()`](MockProducer::consumer_group_offsets_history),
@@ -104,37 +104,37 @@ use super::Callback;
 //   missing = sorted((ln, n) for n, ln in names.items() if snake(n) not in defs)
 //   print(f"{len(names)} declared, {len(names)-len(missing)} present, "
 //         f"{len(missing)} absent")
-//   for ln, n in missing: print(f"  {ln:4d} {n}")
+//   for ln, n in missing: print(f"  {n}")
 //   PY
 //
 //   40 declared, 33 present, 7 absent
-//     378 disableTelemetry
-//     387 injectTimeoutException
-//     396 setClientInstanceId
-//     401 clientInstanceId
-//     661 addedMetrics
-//     666 registerMetricForSubscription
-//     671 unregisterMetricFromSubscription
+//     disableTelemetry
+//     injectTimeoutException
+//     setClientInstanceId
+//     clientInstanceId
+//     addedMetrics
+//     registerMetricForSubscription
+//     unregisterMetricFromSubscription
 //
 // All seven predate Phase 7 and none is in its scope — PLAN §Phase-7 enumerates
 // the transactional surface, and these are two other features:
 //
-//   `clientInstanceId` (401), `registerMetricForSubscription` (666),
-//     `unregisterMetricFromSubscription` (671) — `Producer`-interface methods
+//   `clientInstanceId`, `registerMetricForSubscription`,
+//     `unregisterMetricFromSubscription` — `Producer`-interface methods
 //     the *Rust trait does not declare*. The gap is in `producer.rs`, not
 //     here: a `MockProducer` impl would have nothing to override. Tracked as
 //     PLAN §9.23.
-//   `disableTelemetry` (378), `injectTimeoutException` (387),
-//     `setClientInstanceId` (396), `addedMetrics` (661) — the mock-only knobs
+//   `disableTelemetry`, `injectTimeoutException`,
+//     `setClientInstanceId`, `addedMetrics` — the mock-only knobs
 //     that exist to drive those same two features. They follow whenever the
 //     three above land. Same §9.23.
 //
 // Three names the Phase-7 paste listed as absent are now present, which is why
 // this reads 33/7 where Phase 7 read 31/9:
-//   - `partition` (598) — the pluggable `Partitioner` phase gave the mock a
+//   - `partition` — the pluggable `Partitioner` phase gave the mock a
 //     `partitioner` field plus the two `Serializer`s and translated
 //     `partition()` onto `MockProducerInner`.
-//   - `metrics` (419) and `setMockMetrics` (426) — landed with the
+//   - `metrics` and `setMockMetrics` — landed with the
 //     producer-metrics milestone (which post-dates the Phase-7 paste), as
 //     `fn metrics` / `fn set_mock_metrics`.
 //
@@ -148,20 +148,20 @@ use super::Callback;
 //     printf '%s %s\n' "$m" "$(grep -c "$m" $J)"; done
 //
 // prints `0` seven times. `partition` is driven by the `RoundRobinPartitioner`
-// that `testPartitioner` passes (Java 94); that test is now translated
+// that `testPartitioner` passes; that test is now translated
 // faithfully (it was previously present but weakened). The serializers
-// `shouldThrowClassCastException` passes (690) still have no Rust analogue —
+// `shouldThrowClassCastException` passes still have no Rust analogue —
 // static typing rules the mis-apply out — so that test remains not applicable.
 // Both are stated at their entries in the test accounting block at the end of
 // this file.
 //
 // Two Java names cover four Rust `fn`s, so "33 present" is not "33 signatures":
-// `send` (287, 297) → `send` / `send_with_callback`, and `close` (431, 436) →
+// `send` → `send` / `send_with_callback`, and `close` →
 // `close` / `close_with_timeout`. The nested `Completion` class sits at 8-space
-// indent and so is outside the scan; its one method, `complete` (639), is
+// indent and so is outside the scan; its one method, `complete`, is
 // translated as `Completion::complete`.
 //
-// Java's nine public `RuntimeException` *fields* (80-96) are not methods and are
+// Java's nine public `RuntimeException` *fields* are not methods and are
 // invisible to the derivation. All nine are present as `set_*_error` setters;
 // the five transactional ones landed in Phase 7, covered by
 // `test_set_transactional_errors`.
@@ -171,30 +171,26 @@ use super::Callback;
 ///
 /// By default this mock will synchronously complete each send call successfully.
 /// However it can be configured to allow the user to control the completion of
-/// the call and supply an optional error for the producer to throw.
-///
-/// Corresponds to Java's `org.apache.kafka.clients.producer.MockProducer`.
-///
-/// # Thread Safety
-///
-/// All methods use interior mutability via `Mutex`, matching Java's
-/// `synchronized` methods. The struct is `Send + Sync` so it can be shared
-/// via `Arc`.
+/// the call and supply an optional error for the producer to return.
+//
+// All methods use interior mutability via `Mutex`, matching
+// Java's `synchronized` methods. The struct is `Send + Sync` so it can be
+// shared via `Arc`.
 #[doc(alias = "org.apache.kafka.clients.producer.MockProducer")]
 pub struct MockProducer<K, V> {
     inner: Mutex<MockProducerInner<K, V>>,
-    /// Java `keySerializer` (`MockProducer.java:65`), or `None`. Outside the
+    /// Java `keySerializer`, or `None`. Outside the
     /// mutex: Java assigns it once in the constructor and only reads it, and a
     /// serializer is awaited, which must not happen with the `inner` guard held
     /// (CLAUDE.md §11.6).
     key_serializer: Option<Box<dyn DynSerializer<K>>>,
-    /// Java `valueSerializer` (`MockProducer.java:66`), or `None`. Outside the
+    /// Java `valueSerializer`, or `None`. Outside the
     /// mutex, as `key_serializer`.
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
 impl<K, V> std::fmt::Debug for MockProducer<K, V> {
-    /// The mock's flags and how many records it holds, not the records.
+    // The mock's flags and how many records it holds, not the records.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.inner.lock().unwrap();
         f.debug_struct("MockProducer")
@@ -208,60 +204,60 @@ impl<K, V> std::fmt::Debug for MockProducer<K, V> {
 /// The offsets one transaction contributed, grouped by consumer group id.
 ///
 /// Spells Java's `Map<String, Map<TopicPartition, OffsetAndMetadata>>`
-/// (`MockProducer.java:63`, `:68`); an alias rather than a new type, so it adds
+/// (`MockProducer#consumerGroupOffsetsHistory`); an alias rather than a new type, so it adds
 /// no struct absent from the Java source (`definition-of-done.md` §7).
 type ConsumerGroupOffsets = HashMap<String, HashMap<TopicPartition, OffsetAndMetadata>>;
 
 struct MockProducerInner<K, V> {
     cluster: Cluster,
-    /// Java `partitioner` (`MockProducer.java:58`) — the partition strategy, or
+    /// Java `partitioner` — the partition strategy, or
     /// `None` when the mock was created without one.
     partitioner: Option<Box<dyn Partitioner<K, V>>>,
     auto_complete: bool,
-    /// Java `sent` (`MockProducer.java:59`).
+    /// Java `sent`.
     sent: Vec<ProducerRecord<K, V>>,
-    /// Java `uncommittedSends` (`:60`) — records sent inside the in-flight
+    /// Java `uncommittedSends` — records sent inside the in-flight
     /// transaction, published to `sent` only on commit.
     uncommitted_sends: Vec<ProducerRecord<K, V>>,
     completions: VecDeque<Completion>,
     offsets: HashMap<TopicPartition, i64>,
-    /// Java `consumerGroupOffsets` (`:63`) — one entry per committed
+    /// Java `consumerGroupOffsets` — one entry per committed
     /// transaction that carried offsets.
     consumer_group_offsets: Vec<ConsumerGroupOffsets>,
-    /// Java `uncommittedConsumerGroupOffsets` (`:68`).
+    /// Java `uncommittedConsumerGroupOffsets`.
     uncommitted_consumer_group_offsets: ConsumerGroupOffsets,
     closed: bool,
-    /// Java `transactionInitialized` (`:70`).
+    /// Java `transactionInitialized`.
     transaction_initialized: bool,
-    /// Java `transactionInFlight` (`:71`).
+    /// Java `transactionInFlight`.
     transaction_in_flight: bool,
-    /// Java `transactionCommitted` (`:72`).
+    /// Java `transactionCommitted`.
     transaction_committed: bool,
-    /// Java `transactionAborted` (`:73`).
+    /// Java `transactionAborted`.
     transaction_aborted: bool,
-    /// Java `producerFenced` (`:74`).
+    /// Java `producerFenced`.
     producer_fenced: bool,
-    /// Java `sentOffsets` (`:75`).
+    /// Java `sentOffsets`.
     sent_offsets: bool,
-    /// Java `commitCount` (`:76`).
+    /// Java `commitCount`.
     commit_count: i64,
-    /// Java `initTransactionException` (`:79`).
+    /// Java `initTransactionException`.
     init_transaction_error: Option<Error>,
-    /// Java `beginTransactionException` (`:80`).
+    /// Java `beginTransactionException`.
     begin_transaction_error: Option<Error>,
-    /// Java `sendOffsetsToTransactionException` (`:81`).
+    /// Java `sendOffsetsToTransactionException`.
     send_offsets_to_transaction_error: Option<Error>,
-    /// Java `commitTransactionException` (`:82`).
+    /// Java `commitTransactionException`.
     commit_transaction_error: Option<Error>,
-    /// Java `abortTransactionException` (`:83`).
+    /// Java `abortTransactionException`.
     abort_transaction_error: Option<Error>,
-    /// Java `sendException` (`:84`).
+    /// Java `sendException`.
     send_error: Option<Error>,
-    /// Java `flushException` (`:85`).
+    /// Java `flushException`.
     flush_error: Option<Error>,
-    /// Java `partitionsForException` (`:86`).
+    /// Java `partitionsForException`.
     partitions_for_error: Option<Error>,
-    /// Java `closeException` (`:87`).
+    /// Java `closeException`.
     close_error: Option<Error>,
     /// User-supplied metrics returned by [`metrics()`](Producer::metrics).
     ///
@@ -271,7 +267,7 @@ struct MockProducerInner<K, V> {
 }
 
 impl<K, V> MockProducerInner<K, V> {
-    /// Corresponds to Java's `verifyNotClosed()` (`MockProducer.java:248`).
+    /// Corresponds to Java's `verifyNotClosed()`.
     fn verify_not_closed(&self) -> Result<(), Error> {
         if self.closed {
             return Err(Error::local_illegal_state("MockProducer is already closed."));
@@ -279,7 +275,7 @@ impl<K, V> MockProducerInner<K, V> {
         Ok(())
     }
 
-    /// Corresponds to Java's `verifyNotFenced()` (`MockProducer.java:254`),
+    /// Corresponds to Java's `verifyNotFenced()`,
     /// which throws `ProducerFencedException`.
     fn verify_not_fenced(&self) -> Result<(), Error> {
         if self.producer_fenced {
@@ -289,7 +285,7 @@ impl<K, V> MockProducerInner<K, V> {
     }
 
     /// Corresponds to Java's `verifyTransactionsInitialized()`
-    /// (`MockProducer.java:260`).
+    /// (`MockProducer#verifyTransactionsInitialized`).
     fn verify_transactions_initialized(&self) -> Result<(), Error> {
         if !self.transaction_initialized {
             return Err(Error::local_illegal_state(
@@ -300,7 +296,7 @@ impl<K, V> MockProducerInner<K, V> {
     }
 
     /// Corresponds to Java's `verifyTransactionInFlight()`
-    /// (`MockProducer.java:266`).
+    /// (`MockProducer#verifyTransactionInFlight`).
     fn verify_transaction_in_flight(&self) -> Result<(), Error> {
         if !self.transaction_in_flight {
             return Err(Error::local_illegal_state("There is no open transaction."));
@@ -308,7 +304,7 @@ impl<K, V> MockProducerInner<K, V> {
         Ok(())
     }
 
-    /// Corresponds to Java's `flush()` (`MockProducer.java:347`).
+    /// Corresponds to Java's `flush()`.
     ///
     /// Java's `flush()` is `synchronized` and is called from within the equally
     /// `synchronized` `commitTransaction` / `abortTransaction`; a Java monitor is
@@ -328,13 +324,13 @@ impl<K, V> MockProducerInner<K, V> {
         Ok(())
     }
 
-    /// Corresponds to Java's `completeNext()` (`MockProducer.java:504`).
+    /// Corresponds to Java's `completeNext()`.
     fn complete_next(&mut self) -> bool {
         self.error_next(None)
     }
 
     /// Corresponds to Java's `errorNext(RuntimeException)`
-    /// (`MockProducer.java:513`).
+    /// (`MockProducer#errorNext`).
     fn error_next(&mut self, error: Option<Error>) -> bool {
         match self.completions.pop_front() {
             Some(completion) => {
@@ -346,7 +342,7 @@ impl<K, V> MockProducerInner<K, V> {
     }
 
     /// The explicit-partition branch of Java's `partition(ProducerRecord,
-    /// Cluster)` (`MockProducer.java:598-610`): the record's own partition,
+    /// Cluster)` (`MockProducer#partition`): the record's own partition,
     /// validated against the topic's partition count, or `None` when the record
     /// has none and the key/value must be serialized first.
     fn explicit_partition(&self, record: &ProducerRecord<K, V>) -> Result<Option<i32>, Error> {
@@ -364,9 +360,9 @@ impl<K, V> MockProducerInner<K, V> {
     }
 
     /// The rest of Java's `partition(ProducerRecord, Cluster)`
-    /// (`MockProducer.java:611-616`), once the key and value are serialized:
+    /// (`MockProducer#partition`), once the key and value are serialized:
     /// the partitioner's choice or, when there is none, the first partition of
-    /// the topic (`:614-615`), exactly as Java's `partitioner == null` branch.
+    /// the topic (`MockProducer#partition`), exactly as Java's `partitioner == null` branch.
     fn partition(&self, record: &ProducerRecord<K, V>, key_bytes: Option<&[u8]>, value_bytes: Option<&[u8]>) -> i32 {
         let topic = record.topic();
         match self.partitioner.as_ref() {
@@ -378,16 +374,16 @@ impl<K, V> MockProducerInner<K, V> {
     }
 
     /// The checks Java's `send` makes before it partitions the record
-    /// (`MockProducer.java:288-303`).
+    /// (`MockProducer#send`).
     fn verify_can_send(&self) -> Result<(), Error> {
         if self.closed {
             return Err(Error::local_illegal_state("MockProducer is already closed."));
         }
 
-        // Java `:293` throws `KafkaException("MockProducer is fenced.", new
+        // Java `MockProducer#send` throws `KafkaException("MockProducer is fenced.", new
         // ProducerFencedException("Fenced"))` — deliberately a DIFFERENT value from
         // `verifyNotFenced`'s bare `ProducerFencedException("MockProducer is fenced.")`
-        // (`:256`): here the fenced error is the *cause* of a bare `KafkaException`,
+        // (`MockProducer#verifyNotFenced`): here the fenced error is the *cause* of a bare `KafkaException`,
         // which is what `shouldThrowOnSendIfProducerGotFenced` asserts
         // (`assertThrows(KafkaException.class, ..)` plus
         // `assertInstanceOf(ProducerFencedException.class, e.getCause())`). The outer
@@ -424,7 +420,7 @@ impl Completion {
     /// Complete this send with either a success or an error.
     ///
     /// Corresponds to Java's `Completion.complete(RuntimeException)`
-    /// (`MockProducer.java:567-581`), whose three steps run in this order: set the
+    /// (`MockProducer.Completion#complete`), whose three steps run in this order: set the
     /// result, fire the callback, then `done()`. The `done()` last is load-bearing
     /// in Java — it is the latch a `Future.get()` waits on, so a waiter cannot
     /// observe the send as complete before the callback has returned. It is not
@@ -439,16 +435,16 @@ impl Completion {
                 Arc::new(move |_| Some(e.clone()))
             };
             result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
-            // Java 578: the callback still receives metadata on the error path,
+            // `MockProducer.Completion#complete`: the callback still receives metadata on the error path,
             // carrying -1 for every unknown field, exactly as `KafkaProducer`'s own
-            // error path does (`kafka_producer.rs:1155`).
+            // error path does (`KafkaProducer::handle_api_error`).
             if let Some(cb) = callback {
                 let null_metadata = RecordMetadata::new(topic_partition, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
                 cb.on_completion(Some(&null_metadata), Some(&e));
             }
         } else {
             result.set(offset, RecordBatch::NO_TIMESTAMP, None);
-            // Java 576: fire the callback with the record's metadata.
+            // `MockProducer.Completion#complete`: fire the callback with the record's metadata.
             if let Some(cb) = callback {
                 cb.on_completion(Some(&metadata), None);
             }
@@ -459,17 +455,18 @@ impl Completion {
 
 /// Parameters for [`MockProducer::with_options`].
 ///
-/// This struct has **no Java counterpart** (DoD #7). It exists solely to
-/// satisfy CLAUDE.md §2's cap on derived overload names: Java's widest
+/// This struct has **no Java counterpart**. It exists because a method taking
+/// more than three parameters beyond the overload group's intersection takes a
+/// single options struct instead: Java's widest
 /// `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`
-/// constructor (`MockProducer.java:113`) differs from the group's parameter-name
-/// intersection — which is EMPTY, since the no-arg `:149` is in the group — by
-/// five parameters, so the cap fires and this struct becomes the method's *only*
+/// constructor (`MockProducer#MockProducer`) differs from the group's parameter-name
+/// intersection — which is EMPTY, since the no-arg `MockProducer` is in the group — by
+/// five parameters, so this struct becomes the method's *only*
 /// parameter, carrying every Java parameter.
 ///
 /// It deliberately has **no** `Default`. `auto_complete` is what both
-/// parameter-taking Java constructors (`:113`, `:137`) take from their caller, so
-/// it has no Java-derived default; the no-arg `:149`, which does default it to
+/// parameter-taking Java constructors (`MockProducer#MockProducer(Cluster,boolean,Partitioner,Serializer,Serializer)`, `MockProducer#MockProducer(boolean,Partitioner,Serializer,Serializer)`) take from their caller, so
+/// it has no Java-derived default; the no-arg `MockProducer#MockProducer()`, which does default it to
 /// `false`, is translated as [`Default for MockProducer`](MockProducer) instead.
 /// Construct it with [`MockProducerOptionsBuilder::new`] and set it:
 /// [`MockProducerOptionsBuilder::build`] returns an error if `auto_complete` was
@@ -479,25 +476,25 @@ impl Completion {
 #[doc(alias = "rust-only")]
 pub struct MockProducerOptions<K, V> {
     /// The cluster holding metadata for this producer. Java's `cluster`; starts
-    /// as [`Cluster::empty`], the value `:137` passes on the caller's behalf.
+    /// as [`Cluster::empty`], the value `MockProducer#MockProducer(boolean,Partitioner,Serializer,Serializer)` passes on the caller's behalf.
     pub(crate) cluster: Cluster,
     /// If `true`, automatically complete all requests successfully and execute
     /// the callback. Java's `autoComplete`.
     pub(crate) auto_complete: bool,
-    /// The partition strategy, or `None`. Java's `partitioner`, which `:149`
+    /// The partition strategy, or `None`. Java's `partitioner`, which `MockProducer#MockProducer()`
     /// passes as `null`.
     pub(crate) partitioner: Option<Box<dyn Partitioner<K, V>>>,
-    /// The key serializer, or `None`. Java's `keySerializer`, which `:149`
+    /// The key serializer, or `None`. Java's `keySerializer`, which `MockProducer#MockProducer()`
     /// passes as `null`.
     pub(crate) key_serializer: Option<Box<dyn DynSerializer<K>>>,
-    /// The value serializer, or `None`. Java's `valueSerializer`, which `:149`
+    /// The value serializer, or `None`. Java's `valueSerializer`, which `MockProducer#MockProducer()`
     /// passes as `null`.
     pub(crate) value_serializer: Option<Box<dyn DynSerializer<V>>>,
 }
 
 impl<K, V> std::fmt::Debug for MockProducerOptions<K, V> {
-    /// The partitioner and the serializers are trait objects, so only whether
-    /// they are set is printed.
+    // The partitioner and the serializers are trait objects, so only whether
+    // they are set is printed.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockProducerOptions")
             .field("cluster", &self.cluster)
@@ -511,11 +508,10 @@ impl<K, V> std::fmt::Debug for MockProducerOptions<K, V> {
 
 /// Fluent builder for [`MockProducerOptions`].
 ///
-/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
-/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
+/// [`Self::new`] takes no parameters, every parameter has a fluent setter, and
+/// [`Self::build`] validates the mandatory ones — returning
 /// [`Error::LocalIllegalArgument`] if they were not set. Like
-/// [`MockProducerOptions`] it has no Java counterpart and exists solely to
-/// satisfy that naming rule (DoD #7).
+/// [`MockProducerOptions`] it has no Java counterpart.
 // builds MockProducerOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct MockProducerOptionsBuilder<K, V> {
@@ -527,8 +523,8 @@ pub struct MockProducerOptionsBuilder<K, V> {
 }
 
 impl<K, V> std::fmt::Debug for MockProducerOptionsBuilder<K, V> {
-    /// The partitioner and the serializers are trait objects, so only whether
-    /// they are set is printed.
+    // The partitioner and the serializers are trait objects, so only whether
+    // they are set is printed.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockProducerOptionsBuilder")
             .field("cluster", &self.cluster)
@@ -560,30 +556,69 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
     }
 
     /// Sets `MockProducerOptions::cluster`.
+    ///
+    /// # Arguments
+    ///
+    /// - `cluster` - the cluster holding metadata for this producer
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_cluster(mut self, cluster: Cluster) -> Self {
         self.cluster = Some(cluster);
         self
     }
     /// Sets `MockProducerOptions::auto_complete`, a mandatory parameter:
     /// [`Self::build`] returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `auto_complete` - whether to complete every request automatically
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_auto_complete(mut self, auto_complete: bool) -> Self {
         self.auto_complete = Some(auto_complete);
         self
     }
     /// Sets `MockProducerOptions::partitioner`.
+    ///
+    /// # Arguments
+    ///
+    /// - `partitioner` - the partition strategy, `None` for Java's `null`
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_partitioner(mut self, partitioner: Option<Box<dyn Partitioner<K, V>>>) -> Self {
         self.partitioner = partitioner;
         self
     }
     /// Sets `MockProducerOptions::key_serializer`, any [`Serializer<K>`];
-    /// unset is Java's `null`, which `MockProducer()` passes
-    /// (`MockProducer.java:149`).
+    /// unset is Java's `null`, which `MockProducer()` passes.
+    ///
+    /// # Arguments
+    ///
+    /// - `key_serializer` - the serializer for key
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_key_serializer(mut self, key_serializer: impl Serializer<K> + 'static) -> Self {
         self.key_serializer = Some(Box::new(key_serializer));
         self
     }
     /// Sets `MockProducerOptions::value_serializer`, any [`Serializer<V>`];
     /// unset is Java's `null`.
+    ///
+    /// # Arguments
+    ///
+    /// - `value_serializer` - the serializer for value
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_value_serializer(mut self, value_serializer: impl Serializer<V> + 'static) -> Self {
         self.value_serializer = Some(Box::new(value_serializer));
         self
@@ -591,18 +626,18 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
 
     /// Returns the built options.
     ///
-    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
-    /// being named in the constructor, so a later Java version that makes one of
-    /// them optional changes the set this accepts instead of adding a second
+    /// The mandatory parameters are validated here rather than being named in
+    /// the constructor, so a later Java version that makes one of them
+    /// optional changes the set this accepts instead of adding a second
     /// constructor. Today there is one mandatory set: `auto_complete`. `cluster`
-    /// is not in it because Java's `:137` supplies `Cluster.empty()` itself.
+    /// is not in it because Java's `Cluster#Cluster` supplies `Cluster.empty()` itself.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
-    /// set which was not given a setter call. Only presence is checked here;
-    /// semantic validation belongs to the method the options are passed to
-    /// (CLAUDE.md §2).
+    /// - `Error::is_local_illegal_argument_error`, naming the first parameter
+    ///   of that set which was not given a setter call. Only presence is
+    ///   checked here; semantic validation belongs to the method the options
+    ///   are passed to.
     pub fn build(self) -> Result<MockProducerOptions<K, V>, Error> {
         Ok(MockProducerOptions {
             cluster: self.cluster.unwrap_or_else(Cluster::empty),
@@ -623,31 +658,32 @@ impl<K, V> MockProducerOptionsBuilder<K, V> {
 }
 
 impl<K, V> MockProducer<K, V> {
-    // Java's three `MockProducer` constructors (`MockProducer.java:113,137,149`)
-    // have an EMPTY parameter-name intersection, and the no-arg `:149` matches
+    // Java's three `MockProducer` constructors (`MockProducer#MockProducer`, `MockProducer`)
+    // have an EMPTY parameter-name intersection, and the no-arg `MockProducer` matches
     // it — so that one owns the plain name and every sibling is suffixed with
-    // its full Rust parameter list (CLAUDE.md §2). Rust translates `:149` as
+    // its full Rust parameter list (CLAUDE.md §2). Rust translates `MockProducer#MockProducer()` as
     // [`Default`] rather than an inherent `new`, which is why no constructor
-    // here is called `new`. `:113` and `:137` take the partitioner and the two
+    // here is called `new`. The other two take the partitioner and the two
     // serializers as values, so they DO contribute name tokens: five and four
     // respectively, past §2's cap of three, which is why both are served by
     // [`Self::with_options`] and [`MockProducerOptions`] rather than by a name
     // listing every parameter.
 
-    /// Create a mock producer.
+    /// Create a mock producer
     ///
     /// # Arguments
     ///
-    /// * `cluster` - The cluster holding metadata for this producer.
-    /// * `auto_complete` - If `true`, automatically complete all requests
-    ///   successfully. Otherwise the user must call [`complete_next()`](Self::complete_next)
-    ///   or [`error_next()`](Self::error_next) after [`send()`](Producer::send)
-    ///   to complete the call and resolve the returned future (the crate-internal `FutureRecordMetadata`).
+    /// - `cluster` - The cluster holding metadata for this producer
+    /// - `auto_complete` - If true automatically complete all requests
+    ///   successfully and execute the callback. Otherwise the user must call
+    ///   [`complete_next`](Self::complete_next) or
+    ///   [`error_next`](Self::error_next) after [`send`](Producer::send) to
+    ///   complete the call and resolve the returned future.
     ///
-    /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
-    /// Serializer, Serializer)` constructor invoked with a null partitioner and
-    /// null serializers (`MockProducer.java:113`). Delegates to
-    /// [`with_options`](Self::with_options).
+    /// # Translation notes
+    ///
+    /// Java's `MockProducer(Cluster, boolean, Partitioner, Serializer,
+    /// Serializer)` with a `null` partitioner and `null` serializers.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_cluster_auto_complete(cluster: Cluster, auto_complete: bool) -> Self {
         Self::with_options(
@@ -659,20 +695,25 @@ impl<K, V> MockProducer<K, V> {
         )
     }
 
-    /// Create a mock producer with a custom partitioner and key/value
-    /// serializers.
+    /// Create a mock producer
     ///
     /// # Arguments
     ///
-    /// * `options` - Every Java parameter, built through
-    ///   [`MockProducerOptionsBuilder`]. [`MockProducerOptions`] is this
-    ///   method's only parameter because the derived name would list five
-    ///   parameters, past CLAUDE.md §2's cap of three.
+    /// - `options` - The cluster holding metadata for this producer (unset:
+    ///   an empty cluster), whether to automatically complete all requests
+    ///   successfully and execute the callback (otherwise the user must call
+    ///   [`complete_next`](Self::complete_next) or
+    ///   [`error_next`](Self::error_next) after [`send`](Producer::send)),
+    ///   the partition strategy, and the serializers for key and value.
     ///
-    /// Corresponds to Java's `MockProducer(Cluster, boolean, Partitioner,
-    /// Serializer, Serializer)` constructor (`MockProducer.java:113`), and — with
-    /// `cluster` left unset — to `MockProducer(boolean, Partitioner, Serializer,
-    /// Serializer)` (`:137`), which passes `Cluster.empty()` itself.
+    /// # Translation notes
+    ///
+    /// Java's `MockProducer(Cluster, boolean, Partitioner, Serializer,
+    /// Serializer)` and, with `cluster` unset, `MockProducer(boolean,
+    /// Partitioner, Serializer, Serializer)`, which passes `Cluster.empty()`.
+    // `MockProducerOptions` is this method's only parameter because the
+    // derived name would list five parameters, past CLAUDE.md §2's cap of
+    // three.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_options(options: MockProducerOptions<K, V>) -> Self {
         let MockProducerOptions { cluster, auto_complete, partitioner, key_serializer, value_serializer } = options;
@@ -711,23 +752,27 @@ impl<K, V> MockProducer<K, V> {
         }
     }
 
-    /// Create a new mock producer with an empty cluster and the given
+    /// Create a new mock producer with invented metadata and the given
     /// `auto_complete` setting.
     ///
-    /// Equivalent to `MockProducer::with_cluster_auto_complete(Cluster::empty(), auto_complete)`.
+    /// # Arguments
     ///
-    /// Corresponds to Java's `MockProducer(boolean, Partitioner, Serializer,
-    /// Serializer)`.
+    /// - `auto_complete` - If true automatically complete all requests
+    ///   successfully and execute the callback. Otherwise the user must call
+    ///   [`complete_next`](Self::complete_next) or
+    ///   [`error_next`](Self::error_next) after [`send`](Producer::send) to
+    ///   complete the call and resolve the returned future.
+    // Java's `MockProducer(boolean, Partitioner, Serializer, Serializer)` with
+    // a `null` partitioner and `null` serializers: equivalent to
+    // `with_cluster_auto_complete(Cluster::empty(), auto_complete)`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#MockProducer")]
     pub fn with_auto_complete(auto_complete: bool) -> Self {
         Self::with_cluster_auto_complete(Cluster::empty(), auto_complete)
     }
 
-    /// Get the list of sent records since the last call to [`clear()`](Self::clear).
-    ///
-    /// Returns a clone of the internal sent list.
-    ///
-    /// Corresponds to Java's `MockProducer.history()`.
+    /// Returns the list of sent records since the last call to
+    /// [`clear`](Self::clear).
+    // A clone of the internal sent list.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#history")]
     pub fn history(&self) -> Vec<ProducerRecord<K, V>>
     where
@@ -738,13 +783,13 @@ impl<K, V> MockProducer<K, V> {
         inner.sent.clone()
     }
 
-    /// Get the list of records sent inside the in-flight transaction and not yet
-    /// committed.
+    /// Gets the list of records sent in the current transaction that have not
+    /// yet been committed.
     ///
-    /// Returns a clone of the internal uncommitted-sends list.
+    /// # Returns
     ///
-    /// Corresponds to Java's `MockProducer.uncommittedRecords()`
-    /// (`MockProducer.java:471`).
+    /// A list of uncommitted producer records
+    // A clone of the internal uncommitted-sends list.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#uncommittedRecords")]
     pub fn uncommitted_records(&self) -> Vec<ProducerRecord<K, V>>
     where
@@ -755,38 +800,34 @@ impl<K, V> MockProducer<K, V> {
         inner.uncommitted_sends.clone()
     }
 
-    /// Get the list of committed consumer group offsets since the last call to
-    /// [`clear()`](Self::clear) — one entry per committed transaction that
-    /// carried offsets.
-    ///
-    /// Corresponds to Java's `MockProducer.consumerGroupOffsetsHistory()`
-    /// (`MockProducer.java:479`).
+    /// Returns the list of committed consumer group offsets since the last
+    /// call to [`clear`](Self::clear).
+    // One entry per committed transaction that carried offsets.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#consumerGroupOffsetsHistory")]
     pub fn consumer_group_offsets_history(&self) -> Vec<ConsumerGroupOffsets> {
         let inner = self.inner.lock().unwrap();
         inner.consumer_group_offsets.clone()
     }
 
-    /// Get the offsets staged by the in-flight transaction and not yet committed.
+    /// Gets the consumer group offsets sent in the current transaction that
+    /// have not yet been committed.
     ///
-    /// Corresponds to Java's `MockProducer.uncommittedOffsets()`
-    /// (`MockProducer.java:483`). Java hands back the live map; behind the mutex
-    /// that is not expressible, so this returns a snapshot clone. No Java caller
-    /// mutates the returned map.
+    /// # Returns
+    ///
+    /// A map of consumer group IDs to their uncommitted offsets
+    // Java hands back the live map; behind the mutex that is not expressible,
+    // so this returns a snapshot clone. No Java caller mutates the returned
+    // map.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#uncommittedOffsets")]
     pub fn uncommitted_offsets(&self) -> ConsumerGroupOffsets {
         let inner = self.inner.lock().unwrap();
         inner.uncommitted_consumer_group_offsets.clone()
     }
 
-    /// Clear the stored history of sent records and consumer group offsets.
-    ///
-    /// Note: per-topic-partition offset counters are intentionally preserved
-    /// across `clear()` calls, matching Java's `MockProducer.clear()` which
-    /// does **not** reset the `offsets` map. Nor does it reset the transaction
-    /// flags — only `sentOffsets`.
-    ///
-    /// Corresponds to Java's `MockProducer.clear()` (`MockProducer.java:490`).
+    /// Clear the stored history of sent records, consumer group offsets
+    // Per-topic-partition offset counters are intentionally preserved, as
+    // Java's `MockProducer.clear()` does not reset the `offsets` map. Nor does
+    // it reset the transaction flags, only `sentOffsets`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#clear")]
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
@@ -800,9 +841,9 @@ impl<K, V> MockProducer<K, V> {
 
     /// Complete the earliest uncompleted call successfully.
     ///
-    /// Returns `true` if there was an uncompleted call to complete.
+    /// # Returns
     ///
-    /// Corresponds to Java's `MockProducer.completeNext()`.
+    /// true if there was an uncompleted call to complete
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#completeNext")]
     pub fn complete_next(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
@@ -811,28 +852,28 @@ impl<K, V> MockProducer<K, V> {
 
     /// Complete the earliest uncompleted call with the given error.
     ///
-    /// Returns `true` if there was an uncompleted call to complete.
+    /// # Arguments
     ///
-    /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
+    /// - `error` - the error
+    ///
+    /// # Returns
+    ///
+    /// true if there was an uncompleted call to complete
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#errorNext")]
     pub fn error_next(&self, error: Error) -> bool {
         let mut inner = self.inner.lock().unwrap();
         inner.error_next(Some(error))
     }
 
-    /// Mark this producer as fenced by another producer with the same
-    /// `transactional.id`. Every subsequent transactional call and every
-    /// [`send()`](Producer::send) then fails with
-    /// `Errors::ProducerFenced`.
-    ///
-    /// Corresponds to Java's `MockProducer.fenceProducer()`
-    /// (`MockProducer.java:429`).
+    /// Fences this mock producer, causing it to return a producer-fenced error
+    /// on subsequent transactional operations.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the producer is closed, is already fenced, or was never
-    /// initialized for transactions ([`Error::local_illegal_state`] for the first
-    /// and last, `Errors::ProducerFenced` for the second).
+    /// - `Error::is_local_illegal_state_error` if closed or not initialized
+    ///   for transactions.
+    /// - `Error::is_producer_fenced_error` if already fenced.
+    // Every subsequent `send()` fails too, as in Java's `MockProducer`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#fenceProducer")]
     pub fn fence_producer(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
@@ -845,9 +886,6 @@ impl<K, V> MockProducer<K, V> {
 
     /// Returns `true` if [`init_transactions()`](Producer::init_transactions) has
     /// completed successfully.
-    ///
-    /// Corresponds to Java's `MockProducer.transactionInitialized()`
-    /// (`MockProducer.java:470`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionInitialized")]
     pub fn transaction_initialized(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -856,9 +894,6 @@ impl<K, V> MockProducer<K, V> {
 
     /// Returns `true` if a transaction has been begun and neither committed nor
     /// aborted.
-    ///
-    /// Corresponds to Java's `MockProducer.transactionInFlight()`
-    /// (`MockProducer.java:440`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionInFlight")]
     pub fn transaction_in_flight(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -866,9 +901,6 @@ impl<K, V> MockProducer<K, V> {
     }
 
     /// Returns `true` if the most recent transaction was committed.
-    ///
-    /// Corresponds to Java's `MockProducer.transactionCommitted()`
-    /// (`MockProducer.java:444`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionCommitted")]
     pub fn transaction_committed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -876,33 +908,31 @@ impl<K, V> MockProducer<K, V> {
     }
 
     /// Returns `true` if the most recent transaction was aborted.
-    ///
-    /// Corresponds to Java's `MockProducer.transactionAborted()`
-    /// (`MockProducer.java:448`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#transactionAborted")]
     pub fn transaction_aborted(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.transaction_aborted
     }
 
-    /// Returns `true` if offsets were sent to the current or most recent
-    /// transaction. Reset only by
-    /// [`begin_transaction()`](Producer::begin_transaction) and
-    /// [`clear()`](Self::clear) — not by a commit.
+    /// Checks whether offsets have been sent to the current transaction.
     ///
-    /// Corresponds to Java's `MockProducer.sentOffsets()`
-    /// (`MockProducer.java:456`).
+    /// # Returns
+    ///
+    /// `true` if offsets were sent in the current transaction, `false`
+    /// otherwise
+    // Reset only by `begin_transaction()` and `clear()`, not by a commit.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sentOffsets")]
     pub fn sent_offsets(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.sent_offsets
     }
 
-    /// The number of transactions committed so far. Aborted transactions are not
-    /// counted.
+    /// Gets the total number of transactions committed by this mock producer.
     ///
-    /// Corresponds to Java's `MockProducer.commitCount()`
-    /// (`MockProducer.java:460`).
+    /// # Returns
+    ///
+    /// The commit count
+    // Aborted transactions are not counted.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#commitCount")]
     pub fn commit_count(&self) -> i64 {
         let inner = self.inner.lock().unwrap();
@@ -910,8 +940,6 @@ impl<K, V> MockProducer<K, V> {
     }
 
     /// Returns `true` if the producer is closed.
-    ///
-    /// Corresponds to Java's `MockProducer.closed()`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#closed")]
     pub fn closed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
@@ -919,126 +947,146 @@ impl<K, V> MockProducer<K, V> {
     }
 
     /// Returns `true` if there are no pending completions.
-    ///
-    /// Corresponds to Java's `MockProducer.flushed()`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#flushed")]
     pub fn flushed(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.completions.is_empty()
     }
 
-    /// Set an error to be returned on every [`send()`](Producer::send) call
-    /// until cleared.
+    /// Error to return when [`send`](Producer::send) or
+    /// [`send_with_callback`](Producer::send_with_callback) is called
     ///
-    /// The error persists across calls until explicitly cleared with `None`,
-    /// matching Java's `MockProducer.sendException` field semantics.
+    /// # Arguments
     ///
-    /// Pass `None` to clear a previously set error.
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.sendException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sendException")]
     pub fn set_send_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_error = error;
     }
 
-    /// Set an error to be returned on every [`flush()`](Producer::flush) call
-    /// until cleared.
+    /// Error to return when [`flush`](Producer::flush) is called
     ///
-    /// The error persists across calls until explicitly cleared with `None`,
-    /// matching Java's `MockProducer.flushException` field semantics.
+    /// # Arguments
     ///
-    /// Pass `None` to clear a previously set error.
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.flushException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#flushException")]
     pub fn set_flush_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.flush_error = error;
     }
 
-    /// Set an error to be returned on every
-    /// [`partitions_for()`](Producer::partitions_for) call until cleared.
+    /// Error to return when [`partitions_for`](Producer::partitions_for) is
+    /// called
     ///
-    /// The error persists across calls until explicitly cleared with `None`,
-    /// matching Java's `MockProducer.partitionsForException` field semantics.
+    /// # Arguments
     ///
-    /// Pass `None` to clear a previously set error.
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.partitionsForException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#partitionsForException")]
     pub fn set_partitions_for_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.partitions_for_error = error;
     }
 
-    /// Set an error to be returned on every [`close()`](Producer::close) call
-    /// until cleared.
+    /// Error to return when [`close`](Producer::close) or
+    /// [`close_with_timeout`](Producer::close_with_timeout) is called
     ///
-    /// The error persists across calls until explicitly cleared with `None`,
-    /// matching Java's `MockProducer.closeException` field semantics.
+    /// # Arguments
     ///
-    /// Pass `None` to clear a previously set error.
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.closeException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#closeException")]
     pub fn set_close_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
     }
 
-    /// Seed a metric returned by [`metrics()`](Producer::metrics).
+    /// Set a mock metric for testing
     ///
-    /// Corresponds to Java's `MockProducer.setMockMetrics(MetricName name,
-    /// Metric metric)`.
+    /// # Arguments
+    ///
+    /// - `name` - key
+    /// - `metric` - value
+    // Java's `setMockMetrics(MetricName name, Metric metric)`; the metric is
+    // returned by `metrics()`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#setMockMetrics")]
     pub fn set_mock_metrics(&self, name: MetricName, metric: Arc<KafkaMetric>) {
         let mut inner = self.inner.lock().unwrap();
         inner.mock_metrics.insert(name, metric);
     }
 
-    /// Set an error to be returned on every
-    /// [`init_transactions()`](Producer::init_transactions) call until cleared.
+    /// Error to return when [`init_transactions`](Producer::init_transactions)
+    /// is called
     ///
-    /// Matches Java's public `MockProducer.initTransactionException` field
-    /// (`MockProducer.java:79`), which likewise persists until set back to `null`.
+    /// # Arguments
+    ///
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.initTransactionException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#initTransactionException")]
     pub fn set_init_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.init_transaction_error = error;
     }
 
-    /// Set an error to be returned on every
-    /// [`begin_transaction()`](Producer::begin_transaction) call until cleared.
+    /// Error to return when [`begin_transaction`](Producer::begin_transaction)
+    /// is called
     ///
-    /// Matches Java's public `MockProducer.beginTransactionException` field
-    /// (`MockProducer.java:80`).
+    /// # Arguments
+    ///
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.beginTransactionException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#beginTransactionException")]
     pub fn set_begin_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.begin_transaction_error = error;
     }
 
-    /// Set an error to be returned on every
-    /// [`send_offsets_to_transaction()`](Producer::send_offsets_to_transaction)
-    /// call until cleared.
+    /// Error to return when
+    /// [`send_offsets_to_transaction`](Producer::send_offsets_to_transaction)
+    /// is called
     ///
-    /// Matches Java's public `MockProducer.sendOffsetsToTransactionException`
-    /// field (`MockProducer.java:81`).
+    /// # Arguments
+    ///
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.sendOffsetsToTransactionException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#sendOffsetsToTransactionException")]
     pub fn set_send_offsets_to_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_offsets_to_transaction_error = error;
     }
 
-    /// Set an error to be returned on every
-    /// [`commit_transaction()`](Producer::commit_transaction) call until cleared.
+    /// Error to return when
+    /// [`commit_transaction`](Producer::commit_transaction) is called
     ///
-    /// Matches Java's public `MockProducer.commitTransactionException` field
-    /// (`MockProducer.java:82`).
+    /// # Arguments
+    ///
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.commitTransactionException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#commitTransactionException")]
     pub fn set_commit_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.commit_transaction_error = error;
     }
 
-    /// Set an error to be returned on every
-    /// [`abort_transaction()`](Producer::abort_transaction) call until cleared.
+    /// Error to return when [`abort_transaction`](Producer::abort_transaction)
+    /// is called
     ///
-    /// Matches Java's public `MockProducer.abortTransactionException` field
-    /// (`MockProducer.java:83`).
+    /// # Arguments
+    ///
+    /// - `error` - `None` clears it
+    // Java's public `MockProducer.abortTransactionException` field: the error persists across
+    // calls until set back to `None` (Java's `null`).
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#abortTransactionException")]
     pub fn set_abort_transaction_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
@@ -1047,26 +1095,26 @@ impl<K, V> MockProducer<K, V> {
 }
 
 impl<K, V> Default for MockProducer<K, V> {
-    /// Create a new mock producer with an empty cluster and `auto_complete=false`.
-    ///
-    /// Corresponds to Java's no-arg `MockProducer()` constructor.
+    // Create a new mock producer with an empty cluster and `auto_complete=false`.
+    //
+    // Corresponds to Java's no-arg `MockProducer()` constructor.
     fn default() -> Self {
         Self::with_cluster_auto_complete(Cluster::empty(), false)
     }
 }
 
 impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
-    /// Initialize this mock for transactions.
-    ///
-    /// Corresponds to Java's `MockProducer.initTransactions()`
-    /// (`MockProducer.java:145`). Stays `async` because the trait declares it so
-    /// (Java's `KafkaProducer.initTransactions` blocks); the mock never awaits.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the producer is closed, is fenced, has already been
-    /// initialized, or an error was installed with
-    /// [`set_init_transaction_error`](MockProducer::set_init_transaction_error).
+    // Initialize this mock for transactions.
+    //
+    // Corresponds to Java's `MockProducer.initTransactions()`
+    // (`MockProducer#initTransactions`). Stays `async` because the trait declares it so
+    // (Java's `KafkaProducer.initTransactions` blocks); the mock never awaits.
+    //
+    // # Errors
+    //
+    // Returns `Err` if the producer is closed, is fenced, has already been
+    // initialized, or an error was installed with
+    // [`set_init_transaction_error`](MockProducer::set_init_transaction_error).
     async fn init_transactions(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1087,16 +1135,16 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    /// Begin a transaction.
-    ///
-    /// Corresponds to Java's `MockProducer.beginTransaction()`
-    /// (`MockProducer.java:162`).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
-    /// transactions, a transaction is already in flight, or an error was installed
-    /// with [`set_begin_transaction_error`](MockProducer::set_begin_transaction_error).
+    // Begin a transaction.
+    //
+    // Corresponds to Java's `MockProducer.beginTransaction()`
+    // (`MockProducer#beginTransaction`).
+    //
+    // # Errors
+    //
+    // Returns `Err` if the producer is closed, is fenced, was not initialized for
+    // transactions, a transaction is already in flight, or an error was installed
+    // with [`set_begin_transaction_error`](MockProducer::set_begin_transaction_error).
     fn begin_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1118,22 +1166,22 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    /// Stage consumer group offsets as part of the in-flight transaction.
-    ///
-    /// Corresponds to Java's `MockProducer.sendOffsetsToTransaction(Map,
-    /// ConsumerGroupMetadata)` (`MockProducer.java:182`). Java's
-    /// `Objects.requireNonNull(groupMetadata)` (`:184`) has no counterpart: the
-    /// parameter is a reference and not an `Option`, so a missing metadata is not
-    /// expressible.
-    ///
-    /// An empty `offsets` map is ignored and leaves
-    /// [`sent_offsets()`](MockProducer::sent_offsets) `false` (Java `:194-196`).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
-    /// transactions, has no open transaction, or an error was installed with
-    /// [`set_send_offsets_to_transaction_error`](MockProducer::set_send_offsets_to_transaction_error).
+    // Stage consumer group offsets as part of the in-flight transaction.
+    //
+    // Corresponds to Java's `MockProducer.sendOffsetsToTransaction(Map,
+    // ConsumerGroupMetadata)` (`MockProducer#sendOffsetsToTransaction`). Java's
+    // `Objects.requireNonNull(groupMetadata)` (`MockProducer#sendOffsetsToTransaction`) has no counterpart: the
+    // parameter is a reference and not an `Option`, so a missing metadata is not
+    // expressible.
+    //
+    // An empty `offsets` map is ignored and leaves
+    // [`sent_offsets()`](MockProducer::sent_offsets) `false` (Java `MockProducer#sendOffsetsToTransaction`).
+    //
+    // # Errors
+    //
+    // Returns `Err` if the producer is closed, is fenced, was not initialized for
+    // transactions, has no open transaction, or an error was installed with
+    // [`set_send_offsets_to_transaction_error`](MockProducer::set_send_offsets_to_transaction_error).
     async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -1153,7 +1201,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             return Ok(());
         }
 
-        // Java 197-199: `computeIfAbsent` then `putAll`, so a second call for the
+        // `MockProducer#sendOffsetsToTransaction`: `computeIfAbsent` then `putAll`, so a second call for the
         // same group merges into the first, later offsets winning per partition.
         let uncommitted_offsets = inner
             .uncommitted_consumer_group_offsets
@@ -1164,17 +1212,17 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    /// Commit the in-flight transaction, publishing its records and offsets.
-    ///
-    /// Corresponds to Java's `MockProducer.commitTransaction()`
-    /// (`MockProducer.java:204`).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
-    /// transactions, has no open transaction, an error was installed with
-    /// [`set_commit_transaction_error`](MockProducer::set_commit_transaction_error),
-    /// or the `flush()` this performs fails.
+    // Commit the in-flight transaction, publishing its records and offsets.
+    //
+    // Corresponds to Java's `MockProducer.commitTransaction()`
+    // (`MockProducer#commitTransaction`).
+    //
+    // # Errors
+    //
+    // Returns `Err` if the producer is closed, is fenced, was not initialized for
+    // transactions, has no open transaction, an error was installed with
+    // [`set_commit_transaction_error`](MockProducer::set_commit_transaction_error),
+    // or the `flush()` this performs fails.
     async fn commit_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1188,12 +1236,12 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
         inner.flush()?;
 
-        // Java 216/220: `sent.addAll(uncommittedSends)` then
+        // `MockProducer#commitTransaction`: `sent.addAll(uncommittedSends)` then
         // `uncommittedSends.clear()`.
         let uncommitted_sends = std::mem::take(&mut inner.uncommitted_sends);
         inner.sent.extend(uncommitted_sends);
 
-        // Java 217-218/221: the map *object* is appended to the history and the
+        // `MockProducer#commitTransaction`: the map *object* is appended to the history and the
         // field is then reassigned to a fresh map — deliberately not `clear()`,
         // which would empty the very map just published. `mem::take` is that pair.
         let uncommitted_offsets = std::mem::take(&mut inner.uncommitted_consumer_group_offsets);
@@ -1209,17 +1257,17 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    /// Abort the in-flight transaction, discarding its records and offsets.
-    ///
-    /// Corresponds to Java's `MockProducer.abortTransaction()`
-    /// (`MockProducer.java:230`).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the producer is closed, is fenced, was not initialized for
-    /// transactions, has no open transaction, an error was installed with
-    /// [`set_abort_transaction_error`](MockProducer::set_abort_transaction_error),
-    /// or the `flush()` this performs fails.
+    // Abort the in-flight transaction, discarding its records and offsets.
+    //
+    // Corresponds to Java's `MockProducer.abortTransaction()`
+    // (`MockProducer#abortTransaction`).
+    //
+    // # Errors
+    //
+    // Returns `Err` if the producer is closed, is fenced, was not initialized for
+    // transactions, has no open transaction, an error was installed with
+    // [`set_abort_transaction_error`](MockProducer::set_abort_transaction_error),
+    // or the `flush()` this performs fails.
     async fn abort_transaction(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
@@ -1232,7 +1280,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         }
 
         inner.flush()?;
-        // Java 241-242: `clear()` on both — unlike the commit path, neither
+        // `MockProducer#abortTransaction`: `clear()` on both — unlike the commit path, neither
         // collection has been handed to the history, so there is nothing to detach.
         inner.uncommitted_sends.clear();
         inner.uncommitted_consumer_group_offsets.clear();
@@ -1260,7 +1308,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         let (has_partitions, explicit_partition) = {
             let inner = self.inner.lock().unwrap();
             inner.verify_can_send()?;
-            // Java 309-316: with cluster metadata for the topic, delegate to
+            // `MockProducer#send`: with cluster metadata for the topic, delegate to
             // `partition()`; otherwise serialize key/value (with fresh
             // `RecordHeaders`) and leave the partition at 0.
             let has_partitions = !inner.cluster.partitions_for_topic(record.topic()).is_empty();
@@ -1272,12 +1320,12 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             (has_partitions, explicit_partition)
         };
 
-        // `partition()` serializes with the record's headers (`:612-613`); the
-        // empty-cluster branch with fresh ones (`:313-314`).
+        // `partition()` serializes with the record's headers (`MockProducer#partition`); the
+        // empty-cluster branch with fresh ones (`MockProducer#send`).
         //
         // DEVIATION (`definition-of-done.md` §7): in the empty-cluster branch Java
-        // serializes purely for the `ClassCastException` side effect (Java 313
-        // comment) — a case static typing rules out in Rust — and then uses
+        // serializes purely for the `ClassCastException` side effect (the comment in
+        // `MockProducer#send`) — a case static typing rules out in Rust — and then uses
         // partition 0. Rust still consults the serializers when present, so a
         // serializer error surfaces as Java's would, but honours an explicit
         // `record.partition()` before falling back to 0 so the C FFI
@@ -1344,7 +1392,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
         let metadata = RecordMetadata::new(tp.clone(), base_offset, batch_index, RecordBatch::NO_TIMESTAMP, 0, 0);
 
-        // Java 319-322: inside a transaction the record is staged rather than
+        // `MockProducer#send`: inside a transaction the record is staged rather than
         // published, and only `commitTransaction` moves it across.
         if inner.transaction_in_flight {
             inner.uncommitted_sends.push(record);
@@ -1378,8 +1426,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(inner.cluster.partitions_for_topic(topic).to_vec())
     }
 
-    /// Return the mock metrics. Corresponds to Java's `MockProducer.metrics()`
-    /// returning the `mockMetrics` map.
+    // Return the mock metrics. Corresponds to Java's `MockProducer.metrics()`
+    // returning the `mockMetrics` map.
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
         let inner = self.inner.lock().unwrap();
         inner.mock_metrics.clone()
@@ -1434,37 +1482,37 @@ mod tests {
     use crate::producer::RoundRobinPartitioner;
 
     // -----------------------------------------------------------------------
-    // Fixtures, mirroring `MockProducerTest.java`'s fields (56-64)
+    // Fixtures, mirroring `MockProducerTest.java`'s fields
     // -----------------------------------------------------------------------
 
-    /// Java's `MockProducerTest.topic` (`MockProducerTest.java:56`).
+    /// Java's `MockProducerTest.topic`.
     const TOPIC: &str = "topic";
 
     /// The four `RecordMetadata` fields `testMetadataOnException` inspects
-    /// (`MockProducerTest.java:728-731`): offset, timestamp, serialized key size,
+    /// (`MockProducerTest#testMetadataOnException`): offset, timestamp, serialized key size,
     /// serialized value size.
     type ObservedMetadata = (i64, i64, i32, i32);
 
-    /// Java's `MockProducerTest.groupId` (`MockProducerTest.java:60`).
+    /// Java's `MockProducerTest.groupId`.
     const GROUP_ID: &str = "group";
 
     fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
         ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
     }
 
-    /// Java's `MockProducerTest.record1` (`MockProducerTest.java:58`). A function
+    /// Java's `MockProducerTest.record1`. A function
     /// rather than a field because the tests hand records to `send` by value.
     fn record1() -> ProducerRecord<String, String> {
         make_record(TOPIC, "key1", "value1")
     }
 
-    /// Java's `MockProducerTest.record2` (`MockProducerTest.java:59`).
+    /// Java's `MockProducerTest.record2`.
     fn record2() -> ProducerRecord<String, String> {
         make_record(TOPIC, "key2", "value2")
     }
 
     /// Java's `MockProducerTest.buildMockProducer(boolean)`
-    /// (`MockProducerTest.java:62`), which passes `Cluster.empty()` and the two
+    /// (`MockProducerTest#buildMockProducer`), which passes `Cluster.empty()` and the two
     /// `MockSerializer`s the Rust mock has no counterpart for (it takes
     /// pre-serialized bytes — see [`MockProducer::with_options`]).
     fn build_mock_producer(auto_complete: bool) -> MockProducer<String, String> {
@@ -1491,7 +1539,7 @@ mod tests {
     }
 
     /// Build the `(partition, offset)` map Java spells as an anonymous `HashMap`
-    /// subclass, e.g. `MockProducerTest.java:403-408`.
+    /// subclass, e.g. `MockProducerTest`.
     ///
     /// Java writes `new OffsetAndMetadata(42L, null)`; Rust's `metadata` is a
     /// non-nullable `String`, so `OffsetAndMetadata::new(offset)` — metadata `""`,
@@ -1513,7 +1561,7 @@ mod tests {
     /// Assert `result` failed the way Java's `ProducerFencedException` does.
     ///
     /// `MockProducer` raises it with exactly one message, from `verifyNotFenced`
-    /// (`MockProducer.java:256`) and from the fenced `send` (`:294`).
+    /// (`MockProducer#verifyNotFenced`) and from the fenced `send`.
     fn assert_producer_fenced<T>(result: Result<T, Error>) {
         let error = result.err().expect("expected a ProducerFenced error, got Ok");
         assert_eq!(Errors::ProducerFenced, error.error(), "expected ProducerFenced, got {error}");
@@ -1524,7 +1572,7 @@ mod tests {
     // Tests translated from MockProducerTest.java
     // -----------------------------------------------------------------------
 
-    /// Translated from `MockProducerTest.testAutoCompleteMock` (Java 73).
+    /// Translated from `MockProducerTest.testAutoCompleteMock`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testAutoCompleteMock")]
     async fn test_auto_complete_mock() {
@@ -1547,7 +1595,7 @@ mod tests {
     }
 
     /// Two-partition cluster whose partitions have **no** leader, matching Java's
-    /// `testPartitioner` fixture (`MockProducerTest.java:87-90`, `new
+    /// `testPartitioner` fixture (`MockProducerTest#testPartitioner`, `new
     /// PartitionInfo(topic, n, null, null, null)`). The Rust
     /// `Cluster::with_invalid_topics_controller_topic_ids` takes eight arguments
     /// where Java's constructor takes five; the extra three (controller,
@@ -1567,7 +1615,7 @@ mod tests {
         )
     }
 
-    /// Translated from `MockProducerTest.testPartitioner` (Java 86).
+    /// Translated from `MockProducerTest.testPartitioner`.
     ///
     /// Drives a `RoundRobinPartitioner` over a two-partition cluster. Because the
     /// partitions have no leader, `available_partitions_for_topic` is empty, so the
@@ -1650,7 +1698,7 @@ mod tests {
     }
 
     /// Java's mock serializes through `partition()` with the record's own
-    /// headers (`MockProducer.java:612-613`), so a header a serializer adds is
+    /// headers (`MockProducer#partition`), so a header a serializer adds is
     /// on the record `history()` returns; the mock does not make them
     /// read-only, unlike `KafkaProducer`.
     #[tokio::test]
@@ -1671,7 +1719,7 @@ mod tests {
     }
 
     /// With no partitions for the topic, Java's mock serializes with fresh
-    /// headers (`MockProducer.java:316-317`), so what a serializer adds there
+    /// headers (`MockProducer#send(ProducerRecord,Callback)`), so what a serializer adds there
     /// does not reach the record.
     #[tokio::test]
     async fn test_serializer_added_headers_are_dropped_on_an_empty_cluster() {
@@ -1684,7 +1732,7 @@ mod tests {
 
     /// Rust-only: an explicit record partition outside `[0, numPartitions)` is
     /// rejected with Java's exact `IllegalArgumentException` message
-    /// (`MockProducer.java:605-609`). `MockProducerTest.java` has no dedicated
+    /// (`MockProducer#partition`). `MockProducerTest.java` has no dedicated
     /// test for this branch, so it is local coverage of a translated behaviour.
     #[tokio::test]
     async fn test_partition_out_of_range_is_rejected() {
@@ -1713,7 +1761,7 @@ mod tests {
     }
 
     /// Rust-only: an in-range explicit record partition is honoured as-is
-    /// (`MockProducer.java:610`), taking priority over the partitioner.
+    /// (`MockProducer#partition`), taking priority over the partitioner.
     #[tokio::test]
     async fn test_explicit_partition_is_honoured() {
         let producer: MockProducer<String, String> = MockProducer::with_options(
@@ -1740,7 +1788,7 @@ mod tests {
 
     /// Rust-only: with no partitioner set, a keyed record on a populated cluster
     /// lands on the topic's first partition, translating Java's `partitioner ==
-    /// null` branch (`MockProducer.java:614-615`).
+    /// null` branch (`MockProducer#partition`).
     #[tokio::test]
     async fn test_no_partitioner_uses_first_partition() {
         let producer: MockProducer<String, String> =
@@ -1775,7 +1823,7 @@ mod tests {
         assert_eq!(7, md.partition(), "empty cluster still honours an explicit partition");
     }
 
-    /// Translated from `MockProducerTest.testManualCompletion` (Java 107).
+    /// Translated from `MockProducerTest.testManualCompletion`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testManualCompletion")]
     async fn test_manual_completion() {
@@ -1813,7 +1861,7 @@ mod tests {
         assert!(md3.is_done() && md4.is_done(), "Requests should be completed.");
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed` (Java 624).
+    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_send_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -1821,7 +1869,7 @@ mod tests {
         assert_illegal_state(producer.send(record1()).await, "MockProducer is already closed.");
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed` (Java 673).
+    /// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_flush_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -1829,7 +1877,7 @@ mod tests {
         assert_illegal_state(producer.flush().await, "MockProducer is already closed.");
     }
 
-    /// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords` (Java 696).
+    /// Translated from `MockProducerTest.shouldBeFlushedIfNoBufferedRecords`.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeFlushedIfNoBufferedRecords")]
     fn should_be_flushed_if_no_buffered_records() {
@@ -1837,7 +1885,7 @@ mod tests {
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords` (Java 702).
+    /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeFlushedWithAutoCompleteIfBufferedRecords"
@@ -1848,7 +1896,7 @@ mod tests {
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords` (Java 709).
+    /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords"
@@ -1859,7 +1907,7 @@ mod tests {
         assert!(!producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.shouldNotBeFlushedAfterFlush` (Java 716).
+    /// Translated from `MockProducerTest.shouldNotBeFlushedAfterFlush`.
     ///
     /// Note: the Java name is misleading — the body asserts that after flush
     /// `flushed()` returns `true`, not `false`. The name is kept as Java spells it
@@ -1875,20 +1923,20 @@ mod tests {
         assert!(producer.flushed());
     }
 
-    /// Translated from `MockProducerTest.testMetadataOnException` (Java 724).
+    /// Translated from `MockProducerTest.testMetadataOnException`.
     ///
     /// Java asserts on the metadata handed to the send callback, inline in the
-    /// callback body (Java 727-731). The four values are captured here and asserted
+    /// callback body. The four values are captured here and asserted
     /// *after* `error_next` returns instead, because an assertion that only ever
     /// runs inside the callback cannot fail when the callback **never runs** — Java
-    /// has that hole too, and `assertNotNull(md)` at 727 does not close it. Capturing
+    /// has that hole too, and its `assertNotNull(md)` in the callback does not close it. Capturing
     /// outside makes "never fired" a failure, so this form is strictly stronger.
     ///
     /// A panic *is* propagated on this path — `error_next` → `Completion::complete`
     /// → `cb(..)` is synchronous with no `catch_unwind`, and the closure's own
     /// `expect` below relies on that. (Java's producer does swallow callback
     /// exceptions, but in `ProducerBatch.completeFutureAndFireCallbacks`
-    /// (`ProducerBatch.java:337-339`), not in `MockProducer.Completion.complete`,
+    /// (`ProducerBatch#completeFutureAndFireCallbacks`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#testMetadataOnException")]
@@ -1928,7 +1976,7 @@ mod tests {
     // Transaction lifecycle: init / begin / commit / abort state and counts
     // -----------------------------------------------------------------------
 
-    /// Translated from `MockProducerTest.shouldInitTransactions` (Java 134).
+    /// Translated from `MockProducerTest.shouldInitTransactions`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldInitTransactions")]
     async fn should_init_transactions() {
@@ -1938,8 +1986,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions`
-    /// (Java 141).
+    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerAlreadyInitializedForTransactions`.
     #[tokio::test]
     async fn should_throw_on_init_transaction_if_producer_already_initialized_for_transactions() {
         let producer = build_mock_producer(true);
@@ -1951,8 +1998,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnBeginTransactionIfTransactionsNotInitialized`
-    /// (Java 148).
+    /// `MockProducerTest.shouldThrowOnBeginTransactionIfTransactionsNotInitialized`.
     #[test]
     fn should_throw_on_begin_transaction_if_transactions_not_initialized() {
         let producer = build_mock_producer(true);
@@ -1962,7 +2008,7 @@ mod tests {
         );
     }
 
-    /// Translated from `MockProducerTest.shouldBeginTransactions` (Java 154).
+    /// Translated from `MockProducerTest.shouldBeginTransactions`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldBeginTransactions")]
     async fn should_begin_transactions() {
@@ -1973,8 +2019,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfTransactionInflight`
-    /// (Java 162).
+    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfTransactionInflight`.
     #[tokio::test]
     async fn should_throw_on_begin_transactions_if_transaction_inflight() {
         let producer = build_mock_producer(true);
@@ -1984,11 +2029,10 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionIfTransactionsNotInitialized`
-    /// (Java 170).
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionIfTransactionsNotInitialized`.
     ///
     /// Java passes `null` for the offsets map, relying on the guard firing before
-    /// `offsets.isEmpty()` is reached (`MockProducer.java:194`). A `HashMap`
+    /// `offsets.isEmpty()` is reached (`MockProducer#sendOffsetsToTransaction`). A `HashMap`
     /// parameter is not nullable, so the empty map stands in — and it tests the
     /// same ordering: were the guard to move below the emptiness check, Java would
     /// throw `NullPointerException` and this assertion would see `Ok`.
@@ -2004,8 +2048,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionTransactionIfNoTransactionGotStarted`
-    /// (Java 176). Java's `null` offsets map becomes the empty map, as in
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionTransactionIfNoTransactionGotStarted`. Java's `null` offsets map becomes the empty map, as in
     /// `should_throw_on_send_offsets_to_transaction_if_transactions_not_initialized`.
     #[tokio::test]
     async fn should_throw_on_send_offsets_to_transaction_transaction_if_no_transaction_got_started() {
@@ -2019,8 +2062,7 @@ mod tests {
         );
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnCommitIfTransactionsNotInitialized`
-    /// (Java 183).
+    /// Translated from `MockProducerTest.shouldThrowOnCommitIfTransactionsNotInitialized`.
     #[tokio::test]
     async fn should_throw_on_commit_if_transactions_not_initialized() {
         let producer = build_mock_producer(true);
@@ -2031,8 +2073,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnCommitTransactionIfNoTransactionGotStarted`
-    /// (Java 189).
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfNoTransactionGotStarted`.
     #[tokio::test]
     async fn should_throw_on_commit_transaction_if_no_transaction_got_started() {
         let producer = build_mock_producer(true);
@@ -2040,7 +2081,7 @@ mod tests {
         assert_illegal_state(producer.commit_transaction().await, "There is no open transaction.");
     }
 
-    /// Translated from `MockProducerTest.shouldCommitEmptyTransaction` (Java 196).
+    /// Translated from `MockProducerTest.shouldCommitEmptyTransaction`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldCommitEmptyTransaction")]
     async fn should_commit_empty_transaction() {
@@ -2053,7 +2094,7 @@ mod tests {
         assert!(!producer.transaction_aborted());
     }
 
-    /// Translated from `MockProducerTest.shouldCountCommittedTransaction` (Java 207).
+    /// Translated from `MockProducerTest.shouldCountCommittedTransaction`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldCountCommittedTransaction")]
     async fn should_count_committed_transaction() {
@@ -2066,7 +2107,7 @@ mod tests {
         assert_eq!(1, producer.commit_count());
     }
 
-    /// Translated from `MockProducerTest.shouldNotCountAbortedTransaction` (Java 218).
+    /// Translated from `MockProducerTest.shouldNotCountAbortedTransaction`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldNotCountAbortedTransaction")]
     async fn should_not_count_aborted_transaction() {
@@ -2081,8 +2122,7 @@ mod tests {
         assert_eq!(1, producer.commit_count());
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnAbortIfTransactionsNotInitialized`
-    /// (Java 231).
+    /// Translated from `MockProducerTest.shouldThrowOnAbortIfTransactionsNotInitialized`.
     #[tokio::test]
     async fn should_throw_on_abort_if_transactions_not_initialized() {
         let producer = build_mock_producer(true);
@@ -2093,8 +2133,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnAbortTransactionIfNoTransactionGotStarted`
-    /// (Java 237).
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfNoTransactionGotStarted`.
     #[tokio::test]
     async fn should_throw_on_abort_transaction_if_no_transaction_got_started() {
         let producer = build_mock_producer(true);
@@ -2102,7 +2141,7 @@ mod tests {
         assert_illegal_state(producer.abort_transaction().await, "There is no open transaction.");
     }
 
-    /// Translated from `MockProducerTest.shouldAbortEmptyTransaction` (Java 244).
+    /// Translated from `MockProducerTest.shouldAbortEmptyTransaction`.
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldAbortEmptyTransaction")]
     async fn should_abort_empty_transaction() {
@@ -2120,8 +2159,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowFenceProducerIfTransactionsNotInitialized`
-    /// (Java 255).
+    /// `MockProducerTest.shouldThrowFenceProducerIfTransactionsNotInitialized`.
     #[test]
     fn should_throw_fence_producer_if_transactions_not_initialized() {
         let producer = build_mock_producer(true);
@@ -2132,7 +2170,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfProducerGotFenced` (Java 261).
+    /// `MockProducerTest.shouldThrowOnBeginTransactionsIfProducerGotFenced`.
     #[tokio::test]
     async fn should_throw_on_begin_transactions_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
@@ -2141,10 +2179,9 @@ mod tests {
         assert_producer_fenced(producer.begin_transaction());
     }
 
-    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerGotFenced`
-    /// (Java 269).
+    /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerGotFenced`.
     ///
-    /// Java calls `producer.send(null)`; the fenced check (`MockProducer.java:293`)
+    /// Java calls `producer.send(null)`; the fenced check (`MockProducer#send`)
     /// precedes any use of the record, and `ProducerRecord` is taken by value here,
     /// so a real record makes the same point.
     ///
@@ -2177,10 +2214,10 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionByGroupIdIfProducerGotFenced`
-    /// (Java 278).
+    /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionByGroupIdIfProducerGotFenced`.
     ///
-    /// Java 278 and 286 have identical bodies: the group-id overload of
+    /// This test and
+    /// `shouldThrowOnSendOffsetsToTransactionByGroupMetadataIfProducerGotFenced` have identical bodies: the group-id overload of
     /// `sendOffsetsToTransaction` was removed, so both now call the
     /// `ConsumerGroupMetadata` one. Both are translated anyway —
     /// `definition-of-done.md` §3 does not allow skipping a Java test because a
@@ -2199,7 +2236,8 @@ mod tests {
 
     /// Translated from
     /// `MockProducerTest.shouldThrowOnSendOffsetsToTransactionByGroupMetadataIfProducerGotFenced`
-    /// (Java 286) — the identical twin of Java 278, see the note there.
+    /// — the identical twin of
+    /// `shouldThrowOnSendOffsetsToTransactionByGroupIdIfProducerGotFenced`, see the note there.
     #[tokio::test]
     async fn should_throw_on_send_offsets_to_transaction_by_group_metadata_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
@@ -2213,7 +2251,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerGotFenced` (Java 294).
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerGotFenced`.
     #[tokio::test]
     async fn should_throw_on_commit_transaction_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
@@ -2223,7 +2261,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerGotFenced` (Java 302).
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerGotFenced`.
     #[tokio::test]
     async fn should_throw_on_abort_transaction_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
@@ -2233,10 +2271,10 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldNotThrowOnFlushProducerIfProducerIsFenced` (Java 680).
+    /// `MockProducerTest.shouldNotThrowOnFlushProducerIfProducerIsFenced`.
     ///
     /// The one entry point fencing does *not* close: Java's `flush()`
-    /// (`MockProducer.java:347`) omits `verifyNotFenced()`.
+    /// (`MockProducer#flush`) omits `verifyNotFenced()`.
     #[tokio::test]
     async fn should_not_throw_on_flush_producer_if_producer_is_fenced() {
         let producer = build_mock_producer(true);
@@ -2250,7 +2288,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerIsClosed` (Java 617).
+    /// `MockProducerTest.shouldThrowOnInitTransactionIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_init_transaction_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2259,7 +2297,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnBeginTransactionIfProducerIsClosed` (Java 631).
+    /// `MockProducerTest.shouldThrowOnBeginTransactionIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_begin_transaction_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2269,7 +2307,8 @@ mod tests {
 
     /// Translated from
     /// `MockProducerTest.shouldThrowSendOffsetsToTransactionByGroupIdIfProducerIsClosed`
-    /// (Java 638). Java 638 and 645 have identical bodies — see the note on
+    /// This test and
+    /// `shouldThrowSendOffsetsToTransactionByGroupMetadataIfProducerIsClosed` have identical bodies — see the note on
     /// `should_throw_on_send_offsets_to_transaction_by_group_id_if_producer_got_fenced`.
     #[tokio::test]
     async fn should_throw_send_offsets_to_transaction_by_group_id_if_producer_is_closed() {
@@ -2285,7 +2324,8 @@ mod tests {
 
     /// Translated from
     /// `MockProducerTest.shouldThrowSendOffsetsToTransactionByGroupMetadataIfProducerIsClosed`
-    /// (Java 645) — the identical twin of Java 638.
+    /// — the identical twin of
+    /// `shouldThrowSendOffsetsToTransactionByGroupIdIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_send_offsets_to_transaction_by_group_metadata_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2299,7 +2339,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerIsClosed` (Java 652).
+    /// `MockProducerTest.shouldThrowOnCommitTransactionIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_commit_transaction_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2308,7 +2348,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerIsClosed` (Java 659).
+    /// `MockProducerTest.shouldThrowOnAbortTransactionIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_abort_transaction_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2317,7 +2357,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnFenceProducerIfProducerIsClosed` (Java 666).
+    /// `MockProducerTest.shouldThrowOnFenceProducerIfProducerIsClosed`.
     #[tokio::test]
     async fn should_throw_on_fence_producer_if_producer_is_closed() {
         let producer = build_mock_producer(true);
@@ -2330,8 +2370,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Translated from
-    /// `MockProducerTest.shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled`
-    /// (Java 310).
+    /// `MockProducerTest.shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPublishMessagesOnlyAfterCommitIfTransactionsAreEnabled"
@@ -2352,8 +2391,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled`
-    /// (Java 330).
+    /// `MockProducerTest.shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldFlushOnCommitForNonAutoCompleteIfTransactionsAreEnabled"
@@ -2376,7 +2414,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldDropMessagesOnAbortIfTransactionsAreEnabled` (Java 348).
+    /// `MockProducerTest.shouldDropMessagesOnAbortIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldDropMessagesOnAbortIfTransactionsAreEnabled"
@@ -2397,8 +2435,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled`
-    /// (Java 364).
+    /// `MockProducerTest.shouldThrowOnAbortForNonAutoCompleteIfTransactionsAreEnabled`.
     ///
     /// The Java name says "shouldThrow"; the body asserts the opposite — the abort
     /// succeeds and flushes the pending send. The name is kept as Java spells it
@@ -2417,8 +2454,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled`
-    /// (Java 377).
+    /// `MockProducerTest.shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPreserveCommittedMessagesOnAbortIfTransactionsAreEnabled"
@@ -2443,8 +2479,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Translated from
-    /// `MockProducerTest.shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`
-    /// (Java 397).
+    /// `MockProducerTest.shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPublishConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled"
@@ -2477,8 +2512,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
-    /// (Java 438).
+    /// `MockProducerTest.shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldIgnoreEmptyOffsetsWhenSendOffsetsToTransactionByGroupMetadata"
@@ -2495,8 +2529,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata`
-    /// (Java 447).
+    /// `MockProducerTest.shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata"
@@ -2517,8 +2550,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction`
-    /// (Java 464).
+    /// `MockProducerTest.shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction"
@@ -2553,11 +2585,10 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`
-    /// (Java 492).
+    /// `MockProducerTest.shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommitIfTransactionsAreEnabled`.
     ///
     /// The two calls for the same group merge, and partition 1's offset moves from
-    /// 73 to 101 — Java's `putAll` semantics (`MockProducer.java:199`), spelled as
+    /// 73 to 101 — Java's `putAll` semantics (`MockProducer#sendOffsetsToTransaction`), spelled as
     /// `HashMap::extend`.
     #[tokio::test]
     #[doc(
@@ -2591,8 +2622,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled`
-    /// (Java 529).
+    /// `MockProducerTest.shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled"
@@ -2627,8 +2657,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled`
-    /// (Java 558).
+    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.producer.MockProducerTest#shouldPreserveOffsetsFromCommitByGroupIdOnAbortIfTransactionsAreEnabled"
@@ -2655,8 +2684,7 @@ mod tests {
     }
 
     /// Translated from
-    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled`
-    /// (Java 583).
+    /// `MockProducerTest.shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactionsAreEnabled`.
     ///
     /// The load-bearing case for the `mem::take` in `commit_transaction`: the map
     /// published by the first commit must survive the second transaction's abort,
@@ -2952,7 +2980,7 @@ mod tests {
 
     /// Tests `uncommitted_records` and `uncommitted_offsets`, the two staging
     /// accessors `MockProducerTest` never calls — `uncommittedRecords`
-    /// (`MockProducer.java:471`) and `uncommittedOffsets` (`:483`) appear zero
+    /// (`MockProducer#uncommittedRecords`) and `uncommittedOffsets` appear zero
     /// times in `MockProducerTest.java`; their Java callers are Kafka Streams
     /// tests, out of scope. Covered here so the accessors are not untested public
     /// API.
@@ -2985,7 +3013,7 @@ mod tests {
     }
 
     /// Tests that `clear` empties the four collections and the flag Java's
-    /// `clear()` resets beyond `sent` (`MockProducer.java:490-497`), and that it
+    /// `clear()` resets beyond `sent` (`MockProducer#clear`), and that it
     /// leaves the transaction flags alone — Java resets `sentOffsets` there but
     /// not `transactionInitialized` / `transactionInFlight`.
     #[tokio::test]
@@ -3032,20 +3060,20 @@ mod tests {
 
     /// Tests the five transactional error knobs, Java's public
     /// `initTransactionException` … `abortTransactionException`
-    /// (`MockProducer.java:79-83`). Like `uncommittedRecords`, no
+    /// (`MockProducer#initTransactionException`). Like `uncommittedRecords`, no
     /// `MockProducerTest` method touches them; the four non-transactional knobs
     /// above are covered the same way.
     ///
     /// Each is checked at Java's position in its method: after the `verify*`
     /// guards, so it does not mask them, and — for `beginTransaction` — before the
-    /// in-flight check (`MockProducer.java:167-173`).
+    /// in-flight check (`MockProducer#beginTransaction`).
     #[tokio::test]
     async fn test_set_transactional_errors() {
         let injected = || Error::new(Errors::CoordinatorNotAvailable);
 
         // `auto_complete = false` so a pending send stays pending: that is what
         // shows the commit / abort errors firing *ahead* of Java's `flush()`
-        // (`MockProducer.java:210-214`, `:236-240`).
+        // (`MockProducer#commitTransaction`, `MockProducer#abortTransaction`).
         let producer = build_mock_producer(false);
 
         // init: installed before the first `init_transactions`, so it fires there.
@@ -3119,7 +3147,7 @@ mod tests {
     //
     //   1. The `@Test`-to-declaration walk skips *intervening annotations*.
     //      `shouldThrowClassCastException` carries a second one
-    //      (`@SuppressWarnings("unchecked")`, Java 688), and without the skip the
+    //      (`@SuppressWarnings("unchecked")`), and without the skip the
     //      walk yields `SuppressWarnings` for it — the count stays 55 while a
     //      name is silently wrong, which a count-only guard cannot see. Check it
     //      by deleting the `w && /^    @/{next}` clause: the only row that
@@ -3195,37 +3223,36 @@ mod tests {
     // implement and nothing to defer.
     //
     //   NOT APPLICABLE — `MockProducerTest.shouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction`
-    //     (Java 430). Despite the name, the `NullPointerException` it asserts does
+    //     Despite the name, the `NullPointerException` it asserts does
     //     not come from `sendOffsetsToTransaction`: it comes from evaluating
     //     `new ConsumerGroupMetadata(null)` in the lambda — the one-arg constructor
-    //     at `ConsumerGroupMetadata.java:54`, delegating to the four-arg one
-    //     declared at `:40`, whose first statement is
-    //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `:44` —
+    //     at `ConsumerGroupMetadata#ConsumerGroupMetadata`, delegating to the four-arg one
+    //     declared at `ConsumerGroupMetadata#ConsumerGroupMetadata`, whose first statement is
+    //     `Objects.requireNonNull(groupId, "group.id can't be null")` at `ConsumerGroupMetadata#ConsumerGroupMetadata` —
     //     before the mock is entered at all. With `Collections.emptyMap()` for the offsets
     //     there is no other reachable throw — `sendOffsetsToTransaction` would
-    //     return at `MockProducer.java:204`. Rust's
+    //     return at `MockProducer`. Rust's
     //     `ConsumerGroupMetadata::new(impl Into<String>)` cannot receive null, and
     //     `send_offsets_to_transaction` takes the metadata by value rather than as
     //     an `Option`, so Java's own `Objects.requireNonNull(groupMetadata)`
-    //     (`MockProducer.java:193`) is equally unrepresentable. The empty-offsets
+    //     (`MockProducer`) is equally unrepresentable. The empty-offsets
     //     path it incidentally exercises is covered by
-    //     `should_ignore_empty_offsets_when_send_offsets_to_transaction_by_group_metadata`
-    //     (Java 438).
+    //     `should_ignore_empty_offsets_when_send_offsets_to_transaction_by_group_metadata`.
     //   NOT APPLICABLE — `MockProducerTest.shouldThrowClassCastException`
-    //     (Java 689). Asserts that Java's type erasure lets a raw
+    //     Asserts that Java's type erasure lets a raw
     //     `ProducerRecord` carry a `String` key into an `IntegerSerializer`,
     //     producing `ClassCastException` inside `send`. Rust has no type erasure —
     //     `MockProducer<i32, String>` will not accept a `ProducerRecord<String,
     //     String>` at compile time. The pluggable-partitioner phase gave the mock
-    //     the `keySerializer`/`valueSerializer` fields (Java 65-66) that `partition`
-    //     (Java 598) invokes, but they are `Serializer<K>`/`Serializer<V>` — a
+    //     the `keySerializer`/`valueSerializer` fields that `MockProducer#partition`
+    //     invokes, but they are `Serializer<K>`/`Serializer<V>` — a
     //     `MockProducer<i32, String>` can only hold an `i32`/`String` serializer, so
     //     there is still no erased path on which a `String` key could reach an
     //     `IntegerSerializer`. Re-checked for this phase and still accurate.
     //
     // What the derivation cannot see, and where each is pinned instead:
     //
-    //   - No test remains weakened. `test_partitioner` (Java 86) was the last
+    //   - No test remains weakened. `test_partitioner` was the last
     //     such case: Java drives a `RoundRobinPartitioner` and asserts it picks
     //     partition 0, and the translation now does the same through
     //     `MockProducer::with_options`, replacing the earlier stopgap that had
@@ -3246,15 +3273,15 @@ mod tests {
     //     mechanical swap, so it is the seventh differing body and the fifth to
     //     survive normalisation):
     //
-    //       `testManualCompletion` (107) — Java compares the cause at 122; the
+    //       `testManualCompletion` — Java compares the cause; the
     //         translation asserted a bare `is_err()`. Now `assert_eq!("blah", ..)`.
-    //       `testMetadataOnException` (724) — asserted only that the future failed,
-    //         dropping all four values Java checks at 727-731. Now asserts them.
-    //       `shouldThrowOnSendIfProducerIsClosed` (624) and
-    //         `shouldThrowOnFlushProducerIfProducerIsClosed` (673) — matched their
+    //       `testMetadataOnException` — asserted only that the future failed,
+    //         dropping all four values Java checks in the callback. Now asserts them.
+    //       `shouldThrowOnSendIfProducerIsClosed` and
+    //         `shouldThrowOnFlushProducerIfProducerIsClosed` — matched their
     //         message with `contains`. Now `assert_illegal_state`, i.e. variant plus
     //         exact message.
-    //       `testPartitioner` (86) — had no partitioner and asserted an explicit
+    //       `testPartitioner` — had no partitioner and asserted an explicit
     //         `record.partition()`; now drives a `RoundRobinPartitioner` over a
     //         leaderless two-partition cluster and asserts partition 0, as Java does.
     //   - A test that passes with the bug reintroduced. Twelve mutations of the
@@ -3278,9 +3305,8 @@ mod tests {
     // `definition-of-done.md` §2 obligation rather than adding local coverage:
     // `test_uncommitted_accessors`,
     // `test_clear_resets_staging_but_not_transaction_flags` and
-    // `test_set_transactional_errors` cover `uncommittedRecords` (Java 538),
-    // `uncommittedOffsets` (555) and the five transactional `*Exception` fields
-    // (80-88) — each of which appears **zero** times in `MockProducerTest.java`,
+    // `test_set_transactional_errors` cover `uncommittedRecords`,
+    // `uncommittedOffsets` and the five transactional `*Exception` fields — each of which appears **zero** times in `MockProducerTest.java`,
     // its Java callers being Kafka Streams tests, out of scope. They sit with the
     // other Rust-only additions under "Additional unit tests".
     //

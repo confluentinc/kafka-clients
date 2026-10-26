@@ -34,7 +34,7 @@ pub struct kafka_common_security_token_delegation_TokenInformation_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_security_token_delegation_TokenInformation_t`]
+/// What a `kafka_common_security_token_delegation_TokenInformation_t`
 /// points at: the information plus the NUL-terminated token id and the two
 /// principal handles its getters borrow out. The owner and requester are
 /// immutable in Java, so the copies inside the principal handles never drift
@@ -93,7 +93,7 @@ pub(crate) unsafe fn token_information_ref<'a>(
 }
 
 /// Hands `info` to C as an owned handle, freed with
-/// [`kafka_common_security_token_delegation_TokenInformation_destroy`].
+/// `kafka_common_security_token_delegation_TokenInformation_destroy`.
 pub(crate) fn box_token_information(
     info: TokenInformation,
 ) -> *mut kafka_common_security_token_delegation_TokenInformation_t {
@@ -101,16 +101,24 @@ pub(crate) fn box_token_information(
         as *mut kafka_common_security_token_delegation_TokenInformation_t
 }
 
-/// `new TokenInformation(String tokenId, KafkaPrincipal owner, Collection<KafkaPrincipal> renewers, long issueTimestamp, long maxTimestamp, long expiryTimestamp)`:
-/// the requester is the owner. `owner` and the borrowed
-/// `kafka_common_security_auth_KafkaPrincipal_t` handles in `renewers` are
-/// copied during the call. Owned, freed with
-/// [`kafka_common_security_token_delegation_TokenInformation_destroy`].
+/// Creates token details whose requester is the owner.
+///
+/// # Parameters
+///
+/// - `token_id` - the token id
+/// - `owner` - the token owner, copied
+/// - `renewers` - the principals allowed to renew the token: a list of borrowed
+///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; `NULL` reads as empty
+/// - `issue_timestamp` - the issue time, in milliseconds since the epoch
+/// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
+/// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
 ///
 /// # Safety
 ///
 /// `token_id` must be a valid NUL-terminated string, `owner` a valid
-/// principal handle and `renewers` null or a valid list of principal handles.
+/// principal handle and `renewers` `NULL` or a valid list of principal handles.
+/// The returned handle is owned, freed with
+/// `kafka_common_security_token_delegation_TokenInformation_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_new(
@@ -139,16 +147,27 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     ))
 }
 
-/// `new TokenInformation(String tokenId, KafkaPrincipal owner, KafkaPrincipal tokenRequester, Collection<KafkaPrincipal> renewers, long issueTimestamp, long maxTimestamp, long expiryTimestamp)`
-/// (KIP-373): the requester may differ from the owner when a superuser creates
-/// a token on another principal's behalf. Same copying and ownership as
-/// [`kafka_common_security_token_delegation_TokenInformation_new`].
+/// Creates token details whose requester may differ from the owner, when a superuser creates a
+/// token on another principal's behalf (KIP-373).
+///
+/// # Parameters
+///
+/// - `token_id` - the token id
+/// - `owner` - the token owner, copied
+/// - `token_requester` - the principal that asked for the token, copied
+/// - `renewers` - the principals allowed to renew the token: a list of borrowed
+///   `kafka_common_security_auth_KafkaPrincipal_t` handles, copied; `NULL` reads as empty
+/// - `issue_timestamp` - the issue time, in milliseconds since the epoch
+/// - `max_timestamp` - the latest expiry the token can be renewed to, in milliseconds since the epoch
+/// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
 ///
 /// # Safety
 ///
 /// `token_id` must be a valid NUL-terminated string, `owner` and
-/// `token_requester` valid principal handles and `renewers` null or a valid
+/// `token_requester` valid principal handles and `renewers` `NULL` or a valid
 /// list of principal handles.
+/// The returned handle is owned, freed with
+/// `kafka_common_security_token_delegation_TokenInformation_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_with_token_requester(
@@ -181,11 +200,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     ))
 }
 
-/// `owner()`: borrowed from the handle; never destroyed.
+/// Returns the token owner.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned principal is borrowed, valid as long as
+/// the handle, and never destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner(
@@ -198,12 +218,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { inner_ref(self_) }.owner.as_ptr()
 }
 
-/// `ownerAsString()`, `<type>:<name>`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the owner as `<type>:<name>`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_owner_as_string(
@@ -215,12 +235,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     into_c_string(&unsafe { token_information_ref(self_) }.owner_as_string())
 }
 
-/// `tokenRequester()`: the principal that *asked* for the token, borrowed
-/// from the handle; never destroyed.
+/// Returns the principal that *asked* for the token.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned principal is borrowed, valid as long as
+/// the handle, and never destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester(
@@ -233,12 +253,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { inner_ref(self_) }.token_requester.as_ptr()
 }
 
-/// `tokenRequesterAsString()`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the token requester as `<type>:<name>`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_requester_as_string(
@@ -250,14 +270,13 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     into_c_string(&unsafe { token_information_ref(self_) }.token_requester_as_string())
 }
 
-/// `renewers()`: an owned list of owned
-/// `kafka_common_security_auth_KafkaPrincipal_t` copies, in the order the
-/// broker reported. Freed with `kafka_List_destroy`, which also frees the
-/// principals.
+/// Returns copies of the principals allowed to renew the token, in the order the broker reported.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned list of
+/// `kafka_common_security_auth_KafkaPrincipal_t` is owned, freed with `kafka_List_destroy`, which
+/// also frees the principals.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewers(
@@ -274,12 +293,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     box_list(elements, Some(destroy_boxed::<KafkaPrincipalInner>))
 }
 
-/// `renewersAsString()`: an owned list of owned `<type>:<name>` strings.
-/// Freed with `kafka_List_destroy`, which also frees the strings.
+/// Returns the renewers as `<type>:<name>` strings.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned list is owned, freed with
+/// `kafka_List_destroy`, which also frees the strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_renewers_as_string(
@@ -291,7 +310,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     box_string_list(unsafe { token_information_ref(self_) }.renewers_as_string())
 }
 
-/// `issueTimestamp()`, in milliseconds since the epoch.
+/// Returns the issue time, in milliseconds since the epoch.
 ///
 /// # Safety
 ///
@@ -306,7 +325,7 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { token_information_ref(self_) }.issue_timestamp()
 }
 
-/// `expiryTimestamp()`, in milliseconds since the epoch.
+/// Returns the expiry time, in milliseconds since the epoch.
 ///
 /// # Safety
 ///
@@ -321,7 +340,11 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { token_information_ref(self_) }.expiry_timestamp()
 }
 
-/// `setExpiryTimestamp(long expiryTimestamp)`.
+/// Sets the expiry time.
+///
+/// # Parameters
+///
+/// - `expiry_timestamp` - the expiry time, in milliseconds since the epoch
 ///
 /// # Safety
 ///
@@ -342,11 +365,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { &mut (*(self_ as *mut TokenInformationInner)).info }.set_expiry_timestamp(expiry_timestamp);
 }
 
-/// `tokenId()`: borrowed from the handle.
+/// Returns the token id.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned string is borrowed, valid as long as
+/// the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_token_id(
@@ -358,8 +382,8 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { inner_ref(self_) }.token_id_c.as_ptr()
 }
 
-/// `maxTimestamp()`, in milliseconds since the epoch: the latest the token
-/// can be renewed to, whatever the renewal period asks for.
+/// Returns the latest expiry the token can be renewed to, whatever the renewal period asks for, in
+/// milliseconds since the epoch.
 ///
 /// # Safety
 ///
@@ -374,8 +398,11 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     unsafe { token_information_ref(self_) }.max_timestamp()
 }
 
-/// `ownerOrRenewer(KafkaPrincipal principal)`: whether `principal` is the
-/// owner or one of the renewers.
+/// Returns 1 if `principal` is the owner or one of the renewers, else 0.
+///
+/// # Parameters
+///
+/// - `principal` - the principal to check
 ///
 /// # Safety
 ///
@@ -393,11 +420,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation
     i8::from(unsafe { token_information_ref(self_) }.owner_or_renewer(unsafe { kafka_principal_ref(principal) }))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the token details.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid token-information handle.
+/// `self_` must be a valid token-information handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_TokenInformation_to_string(

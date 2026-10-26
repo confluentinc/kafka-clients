@@ -1,0 +1,56 @@
+# check-api-docs findings not burnt down yet (.claude/rules/documentation.md).
+# One `<kind> <item>` per line; `java-line <file>` waives a whole file.
+# A line matching no finding any more is itself a finding: delete it. Rewrite with
+# `cargo xtask doc-baseline`; see everything with
+# `cargo xtask lint-custom check-api-docs --no-baseline`.
+errors crate::consumer::Consumer::poll
+errors kafka_consumer_Consumer_poll
+errors kafka_consumer_Consumer_poll_cb
+param kafka_admin_ScramMechanism_from_type
+warning crate::admin::AdminClientConfig::new
+warning crate::common::ClusterResourceListener
+warning crate::common::KafkaFuture::then_apply
+warning crate::common::errors::GroupAuthorizationError::group_id
+warning crate::common::metrics::MetricsReporter
+warning crate::common::metrics::Sensor::record_with_value
+warning crate::common::metrics::Sensor::record_with_value_time_ms
+warning crate::common::serialization::Deserializer
+warning crate::common::serialization::Deserializer::deserialize_with_headers
+warning crate::common::serialization::Deserializer::deserialize_with_headers_bytes
+warning crate::common::serialization::Serializer
+warning crate::common::serialization::StringDeserializer
+warning crate::common::serialization::StringSerializer
+warning crate::consumer::Consumer::committed
+warning crate::consumer::Consumer::committed_with_timeout
+warning crate::consumer::Consumer::metrics
+warning crate::consumer::Consumer::offsets_for_times
+warning crate::consumer::Consumer::offsets_for_times_with_timeout
+warning crate::consumer::ConsumerConfig::DEFAULT_ISOLATION_LEVEL
+warning crate::consumer::ConsumerConfig::new
+warning crate::producer::Partitioner
+warning crate::producer::Partitioner::partition
+warning crate::producer::Producer::metrics
+warning crate::producer::ProducerConfig::new
+warning kafka_admin_AdminClientConfig_new
+warning kafka_common_GroupAuthorizationError_group_id
+warning kafka_common_KafkaFuture_then_apply
+warning kafka_common_metrics_Sensor_record_with_value
+warning kafka_common_metrics_Sensor_record_with_value_time_ms
+warning kafka_common_serialization_Deserializer_deserialize_with_headers
+warning kafka_common_serialization_Deserializer_deserialize_with_headers_bytes
+warning kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb
+warning kafka_common_serialization_Deserializer_deserialize_with_headers_cb
+warning kafka_common_serialization_StringDeserializer_new
+warning kafka_common_serialization_StringSerializer_new
+warning kafka_consumer_ConsumerConfig_new
+warning kafka_consumer_Consumer_committed
+warning kafka_consumer_Consumer_committed_cb
+warning kafka_consumer_Consumer_committed_with_timeout
+warning kafka_consumer_Consumer_committed_with_timeout_cb
+warning kafka_consumer_Consumer_metrics
+warning kafka_consumer_Consumer_offsets_for_times
+warning kafka_consumer_Consumer_offsets_for_times_cb
+warning kafka_consumer_Consumer_offsets_for_times_with_timeout
+warning kafka_consumer_Consumer_offsets_for_times_with_timeout_cb
+warning kafka_producer_ProducerConfig_new
+warning kafka_producer_Producer_metrics

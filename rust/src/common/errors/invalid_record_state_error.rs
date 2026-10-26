@@ -18,12 +18,13 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The record state is invalid.
+    /// Thrown when the acknowledgement of delivery of a record could not be completed because the
+    /// record state is invalid.
     ///
-    /// Corresponds to Java's `InvalidRecordStateException`, error code `Errors::InvalidRecordState`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidRecordStateException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidRecordState`. Java `extends` chain: `InvalidRecordStateException`
+    /// -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidRecordStateException")]
     InvalidRecordStateError,
     code: Errors::InvalidRecordState,

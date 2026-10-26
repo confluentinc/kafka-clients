@@ -262,7 +262,8 @@ impl ConsumerRebalanceListener for RecorderListener {
     }
 
     async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Java line 156-158: skip if empty (preserves the previous list).
+        // The listener in `MockConsumerTest#testRebalanceListener` skips an empty
+        // assignment (preserves the previous list).
         if partitions.is_empty() {
             return Ok(());
         }
@@ -354,7 +355,7 @@ async fn test_rebalance_listener() {
 async fn test_re2j_pattern_subscription() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new("earliest").unwrap();
 
-    // Empty pattern → IllegalArgumentException (Java line 194).
+    // Empty pattern → IllegalArgumentException, as in `MockConsumerTest#testRe2JPatternSubscription`.
     let err = consumer.subscribe_with_pattern(SubscriptionPattern::new("")).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
@@ -362,7 +363,7 @@ async fn test_re2j_pattern_subscription() {
     consumer.subscribe_with_pattern(pattern).await.unwrap();
     assert!(consumer.subscription().is_empty());
 
-    // Mixed subscription → IllegalStateException (Java line 203).
+    // Mixed subscription → IllegalStateException, as in `MockConsumerTest#testRe2JPatternSubscription`.
     let err = consumer.subscribe_with_topics(vec!["topic1".to_string()]).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalState(_)));
 }
@@ -401,7 +402,7 @@ async fn should_return_max_poll_records() {
     assert!(records.is_empty());
 }
 
-/// Java declares three `close` forms (`Consumer.java:277,283,288`). The
+/// Java declares three `Consumer#close` forms. The
 /// deprecated `close(Duration)` is not translated (CLAUDE.md §3); CLAUDE.md §2
 /// gives the no-arg form the plain name and suffixes `close(CloseOptions)` with
 /// its parameter name. This asserts both preserve `MockConsumer`'s observable
@@ -422,10 +423,10 @@ async fn close_overloads_mark_the_consumer_closed() {
     assert!(consumer.closed(), "close_with_options(..) closes");
 }
 
-/// Java declares two `enforceRebalance` overloads (`Consumer.java:267,272`);
+/// Java declares two `Consumer#enforceRebalance` overloads;
 /// Rust used to merge them behind one `Option<&str>` parameter. CLAUDE.md §2
 /// un-merges them, so this asserts both forms still set the pending-rebalance
-/// flag that `MockConsumer.java:697-704` sets — i.e. the split is behaviour
+/// flag that `MockConsumer#enforceRebalance` sets — i.e. the split is behaviour
 /// preserving, and the `reason` really is ignored as Java ignores it.
 #[tokio::test]
 async fn enforce_rebalance_overloads_both_set_the_pending_flag() {

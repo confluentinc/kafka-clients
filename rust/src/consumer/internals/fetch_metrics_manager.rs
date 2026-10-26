@@ -86,8 +86,8 @@ impl FetchMetricsManager {
     /// (CLAUDE.md §12.1 — do not panic where recovery is possible).
     ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
-    /// (`Metrics.java:520`) and lets it propagate out of the fetch path. We
-    /// deliberately do NOT propagate: these `record_*` methods are a side channel,
+    /// (`Metrics#addMetric(MetricName,MetricConfig,MetricValueProvider)`) and lets it propagate out of the fetch path.
+    /// We deliberately do NOT propagate: these `record_*` methods are a side channel,
     /// and failing a user's fetch is worse than the metric being absent. The
     /// failure is reported rather than hidden.
     fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
@@ -127,8 +127,8 @@ impl FetchMetricsManager {
     /// `-lag-avg`, `-lag-max`, `{tp}.records-lead`, `-lead-min`, `-lead-avg`)
     /// are ALSO registered at INFO — full Java parity. Java's `SensorBuilder`
     /// creates every sensor (including these per-partition detail sensors,
-    /// `FetchMetricsManager.java:144,159`) via `metrics.sensor(name)`, which
-    /// defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
+    /// `FetchMetricsManager#recordPartitionLag` and `FetchMetricsManager#recordPartitionLead`) via
+    /// `metrics.sensor(name)`, which defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
     /// fetch metrics, so we record the full per-partition metric set per
     /// partition per poll at the default INFO level — the accepted Java-parity
     /// cost (to be measured in M8). The metric VALUES are Java-identical.
@@ -453,7 +453,7 @@ impl FetchMetricsManager {
     /// Removes every sensor and metric this manager registered, including the
     /// per-topic and per-partition ones created on the fetch path. Java
     /// inherits `AbstractConsumerMetricsManager.close()` (KAFKA-19542);
-    /// `AsyncKafkaConsumer.close()` calls it (`AsyncKafkaConsumer.java:1676`).
+    /// `AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean)` calls it.
     pub(crate) fn close(&self) {
         self.inner.close();
     }
@@ -946,7 +946,8 @@ mod tests {
     /// `records-lag-max` / `records-lead-min` AND the DETAILED per-partition
     /// lag/lead sensors are recorded — there is NO DEBUG gating (Java's
     /// `SensorBuilder` defaults every fetch sensor to `RecordingLevel.INFO`,
-    /// including the per-partition detail at `FetchMetricsManager.java:144,159`).
+    /// including the per-partition detail in `FetchMetricsManager#recordPartitionLag` and
+    /// `FetchMetricsManager#recordPartitionLead`).
     #[test]
     fn test_partition_metrics_recording_level() {
         let f = setup();

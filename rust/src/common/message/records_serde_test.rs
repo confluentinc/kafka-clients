@@ -93,8 +93,8 @@ fn test_serde_null_records() {
     message.topic = "foo".to_string();
 
     // Java asserts `assertNull(message.recordSet())` on a message whose record set
-    // was never set. `FieldSpec.fieldDefault` returns `"null"` unconditionally for a
-    // `records` field (FieldSpec.java:453-454) — unlike `bytes`, which defaults to
+    // was never set. `org.apache.kafka.message.FieldSpec#fieldDefault` returns `"null"` unconditionally for a
+    // `records` field — unlike `bytes`, which defaults to
     // an empty buffer unless the spec says `"default": "null"`. This assertion is
     // what pins that asymmetry in the generator.
     assert_eq!(

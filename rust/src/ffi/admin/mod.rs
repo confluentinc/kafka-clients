@@ -428,7 +428,7 @@ impl AdminClassHandle {
         // Shutting the runtime down below cancels the background task where it
         // stands, so a call still pending would never complete. Close with the
         // hard-shutdown deadline at once: the task's `finally`
-        // (`AdminClientRunnable.run`, `KafkaAdminClient.java:1557-1562`) fails
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#run`) fails
         // every pending call with `TimeoutException("The AdminClient thread has
         // exited.")`. The zero close only installs the deadline (it does not
         // join, see `close_with_timeout`); the second keeps that earlier deadline
@@ -538,7 +538,7 @@ impl FutureCtx {
     /// `destroy` frees exactly that handle, being the destructor paired with
     /// the helper that made it (a `box_*` helper and its `_destroy`), and the
     /// handle may be freed from any thread, and read through its accessors from
-    /// several threads at once. `boxer` may also return null, which is never
+    /// several threads at once. `boxer` may also return `NULL`, which is never
     /// freed.
     pub(crate) unsafe fn handle_future<T, F>(
         &self,
@@ -718,11 +718,11 @@ pub(crate) unsafe fn result_ref<'a, R, P>(handle: *const P) -> &'a ResultHandle<
     unsafe { &*(handle as *const ResultHandle<R>) }
 }
 
-/// Frees a handle built by [`box_result`]; null is a no-op.
+/// Frees a handle built by [`box_result`]; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `handle` must be null or a handle built by `box_result::<R, P>` and not
+/// `handle` must be `NULL` or a handle built by `box_result::<R, P>` and not
 /// yet destroyed, that no other call uses at the same time; it is not used
 /// afterwards.
 pub(crate) unsafe fn destroy_result<R, P>(handle: *mut P) {
@@ -772,6 +772,16 @@ pub unsafe extern "C" fn kafka_admin_Admin_close(self_: *const kafka_admin_Admin
 
 /// `Admin.close()`, completion queued.
 ///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving only `opaque`; queued for `kafka_admin_Admin__execute_callbacks`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// None: Java's `close()` throws nothing and `cb` receives no error. A panic caught at the boundary
+/// is logged and `cb` still fires.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle or view.
@@ -796,11 +806,21 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
     });
 }
 
-/// `Admin.close(Duration timeout)`, blocking; `timeout` in milliseconds.
-/// Java's `Duration` cannot be negative and the Rust `close_with_timeout`
-/// takes an unsigned `Duration`, so a negative `timeout` is clamped to `0`
-/// (close without waiting for in-flight work); the 365-day ceiling Java
-/// applies is applied by the Rust client.
+/// Close the Admin client and release all associated resources.
+///
+/// The close operation has a grace period during which current operations will be allowed to
+/// complete, specified by the given duration. New operations will not be accepted during the grace
+/// period. Once the grace period is over, all operations that have not yet been completed will be
+/// aborted with a `kafka_common_Error_is_timeout_error` error.
+///
+/// # Parameters
+///
+/// - `timeout` - The time to use for the wait time, in milliseconds.
+///
+/// # Translation notes
+///
+/// Blocks until the background task finishes. A negative `timeout` is clamped to `0`: close
+/// without waiting for in-flight work.
 ///
 /// # Safety
 ///
@@ -815,7 +835,18 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout(self_: *const kafk
 }
 
 /// `Admin.close(Duration timeout)`, completion queued; `timeout` as in
-/// [`kafka_admin_Admin_close_with_timeout`].
+/// `kafka_admin_Admin_close_with_timeout`.
+///
+/// # Parameters
+///
+/// - `timeout` - The time to use for the wait time, in milliseconds.
+/// - `cb` - the completion, receiving only `opaque`; queued for `kafka_admin_Admin__execute_callbacks`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// None: Java's `close(Duration)` throws nothing and `cb` receives no error. A panic caught at the
+/// boundary is logged and `cb` still fires.
 ///
 /// # Safety
 ///
@@ -854,8 +885,11 @@ fn close_timeout(timeout: i64) -> Duration {
 // Callback pump
 // ---------------------------------------------------------------------------
 
-/// Runs the queued callbacks serially on the calling thread and returns how
-/// many ran (CLAUDE.md §4 rule 5).
+/// Runs the queued callbacks serially on the calling thread.
+///
+/// # Returns
+///
+/// How many callbacks ran.
 ///
 /// # Safety
 ///
@@ -870,6 +904,11 @@ pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafk
 
 /// Installs the hook fired once each time the callback vector goes from
 /// empty to non-empty (see [`kafka_admin_Admin_callbacks_notify_fn_t`]).
+///
+/// # Parameters
+///
+/// - `notify` - the hook
+/// - `opaque` - passed to `notify`
 ///
 /// # Safety
 ///
@@ -893,14 +932,26 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
 // Destroy
 // ---------------------------------------------------------------------------
 
-/// Frees an `Admin_t` returned by `kafka_admin_AdminClient_create` (see the
-/// module docs: waits for the `_cb` tasks, fires the pending callbacks, drops
-/// the client); null is a no-op. Never pass a view obtained from an
-/// `__as_Admin` function: that class handle has its own `_destroy`.
+/// Frees an `Admin_t` returned by `kafka_admin_AdminClient_create`; `NULL` is a
+/// no-op. Never pass a view obtained from an `__as_Admin` function: that class
+/// handle has its own `_destroy`.
+///
+/// It waits for the tasks spawned by `_cb` calls, then closes the client with
+/// no grace period, so the calls still pending fail with
+/// `kafka_common_Error_is_timeout_error`, "The AdminClient thread has exited.";
+/// call `kafka_admin_Admin_close_with_timeout` first to let in-flight work
+/// finish. It then runs the still-pending callbacks, each exactly once, drops
+/// the client and shuts its runtime down; the `kafka_common_KafkaFuture_get_cb`
+/// calls still waiting on its futures fire last, once each. A future whose call
+/// never completed (a background task stuck in a TCP connect is cancelled
+/// rather than joined) fails with `kafka_common_Error_is_local_illegal_state_error`,
+/// "The client was destroyed before the future completed". Called inside a
+/// tokio runtime, where it cannot wait, it returns at once and does all of
+/// this on a new thread, the pending callbacks included.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle from
+/// `self_` must be `NULL` or an owned handle from
 /// `kafka_admin_AdminClient_create` not yet destroyed, that no other call
 /// uses at the same time; it is not used afterwards, by the callbacks this
 /// call runs included.
@@ -962,7 +1013,7 @@ mod tests {
     ///
     /// # Safety
     ///
-    /// `err` must point at null.
+    /// `err` must point at `NULL`.
     unsafe fn built_mock(err: &mut *mut kafka_common_Error_t) -> *mut kafka_admin_MockAdminClient_t {
         // SAFETY: Per this function's `# Safety`, `err` points at null.
         unsafe { built_mock_with_raft_controller(false, err) }
@@ -972,7 +1023,7 @@ mod tests {
     ///
     /// # Safety
     ///
-    /// `err` must point at null.
+    /// `err` must point at `NULL`.
     unsafe fn built_mock_with_raft_controller(
         using_raft_controller: bool,
         err: &mut *mut kafka_common_Error_t,
@@ -1094,7 +1145,7 @@ mod tests {
 
     /// Java `KafkaAdminClient.close` fails the calls still pending with
     /// `TimeoutException("The AdminClient thread has exited.")`
-    /// (`KafkaAdminClient.java:1557-1562,1692-1694`): destroying an admin whose
+    /// (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#run`): destroying an admin whose
     /// broker is unreachable, with a `listTopics` still waiting and a blocking
     /// `get` on it in another thread, returns promptly, and both the `get_cb`
     /// waiting on the call and the blocking `get` see the call fail.

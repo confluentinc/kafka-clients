@@ -54,7 +54,8 @@ pub enum CoordinatorType {
 impl CoordinatorType {
     /// Java's `CoordinatorType.name()` — the enum constant's own name, as
     /// interpolated into `TransactionManager`'s two `IllegalStateException`
-    /// messages (`TransactionManager.java:1179,1199`).
+    /// messages (`TransactionManager#coordinator`,
+    /// `TransactionManager#lookupCoordinator(CoordinatorType,String)`).
     ///
     /// `name()` is inherited from `java.lang.Enum`, so there is no Java body to
     /// translate. The Rust enum has no `Display`, and `Debug` would print
