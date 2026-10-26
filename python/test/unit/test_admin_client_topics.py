@@ -319,12 +319,18 @@ def test_calls_after_close_raise_illegal_state() -> None:
 def test_delete_and_describe_topics_args() -> None:
     by_ids, keys = _conversions.topic_collection_target(["a", "b"], "deleteTopics")
     assert (by_ids, keys) == (False, ["a", "b"])
-    assert _conversions.delete_topics_args(False, keys) == (["a", "b"], False)
+    assert _conversions.delete_topics_args(["a", "b"], False, keys) == (
+        _conversions.DELETE_TOPIC_NAMES, ["a", "b"])
+    assert _conversions.delete_topics_args(
+        TopicCollection.of_topic_names(topics=["a", "b"]), False, keys) == (
+        _conversions.DELETE_TOPIC_NAME_COLLECTION, ["a", "b"])
     topic_id = Uuid.random_uuid()
     by_ids, keys = _conversions.topic_collection_target(
         TopicCollection.of_topic_ids(topics=[topic_id]), "deleteTopics")
     assert (by_ids, keys) == (True, [topic_id])
-    assert _conversions.delete_topics_args(True, keys) == ([str(topic_id)], True)
+    assert _conversions.delete_topics_args(
+        TopicCollection.of_topic_ids(topics=[topic_id]), True, keys) == (
+        _conversions.DELETE_TOPIC_ID_COLLECTION, [str(topic_id)])
     names = TopicCollection.of_topic_names(topics=["x"])
     assert _conversions.topic_collection_target(names, "describeTopics") == (False, ["x"])
     assert _conversions.describe_topics_args(_conversions.DESCRIBE_TOPIC_ID_COLLECTION,

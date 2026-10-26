@@ -394,7 +394,74 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
     box_create_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics`: a non-blocking call returning the owned result handle,
+/// `Admin.delete_topics_with_string_slice`: a non-blocking call returning the owned result handle,
+/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
+/// copied during the call (see the module docs for the container element
+/// types).
+/// `topics` is a `kafka_List_t` of `const char *` topic names.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view. Every other pointer must be null
+/// where the module docs allow it, or else live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a
+/// string NUL-terminated, an enum one of its singletons, and a list or map
+/// holding elements of the types the module docs give, each element
+/// meeting these same conditions.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
+    self_: *const kafka_admin_Admin_t,
+    topics: *const kafka_List_t,
+) -> *mut kafka_admin_DeleteTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
+    // copied.
+    let topics_ = unsafe { list_strings(topics) };
+    let result = client.call(|admin| admin.delete_topics_with_string_slice(&topics_));
+    box_delete_topics_result(result, &client.future_ctx())
+}
+
+/// `Admin.delete_topics_with_string_slice_options`: a non-blocking call returning the owned result handle,
+/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
+/// copied during the call (see the module docs for the container element
+/// types).
+/// `topics` is a `kafka_List_t` of `const char *` topic names.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view. Every other pointer must be null
+/// where the module docs allow it, or else live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a
+/// string NUL-terminated, an enum one of its singletons, and a list or map
+/// holding elements of the types the module docs give, each element
+/// meeting these same conditions.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_options(
+    self_: *const kafka_admin_Admin_t,
+    topics: *const kafka_List_t,
+    options: *const kafka_admin_DeleteTopicsOptions_t,
+) -> *mut kafka_admin_DeleteTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
+    // copied.
+    let topics_ = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `options` is a live
+    // `kafka_admin_DeleteTopicsOptions_t` handle that no other call mutates during this one, so no
+    // setter runs on it while it is cloned, as `delete_topics_options_ref` requires.
+    let options_ = unsafe { delete_topics_options_ref(options) }.clone();
+    let result = client.call(|admin| admin.delete_topics_with_string_slice_options(&topics_, options_));
+    box_delete_topics_result(result, &client.future_ctx())
+}
+
+/// `Admin.delete_topics_with_topic_collection`: a non-blocking call returning the owned result handle,
 /// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
 /// copied during the call (see the module docs for the container element
 /// types).
@@ -409,7 +476,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
 /// meeting these same conditions.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection(
     self_: *const kafka_admin_Admin_t,
     topics: *const kafka_common_TopicCollection_t,
 ) -> *mut kafka_admin_DeleteTopicsResult_t {
@@ -420,11 +487,11 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
     // handle, unmutated during this call, as `topic_collection_ref` requires; it is cloned before
     // the call returns.
     let topics_ = unsafe { topic_collection_ref(topics) }.clone();
-    let result = client.call(|admin| admin.delete_topics(topics_));
+    let result = client.call(|admin| admin.delete_topics_with_topic_collection(topics_));
     box_delete_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics_with_options`: a non-blocking call returning the owned result handle,
+/// `Admin.delete_topics_with_topic_collection_options`: a non-blocking call returning the owned result handle,
 /// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
 /// copied during the call (see the module docs for the container element
 /// types).
@@ -439,7 +506,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
 /// meeting these same conditions.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection_options(
     self_: *const kafka_admin_Admin_t,
     topics: *const kafka_common_TopicCollection_t,
     options: *const kafka_admin_DeleteTopicsOptions_t,
@@ -455,7 +522,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
     // `kafka_admin_DeleteTopicsOptions_t` handle that no other call mutates during this one, so no
     // setter runs on it while it is cloned, as `delete_topics_options_ref` requires.
     let options_ = unsafe { delete_topics_options_ref(options) }.clone();
-    let result = client.call(|admin| admin.delete_topics_with_options(topics_, options_));
+    let result = client.call(|admin| admin.delete_topics_with_topic_collection_options(topics_, options_));
     box_delete_topics_result(result, &client.future_ctx())
 }
 

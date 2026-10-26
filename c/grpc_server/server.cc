@@ -3101,7 +3101,7 @@ class AdminServiceImpl final : public AdminService::Service {
     kafka_admin_DeleteTopicsOptions_set_retry_on_quota_violation(opts.get(),
                                                                  retry_on_quota(*req) ? 1 : 0);
     Owned<kafka_admin_DeleteTopicsResult_t, kafka_admin_DeleteTopicsResult_destroy> result(
-        kafka_admin_Admin_delete_topics_with_options(admin, topics.collection.get(), opts.get()));
+        kafka_admin_Admin_delete_topics_with_topic_collection_options(admin, topics.collection.get(), opts.get()));
     if (topics.by_ids) {
       OwnedMap values(kafka_admin_DeleteTopicsResult_topic_id_values(result.get()));
       void_futures_to_proto<kafka_common_Uuid_t>(
