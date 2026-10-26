@@ -22,7 +22,8 @@ CFLAGS_EXTRA ?= $(CFLAGS_NATIVE)
 # repository root's Makefile activates its venv first) and, except
 # `check-static` and `test-soak`, expects the Rust library already built under
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE): the root Makefile orders that.
-.PHONY: init build test test-unit typecheck check-static test-soak test-integration test-performance \
+.PHONY: init build test test-unit typecheck check-static test-soak test-verifiable-clients \
+	test-integration test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
 
 # Development dependencies, for a fresh clone (the root `init`).
@@ -46,6 +47,7 @@ test: build
 	python -m pytest test/integration -v
 	$(MAKE) check-static
 	$(MAKE) test-soak
+	$(MAKE) test-verifiable-clients
 	$(MAKE) test-integration
 
 # Unit tests only (pytest test/unit). The gRPC multilanguage arm runs on Linux
@@ -83,6 +85,15 @@ check-static:
 # the broker-backed suites.
 test-soak:
 	python -m pytest soak/test -v
+
+# The system-test tools' tests (verifiable_clients/test): the throttler, the
+# JSON events, the argument parsing, the loops over MockProducer and
+# MockConsumer, and each script run against an unreachable broker. No broker
+# and no container; they need the built extension. The tools are type checked
+# as strictly as the package they use.
+test-verifiable-clients:
+	python -m mypy --strict verifiable_clients
+	python -m pytest verifiable_clients/test -v
 
 # The Python-backend arms of the multilanguage suite: build the sync and
 # asyncio gRPC server images, then run the `__grpc_python` tests of the Rust
