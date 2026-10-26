@@ -292,11 +292,13 @@ impl KafkaAdminClient {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
-        // Mirrors Java: a set nodeId routes to that specific broker via
-        // `ConstantNodeIdProvider`, otherwise the request goes to an arbitrary
-        // broker or the active controller.
+        // Mirrors Java: a set nodeId routes to that specific node via
+        // `new ConstantNodeIdProvider(options.nodeId().getAsInt(), true)`
+        // (`KafkaAdminClient.java:4653-4654`), a broker or, for a
+        // `bootstrap.controllers` client, a controller; otherwise the request
+        // goes to an arbitrary broker or the active controller.
         let node_provider = match options.node_id() {
-            Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+            Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
             None => NodeProvider::LeastLoadedBrokerOrActiveKController,
         };
 
@@ -1083,7 +1085,7 @@ impl KafkaAdminClient {
                 let list_call = Call::new(
                     "listGroups",
                     deadline,
-                    NodeProvider::ConstantNodeId(node_id),
+                    NodeProvider::ConstantNodeId { node_id, supports_use_controllers: false },
                     create_list_request,
                     handle_list_response,
                     handle_list_failure,
@@ -1360,7 +1362,7 @@ where
 {
     let RequestSpec { name, scope, keys, request, next_allowed_try_ms, deadline_ms, tries } = spec;
     let node_provider = match scope.destination_broker_id() {
-        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: false },
         None => NodeProvider::LeastLoaded,
     };
     // create_request: hand over the pre-built builder on first send; rebuild
@@ -2124,7 +2126,7 @@ fn get_alter_user_scram_credentials_call(
     Call::new(
         "alterUserScramCredentials",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -2632,7 +2634,8 @@ fn get_alter_partition_reassignments_call(
     Call::new(
         "alterPartitionReassignments",
         deadline,
-        NodeProvider::Controller,
+        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4073-4074`).
+        NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
         handle_failure,
@@ -2713,7 +2716,8 @@ fn get_list_partition_reassignments_call(
     Call::new(
         "listPartitionReassignments",
         deadline,
-        NodeProvider::Controller,
+        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4209-4210`).
+        NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
         handle_failure,
@@ -2839,8 +2843,10 @@ fn get_describe_configs_call(
         }
     });
 
+    // `node != null ? new ConstantNodeIdProvider(node, true) : new
+    // LeastLoadedBrokerOrActiveKController()` (`KafkaAdminClient.java:2854-2855`).
     let node_provider = match node {
-        Some(node_id) => NodeProvider::ConstantNodeId(node_id),
+        Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
         None => NodeProvider::LeastLoadedBrokerOrActiveKController,
     };
 
@@ -2955,7 +2961,7 @@ fn get_describe_log_dirs_call(
     Call::new(
         "describeLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3032,7 +3038,7 @@ fn get_alter_replica_log_dirs_call(
     Call::new(
         "alterReplicaLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3122,7 +3128,7 @@ fn get_describe_replica_log_dirs_call(
     Call::new(
         "describeReplicaLogDirs",
         deadline,
-        NodeProvider::ConstantNodeId(broker_id),
+        NodeProvider::ConstantNodeId { node_id: broker_id, supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3307,7 +3313,7 @@ fn get_create_topics_call(
     Call::new(
         "createTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3427,7 +3433,7 @@ fn get_create_partitions_call(
     Call::new(
         "createPartitions",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3541,7 +3547,7 @@ fn get_delete_topics_call(
     Call::new(
         "deleteTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -3665,7 +3671,7 @@ fn get_delete_topics_with_ids_call(
     Call::new(
         "deleteTopics",
         deadline,
-        NodeProvider::Controller,
+        NodeProvider::Controller { supports_use_controllers: false },
         create_request,
         handle_response,
         handle_failure,
@@ -4157,10 +4163,14 @@ impl Admin for KafkaAdminClient {
         options: AlterConfigsOptions,
     ) -> AlterConfigsResult {
         let mut all_futures: HashMap<ConfigResource, KafkaFuture<()>> = HashMap::new();
-        // BROKER_LOGGER requests always go to a specific broker; a non-default
-        // BROKER resource goes to that specific node; everything else goes to
-        // the least loaded broker (bootstrap.controllers is not defined by
-        // `AdminClientConfig`, so the controller special-casing never triggers).
+        // BROKER_LOGGER requests always go to a specific, constant broker or controller node.
+        //
+        // BROKER resource changes for a specific (non-default) resource go to either that specific
+        // node (if using bootstrap.servers), or directly to the active controller (if using
+        // bootstrap.controllers)
+        //
+        // All other requests go to the least loaded broker (if using bootstrap.servers) or the
+        // active controller (if using bootstrap.controllers)
         let mut unified_request_resources: Vec<ConfigResource> = Vec::new();
 
         for resource in configs.keys() {
@@ -4175,7 +4185,8 @@ impl Admin for KafkaAdminClient {
                     configs,
                     &options,
                     std::slice::from_ref(resource),
-                    NodeProvider::ConstantNodeId(node_id),
+                    // `new ConstantNodeIdProvider(node, true)` (`KafkaAdminClient.java:2986`).
+                    NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
                 );
                 all_futures.extend(futures);
             } else {
@@ -4417,7 +4428,7 @@ impl Admin for KafkaAdminClient {
         let call = Call::new(
             "electLeaders",
             deadline,
-            NodeProvider::Controller,
+            NodeProvider::Controller { supports_use_controllers: false },
             create_request,
             handle_response,
             handle_failure,
@@ -5287,7 +5298,8 @@ impl Admin for KafkaAdminClient {
         let call = Call::new(
             "updateFeatures",
             deadline,
-            NodeProvider::Controller,
+            // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4733-4734`).
+            NodeProvider::Controller { supports_use_controllers: true },
             create_request,
             handle_response,
             handle_failure,
