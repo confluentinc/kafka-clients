@@ -32,6 +32,28 @@ breaking changes.
   `ApiVersions` handshake after `request.timeout.ms` is waited for instead of
   being disconnected, and a node with a request in flight is no longer picked
   as the least-loaded node.
+- New public `EndpointType`, Java's `org.apache.kafka.clients.admin.EndpointType`
+  (KIP-919): `Unknown`, `Broker` and `Controller`, with `id()` and
+  `from_id(i8)`, which answers `Unknown` for an id it does not know.
+- `bootstrap.controllers` (KIP-919) is defined again (Rust, C API, Python), and
+  `AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG` is back: a `LIST`, empty
+  by default, validated as Java's `AdminClientConfig` validates it, and read
+  by the client whichever list it bootstraps from, so it is no longer listed
+  among the unused configurations. A client configured with it alone
+  bootstraps from the KRaft controller quorum, as Java's does: it refreshes
+  its metadata with `DescribeCluster` for the CONTROLLER endpoint, sends the
+  calls the controllers serve (describing the cluster, the configs and the
+  features, altering configs, ACLs, partition reassignments, updating the
+  features, unregistering a controller) to the active controller or the node
+  they name, and fails every other call at once with
+  `UnsupportedEndpointTypeError`.
+- **Breaking:** setting neither `bootstrap.servers` nor `bootstrap.controllers`
+  fails client creation, still wrapped in `Failed to create new
+  KafkaAdminClient`, with Java's `KafkaAdminClient.determineBootstrapType`
+  `ConfigError` `You must set either bootstrap.servers or
+  bootstrap.controllers`, where it was `ClientUtils`'s `No resolvable
+  bootstrap urls given in bootstrap.servers`; setting both fails with `You
+  cannot set both bootstrap.servers and bootstrap.controllers`.
 
 ### Common
 
@@ -47,6 +69,13 @@ breaking changes.
   certificate signed with one of those keys could impersonate a broker. The C
   and Python bindings are built with the fixed versions; a Rust application
   picks them up by updating its lockfile.
+
+### C API
+
+- `kafka_admin_EndpointType_t`, Java's `EndpointType`: the singletons
+  `kafka_admin_EndpointType_unknown`, `_broker` and `_controller`, the C enum
+  `kafka_admin_EndpointType_e` read with `kafka_admin_EndpointType__enum`, and
+  `_id`, `_from_id` and `_to_string`.
 
 ## [0.3.0-beta.1] - 2026-10-23
 

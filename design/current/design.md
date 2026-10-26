@@ -736,9 +736,10 @@ Java ships the mock in its test jar. Here it stays public through its
 
 The admin client builds its channel builder from `security.protocol` like the
 other two clients (`kafka_admin_client.rs:325`), so SSL and SASL/PLAIN work.
-The one visible gap is `bootstrap.controllers` (KIP-919), which is passed to
-`AdminMetadataManager` as `false` (`kafka_admin_client.rs:313`); the
-`using_bootstrap_controllers()` branches exist but are never taken.
+`bootstrap.controllers` (KIP-919) is supported: such a client bootstraps from
+the controllers, refreshes its metadata with `DescribeCluster` for the
+CONTROLLER endpoint, and fails at once every call whose node provider cannot
+reach a controller (`UnsupportedEndpointTypeError`), as Java's does.
 
 Beyond the 44 RPCs there is no `ForwardingAdmin`, and there are no
 Streams-group, share-group or KRaft raft-voter RPCs (`add_raft_voter`,

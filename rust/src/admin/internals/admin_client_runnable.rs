@@ -27,12 +27,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::ClientResponse;
+use crate::DescribeClusterRequestData;
 use crate::KafkaClient;
 use crate::MetadataRecoveryStrategy;
-use crate::admin::KafkaAdminClient;
+use crate::admin::{EndpointType, KafkaAdminClient};
 use crate::common::errors::{DisconnectError, UnsupportedEndpointTypeError};
 use crate::common::protocol::Errors;
-use crate::common::requests::{ConcreteResponse, RequestBuilder, metadata_request};
+use crate::common::requests::{ConcreteResponse, RequestBuilder, describe_cluster_request, metadata_request};
 use crate::common::utils::{
     Time,
     internals::{ExponentialBackoff, LogContext},
@@ -870,12 +871,11 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     Some(body) => {
                         let result = call.handle_response(&body, now);
                         match result {
-                            HandleResult::Done => {
-                                if call.internal {
-                                    // Metadata refreshed → force reassignment against new metadata.
-                                    self.unassign_unsent_calls(|_| true);
-                                }
-                            },
+                            HandleResult::Done => {},
+                            // Metadata refreshed: unassign all unsent requests so
+                            // that a new destination is selected from the new
+                            // metadata.
+                            HandleResult::UnassignUnsentCalls => self.unassign_unsent_calls(|_| true),
                             // `runnable.call(call, now)` from inside
                             // `handleResponse`: a quota-retry follow-up, or the
                             // call itself for the next page (`CallAgain`, which
@@ -912,7 +912,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
         // Protocol downgrade + retry does not count against the retry budget
         // (that is why `tries` is not incremented here).
-        if error.error() == Errors::UnsupportedVersion && call.handle_unsupported_version() {
+        if error.error() == Errors::UnsupportedVersion && call.handle_unsupported_version(&error) {
             kafka_debug!(
                 self.log_context,
                 "{} attempting protocol downgrade and then retry.",
@@ -1010,14 +1010,90 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         }
     }
 
-    /// Builds the internal broker metadata refresh call.
+    /// Creates a new metadata call: [`make_controller_metadata_call`] when the
+    /// client uses `bootstrap.controllers`, [`make_broker_metadata_call`]
+    /// otherwise.
     ///
-    /// Translated from `makeBrokerMetadataCall` (the only variant needed while
-    /// `AdminClientConfig` leaves `bootstrap.controllers` undefined).
+    /// Translated from `makeMetadataCall` (`KafkaAdminClient.java:1722-1728`).
+    ///
+    /// [`make_controller_metadata_call`]: Self::make_controller_metadata_call
+    /// [`make_broker_metadata_call`]: Self::make_broker_metadata_call
     fn make_metadata_call(&self, now: i64) -> Call {
+        if self.metadata_manager.using_bootstrap_controllers() {
+            self.make_controller_metadata_call(now)
+        } else {
+            self.make_broker_metadata_call(now)
+        }
+    }
+
+    /// Builds the internal metadata refresh call of a `bootstrap.controllers`
+    /// client: a `DescribeCluster` request for the CONTROLLER endpoint, as
+    /// KIP-919 specifies.
+    ///
+    /// Translated from `makeControllerMetadataCall`
+    /// (`KafkaAdminClient.java:1730-1770`).
+    fn make_controller_metadata_call(&self, now: i64) -> Call {
+        // Use DescribeCluster here, as specified by KIP-919.
         let deadline = now + self.request_timeout_ms as i64;
         let mm_ok = self.metadata_manager.clone();
         let mm_fail = self.metadata_manager.clone();
+        let mm_uv = self.metadata_manager.clone();
+        Call::new_internal(
+            "describeCluster",
+            deadline,
+            NodeProvider::MetadataUpdate,
+            Box::new(|_timeout_ms| {
+                let mut data = DescribeClusterRequestData::new();
+                data.set_include_cluster_authorized_operations(false);
+                data.set_endpoint_type(EndpointType::Controller.id());
+                Ok(Box::new(describe_cluster_request::Builder::new(data)) as Box<dyn RequestBuilder>)
+            }),
+            Box::new(move |response, now, _cur_node| {
+                // Java casts unguarded (`KafkaAdminClient.java:1743`); a mismatch
+                // reaches `call.fail` through the response loop's `catch`, as
+                // for the broker metadata call.
+                let ConcreteResponse::DescribeCluster(describe_cluster_response) = response else {
+                    return HandleResult::Retry(Error::local_illegal_state(
+                        "Expected a DescribeCluster response for the internal metadata call",
+                    ));
+                };
+                let cluster = match KafkaAdminClient::parse_describe_cluster_response(describe_cluster_response.data())
+                {
+                    Ok(cluster) => cluster,
+                    Err(error) => {
+                        // `catch (ApiException e) { handleFailure(e); return; }`
+                        // (`:1747-1750`): this call's `handleFailure`, and no
+                        // unassignment.
+                        mm_ok.update_failed(error);
+                        return HandleResult::Done;
+                    },
+                };
+                mm_ok.update(cluster, now);
+                // Unassign all unsent requests after a metadata refresh to allow
+                // for a new destination to be selected from the new metadata.
+                HandleResult::UnassignUnsentCalls
+            }),
+            Box::new(move |error| {
+                mm_fail.update_failed(error.clone());
+            }),
+            Box::new(move |error| {
+                mm_uv.update_failed(error.clone());
+                false
+            }),
+        )
+    }
+
+    /// Builds the internal metadata refresh call of a `bootstrap.servers`
+    /// client. We use `MetadataRequest` here so that we can continue to support
+    /// brokers that are too old to handle `DescribeCluster`.
+    ///
+    /// Translated from `makeBrokerMetadataCall`
+    /// (`KafkaAdminClient.java:1772-1813`).
+    fn make_broker_metadata_call(&self, now: i64) -> Call {
+        let deadline = now + self.request_timeout_ms as i64;
+        let mm_ok = self.metadata_manager.clone();
+        let mm_fail = self.metadata_manager.clone();
+        let mm_uv = self.metadata_manager.clone();
         Call::new_internal(
             "fetchMetadata",
             deadline,
@@ -1031,7 +1107,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             }),
             Box::new(move |response, now, _cur_node| {
                 // Java does `(MetadataResponse) abstractResponse` unguarded
-                // (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+                // (`KafkaAdminClient.java:1789`) and relies on the response loop's
                 // `catch (Throwable t)` → `call.fail(now, t)` →
                 // `metadataManager.updateFailed(e)` to leave `UPDATE_PENDING`.
                 //
@@ -1039,9 +1115,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 // while `process_pending_calls` had already called
                 // `transition_to_update_pending`. `metadata_fetch_delay_ms` returns
                 // `i64::MAX` in that state, so the client never refreshed metadata
-                // again for its whole lifetime — and `HandleResult::Done` on an
-                // internal call also re-queues the pending calls against the
-                // permanently stale metadata.
+                // again for its whole lifetime — and unassigning the unsent calls
+                // also re-queued them against the permanently stale metadata.
                 let ConcreteResponse::Metadata(metadata_response) = response else {
                     return HandleResult::Retry(Error::local_illegal_state(
                         "Expected a Metadata response for the internal metadata call",
@@ -1052,10 +1127,16 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 } else {
                     mm_ok.update(metadata_response.build_cluster(), now);
                 }
-                HandleResult::Done
+                // Unassign all unsent requests after a metadata refresh to allow
+                // for a new destination to be selected from the new metadata.
+                HandleResult::UnassignUnsentCalls
             }),
             Box::new(move |error| {
                 mm_fail.update_failed(error.clone());
+            }),
+            Box::new(move |error| {
+                mm_uv.update_failed(error.clone());
+                false
             }),
         )
     }
