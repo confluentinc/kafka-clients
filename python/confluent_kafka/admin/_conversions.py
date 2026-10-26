@@ -181,6 +181,9 @@ if TYPE_CHECKING:
     from confluent_kafka.consumer import OffsetAndMetadata
 
 __all__ = [
+    "DELETE_TOPIC_ID_COLLECTION",
+    "DELETE_TOPIC_NAMES",
+    "DELETE_TOPIC_NAME_COLLECTION",
     "DESCRIBE_TOPIC_ID_COLLECTION",
     "describe_topic_names",
     "group_ids_list",
@@ -589,11 +592,26 @@ def _uuid_key(raw: str) -> Any:
     return Uuid.from_string(str=raw)
 
 
-def delete_topics_args(by_ids: bool, keys: list[Any]) -> tuple[Any, ...]:
-    """``Admin_delete_topics(h, names_or_ids, by_ids, options)``'s arguments: the
-    names, or the ids as Java's ``Uuid.toString()``."""
-    targets = [str(key) for key in keys] if by_ids else keys
-    return (targets, by_ids)
+#: ``Admin_delete_topics``'s ``form``: which Java overload's entry point the
+#: extension calls, as for ``Admin_describe_topics``: ``deleteTopics(Collection<String>)``
+#: (``_with_string_slice_options``), or a ``TopicNameCollection`` / ``TopicIdCollection``
+#: (``_with_topic_collection_options``).
+DELETE_TOPIC_NAMES = 0
+DELETE_TOPIC_NAME_COLLECTION = 1
+DELETE_TOPIC_ID_COLLECTION = 2
+
+
+def delete_topics_args(topics: Any, by_ids: bool, keys: list[Any]) -> tuple[Any, ...]:
+    """``Admin_delete_topics(h, form, names_or_ids, options)``'s arguments: the form of
+    the Java overload ``topics`` selects, and the names, or the ids as Java's
+    ``Uuid.toString()``."""
+    from confluent_kafka.common.topic_collection import TopicCollection
+
+    if by_ids:
+        return (DELETE_TOPIC_ID_COLLECTION, [str(key) for key in keys])
+    if isinstance(topics, TopicCollection):
+        return (DELETE_TOPIC_NAME_COLLECTION, keys)
+    return (DELETE_TOPIC_NAMES, keys)
 
 
 def delete_topics_result(native: Any, by_ids: bool, kind: Kind,

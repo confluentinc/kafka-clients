@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::delete_topics`.
+//! The result of the `Admin::delete_topics_with_*` methods.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`.
 
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::common::{KafkaFuture, Uuid};
 
-/// The result of the `Admin::delete_topics` call.
+/// The result of the `Admin::delete_topics_with_*` methods.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteTopicsResult`.
 /// Exactly one of the two maps is present, the one matching the kind of
@@ -67,7 +67,7 @@ impl DeleteTopicsResult {
         Self::with_topic_id_futures_name_futures(None, Some(name_futures))
     }
 
-    /// Use when `Admin::delete_topics_with_options` used a `TopicCollection`
+    /// Use when `Admin::delete_topics_with_topic_collection_options` used a `TopicCollection`
     /// of ids.
     ///
     /// Returns a map from topic IDs to futures which can be used to check the
@@ -78,7 +78,7 @@ impl DeleteTopicsResult {
         self.topic_id_futures.as_ref()
     }
 
-    /// Use when `Admin::delete_topics_with_options` used a `TopicCollection`
+    /// Use when `Admin::delete_topics_with_topic_collection_options` used a `TopicCollection`
     /// of names.
     ///
     /// Returns a map from topic names to futures which can be used to check

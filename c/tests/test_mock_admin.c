@@ -1689,7 +1689,7 @@ static void test_mock_admin_delete_topics_by_names(void) {
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
     kafka_admin_DeleteTopicsOptions_t *options = kafka_admin_DeleteTopicsOptions_new();
     kafka_admin_DeleteTopicsOptions_set_timeout_ms(options, 5000);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_options(f.admin, collection, options);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection_options(f.admin, collection, options);
     kafka_admin_DeleteTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
@@ -1732,7 +1732,7 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_List_t *ids = kafka_List_new();
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
@@ -1752,13 +1752,49 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     fixture_destroy(&f);
 }
 
+/* Java's `deleteTopics(Collection<String>)` and `(Collection<String>,
+ * DeleteTopicsOptions)` wrap the names in `TopicCollection.ofTopicNames`
+ * (`Admin.java:214-230`): each `_with_string_slice` form deletes the named
+ * topic and returns a result keyed by name. */
+static void test_mock_admin_delete_topics_with_string_slice(void) {
+    for (int with_options = 0; with_options <= 1; with_options++) {
+        fixture_t f;
+        fixture_init(&f, 1);
+        create_one(&f, "del-slice", 1, 1);
+        kafka_List_t *names = string_list("del-slice", NULL);
+        kafka_admin_DeleteTopicsResult_t *result;
+        if (with_options) {
+            kafka_admin_DeleteTopicsOptions_t *options = kafka_admin_DeleteTopicsOptions_new();
+            result = kafka_admin_Admin_delete_topics_with_string_slice_options(f.admin, names, options);
+            kafka_admin_DeleteTopicsOptions_destroy(options);
+        } else {
+            result = kafka_admin_Admin_delete_topics_with_string_slice(f.admin, names);
+        }
+        kafka_List_destroy(names);
+        TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
+        kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
+        TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
+        TEST_ASSERT_NULL(get_ok(future_for(values, "del-slice")));
+        kafka_Map_destroy(values);
+        expect_void_ok(kafka_admin_DeleteTopicsResult_all(result));
+        kafka_admin_DeleteTopicsResult_destroy(result);
+
+        kafka_admin_ListTopicsResult_t *listed = kafka_admin_Admin_list_topics(f.admin);
+        kafka_common_KafkaFuture_t *listed_names = kafka_admin_ListTopicsResult_names(listed);
+        TEST_ASSERT_EQUAL_INT32(0, kafka_List_size((const kafka_List_t *)get_ok(listed_names)));
+        kafka_common_KafkaFuture_destroy(listed_names);
+        kafka_admin_ListTopicsResult_destroy(listed);
+        fixture_destroy(&f);
+    }
+}
+
 static void test_mock_admin_delete_topics_async(void) {
     fixture_t f;
     fixture_init(&f, 1);
     create_one(&f, "del-async", 1, 1);
     kafka_List_t *names = string_list("del-async", "del-missing", NULL);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
     cb_result_t ok;
     get_cb_pumped(&f, future_for(values, "del-async"), &ok);
@@ -1788,7 +1824,7 @@ static void test_mock_admin_delete_topics_by_ids_async(void) {
     kafka_List_t *ids = kafka_List_new();
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     kafka_common_KafkaFuture_t *all = kafka_admin_DeleteTopicsResult_all(result);
     cb_result_t r;
     get_cb_pumped(&f, all, &r);
@@ -2973,7 +3009,7 @@ static void test_mock_admin_list_partition_reassignments_after_delete_returns_er
     reassign_one(&f, "lr-gone", 0);
     kafka_List_t *names = string_list("lr-gone", NULL);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
-    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     expect_void_ok(kafka_admin_DeleteTopicsResult_all(deleted));
     kafka_admin_DeleteTopicsResult_destroy(deleted);
     kafka_common_TopicCollection_destroy(collection);
@@ -5279,6 +5315,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_uuid_from_string_rejects_bad_id);
     RUN_TEST(test_mock_admin_delete_topics_by_names);
     RUN_TEST(test_mock_admin_delete_topics_by_ids);
+    RUN_TEST(test_mock_admin_delete_topics_with_string_slice);
     RUN_TEST(test_mock_admin_delete_topics_async);
     RUN_TEST(test_mock_admin_delete_topics_by_ids_async);
     RUN_TEST(test_mock_admin_create_partitions_reports_unsupported_per_topic);

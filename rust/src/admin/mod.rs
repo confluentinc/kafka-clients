@@ -259,19 +259,63 @@ pub trait Admin: Send + Sync {
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#createTopics")]
     fn create_topics_with_options(&self, new_topics: &[NewTopic], options: CreateTopicsOptions) -> CreateTopicsResult;
 
-    /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
+    /// Delete a batch of topics, by name.
     ///
-    /// Corresponds to `Admin.deleteTopics(TopicCollection)`.
+    /// Corresponds to `Admin.deleteTopics(Collection<String>)`
+    /// (`Admin.java:214-216`), a convenience for
+    /// `deleteTopics(TopicCollection.ofTopicNames(topics), new DeleteTopicsOptions())`.
+    ///
+    /// Java names the parameter of all four `deleteTopics` overloads `topics`,
+    /// and no overload takes the parameters all four share, so each form is
+    /// named after its parameter's type (CLAUDE.md §2): `&[String]` gives
+    /// `_string_slice` and `TopicCollection` gives `_topic_collection`, and
+    /// there is no plain `delete_topics`.
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
-    fn delete_topics(&self, topics: TopicCollection) -> DeleteTopicsResult {
-        self.delete_topics_with_options(topics, DeleteTopicsOptions::default())
+    fn delete_topics_with_string_slice(&self, topics: &[String]) -> DeleteTopicsResult {
+        self.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_names(topics.to_vec()),
+            DeleteTopicsOptions::default(),
+        )
+    }
+
+    /// Delete a batch of topics, by name.
+    ///
+    /// Corresponds to `Admin.deleteTopics(Collection<String>, DeleteTopicsOptions)`
+    /// (`Admin.java:228-230`), whose body wraps the names in a
+    /// `TopicCollection`. See
+    /// [`delete_topics_with_string_slice`](Admin::delete_topics_with_string_slice)
+    /// for the name.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
+    fn delete_topics_with_string_slice_options(
+        &self,
+        topics: &[String],
+        options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult {
+        self.delete_topics_with_topic_collection_options(TopicCollection::of_topic_names(topics.to_vec()), options)
     }
 
     /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
     ///
-    /// Corresponds to `Admin.deleteTopics(TopicCollection, DeleteTopicsOptions)`.
+    /// Corresponds to `Admin.deleteTopics(TopicCollection)` (`Admin.java:242-244`).
+    /// See [`delete_topics_with_string_slice`](Admin::delete_topics_with_string_slice)
+    /// for the name.
     #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
-    fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult;
+    fn delete_topics_with_topic_collection(&self, topics: TopicCollection) -> DeleteTopicsResult {
+        self.delete_topics_with_topic_collection_options(topics, DeleteTopicsOptions::default())
+    }
+
+    /// Delete a batch of topics (by name or by id, per the `TopicCollection`).
+    ///
+    /// Corresponds to `Admin.deleteTopics(TopicCollection, DeleteTopicsOptions)`
+    /// (`Admin.java:266`), the form Java's other three forward to. See
+    /// [`delete_topics_with_string_slice`](Admin::delete_topics_with_string_slice)
+    /// for the name.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteTopics")]
+    fn delete_topics_with_topic_collection_options(
+        &self,
+        topics: TopicCollection,
+        options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult;
 
     /// List the topics available in the cluster.
     ///
@@ -1347,6 +1391,31 @@ mod tests {
                 .await
                 .expect("the topic exists");
             assert_eq!(actual, expected);
+        }
+    }
+
+    /// `Admin.deleteTopics(Collection<String>)` `:214` and
+    /// `deleteTopics(Collection<String>, DeleteTopicsOptions)` `:228` wrap the
+    /// names in a `TopicCollection`, so both return a name-keyed result and
+    /// delete the named topics, as `deleteTopics(TopicCollection)` `:242` does.
+    #[tokio::test]
+    async fn delete_topics_by_name_wraps_the_names_in_a_topic_collection() {
+        let names = ["topic".to_string()];
+        for delete in [
+            Admin::delete_topics_with_string_slice as fn(&MockAdminClient, &[String]) -> DeleteTopicsResult,
+            |mock, names| mock.delete_topics_with_string_slice_options(names, DeleteTopicsOptions::default()),
+            |mock, names| mock.delete_topics_with_topic_collection(TopicCollection::of_topic_names(names.to_vec())),
+        ] {
+            let mock = admin();
+            let result = delete(&mock, &names);
+            assert!(result.topic_id_values().is_none(), "the names are not ids");
+            let values = result.topic_name_values().expect("deleted by name");
+            assert_eq!(values.keys().collect::<HashSet<_>>(), HashSet::from([&names[0]]));
+            result.all().get().await.expect("the topic exists");
+            assert!(
+                mock.list_topics().names().get().await.unwrap().is_empty(),
+                "the named topic is deleted"
+            );
         }
     }
 

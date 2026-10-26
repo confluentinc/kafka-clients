@@ -3814,7 +3814,11 @@ impl Admin for KafkaAdminClient {
         CreateTopicsResult::new(public)
     }
 
-    fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_with_topic_collection_options(
+        &self,
+        topics: TopicCollection,
+        options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
@@ -7592,7 +7596,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7606,7 +7610,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["ghost".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7623,8 +7627,10 @@ mod tests {
     async fn test_delete_topics_by_id_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         let id = Uuid::new(1, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id]),
+            DeleteTopicsOptions::new(),
+        );
         let mut r = DeletableTopicResult::new();
         r.set_topic_id(id);
         r.set_error_code(Errors::None.code());
@@ -7639,7 +7645,7 @@ mod tests {
         // By name: the response omits "myOtherTopic", so its future is
         // completed by the unrealized-futures sanity check.
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string(), "myOtherTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7659,8 +7665,10 @@ mod tests {
         let (admin, mut runnable, _time, _nodes) = env();
         let id1 = Uuid::new(1, 1);
         let id2 = Uuid::new(2, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id1, id2]),
+            DeleteTopicsOptions::new(),
+        );
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(1000, vec![delete_result_with_id(id1, Errors::None)]));
@@ -7695,7 +7703,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7725,7 +7733,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7751,7 +7759,7 @@ mod tests {
                 delete_result_named("topic3", Errors::TopicAlreadyExists),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7776,7 +7784,7 @@ mod tests {
                 delete_result_with_id(id3, Errors::UnknownTopicId),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7807,7 +7815,7 @@ mod tests {
             1000,
             vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7842,7 +7850,7 @@ mod tests {
             1000,
             vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -9612,7 +9620,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec![String::new()]),
             DeleteTopicsOptions::new(),
         );

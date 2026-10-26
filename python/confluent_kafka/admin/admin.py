@@ -604,7 +604,7 @@ class Admin(_AdminState):
         reject_str("topics", topics)
         self._check_not_closed()
         by_ids, keys = _conversions.topic_collection_target(topics, "deleteTopics")
-        args = _conversions.delete_topics_args(by_ids, keys)
+        args = _conversions.delete_topics_args(topics, by_ids, keys)
         reads = (_conversions.any_topic_id(keys) if by_ids
                  else _conversions.any_topic_name(keys))
         options = _conversions.options_or_new(options, DeleteTopicsOptions, read=reads)
