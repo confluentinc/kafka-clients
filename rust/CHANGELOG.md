@@ -32,6 +32,9 @@ breaking changes.
   `ApiVersions` handshake after `request.timeout.ms` is waited for instead of
   being disconnected, and a node with a request in flight is no longer picked
   as the least-loaded node.
+- New public `EndpointType`, Java's `org.apache.kafka.clients.admin.EndpointType`
+  (KIP-919): `Unknown`, `Broker` and `Controller`, with `id()` and
+  `from_id(i8)`, which answers `Unknown` for an id it does not know.
 
 ### Common
 
@@ -46,6 +49,13 @@ breaking changes.
   A Rust application should also update rustls-webpki to 0.103.16
   ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382)) in
   its lockfile.
+
+### C API
+
+- `kafka_admin_EndpointType_t`, Java's `EndpointType`: the singletons
+  `kafka_admin_EndpointType_unknown`, `_broker` and `_controller`, the C enum
+  `kafka_admin_EndpointType_e` read with `kafka_admin_EndpointType__enum`, and
+  `_id`, `_from_id` and `_to_string`.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
