@@ -2686,7 +2686,9 @@ void config_entry_to_proto(const kafka_admin_ConfigEntry_t* e, ConfigEntry* dst)
   dst->set_is_sensitive(kafka_admin_ConfigEntry_is_sensitive(e) != 0);
   dst->set_is_read_only(kafka_admin_ConfigEntry_is_read_only(e) != 0);
   dst->set_source(config_source_name(kafka_admin_ConfigEntry_source(e)));
-  dst->set_config_type(config_type_name(kafka_admin_ConfigEntry_type(e)));
+  // NULL is Java's null type, which a createTopics entry carries: left unset.
+  const kafka_admin_ConfigEntry_ConfigType_t* type = kafka_admin_ConfigEntry_type(e);
+  if (type != nullptr) dst->set_config_type(config_type_name(type));
   const char* doc = kafka_admin_ConfigEntry_documentation(e);
   if (doc != nullptr) dst->set_documentation(doc);
   OwnedList synonyms(kafka_admin_ConfigEntry_synonyms(e));

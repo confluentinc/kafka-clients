@@ -168,7 +168,7 @@ class ConfigEntry:
     def __init__(self, *, name: str, value: str | None,
                  source: ConfigEntry.ConfigSource, is_sensitive: bool,
                  is_read_only: bool, synonyms: Sequence[ConfigEntry.ConfigSynonym],
-                 type: ConfigEntry.ConfigType,  # noqa: A002 - Java's name
+                 type: ConfigEntry.ConfigType | None,  # noqa: A002 - Java's name
                  documentation: str | None) -> None: ...
 
     @java_forms(Form("name", "value"),
@@ -181,7 +181,7 @@ class ConfigEntry:
                  source: ConfigEntry.ConfigSource = MISSING, is_sensitive: bool = MISSING,
                  is_read_only: bool = MISSING,
                  synonyms: Sequence[ConfigEntry.ConfigSynonym] = MISSING,
-                 type: ConfigEntry.ConfigType = MISSING,  # noqa: A002 - Java's name
+                 type: ConfigEntry.ConfigType | None = MISSING,  # noqa: A002 - Java's name
                  documentation: str | None = MISSING) -> None:
         """Create a configuration entry with the provided values.
 
@@ -190,7 +190,9 @@ class ConfigEntry:
         whether the config value is sensitive, the broker never returns the
         value if it is sensitive; ``is_read_only``: whether the config is
         read-only and cannot be updated; ``synonyms``: synonym configs in order
-        of precedence.
+        of precedence; ``type``: the config data type, ``None`` for Java's null
+        type, which ``KafkaAdminClient`` gives the entries of a ``createTopics``
+        result.
         """
         if source is _UNKNOWN_SOURCE:
             source = ConfigEntry.ConfigSource.UNKNOWN
@@ -246,8 +248,9 @@ class ConfigEntry:
         # client builds the entry.
         return None if synonyms is None else list(synonyms)  # type: ignore[return-value]
 
-    def type(self) -> ConfigEntry.ConfigType:  # noqa: A003 - Java's name
-        """Return the config data type."""
+    def type(self) -> ConfigEntry.ConfigType | None:  # noqa: A003 - Java's name
+        """Return the config data type, or ``None`` for the entries of a
+        ``createTopics`` result, which Java builds with a null type."""
         return self._type
 
     def documentation(self) -> str | None:

@@ -39,7 +39,8 @@ def _assert_created_config(config: Config) -> None:
     entry = config.get(name="retention.ms")
     assert entry is not None and entry.value() == RETENTION_MS
     assert entry.source() is ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG
-    assert entry.type() is ConfigEntry.ConfigType.UNKNOWN
+    # Java's createTopics entries have a null type (KafkaAdminClient.java:1992-2002).
+    assert entry.type() is None
     assert entry.synonyms() == [] and entry.documentation() is None
 
 
