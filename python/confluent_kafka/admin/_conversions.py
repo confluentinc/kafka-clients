@@ -908,7 +908,8 @@ def _config_entry(raw: tuple[Any, ...]) -> ConfigEntry:
     type, documentation, synonyms)`` as Java's ``new ConfigEntry(name, value, source,
     isSensitive, readOnly, synonyms, type, documentation)``
     (``KafkaAdminClient.describeConfigs``); ``is_default`` is not a field, as Java
-    derives ``isDefault()`` from the source."""
+    derives ``isDefault()`` from the source. ``type`` is ``None`` for Java's null
+    type, which the entries of a ``createTopics`` result carry."""
     from confluent_kafka.admin.config_entry import ConfigEntry
 
     (name, value, _is_default, is_sensitive, is_read_only, source, config_type,
@@ -920,7 +921,8 @@ def _config_entry(raw: tuple[Any, ...]) -> ConfigEntry:
             name=synonym_name, value=synonym_value,
             source=ConfigEntry.ConfigSource(synonym_source))
             for synonym_name, synonym_value, synonym_source in synonyms],
-        type=ConfigEntry.ConfigType(config_type), documentation=documentation)
+        type=None if config_type is None else ConfigEntry.ConfigType(config_type),
+        documentation=documentation)
 
 
 def describe_configs_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
