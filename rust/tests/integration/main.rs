@@ -68,6 +68,7 @@ mod producer_send_while_deletion_test;
 mod producer_test;
 mod producer_transactions_test;
 mod sasl_plain_plaintext_consumer_test;
+mod sasl_reauthentication_test;
 mod sasl_ssl_consumer_test;
 mod ssl_consumer_test;
 mod transactions_bounce_test;
