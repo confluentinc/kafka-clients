@@ -92,6 +92,13 @@ breaking changes.
   missing map or value as `null`, instead of Rust's debug syntax.
 - `AclOperation::values()` and `AclPermissionType::values()` return the
   constants in declaration order, as Java's `values()` does.
+- `MockAdminClient` stores a config value of null as null, as Java's mock
+  does: a `NewTopic` config given to `createTopics` with a `None` value, or a
+  `SET` with a `None` value through `incrementalAlterConfigs`, reads back from
+  `describe_configs` as `None` instead of `Some("")`. A group config set to
+  null reads back as its default when it has one, as Java's `putIfAbsent`
+  overlay replaces a null value; the Python `MockAdminClient` now does the
+  same.
 
 ### Common
 
