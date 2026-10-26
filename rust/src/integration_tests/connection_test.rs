@@ -21,7 +21,9 @@
 //! 3. Send MetadataRequest, receive MetadataResponse
 //! 4. Verify response data
 //!
-//! Maps to Java's `MetadataVersionIntegrationTest` and `BootstrapControllersIntegrationTest`.
+//! Maps to Java's `MetadataVersionIntegrationTest`. Java's
+//! `BootstrapControllersIntegrationTest` is translated in
+//! `tests/integration/admin_bootstrap_controllers_test.rs`.
 
 use std::net::SocketAddr;
 

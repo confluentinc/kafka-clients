@@ -35,6 +35,25 @@ breaking changes.
 - New public `EndpointType`, Java's `org.apache.kafka.clients.admin.EndpointType`
   (KIP-919): `Unknown`, `Broker` and `Controller`, with `id()` and
   `from_id(i8)`, which answers `Unknown` for an id it does not know.
+- `bootstrap.controllers` (KIP-919) is defined again (Rust, C API, Python), and
+  `AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG` is back: a `LIST`, empty
+  by default, validated as Java's `AdminClientConfig` validates it, and read
+  by the client whichever list it bootstraps from, so it is no longer listed
+  among the unused configurations. A client configured with it alone
+  bootstraps from the KRaft controller quorum, as Java's does: it refreshes
+  its metadata with `DescribeCluster` for the CONTROLLER endpoint, sends the
+  calls the controllers serve (describing the cluster, the configs and the
+  features, altering configs, ACLs, partition reassignments, updating the
+  features, unregistering a controller) to the active controller or the node
+  they name, and fails every other call at once with
+  `UnsupportedEndpointTypeError`.
+- **Breaking:** setting neither `bootstrap.servers` nor `bootstrap.controllers`
+  fails client creation, still wrapped in `Failed to create new
+  KafkaAdminClient`, with Java's `KafkaAdminClient.determineBootstrapType`
+  `ConfigError` `You must set either bootstrap.servers or
+  bootstrap.controllers`, where it was `ClientUtils`'s `No resolvable
+  bootstrap urls given in bootstrap.servers`; setting both fails with `You
+  cannot set both bootstrap.servers and bootstrap.controllers`.
 
 ### Common
 
