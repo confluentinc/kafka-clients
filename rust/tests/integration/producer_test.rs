@@ -1386,7 +1386,9 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
         ]);
         let new_topic =
             NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))
-                .set_configs(topic_config);
+                .set_configs(Some(
+                    topic_config.into_iter().map(|(name, value)| (name, Some(value))).collect(),
+                ));
         let _ = admin.create_topics(&[new_topic]).all().get().await;
         test_utils::wait_for_partition_leaders(admin.as_ref(), GROUP_METADATA_TOPIC_NAME, 0..1).await;
     }

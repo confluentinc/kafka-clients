@@ -1358,7 +1358,25 @@ static void test_mock_admin_new_topic_configs(void) {
     TEST_ASSERT_EQUAL_STRING("60000", (const char *)kafka_Map_get(copy, (void *)"retention.ms"));
     kafka_Map_destroy(copy);
     char *text = kafka_admin_NewTopic_to_string(topic);
-    TEST_ASSERT_NOT_NULL(strstr(text, "configured"));
+    TEST_ASSERT_EQUAL_STRING("(name=configured, numPartitions=1, replicationFactor=1, replicasAssignments=null, "
+                             "configs={cleanup.policy=compact, retention.ms=60000})",
+                             text);
+    kafka_string_destroy(text);
+
+    /* Java's `configs(Map)` stores the map as given: a NULL value is Java's
+     * null config value, read back as NULL and printed as `null`. */
+    configs = kafka_Map_new();
+    kafka_Map_put(configs, (void *)"retention.ms", (void *)"60000");
+    kafka_Map_put(configs, (void *)"cleanup.policy", NULL);
+    kafka_admin_NewTopic_set_configs(topic, configs);
+    kafka_Map_destroy(configs);
+    copy = kafka_admin_NewTopic_configs(topic);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(copy));
+    TEST_ASSERT_EQUAL_STRING("cleanup.policy", (const char *)kafka_Map_key(copy, 0));
+    TEST_ASSERT_NULL(kafka_Map_value(copy, 0));
+    kafka_Map_destroy(copy);
+    text = kafka_admin_NewTopic_to_string(topic);
+    TEST_ASSERT_NOT_NULL(strstr(text, "configs={cleanup.policy=null, retention.ms=60000}"));
     kafka_string_destroy(text);
 
     kafka_List_t *topics = kafka_List_new();
@@ -1370,6 +1388,11 @@ static void test_mock_admin_new_topic_configs(void) {
     const kafka_admin_ConfigEntry_t *entry = kafka_admin_Config_get(cfg, "retention.ms");
     TEST_ASSERT_NOT_NULL(entry);
     TEST_ASSERT_EQUAL_STRING("60000", kafka_admin_ConfigEntry_value(entry));
+    /* The mock builds the result's entries with `new ConfigEntry(key, value)`,
+     * so the null value stays null. */
+    entry = kafka_admin_Config_get(cfg, "cleanup.policy");
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(entry));
     TEST_ASSERT_NULL(kafka_admin_Config_get(cfg, "no.such.config"));
     kafka_common_KafkaFuture_destroy(config);
     kafka_admin_CreateTopicsResult_destroy(result);

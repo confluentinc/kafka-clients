@@ -81,6 +81,17 @@ breaking changes.
   `RemoveMembersFromConsumerGroupOptions::set_reason` take an `Option`, so
   `None` clears a value set earlier, as Java's `owner(null)` and
   `reason(null)` do.
+- **Breaking (Rust, Python):** a `NewTopic` config value can be null, as a
+  value of Java's `Map<String, String>` can. `NewTopic::set_configs` takes an
+  `Option<BTreeMap<String, Option<String>>>` and `configs()` returns the
+  `Option`-valued map: `None` for the map clears configs set earlier, as
+  Java's `configs(null)` does, and a `None` value is sent to the broker as a
+  null config value. In Python a `None` value is sent the same way instead of
+  raising `TypeError`, and `configs()` is typed `dict[str, str | None]`.
+- `NewTopic`'s `Display` prints Java's `toString()`, the maps as `{k=v}` and a
+  missing map or value as `null`, instead of Rust's debug syntax.
+- `AclOperation::values()` and `AclPermissionType::values()` return the
+  constants in declaration order, as Java's `values()` does.
 
 ### Common
 
@@ -127,6 +138,14 @@ breaking changes.
   with `NULL` clears the reason instead of setting an empty one, and
   `kafka_admin_CreateDelegationTokenOptions_set_owner` with `NULL` clears the
   owner, as Java's `reason(null)` and `owner(null)` do.
+- **Breaking (C API):** `kafka_admin_NewTopic_set_configs` takes a `NULL`
+  value as Java's `null` config value, which it used to send as an empty
+  string, and a `NULL` map as Java's `null` map, which clears the configs
+  where it used to set an empty map. `kafka_admin_NewTopic_configs` returns a
+  `NULL` value for a null config value.
+- `kafka_common_acl_AclOperation_values` and
+  `kafka_common_acl_AclPermissionType_values` return an owned list of the
+  borrowed singletons in declaration order.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
