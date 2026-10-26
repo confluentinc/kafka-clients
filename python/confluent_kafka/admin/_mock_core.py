@@ -298,7 +298,7 @@ def _timeout() -> Exception:
     return KafkaTimeoutError()
 
 
-def _config(entries: Mapping[str, str] | None, resource: object = None) -> Config:
+def _config(entries: Mapping[str, str | None] | None, resource: object = None) -> Config:
     """The private ``toConfigObject(Map)``: a ``Config`` of one ``ConfigEntry(name,
     value)`` per entry; it dereferences its map, so Java throws
     ``NullPointerException`` for ``null``: here ``None`` raises ``IllegalStateError``
@@ -322,12 +322,13 @@ class _TopicMetadata:
 
     def __init__(self, topic_id: Uuid, is_internal_topic: bool,
                  partitions: list[TopicPartitionInfo], partition_log_dirs: list[str],
-                 configs: Mapping[str, str] | None) -> None:
+                 configs: Mapping[str, str | None] | None) -> None:
         self.topic_id = topic_id
         self.is_internal_topic = is_internal_topic
         self.partitions = partitions
         self.partition_log_dirs = partition_log_dirs
-        self.configs: Mapping[str, str] = configs if configs is not None else {}
+        # Java's `Map<String, String>` holds a config set to null as given.
+        self.configs: Mapping[str, str | None] = configs if configs is not None else {}
         self.marked_for_deletion = False
         self.fetches_remaining_until_visible = 0
 
@@ -549,9 +550,9 @@ class MockAdminClientCore:
         self._broker_log_dirs: list[Sequence[str]] = (
             broker_log_dirs if isinstance(broker_log_dirs, _CopiesList)
             else list(broker_log_dirs))
-        self._broker_configs: list[dict[str, str]] = []
-        self._client_metrics_configs: dict[str, dict[str, str]] = {}
-        self._group_configs: dict[str, dict[str, str]] = {}
+        self._broker_configs: list[dict[str, str | None]] = []
+        self._client_metrics_configs: dict[str, dict[str, str | None]] = {}
+        self._group_configs: dict[str, dict[str, str | None]] = {}
         non_null(default_group_configs, "default_group_configs")  # new HashMap<>(null)
         self._default_group_configs = dict(default_group_configs)
         for _ in range(len(self._brokers)):
@@ -1067,8 +1068,8 @@ class MockAdminClientCore:
             return AlterConfigsResult._new(futures=futures, kind=self._kind)
 
     @staticmethod
-    def _apply_ops(config: Mapping[str, str],
-                   ops: Iterable[AlterConfigOp]) -> dict[str, str] | Exception:
+    def _apply_ops(config: Mapping[str, str | None],
+                   ops: Iterable[AlterConfigOp]) -> dict[str, str | None] | Exception:
         """The ``SET`` / ``DELETE`` loop each resource type repeats: the new map, or
         Java's ``InvalidRequestException`` for another op type."""
         from confluent_kafka.admin.alter_config_op import AlterConfigOp
@@ -1078,7 +1079,7 @@ class MockAdminClientCore:
         for op in element(ops, "configs"):  # for (AlterConfigOp op : ops)
             if element(op, "configs").op_type() is AlterConfigOp.OpType.SET:
                 value = op.config_entry().value()
-                new_map[op.config_entry().name()] = value  # type: ignore[assignment]
+                new_map[op.config_entry().name()] = value
             elif op.op_type() is AlterConfigOp.OpType.DELETE:
                 new_map.pop(op.config_entry().name(), None)
             else:
