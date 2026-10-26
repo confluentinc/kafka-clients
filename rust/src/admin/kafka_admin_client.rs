@@ -66,10 +66,12 @@ use crate::DescribeLogDirsRequestData;
 use crate::DescribeTopicPartitionsRequestData;
 use crate::DescribeUserScramCredentialsRequestData;
 use crate::DescribeUserScramCredentialsResponseData;
+use crate::HostResolver;
 use crate::IncrementalAlterConfigsRequestData;
 use crate::KafkaClient;
 use crate::ListConfigResourcesRequestData;
 use crate::ListGroupsRequestData;
+use crate::MetadataUpdater;
 use crate::NetworkClient;
 use crate::admin::ConfigEntryOptionsBuilder;
 use crate::admin::config_entry::{ConfigSource, ConfigSynonym, ConfigType};
@@ -80,6 +82,7 @@ use crate::common::config::{ConfigResource, config_resource};
 use crate::common::errors::ApiError;
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::network::ChannelBuilders;
+use crate::common::network::Selectable;
 use crate::common::network::Selector;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
@@ -491,26 +494,13 @@ impl KafkaAdminClient {
         selector.set_time(Arc::clone(&time));
         let api_versions = Arc::new(ApiVersions::new());
 
-        // `ClientUtils.createNetworkClient` (`ClientUtils.java:291-317`): the socket
-        // buffers, `metadata.recovery.strategy` and
-        // `metadata.recovery.rebootstrap.trigger.ms` come from the config.
-        let mut client = NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
+        let mut client = Self::create_network_client(
+            &config,
             selector,
             metadata_manager.updater(),
             &client_id,
-            100, // max in-flight requests per connection (admin sends <= 1 per node)
-            config.reconnect_backoff_ms(),
-            config.reconnect_backoff_max_ms(),
-            config.send_buffer_bytes(),
-            config.receive_buffer_bytes(),
-            config.request_timeout_ms(),
-            config.socket_connection_setup_timeout_ms(),
-            config.socket_connection_setup_timeout_max_ms(),
-            true, // discover_broker_versions
             api_versions,
             DefaultHostResolver::new(),
-            config.metadata_recovery_rebootstrap_trigger_ms(),
-            config.metadata_recovery_strategy(),
             log_context.clone(),
         );
         client.set_time(Arc::clone(&time));
@@ -537,6 +527,57 @@ impl KafkaAdminClient {
         config.log_unused();
         admin.spawn(runnable);
         Ok(admin)
+    }
+
+    /// Builds the admin `NetworkClient` with the arguments
+    /// `KafkaAdminClient.createInternal` passes to `ClientUtils.createNetworkClient`
+    /// (`KafkaAdminClient.java:617-631`, `ClientUtils.java:291-317`): the socket
+    /// buffers, `metadata.recovery.strategy` and
+    /// `metadata.recovery.rebootstrap.trigger.ms` come from the config.
+    ///
+    /// `maxInFlightRequestsPerConnection` is `1` (`:625`). The admin loop sends at
+    /// most one call per node and checks `client.ready(..)` first, so the limit
+    /// does not change what is sent; it matters to `least_loaded_node` and
+    /// `ready`, which treat a node with an in-flight request as busy only when the
+    /// connection cannot take another one.
+    ///
+    /// The `NetworkClient`'s default request timeout is one hour,
+    /// `(int) TimeUnit.HOURS.toMillis(1)` (`:626`), not `request.timeout.ms`.
+    /// Every admin call is sent with its own timeout, `min(request.timeout.ms,
+    /// time left to the call deadline)` (`sendEligibleCalls`), so the default
+    /// bounds only what the `NetworkClient` sends on its own, the `ApiVersions`
+    /// handshake, and caps its `poll` timeout. A broker that takes longer than
+    /// `request.timeout.ms` to answer the handshake is therefore waited for, not
+    /// disconnected; the admin loop still bounds each call by its deadline and
+    /// each node assignment by `request.timeout.ms` (`nodeReadyDeadlines`).
+    pub(crate) fn create_network_client<S: Selectable, H: HostResolver>(
+        config: &AdminClientConfig,
+        selector: S,
+        metadata_updater: Box<dyn MetadataUpdater>,
+        client_id: &str,
+        api_versions: Arc<ApiVersions>,
+        host_resolver: H,
+        log_context: LogContext,
+    ) -> NetworkClient<S, H> {
+        NetworkClient::with_metadata_updater_rebootstrap_trigger_ms(
+            selector,
+            metadata_updater,
+            client_id,
+            1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
+            config.reconnect_backoff_ms(),
+            config.reconnect_backoff_max_ms(),
+            config.send_buffer_bytes(),
+            config.receive_buffer_bytes(),
+            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
+            config.socket_connection_setup_timeout_ms(),
+            config.socket_connection_setup_timeout_max_ms(),
+            true, // discover_broker_versions
+            api_versions,
+            host_resolver,
+            config.metadata_recovery_rebootstrap_trigger_ms(),
+            config.metadata_recovery_strategy(),
+            log_context,
+        )
     }
 
     /// Wires up the shared state and the (not-yet-running) background runnable.
@@ -1429,10 +1470,16 @@ where
 }
 
 /// Computes the absolute deadline for a call. Mirrors
-/// `KafkaAdminClient.calcDeadlineMs`.
+/// `KafkaAdminClient.calcDeadlineMs` (`KafkaAdminClient.java:504-508`): a
+/// negative option timeout is clamped to zero (`now + Math.max(0, optionTimeoutMs)`),
+/// so the call is still sent once instead of expiring before it is assigned a node.
+/// The default API timeout is not clamped, as in Java.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#calcDeadlineMs")]
 fn calc_deadline_ms(now: i64, option_timeout: Option<i32>, default_api_timeout_ms: i32) -> i64 {
-    now + option_timeout.unwrap_or(default_api_timeout_ms) as i64
+    match option_timeout {
+        Some(option_timeout_ms) => now + i64::from(option_timeout_ms.max(0)),
+        None => now + i64::from(default_api_timeout_ms),
+    }
 }
 
 /// Re-keys a `CoordinatorKey`-keyed future map by the coordinator key's id
@@ -5236,12 +5283,16 @@ impl Admin for KafkaAdminClient {
                 },
             }
         }
-        self.shared.shutdown.closing.store(true, std::sync::atomic::Ordering::Release);
+        // Java's `close()` publishes only `hardShutdownTimeMs`; the runnable's
+        // `closing` flag is set by the I/O task itself once its loop exits
+        // (`KafkaAdminClient.java:1551`), so calls keep being retried during the
+        // grace period.
+        //
         // Java calls `client.wakeup()` from inside the successful CAS arm. Here
-        // the wakeup follows the `closing` store so the woken I/O task is
-        // guaranteed to observe both, and it is issued on the
-        // already-earlier-deadline path too (where it is a harmless no-op: the
-        // `close()` that installed that deadline has already woken the task).
+        // the wakeup follows the CAS, so the woken I/O task is guaranteed to
+        // observe the deadline, and it is issued on the already-earlier-deadline
+        // path too (where it is a harmless no-op: the `close()` that installed
+        // that deadline has already woken the task).
         self.shared.wakeup.notify_one();
 
         // Java ends with a *timed* join (`KafkaAdminClient.close`):
@@ -5398,10 +5449,6 @@ struct DescribeTopicPartitionsState {
     /// Java's `partiallyFinishedTopicDescription`: the cursor topic of the
     /// previous page, whose partitions continue in the next one.
     partially_finished_topic_description: Option<TopicDescription>,
-    /// Whether `handleUnsupportedVersionException` has issued the Metadata-API
-    /// fallback. The failure hook may leave the futures to that call only once it
-    /// has been issued; see the failure hook for why it can be missing.
-    metadata_fallback_issued: bool,
 }
 
 /// Builds the paginated `describeTopicPartitions` [`Call`] for
@@ -5439,7 +5486,6 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
     let state = Arc::new(Mutex::new(DescribeTopicPartitionsState {
         topics_requests: topic_names_list.iter().cloned().collect(),
         partially_finished_topic_description: None,
-        metadata_fallback_issued: false,
     }));
 
     let req_state = Arc::clone(&state);
@@ -5556,47 +5602,18 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
-    // `handleUnsupportedVersionException`'s body (`KafkaAdminClient.java:2312-2316`):
-    // issue the Metadata-API call through `runnable.call`, and record that it was.
-    let issue_metadata_fallback = {
-        let state = Arc::clone(&state);
-        let topic_futures = Arc::clone(&topic_futures);
-        move || {
-            state.lock().unwrap().metadata_fallback_issued = true;
-            let now = ctx.time.milliseconds();
-            ctx.sender.call(get_describe_topics_by_names_call(
-                Arc::clone(&topic_futures),
-                topic_names_list.clone(),
-                include_authorized_operations,
-                calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
-            ));
-        }
-    };
-    let issue_metadata_fallback = Arc::new(issue_metadata_fallback);
-
-    let fail_state = Arc::clone(&state);
     let fail_futures = Arc::clone(&topic_futures);
-    let fail_issue_metadata_fallback = Arc::clone(&issue_metadata_fallback);
     let handle_failure = Box::new(move |error: &Error| {
         // An UnsupportedVersionException is not the user's failure: the
         // Metadata-API call issued by the hook below completes the futures
         // (`KafkaAdminClient.java:2427-2431`). Detected by code, because
         // `Error::unsupported_version` builds the generic code-35 error, as
-        // `AdminClientRunnable::fail_call` does.
+        // `AdminClientRunnable::fail_call` does. As in Java, this failure is only
+        // reached after `handleUnsupportedVersionException` issued the fallback:
+        // `fail_call` skips that hook only once `ShutdownSignal::closing` is set,
+        // which happens when the I/O task exits and no response is handled any
+        // more.
         if error.error() == Errors::UnsupportedVersion {
-            // In Java this failure is only reached after
-            // `handleUnsupportedVersionException` issued the fallback: `Call.fail`
-            // skips that hook only once `runnable.closing` is set, which happens
-            // when the I/O thread exits and no response is handled any more. Rust
-            // sets `ShutdownSignal::closing` as soon as `close()` starts, so during
-            // the close grace period `fail_call` comes straight here.
-            // Issue the fallback then, as Java's hook would have: the closing gate
-            // rejects it with "Cannot accept new calls when AdminClient is
-            // closing.", which fails every future instead of leaving them pending.
-            let issued = fail_state.lock().unwrap().metadata_fallback_issued;
-            if !issued {
-                fail_issue_metadata_fallback();
-            }
             return;
         }
         for future in fail_futures.values() {
@@ -5604,8 +5621,16 @@ fn generate_describe_topics_call_with_describe_topic_partitions_api(
         }
     });
 
+    // `handleUnsupportedVersionException` (`KafkaAdminClient.java:2419-2424`):
+    // issue the Metadata-API call through `runnable.call`, and return `false`.
     let handle_uv = Box::new(move || {
-        issue_metadata_fallback();
+        let now = ctx.time.milliseconds();
+        ctx.sender.call(get_describe_topics_by_names_call(
+            Arc::clone(&topic_futures),
+            topic_names_list.clone(),
+            include_authorized_operations,
+            calc_deadline_ms(now, timeout_ms, default_api_timeout_ms),
+        ));
         false
     });
 
@@ -6932,6 +6957,174 @@ mod tests {
         future.get().await.expect("createTopics succeeds");
     }
 
+    /// Steps the runnable until `future` completes and returns its error, failing
+    /// with `api` if it does not complete or succeeds.
+    async fn await_failure<T: Send + 'static>(
+        runnable: &mut AdminClientRunnable<MockClient>,
+        future: KafkaFuture<T>,
+        api: &str,
+    ) -> Error {
+        pump_until(runnable, 40, |_| future.is_done()).await;
+        assert!(future.is_done(), "{api}: the future did not complete");
+        match future.get().await {
+            Ok(_) => panic!("{api}: expected an authentication error, but the call succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    /// Asserts `error` is the error `MockClient.authenticationFailed` records,
+    /// `Errors.SASL_AUTHENTICATION_FAILED.exception()` — a
+    /// `SaslAuthenticationException`, and so an `AuthenticationException`.
+    fn assert_sasl_authentication_error(error: &Error, api: &str) {
+        assert!(
+            error.is_authentication_error(),
+            "{api}: Expected an authentication error, but got {error:?}"
+        );
+        assert!(
+            matches!(error, Error::SaslAuthentication(_)),
+            "{api}: expected a SaslAuthenticationException, but got {error:?}"
+        );
+        assert_eq!(error.message(), "SASL Authentication failed.", "{api}");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testPropagatedMetadataFetchException`:
+    /// a pending authentication error on the controller fails `createTopics` with
+    /// the `SaslAuthenticationException` the client reports for that node, rather
+    /// than the call timing out.
+    ///
+    /// The request to node 0 is answered as disconnected, and the admin loop
+    /// fails the call with `client.authenticationException(node)`
+    /// (`KafkaAdminClient.java:1462-1465`), which is not retriable.
+    ///
+    /// Java runs on `Time.SYSTEM`; here the mock clock stays still, so neither
+    /// `request.timeout.ms=10` nor the 1 s call timeout can expire, and the call
+    /// can only fail through the authentication error.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testPropagatedMetadataFetchException")]
+    async fn test_propagated_metadata_fetch_error() {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let mut client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
+        client.create_pending_authentication_error(&nodes[0], Duration::from_secs(24 * 60 * 60).as_millis() as i64);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:8121".to_string());
+        props.insert("request.timeout.ms".to_string(), "10".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_replicas_assignments(
+                "myTopic",
+                std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+            )],
+            CreateTopicsOptions::new().set_timeout_ms(Some(1000)),
+        );
+        let error = await_failure(&mut runnable, result.all(), "createTopics").await;
+        assert_sasl_authentication_error(&error, "createTopics");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testAdminClientApisAuthenticationFailure`,
+    /// with its helpers `callAdminClientApisAndExpectAnAuthenticationError` and
+    /// `callClientQuotasApisAndExpectAnAuthenticationError`: once the bootstrap
+    /// metadata call fails authentication, every API fails with that
+    /// authentication error.
+    ///
+    /// The metadata call's failure reaches `AdminMetadataManager.updateFailed`,
+    /// which keeps a fatal exception (`RequestUtils.isFatalException`) that
+    /// `isReady()` rethrows to every call choosing a node from then on. As in
+    /// Java, `metadata.recovery.strategy` is `none`: a rebootstrap updates the
+    /// manager with the bootstrap cluster, which clears that exception
+    /// (`AdminMetadataManager.update`).
+    ///
+    /// Java runs on `Time.SYSTEM` and blocks on each future. Here the mock clock
+    /// starts at a wall-clock-sized value, so that, as under `Time.SYSTEM`, the
+    /// metadata seeded from the bootstrap cluster (which leaves
+    /// `lastMetadataUpdateMs` at 0) counts as expired; and it advances by
+    /// `retry.backoff.ms` after each API, the case Java's comment below guards
+    /// against: the backoff has passed, so the admin loop makes a new metadata
+    /// call, whose `MetadataUpdateNodeIdProvider` finds the bootstrap node backing
+    /// off and, under `rebootstrap`, would rebootstrap and clear the error. Each
+    /// future is awaited after stepping the loop until it completes. The calls and
+    /// their order are Java's: createTopics, createPartitions, createAcls,
+    /// describeAcls, deleteAcls, describeConfigs, describeClientQuotas,
+    /// alterClientQuotas.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminClientApisAuthenticationFailure")]
+    async fn test_admin_client_apis_authentication_failure() {
+        const RETRY_BACKOFF_MS: i64 = 100;
+        let time = mock_time(1_700_000_000_000);
+        // Java's `mockBootstrapCluster()`.
+        let cluster = Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:8121".parse().unwrap())]);
+        let bootstrap_node = cluster.nodes()[0].clone();
+        let mut client =
+            MockClient::with_static_nodes(vec![bootstrap_node.clone()], Arc::clone(&time) as Arc<dyn Time>);
+        client
+            .create_pending_authentication_error(&bootstrap_node, Duration::from_secs(24 * 60 * 60).as_millis() as i64);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:8121".to_string());
+        props.insert("request.timeout.ms".to_string(), "1000".to_string());
+        // Default "metadata.recovery.strategy" is rebootstrap. If it meets "retry.backoff.ms" (default is 100L),
+        // following assertion will fail. Set it to none to avoid authentication error cleanup.
+        props.insert("metadata.recovery.strategy".to_string(), "none".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+
+        // callAdminClientApisAndExpectAnAuthenticationError
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_replicas_assignments(
+                "myTopic",
+                std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+            )],
+            CreateTopicsOptions::new().set_timeout_ms(Some(10_000)),
+        );
+        let error = await_failure(&mut runnable, result.all(), "createTopics").await;
+        assert_sasl_authentication_error(&error, "createTopics");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.create_partitions(&new_partitions_counts());
+        let error = await_failure(&mut runnable, result.all(), "createPartitions").await;
+        assert_sasl_authentication_error(&error, "createPartitions");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.create_acls(&[acl1(), acl2()]);
+        let error = await_failure(&mut runnable, result.all(), "createAcls").await;
+        assert_sasl_authentication_error(&error, "createAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.describe_acls(&filter1());
+        let error = await_failure(&mut runnable, result.values().clone(), "describeAcls").await;
+        assert_sasl_authentication_error(&error, "describeAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.delete_acls(&[filter1(), filter2()]);
+        let error = await_failure(&mut runnable, result.all(), "deleteAcls").await;
+        assert_sasl_authentication_error(&error, "deleteAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.describe_configs(&[ConfigResource::new(config_resource::Type::Broker, "0".to_string())]);
+        let error = await_failure(&mut runnable, result.all(), "describeConfigs").await;
+        assert_sasl_authentication_error(&error, "describeConfigs");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        // callClientQuotasApisAndExpectAnAuthenticationError
+        let result = admin.describe_client_quotas(&ClientQuotaFilter::all());
+        let error = await_failure(&mut runnable, result.entities().clone(), "describeClientQuotas").await;
+        assert_sasl_authentication_error(&error, "describeClientQuotas");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let entity =
+            ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), Some("user".to_string()))]));
+        let alteration = ClientQuotaAlteration::new(entity, vec![Op::new("consumer_byte_rate", Some(1000.0))]);
+        let result = admin.alter_client_quotas(&[alteration]);
+        let error = await_failure(&mut runnable, result.all(), "alterClientQuotas").await;
+        assert_sasl_authentication_error(&error, "alterClientQuotas");
+    }
+
     #[tokio::test]
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();
@@ -8183,6 +8376,36 @@ mod tests {
         assert!(names.contains("__consumer_offsets"));
     }
 
+    /// Java's `calcDeadlineMs` clamps a negative option timeout to zero
+    /// (`now + Math.max(0, optionTimeoutMs)`, `KafkaAdminClient.java:504-508`), so
+    /// on a frozen clock a call with `timeoutMs = -1` has `deadlineMs == now`. The
+    /// timeout processor only expires a call whose remaining time is `< 0`
+    /// (`:1131-1132`, `:1151-1152`), so the call is sent and succeeds. Without the
+    /// clamp the deadline is `now - 1` and the call expires unsent.
+    #[tokio::test]
+    async fn test_negative_option_timeout_is_clamped_to_zero() {
+        let (admin, mut runnable, time, nodes) = env();
+        let result = admin.list_topics_with_options(ListTopicsOptions::new().set_timeout_ms(Some(-1)));
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                vec![topic_meta("visible", false, Uuid::new(0, 1), 1)],
+            )));
+        pump(&mut runnable, 5).await;
+        let names = result.names().get().await.expect("the call must be sent, not expired");
+        assert!(names.contains("visible"));
+
+        let now = time.milliseconds();
+        assert_eq!(calc_deadline_ms(now, Some(-1), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(i32::MIN), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(0), 60_000), now);
+        assert_eq!(calc_deadline_ms(now, Some(5), 60_000), now + 5);
+        assert_eq!(calc_deadline_ms(now, None, 60_000), now + 60_000);
+    }
+
     // --- describeTopics ------------------------------------------------------
 
     use crate::DescribeTopicPartitionsResponseData;
@@ -8656,9 +8879,9 @@ mod tests {
     /// because the hard-shutdown deadline is set, and every topic future fails
     /// with `IllegalStateException("Cannot accept new calls when AdminClient is
     /// closing.")` (`KafkaAdminClient.java:970-986`, `:2419-2431`, `:1706-1709`).
-    /// Rust's `fail_call` skips the hook while closing, so the
-    /// failure hook issues the fallback itself; before that it swallowed the
-    /// code-35 error and the futures never completed.
+    /// Rust's `fail_call` reaches the hook too, since `close()` only publishes
+    /// the deadline and `closing` is set once the loop exits. Before that fix
+    /// the code-35 error was swallowed and the futures never completed.
     #[tokio::test]
     async fn an_unsupported_version_during_close_fails_the_by_name_describe() {
         let (admin, mut runnable, _time, nodes) = env();
@@ -8670,7 +8893,7 @@ mod tests {
         assert!(!future.is_done());
 
         // `close(30s)` with describeTopicPartitions queued. No task was spawned,
-        // so this only publishes the deadline and the closing flag.
+        // so this only publishes the deadline.
         admin.close_with_timeout(Duration::from_secs(30)).await;
         // The broker does not support DescribeTopicPartitions.
         runnable.client_mut().prepare_unsupported_version_response();
@@ -9834,6 +10057,43 @@ mod tests {
             all.get().await.unwrap().into_iter().collect::<HashSet<_>>(),
             expected.into_iter().collect::<HashSet<_>>()
         );
+    }
+
+    /// Java's `listTransactions()` is `listTransactions(new ListTransactionsOptions())`
+    /// (`Admin.java`), whose `filteredDuration` starts at `-1L`
+    /// (`ListTransactionsOptions.java:36`), and `ListTransactionsHandler.buildBatchedRequest`
+    /// copies it into `DurationFilter`. So the no-arg call asks every broker with
+    /// `DurationFilter = -1` (no duration filter), not `0`.
+    #[tokio::test]
+    async fn test_list_transactions_without_options_sends_no_duration_filter() {
+        let (admin, mut runnable, _time, nodes) = env();
+        runnable.client_mut().prepare_response(metadata_resp(&nodes, vec![]));
+
+        let duration_filters = Arc::new(Mutex::new(Vec::new()));
+        for node in &nodes {
+            let seen = Arc::clone(&duration_filters);
+            runnable.client_mut().prepare_response_from_matcher(
+                Box::new(move |body: &AbstractRequest| match body {
+                    AbstractRequest::ListTransactions(request) => {
+                        seen.lock().unwrap().push(request.data().duration_filter);
+                        true
+                    },
+                    _ => false,
+                }),
+                list_transactions_resp(&TransactionListing::new(
+                    format!("txn-{}", node.id()),
+                    i64::from(node.id()),
+                    TransactionState::Ongoing,
+                )),
+                node,
+            );
+        }
+
+        let result = admin.list_transactions();
+        let all = result.all();
+        pump_until(&mut runnable, 60, |_r| all.is_done()).await;
+        assert_eq!(all.get().await.unwrap().len(), nodes.len());
+        assert_eq!(*duration_filters.lock().unwrap(), vec![-1; nodes.len()]);
     }
 
     /// Mirrors `KafkaAdminClientTest.testForceTerminateTransaction`.
@@ -15546,7 +15806,253 @@ mod tests {
         assert!(matches!(error, Error::UnsupportedEndpointType(_)), "got {error:?}");
     }
 
+    /// The bootstrap cluster `new_inner` seeds the manager with, for
+    /// `bootstrap.servers=localhost:9092` (node id -1).
+    fn bootstrap_cluster() -> Cluster {
+        Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:9092".parse().unwrap())])
+    }
+
+    /// The node ids the manager hands the `NetworkClient` (`fetchNodes`), sorted.
+    fn fetched_node_ids(manager: &AdminMetadataManager) -> Vec<i32> {
+        let mut ids: Vec<i32> = manager.updater().fetch_nodes().iter().map(Node::id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A broker that answers the `ApiVersions` handshake after `request.timeout.ms`
+    /// still serves the admin client, as in Java.
+    ///
+    /// Java builds the admin `NetworkClient` with a one-hour default request
+    /// timeout (`KafkaAdminClient.java:626`), which is the timeout of the
+    /// handshake. With `request.timeout.ms=5000`, a `listTopics` against a broker
+    /// that answers the handshake after 8 s succeeds: the bootstrap metadata call
+    /// times out at 5 s and is retried on the same, still-handshaking connection.
+    /// With `request.timeout.ms` as the default, the handshake timed out at 5 s,
+    /// the node was disconnected, and every reconnect hit the same slow answer, so
+    /// the call failed with "Timed out waiting for a node assignment.".
+    ///
+    /// Timeline (mock time, relative to the start):
+    ///
+    /// - 0 s: `listTopics` is issued; the bootstrap metadata call connects to
+    ///   node -1, which sends `ApiVersions`.
+    /// - 5 s: the metadata call times out and is replaced by a fresh one, but the
+    ///   handshake survives: `ApiVersions` is still in flight on the same
+    ///   connection, and the node is not marked as failed.
+    /// - 8 s: node -1 answers `ApiVersions`; the retried metadata call goes out on
+    ///   it and discovers broker 0.
+    /// - then broker 0: `listTopics` connects to it, completes its handshake, sends
+    ///   its `Metadata` request, and succeeds.
+    ///
+    /// Stepped with `run_once` over a `NetworkClient` built by
+    /// `create_network_client` on a `MockSelector` and mock time. Each stage steps
+    /// until the condition it is waiting for holds (bounded), so the test does
+    /// not depend on how many loop passes a stage takes.
+    #[tokio::test]
+    async fn a_slow_api_versions_answer_does_not_disconnect_the_admin_client() {
+        use crate::api_message_type::ListenerType;
+        use crate::common::network::{MockSelector, NetworkReceive};
+        use crate::common::requests::{ApiVersionsResponse, RequestTestUtils, ResponseHeader};
+
+        type Runnable = AdminClientRunnable<NetworkClient<MockSelector, DefaultHostResolver>>;
+
+        let time = mock_time(1000);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "5000".to_string());
+        props.insert("default.api.timeout.ms".to_string(), "20000".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        let manager = AdminMetadataManager::new(
+            config.retry_backoff_ms(),
+            config.metadata_max_age_ms(),
+            false,
+            LogContext::empty(),
+        );
+        manager.update(bootstrap_cluster(), time.milliseconds());
+        let api_versions_store = Arc::new(ApiVersions::new());
+        let mut client = KafkaAdminClient::create_network_client(
+            &config,
+            MockSelector::new(),
+            manager.updater(),
+            "admin",
+            Arc::clone(&api_versions_store),
+            DefaultHostResolver::new(),
+            LogContext::empty(),
+        );
+        client.set_time(Arc::clone(&time) as Arc<dyn Time>);
+        let (admin, mut runnable) = KafkaAdminClient::build(
+            client,
+            manager.clone(),
+            &config,
+            "admin".to_string(),
+            Arc::clone(&time) as Arc<dyn Time>,
+            LogContext::empty(),
+        )
+        .unwrap();
+
+        // Delivers a response on `node`'s connection, as the broker would.
+        fn respond(
+            runnable: &mut Runnable,
+            node: &str,
+            correlation_id: i32,
+            api_key: ApiKeys,
+            response: ConcreteResponse,
+        ) {
+            let version = api_key.latest_version();
+            let header = ResponseHeader::with_correlation_id(correlation_id, api_key.response_header_version(version));
+            let mut response = response;
+            let bytes = response.serialize_with_header(&header, version).unwrap().into_buffer();
+            runnable
+                .client_mut()
+                .selector_mut()
+                .complete_receive(NetworkReceive::with_source_buffer(node, bytes));
+        }
+        // Runs `processRequests` iterations until `condition` holds, failing with
+        // `what` after a bound. The mock selector keeps completed sends until
+        // cleared, where a real selector reports each send once.
+        async fn step_until(runnable: &mut Runnable, what: &str, mut condition: impl FnMut(&mut Runnable) -> bool) {
+            const MAX_ITERATIONS: usize = 50;
+            for _ in 0..MAX_ITERATIONS {
+                if condition(runnable) {
+                    return;
+                }
+                runnable.run_once().await;
+                runnable.client_mut().selector_mut().clear_completed_sends();
+            }
+            assert!(
+                condition(runnable),
+                "condition not met after {MAX_ITERATIONS} run_once iterations: {what}"
+            );
+        }
+        fn api_versions() -> ConcreteResponse {
+            ConcreteResponse::ApiVersions(ApiVersionsResponse::default_api_versions_response(ListenerType::Broker))
+        }
+        let in_flight =
+            |runnable: &mut Runnable, node: &str| runnable.client_mut().in_flight_request_count_for_node(node);
+        // The node's handshake has completed and one request — necessarily not
+        // `ApiVersions` — is in flight on it.
+        let handshaken_with_one_in_flight = |runnable: &mut Runnable, node: &str| {
+            api_versions_store.get(node).is_some() && in_flight(runnable, node) == 1
+        };
+
+        let result = admin.list_topics_with_options(ListTopicsOptions::new());
+
+        // 0 s: the bootstrap metadata call connects to node -1 and sends ApiVersions.
+        step_until(&mut runnable, "ApiVersions in flight on node -1", |r| in_flight(r, "-1") == 1).await;
+        let first_deadline = time.milliseconds() + 5_000;
+        assert_eq!(
+            runnable.metadata_call_deadlines_for_test(),
+            vec![first_deadline],
+            "one metadata call, bound by request.timeout.ms"
+        );
+
+        // 5 s: past request.timeout.ms the metadata call times out and is replaced,
+        // but the handshake is still awaited on the same connection.
+        time.sleep(5_001);
+        let retried_deadline = time.milliseconds() + 5_000;
+        step_until(&mut runnable, "the timed-out metadata call was replaced", |r| {
+            r.metadata_call_deadlines_for_test() == vec![retried_deadline]
+        })
+        .await;
+        assert_eq!(in_flight(&mut runnable, "-1"), 1, "the handshake outlives request.timeout.ms");
+        assert!(
+            !runnable
+                .client_mut()
+                .connection_failed(&Node::new(-1, "localhost".to_string(), 9092))
+        );
+
+        // 8 s: the broker answers the handshake; the retried metadata call then
+        // goes out on node -1 and discovers broker 0.
+        time.sleep(2_999);
+        respond(&mut runnable, "-1", 0, ApiKeys::API_VERSIONS, api_versions());
+        step_until(&mut runnable, "the retried metadata call in flight on node -1", |r| {
+            handshaken_with_one_in_flight(r, "-1")
+        })
+        .await;
+        let broker = Node::new(0, "localhost".to_string(), 9092);
+        respond(
+            &mut runnable,
+            "-1",
+            1,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        step_until(&mut runnable, "broker 0 discovered and ApiVersions in flight on it", |r| {
+            fetched_node_ids(&manager) == vec![0] && in_flight(r, "0") == 1
+        })
+        .await;
+        assert_eq!(fetched_node_ids(&manager), vec![0], "the bootstrap metadata call completed");
+
+        // Then broker 0: listTopics completes the handshake, then sends its
+        // Metadata request.
+        respond(&mut runnable, "0", 2, ApiKeys::API_VERSIONS, api_versions());
+        step_until(&mut runnable, "listTopics' Metadata request in flight on broker 0", |r| {
+            handshaken_with_one_in_flight(r, "0")
+        })
+        .await;
+        respond(
+            &mut runnable,
+            "0",
+            3,
+            ApiKeys::METADATA,
+            ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                std::slice::from_ref(&broker),
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+        );
+        let names = result.names();
+        step_until(&mut runnable, "listTopics completed", |_| names.is_done()).await;
+        let names = names.get().await.expect("listTopics succeeds");
+        assert!(names.is_empty());
+    }
+
     // --- shutdown ------------------------------------------------------------
+
+    /// `AdminClientRunnable.enqueue` accepts a call only while the runnable is not
+    /// `closing` and otherwise fails it with `TimeoutException("The AdminClient
+    /// thread has exited.")` (`KafkaAdminClient.java:1679-1695`). A follow-up a
+    /// response hook issues goes through it too (`runnable.call(call, now)`), so
+    /// once the `finally` has set `closing` it fails instead of being queued
+    /// where no loop iteration will ever drain it.
+    #[test]
+    fn a_follow_up_call_after_the_runnable_exited_fails_like_enqueue() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let now = time.milliseconds();
+        let failed = |captured: &Arc<Mutex<Option<Error>>>| {
+            let captured = Arc::clone(captured);
+            Call::new(
+                "createTopics",
+                now + 60_000,
+                NodeProvider::LeastLoaded,
+                Box::new(|_timeout_ms| unreachable!("the call is never sent")),
+                Box::new(|_response, _now, _cur_node| HandleResult::Done),
+                Box::new(move |error| *captured.lock().unwrap() = Some(error.clone())),
+                Box::new(|| false),
+            )
+        };
+
+        // While the loop runs, the follow-up is queued.
+        let captured = Arc::new(Mutex::new(None));
+        runnable.call(failed(&captured), now);
+        assert!(captured.lock().unwrap().is_none(), "a live runnable queues the call");
+        assert!(runnable.has_active_external_calls_for_test());
+
+        // After the `finally` has set `closing`, it fails with Java's error.
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        let captured = Arc::new(Mutex::new(None));
+        runnable.call(failed(&captured), now);
+        let error = captured.lock().unwrap().take().expect("the call failed");
+        assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
+        assert_eq!(error.message(), "The AdminClient thread has exited.");
+        assert!(error.is_retriable_error(), "Java's TimeoutException is a RetriableException");
+    }
 
     /// Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which
     /// skips every `Call` with `internal == true`
@@ -15576,7 +16082,6 @@ mod tests {
         );
 
         // Java's no-argument `Admin.close()`: no reachable hard deadline.
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -15587,6 +16092,60 @@ mod tests {
             runnable.should_exit_for_test(time.milliseconds()),
             "close() must not wait on an internal call: the I/O task has to exit at once"
         );
+    }
+
+    /// A retriable failure during the `close(timeout)` grace period is retried.
+    ///
+    /// Java's `close()` only publishes `hardShutdownTimeMs`
+    /// (`KafkaAdminClient.java:734-760`); `Call.fail` refuses to retry only once
+    /// `runnable.closing` is set (`:970-978`), and that happens in the I/O
+    /// thread's `finally`, after `processRequests` has returned (`:1546-1551`).
+    /// So a `createTopics` whose first attempt is disconnected after `close(30s)`
+    /// is retried and succeeds, and the loop then exits because no external call
+    /// is left (`threadShouldExit`, `:1532-1543`).
+    #[tokio::test]
+    async fn a_retriable_error_during_close_is_retried_within_the_grace_period() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
+        // The first attempt is in flight when `close(30s)` is called.
+        pump_until_request_queued(&mut runnable).await;
+        assert!(runnable.has_active_external_calls_for_test());
+
+        // `close(30s)`. No task was spawned, so this only publishes the deadline;
+        // the loop is stepped below exactly as `process_requests` steps it.
+        admin.close_with_timeout(Duration::from_secs(30)).await;
+
+        // The in-flight attempt is disconnected; the retry succeeds.
+        runnable.client_mut().respond_disconnected(create_response(vec![]), true);
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+
+        let mut exited = false;
+        for _ in 0..40 {
+            if runnable.should_exit_for_test(time.milliseconds()) {
+                exited = true;
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(100);
+        }
+        assert!(exited, "the loop exits once the retried call completes");
+        assert!(
+            time.milliseconds() < 1_000 + 30_000,
+            "the loop exited before the hard-shutdown deadline"
+        );
+        let future = result.values()["myTopic"].clone();
+        assert!(future.is_done(), "the call completed before the loop exited");
+        future.get().await.expect("the disconnected attempt is retried during close");
+        assert_eq!(result.topic_id("myTopic").get().await.unwrap(), Uuid::new(0, 7));
     }
 
     /// The other half of the contract: an **external** call does hold the loop
@@ -15603,7 +16162,6 @@ mod tests {
         );
 
         let now = time.milliseconds();
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -15859,7 +16417,6 @@ mod tests {
         // `close(Duration::from_millis(100))`.
         let now = time.milliseconds();
         let hard_deadline = now + 100;
-        admin.shared.shutdown.closing.store(true, Ordering::Release);
         admin
             .shared
             .shutdown
@@ -16246,7 +16803,7 @@ mod tests {
         pump_until_request_queued(&mut runnable).await;
 
         // `close(30s)` with the createTopics request in flight. No task was
-        // spawned, so this only publishes the deadline and the closing flag.
+        // spawned, so this only publishes the deadline.
         admin.close_with_timeout(Duration::from_secs(30)).await;
         // The controller answers with a quota violation, which asks for a retry.
         runnable.client_mut().respond(create_response_throttled(
