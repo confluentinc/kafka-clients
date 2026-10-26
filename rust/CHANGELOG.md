@@ -54,6 +54,14 @@ breaking changes.
   bootstrap.controllers`, where it was `ClientUtils`'s `No resolvable
   bootstrap urls given in bootstrap.servers`; setting both fails with `You
   cannot set both bootstrap.servers and bootstrap.controllers`.
+- **Breaking (Rust, Python):** a config entry can have no type, as Java's
+  `ConfigEntry.type()` can be `null`. `ConfigEntry::r#type()` returns
+  `Option<ConfigType>` and `ConfigEntryOptionsBuilder::set_config_type` takes
+  one. The entries of a `createTopics` result have no type
+  (`KafkaAdminClient.java:1992-2002`): they reported `ConfigType::Unknown` and
+  printed `type=UNKNOWN`, and now report `None`, print `type=null` and differ
+  from an entry whose type is `Unknown`. In Python `ConfigEntry.type()` returns
+  `None` for them.
 
 ### Common
 
@@ -76,6 +84,12 @@ breaking changes.
   `kafka_admin_EndpointType_unknown`, `_broker` and `_controller`, the C enum
   `kafka_admin_EndpointType_e` read with `kafka_admin_EndpointType__enum`, and
   `_id`, `_from_id` and `_to_string`.
+- **Breaking (C API):** `kafka_admin_ConfigEntry_type` returns `NULL` for an
+  entry without a type, such as the entries of
+  `kafka_admin_CreateTopicsResult_config`, so a caller must check it before
+  `kafka_admin_ConfigEntry_ConfigType__enum`, and
+  `kafka_admin_ConfigEntryOptionsBuilder_set_config_type` takes `NULL` for
+  Java's `null` type.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
