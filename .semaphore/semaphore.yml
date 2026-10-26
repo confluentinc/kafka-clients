@@ -418,7 +418,7 @@ blocks:
             - make test-dotnet-macos-docker
             - command -v colima >/dev/null 2>&1 || brew install colima
             - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
-            - docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done
+            - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'
             - export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
             - export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
             - export TESTCONTAINERS_RYUK_DISABLED=false
