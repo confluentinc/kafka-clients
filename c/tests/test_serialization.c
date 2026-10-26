@@ -486,11 +486,16 @@ static void async_upper_deserialize(void *self, const char *topic, kafka_Bytes_t
 }
 
 static void async_upper_deserialize_with_headers(void *self, const char *topic,
-                                                 const kafka_common_header_internals_RecordHeaders_t *headers,
+                                                 kafka_common_header_internals_RecordHeaders_t *headers,
                                                  kafka_Bytes_t data, int64_t callback_id) {
     async_upper_deserializer_t *imp = self;
     imp->with_headers_calls++;
     TEST_ASSERT_NOT_NULL(headers);
+    // The record's own headers, writable as Java's deserializer may change them.
+    kafka_common_Error_t *error = NULL;
+    kafka_common_header_Headers_add_with_key_value(kafka_common_header_internals_RecordHeaders__as_Headers(headers),
+                                                   "seen", bytes_of("v"), &error);
+    TEST_ASSERT_NULL(error);
     async_upper_deserialize(self, topic, data, callback_id);
 }
 
@@ -549,6 +554,8 @@ static void test_async_c_deserializer_reporting_inside_the_call(void) {
     TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("ABC", (const char *)out);
     free(out);
+    TEST_ASSERT_NOT_NULL(
+        kafka_common_header_Headers_last_header(kafka_common_header_internals_RecordHeaders__as_Headers(headers), "seen"));
     out = kafka_common_serialization_Deserializer_deserialize(deserializer, "t", bytes_of("fail"), &error);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_EQUAL_STRING("cannot deserialize fail", kafka_common_Error_message(error));

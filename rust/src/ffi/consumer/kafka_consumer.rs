@@ -63,7 +63,7 @@ impl Deserializer<GenericValue> for BytesPassthroughDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         _topic: &str,
-        _headers: &RecordHeaders,
+        _headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<GenericValue, Error> {
         Ok(GenericValue::new(box_bytes(data.clone()).cast()))
@@ -85,7 +85,7 @@ impl Deserializer<GenericValue> for ArcDeserializer {
     async fn deserialize_with_headers(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
         Deserializer::deserialize_with_headers(&*self.0.imp().lock().await, topic, headers, data).await
@@ -94,7 +94,7 @@ impl Deserializer<GenericValue> for ArcDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<GenericValue, Error> {
         Deserializer::deserialize_with_headers_bytes(&*self.0.imp().lock().await, topic, headers, data).await
@@ -298,7 +298,7 @@ mod tests {
                 None,
             )))
         };
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let data = Bytes::from_static(b"v");
         for (kind, deserializer) in [("built-in", &built_in), ("C", &asynchronous)] {
             let future = Deserializer::deserialize(deserializer, "t", &data);
@@ -307,13 +307,14 @@ mod tests {
                 "{kind} deserialize: {} bytes",
                 size_of_val(&future)
             );
-            let future = Deserializer::deserialize_with_headers(deserializer, "t", &headers, &data);
+            let future = Deserializer::deserialize_with_headers(deserializer, "t", &mut headers, &data);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers: {} bytes",
                 size_of_val(&future)
             );
-            let future = Deserializer::deserialize_with_headers_bytes(deserializer, "t", &headers, &data);
+            drop(future);
+            let future = Deserializer::deserialize_with_headers_bytes(deserializer, "t", &mut headers, &data);
             assert!(
                 InlineFuture::<()>::is_inline_for(&future),
                 "{kind} with_headers_bytes: {} bytes",
@@ -325,8 +326,8 @@ mod tests {
     /// An asynchronous C deserializer costs no allocation per record on the
     /// consumer's path: through `dyn DynDeserializer`, the `ArcDeserializer`
     /// future stays inline, the Tokio lock is uncontended, the registry slot
-    /// and its arguments are reused, and the headers (empty or not, shared
-    /// with the record) and the fetch buffer are not copied.
+    /// and its arguments are reused, and the headers (empty or not, moved
+    /// into the slot and back) and the fetch buffer are not copied.
     #[test]
     fn async_c_deserializer_through_dyn_allocates_nothing_per_record() {
         use std::ffi::{c_char, c_void};
@@ -348,7 +349,7 @@ mod tests {
         unsafe extern "C" fn report_inline(
             self_: *mut c_void,
             _topic: *const c_char,
-            _headers: *const kafka_common_header_internals_RecordHeaders_t,
+            _headers: *mut kafka_common_header_internals_RecordHeaders_t,
             _data: kafka_Bytes_t,
             callback_id: i64,
         ) {
@@ -385,13 +386,13 @@ mod tests {
             Box::new(ArcDeserializer(unsafe { take_deserializer(handle) }));
         let mut with_k = RecordHeaders::new();
         with_k.add_with_key_value("k", Some(b"v")).unwrap();
-        for headers in [RecordHeaders::new(), with_k] {
+        for mut headers in [RecordHeaders::new(), with_k] {
             let data = Bytes::from_static(b"value");
-            let record = || {
+            let mut record = || {
                 let value = ready(DynDeserializer::deserialize_with_headers_bytes(
                     &*deserializer,
                     "topic",
-                    &headers,
+                    &mut headers,
                     &data,
                 ))
                 .expect("an inline report completes the first poll")
@@ -418,11 +419,11 @@ mod tests {
         use crate::ffi::common::serialization::ready;
         let source = Bytes::from_static(b"hello world");
         let data = source.slice(6..);
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let value = ready(Deserializer::deserialize_with_headers_bytes(
             &BytesPassthroughDeserializer,
             "t",
-            &headers,
+            &mut headers,
             &data,
         ))
         .unwrap()

@@ -63,7 +63,7 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
         self.0.deserialize_with_headers(topic, headers, data).map(bytes_value)
@@ -72,7 +72,7 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
         self.0.deserialize_with_headers_bytes(topic, headers, data).map(bytes_value)

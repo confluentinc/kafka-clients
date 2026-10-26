@@ -52,7 +52,7 @@ use crate::common::serialization::Deserializer;
 use crate::ffi::callback_queue::SendPtr;
 use crate::ffi::callback_result::{ResultSink, WaitReport};
 use crate::ffi::common::header::internals::record_headers::{
-    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_ref,
+    RecordHeadersInner, kafka_common_header_internals_RecordHeaders_t, record_headers_mut,
 };
 use crate::ffi::common::serialization::byte_array_deserializer::GenericByteArrayDeserializer;
 use crate::ffi::common::serialization::bytes_deserializer::GenericBytesDeserializer;
@@ -116,7 +116,7 @@ impl Deserializer<GenericValue> for FfiDeserializer {
     async fn deserialize_with_headers(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &[u8],
     ) -> Result<GenericValue, Error> {
         dispatch!(self, deserializer => deserializer.deserialize_with_headers(topic, headers, data).await)
@@ -125,7 +125,7 @@ impl Deserializer<GenericValue> for FfiDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<GenericValue, Error> {
         dispatch!(self, deserializer => deserializer.deserialize_with_headers_bytes(topic, headers, data).await)
@@ -142,17 +142,22 @@ impl Deserializer<GenericValue> for FfiDeserializer {
 
 impl FfiDeserializer {
     /// `method` for a blocking invoker: a C implementation is waited for on
-    /// the calling thread, a built-in completes at once.
+    /// the calling thread, a built-in completes at once. `headers` is `None`
+    /// for `deserialize(topic, data)`, which takes none.
     fn invoke(
         &self,
         method: Method,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: Option<&mut RecordHeaders>,
         data: Data<'_>,
     ) -> Result<GenericValue, Error> {
         match self {
             FfiDeserializer::C(deserializer) => block_on_thread(deserializer.start(method, topic, headers, data)),
             other => ready(async {
+                // A header method always receives headers; the empty ones stand in only for a
+                // call that cannot reach it, and allocate nothing.
+                let mut empty = RecordHeaders::new();
+                let headers = headers.unwrap_or(&mut empty);
                 match (method, data) {
                     (Method::Deserialize, data) => other.deserialize(topic, data.as_slice()).await,
                     (Method::WithHeaders, data) => {
@@ -188,14 +193,16 @@ pub type kafka_common_serialization_Deserializer_deserialize_async_fn_t =
 /// `T deserialize(String topic, Headers headers, byte[] data)` of an
 /// asynchronous C implementation, reporting as
 /// `kafka_common_serialization_Deserializer_deserialize_async_fn_t`;
-/// `headers` are the record's own headers, shared and read-only, valid like
-/// the other arguments until it reports.
+/// `headers` are the record's own headers, not a copy, valid like the other
+/// arguments until it reports. The implementation may add to or remove from
+/// them (Java lets a deserializer change the record's headers), and the
+/// consumed record carries what they hold when it reports.
 /// `NULL` is the Java default: `deserialize(topic, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_async_fn_t = Option<
     unsafe extern "C" fn(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: kafka_Bytes_t,
         callback_id: i64,
     ),
@@ -204,13 +211,15 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_async_
 /// `T deserialize(String topic, Headers headers, ByteBuffer data)` of an
 /// asynchronous C implementation (KIP-863), reporting as
 /// `kafka_common_serialization_Deserializer_deserialize_async_fn_t`; the
-/// arguments stay valid until it reports. `NULL` is the Java default:
-/// `deserialize(topic, headers, data)`.
+/// arguments stay valid until it reports, and `headers` are the record's own,
+/// changed in place as for
+/// `kafka_common_serialization_Deserializer_deserialize_with_headers_async_fn_t`.
+/// `NULL` is the Java default: `deserialize(topic, headers, data)`.
 pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_async_fn_t = Option<
     unsafe extern "C" fn(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: kafka_Bytes_t,
         callback_id: i64,
     ),
@@ -381,7 +390,10 @@ fn resolve<P: Copy, H: Copy>(
 }
 
 /// The deserialized value of a report: the `void *` the C side owns.
-fn finish_value(_: &mut CallArgs, result: Result<*mut c_void, Error>) -> Result<GenericValue, Error> {
+fn finish_value(args: &mut CallArgs, result: Result<*mut c_void, Error>) -> Result<GenericValue, Error> {
+    // The record's headers go back to it whatever the outcome, as Java's
+    // deserializer changes the record's `Headers` in place.
+    args.restore_headers();
     result.map(GenericValue::new)
 }
 
@@ -395,14 +407,18 @@ fn no_convert(_: &mut CallArgs, _: *mut c_void) {}
 
 impl CDeserializer {
     /// Starts `method`: the implementation is called at once, its arguments
-    /// kept in the registry slot until it reports.
-    pub(crate) fn start(
-        &self,
+    /// kept in the registry slot until it reports. Its `headers` (`None` for
+    /// `deserialize(topic, data)`) are the record's own, moved into the slot
+    /// for the call and moved back, with what the implementation added or
+    /// removed, when the returned future reads the report; the future holds
+    /// the borrow until then.
+    pub(crate) fn start<'a>(
+        &'a self,
         method: Method,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: Option<&'a mut RecordHeaders>,
         data: Data<'_>,
-    ) -> Report<'_, GenericValue> {
+    ) -> Report<'a, GenericValue> {
         let fns = &self.fns;
         let target = resolve(
             method,
@@ -410,12 +426,14 @@ impl CDeserializer {
             fns.deserialize_with_headers,
             fns.deserialize_with_headers_bytes,
         );
-        let with_headers = matches!(target, Target::Headers(_));
+        let with_headers = headers.filter(|_| matches!(target, Target::Headers(_)));
         let (id, (topic, headers, data)) = self.results.register_waiting(no_convert, |args| {
-            let headers = if with_headers {
-                args.share_headers(headers)
-            } else {
-                ptr::null()
+            let headers = match with_headers {
+                // SAFETY: `headers` is borrowed for `'a`, the lifetime of the future returned, so
+                // it stays valid and reached by nothing else while that future lives, as
+                // `take_headers` requires.
+                Some(headers) => unsafe { args.take_headers(headers) },
+                None => ptr::null_mut(),
             };
             (args.set_topic(topic), headers, args.set_data(data))
         });
@@ -461,19 +479,28 @@ impl CDeserializer {
 
     /// Starts `method` for a `_cb` twin: `sink` receives the report on the
     /// reporting thread, and owns the arguments C reads until then.
-    fn start_with_sink(
+    ///
+    /// # Safety
+    ///
+    /// `headers` must be `None` or valid headers reached by nothing else
+    /// until `deliver` runs.
+    unsafe fn start_with_sink(
         &self,
         method: Method,
         topic: &str,
-        headers: &RecordHeaders,
+        headers: Option<*mut RecordHeaders>,
         data: &[u8],
         deliver: impl FnOnce(Result<*mut c_void, Error>) + Send + 'static,
     ) {
         let topic = owned_c_string(topic);
-        // The record's headers, shared (a refcount, no copy) for as long as C reads them.
-        let headers = Box::new(RecordHeadersInner::new(headers.clone()));
+        // A handle on the caller's own headers, which it keeps valid and unused until `deliver`
+        // runs: the implementation changes them in place, as Java's does.
+        // SAFETY: Per this function's `# Safety`, the headers stay valid and reached by nothing else
+        // until `deliver` runs, which is when the sink drops this handle.
+        let mut headers = headers.map(|headers| Box::new(unsafe { RecordHeadersInner::borrowed(headers) }));
         let data = Bytes::copy_from_slice(data);
-        let (topic_ptr, headers_ptr, bytes) = (topic.as_ptr(), headers.as_ptr(), kafka_Bytes_t::from_slice(&data));
+        let headers_ptr = headers.as_deref_mut().map_or(ptr::null_mut(), RecordHeadersInner::as_mut_ptr);
+        let (topic_ptr, bytes) = (topic.as_ptr(), kafka_Bytes_t::from_slice(&data));
         let sink: ResultSink = Box::new(move |result| {
             deliver(result);
             // The arguments the implementation read, released once it reported.
@@ -484,7 +511,9 @@ impl CDeserializer {
         // SAFETY: The function and `self.self_` are the pair the C caller registered together
         // through `kafka_common_serialization_Deserializer_new_async`, whose rustdoc has the caller
         // keep `self_` alive until every call made through the handle has reported. The arguments
-        // point into the heap buffers the sink owns, which it keeps until the report for `id`.
+        // point into the heap buffers the sink owns, which it keeps until the report for `id`, and
+        // at the caller's headers, valid and unused otherwise until then per this function's
+        // `# Safety`.
         unsafe {
             match resolve(
                 method,
@@ -507,25 +536,25 @@ impl Deserializer<GenericValue> for CDeserializer {
         topic: &'a str,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(Method::Deserialize, topic, &EMPTY_HEADERS, Data::Slice(data))
+        self.start(Method::Deserialize, topic, None, Data::Slice(data))
     }
 
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(Method::WithHeaders, topic, headers, Data::Slice(data))
+        self.start(Method::WithHeaders, topic, Some(headers), Data::Slice(data))
     }
 
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
-        self.start(Method::WithHeadersBytes, topic, headers, Data::Bytes(data))
+        self.start(Method::WithHeadersBytes, topic, Some(headers), Data::Bytes(data))
     }
 
     async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
@@ -540,10 +569,6 @@ impl Deserializer<GenericValue> for CDeserializer {
         }
     }
 }
-
-/// The headers of a method that takes none: never read, since a plain
-/// method never reaches a header-taking C function.
-static EMPTY_HEADERS: std::sync::LazyLock<RecordHeaders> = std::sync::LazyLock::new(RecordHeaders::new);
 
 /// Registers an asynchronous C implementation of `Deserializer`;
 /// `deserialize` is required, the other pointers may be `NULL` for the Java
@@ -707,7 +732,7 @@ unsafe fn invoke(
     self_: *const kafka_common_serialization_Deserializer_t,
     method: Method,
     topic: &str,
-    headers: &RecordHeaders,
+    headers: Option<&mut RecordHeaders>,
     data: &[u8],
 ) -> Result<GenericValue, Error> {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, as
@@ -730,12 +755,13 @@ unsafe fn invoke(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid deserializer handle.
+/// `self_` must be a valid deserializer handle, and `headers` `None` or
+/// valid headers reached by nothing else until `deliver` runs.
 unsafe fn invoke_cb(
     self_: *const kafka_common_serialization_Deserializer_t,
     method: Method,
     topic: &str,
-    headers: &RecordHeaders,
+    headers: Option<*mut RecordHeaders>,
     data: &[u8],
     deliver: impl FnOnce(Result<*mut c_void, Error>) + Send + 'static,
 ) {
@@ -744,9 +770,14 @@ unsafe fn invoke_cb(
     // released before return.
     let deserializer = lock_blocking(unsafe { deserializer_ref(self_) }.imp());
     if let FfiDeserializer::C(c) = &*deserializer {
-        c.start_with_sink(method, topic, headers, data, deliver);
+        // SAFETY: Per this function's `# Safety`, `headers` is `None` or valid and reached by
+        // nothing else until `deliver` runs, as `start_with_sink` requires.
+        unsafe { c.start_with_sink(method, topic, headers, data, deliver) };
         return;
     }
+    // SAFETY: Per this function's `# Safety`, the headers are valid and reached by nothing else for
+    // this call, which runs the built-in class to completion before it returns.
+    let headers = headers.map(|headers| unsafe { &mut *headers });
     let result = if method == Method::WithHeadersBytes {
         deserializer.invoke(method, topic, headers, Data::Bytes(&Bytes::copy_from_slice(data)))
     } else {
@@ -813,7 +844,7 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call: an implementation that outlives the call gets a
     // copy.
-    let result = unsafe { invoke(self_, Method::Deserialize, &topic, &EMPTY_HEADERS, slice(data)) };
+    let result = unsafe { invoke(self_, Method::Deserialize, &topic, None, slice(data)) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot pointing at null, as
     // `deliver` requires.
     unsafe { deliver(result, out_err) }
@@ -864,20 +895,16 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_cb(
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call.
-    unsafe {
-        invoke_cb(
-            self_,
-            Method::Deserialize,
-            &topic,
-            &EMPTY_HEADERS,
-            slice(data),
-            value_sink(cb, opaque),
-        )
-    }
+    unsafe { invoke_cb(self_, Method::Deserialize, &topic, None, slice(data), value_sink(cb, opaque)) }
 }
 
 /// `T deserialize(String topic, Headers headers, byte[] data)`; the value
 /// is delivered as for `kafka_common_serialization_Deserializer_deserialize`.
+/// The implementation may add to or remove from `headers`, in place: its
+/// changes are in `headers` when this returns. Header handles obtained
+/// through `headers` before the call (its `__as_Headers` view's
+/// `last_header`, `headers`, `to_array`) are invalid after it, as after a
+/// change made through the view itself; ask the view again.
 ///
 /// # Parameters
 ///
@@ -894,32 +921,29 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_cb(
 /// - The error the deserializer reports.
 /// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
 ///
-/// # Translation notes
-///
-/// WARNING: `headers` is `const`, so the implementation cannot modify them.
-///
 /// # Safety
 ///
 /// `self_` must be a valid deserializer handle, `topic` a valid
-/// NUL-terminated string, `headers` a valid record-headers handle, `data`
-/// null or a valid array and `out_err` a valid slot pointing at null.
+/// NUL-terminated string, `headers` a valid record-headers handle not used
+/// otherwise for the call, `data` null or a valid array and `out_err` a
+/// valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_with_headers(
     self_: *const kafka_common_serialization_Deserializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: kafka_Bytes_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
-    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // unchanged for this call, as `record_headers_ref` requires.
-    let headers = unsafe { record_headers_ref(headers) };
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
+    // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
+    let headers = unsafe { record_headers_mut(headers) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call.
-    let result = unsafe { invoke(self_, Method::WithHeaders, &topic, headers, slice(data)) };
+    let result = unsafe { invoke(self_, Method::WithHeaders, &topic, Some(headers), slice(data)) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot pointing at null.
     unsafe { deliver(result, out_err) }
 }
@@ -932,6 +956,11 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_cb_t =
 /// Non-blocking
 /// `kafka_common_serialization_Deserializer_deserialize_with_headers`; `cb`
 /// fires as for `kafka_common_serialization_Deserializer_deserialize_cb`.
+/// `topic` and `data` are copied; `headers` must stay valid until `cb`
+/// fires, and unused otherwise until then: the implementation reads and
+/// changes them in place, so what it adds or removes is in `headers` when
+/// `cb` fires. Header handles obtained through `headers` before the call are
+/// invalid after it, as for the blocking form.
 ///
 /// # Parameters
 ///
@@ -946,14 +975,10 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_cb_t =
 /// - The error the deserializer reports, delivered to `cb`.
 /// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, delivered to `cb`.
 ///
-/// # Translation notes
-///
-/// WARNING: `headers` is `const`, so the implementation cannot modify them.
-///
 /// # Safety
 ///
-/// As the blocking form, without `out_err`; `cb` must stay valid until it
-/// fires.
+/// As the blocking form, without `out_err`, with `headers` valid and
+/// unused otherwise until `cb` fires; `cb` must stay valid until it fires.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: As for `kafka_common_serialization_Deserializer_deserialize_cb`: `cb` has not fired
     // for this `opaque`, as `deliver_panic_value` requires.
@@ -963,7 +988,7 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_cb_t =
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_with_headers_cb(
     self_: *const kafka_common_serialization_Deserializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: kafka_Bytes_t,
     cb: kafka_common_serialization_Deserializer_deserialize_with_headers_cb_t,
     opaque: *mut c_void,
@@ -971,17 +996,32 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // unchanged for this call.
-    let headers = unsafe { record_headers_ref(headers) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
-    // or a valid array, read only during this call.
-    unsafe { invoke_cb(self_, Method::WithHeaders, &topic, headers, slice(data), value_sink(cb, opaque)) }
+    // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
+    let headers = ptr::from_mut(unsafe { record_headers_mut(headers) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, `data` null or
+    // a valid array, read only during this call, and `headers` valid and unused otherwise until
+    // `cb` fires.
+    unsafe {
+        invoke_cb(
+            self_,
+            Method::WithHeaders,
+            &topic,
+            Some(headers),
+            slice(data),
+            value_sink(cb, opaque),
+        )
+    }
 }
 
 /// `T deserialize(String topic, Headers headers, ByteBuffer data)`
 /// (KIP-863): `data` is copied once into a buffer the implementation may
 /// keep a slice of, as a `BytesDeserializer` does; the value is delivered as
 /// for `kafka_common_serialization_Deserializer_deserialize`.
+/// The implementation may add to or remove from `headers`, in place: its
+/// changes are in `headers` when this returns. Header handles obtained
+/// through `headers` before the call (its `__as_Headers` view's
+/// `last_header`, `headers`, `to_array`) are invalid after it, as after a
+/// change made through the view itself; ask the view again.
 ///
 /// # Parameters
 ///
@@ -998,32 +1038,29 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
 /// - The error the deserializer reports.
 /// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic.
 ///
-/// # Translation notes
-///
-/// WARNING: `headers` is `const`, so the implementation cannot modify them.
-///
 /// # Safety
 ///
 /// `self_` must be a valid deserializer handle, `topic` a valid
-/// NUL-terminated string, `headers` a valid record-headers handle, `data`
-/// null or a valid array and `out_err` a valid slot pointing at null.
+/// NUL-terminated string, `headers` a valid record-headers handle not used
+/// otherwise for the call, `data` null or a valid array and `out_err` a
+/// valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_with_headers_bytes(
     self_: *const kafka_common_serialization_Deserializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: kafka_Bytes_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
-    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // unchanged for this call.
-    let headers = unsafe { record_headers_ref(headers) };
+    // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, which the
+    // caller keeps alive and does not use otherwise for this call, as `record_headers_mut` requires.
+    let headers = unsafe { record_headers_mut(headers) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
     // or a valid array, read only during this call.
-    let result = unsafe { invoke(self_, Method::WithHeadersBytes, &topic, headers, slice(data)) };
+    let result = unsafe { invoke(self_, Method::WithHeadersBytes, &topic, Some(headers), slice(data)) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid slot pointing at null.
     unsafe { deliver(result, out_err) }
 }
@@ -1037,6 +1074,11 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_
 /// `kafka_common_serialization_Deserializer_deserialize_with_headers_bytes`;
 /// `cb` fires as for
 /// `kafka_common_serialization_Deserializer_deserialize_cb`.
+/// `topic` and `data` are copied; `headers` must stay valid until `cb`
+/// fires, and unused otherwise until then: the implementation reads and
+/// changes them in place, so what it adds or removes is in `headers` when
+/// `cb` fires. Header handles obtained through `headers` before the call are
+/// invalid after it, as for the blocking form.
 ///
 /// # Parameters
 ///
@@ -1051,14 +1093,10 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_
 /// - The error the deserializer reports, delivered to `cb`.
 /// - `kafka_common_Error_is_local_illegal_state_error` for a caught Rust panic, delivered to `cb`.
 ///
-/// # Translation notes
-///
-/// WARNING: `headers` is `const`, so the implementation cannot modify them.
-///
 /// # Safety
 ///
-/// As the blocking form, without `out_err`; `cb` must stay valid until it
-/// fires.
+/// As the blocking form, without `out_err`, with `headers` valid and
+/// unused otherwise until `cb` fires; `cb` must stay valid until it fires.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: As for `kafka_common_serialization_Deserializer_deserialize_cb`: `cb` has not fired
     // for this `opaque`, as `deliver_panic_value` requires.
@@ -1068,7 +1106,7 @@ pub type kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_
 pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb(
     self_: *const kafka_common_serialization_Deserializer_t,
     topic: *const c_char,
-    headers: *const kafka_common_header_internals_RecordHeaders_t,
+    headers: *mut kafka_common_header_internals_RecordHeaders_t,
     data: kafka_Bytes_t,
     cb: kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb_t,
     opaque: *mut c_void,
@@ -1076,16 +1114,17 @@ pub unsafe extern "C" fn kafka_common_serialization_Deserializer_deserialize_wit
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string.
     let topic = unsafe { c_str_to_string(topic) };
     // SAFETY: Per this function's `# Safety`, `headers` is a valid record-headers handle, alive and
-    // unchanged for this call.
-    let headers = unsafe { record_headers_ref(headers) };
-    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle and `data` null
-    // or a valid array, read only during this call.
+    // not used otherwise until `cb` fires; the pointer keeps the handle's provenance.
+    let headers = ptr::from_mut(unsafe { record_headers_mut(headers) });
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid deserializer handle, `data` null or
+    // a valid array, read only during this call, and `headers` valid and unused otherwise until
+    // `cb` fires.
     unsafe {
         invoke_cb(
             self_,
             Method::WithHeadersBytes,
             &topic,
-            headers,
+            Some(headers),
             slice(data),
             value_sink(cb, opaque),
         )
@@ -1556,16 +1595,15 @@ mod tests {
     unsafe extern "C" fn async_deserialize_with_headers_bytes(
         self_: *mut c_void,
         topic: *const c_char,
-        headers: *const kafka_common_header_internals_RecordHeaders_t,
+        headers: *mut kafka_common_header_internals_RecordHeaders_t,
         data: kafka_Bytes_t,
         id: i64,
     ) {
         use crate::ffi::common::header::internals::record_header::kafka_common_header_internals_RecordHeader__as_Header;
         use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
         use crate::ffi::common::header::{kafka_common_header_Header_value, kafka_common_header_Headers_last_header};
-        // SAFETY: Test code: `headers` are shared with the record and kept by the slot until the
-        // report; the read-only handle's view is only read, and the header handle `last_header`
-        // returns is read at once.
+        // SAFETY: Test code: `headers` are the record's, kept by the slot until the report; the
+        // view is only read here, and the header handle `last_header` returns is read at once.
         let k = unsafe {
             kafka_common_header_Headers_last_header(
                 kafka_common_header_internals_RecordHeaders__as_Headers(headers),
@@ -1782,7 +1820,7 @@ mod tests {
                     let inner = unsafe { deserializer_ref(handle.get().cast()) };
                     let guard = inner.imp().lock().await;
                     let data = Bytes::from_static(b"trait");
-                    Deserializer::deserialize_with_headers_bytes(&*guard, "t", &record_headers, &data).await
+                    Deserializer::deserialize_with_headers_bytes(&*guard, "t", &mut record_headers, &data).await
                 });
                 thread.join().unwrap();
                 // SAFETY: Test code: an owned string the implementation reported, freed once.
@@ -1899,7 +1937,7 @@ mod tests {
                 let mut headers = RecordHeaders::new();
                 headers.add_with_key_value("k", Some(b"v")).unwrap();
                 let data = Bytes::from(b"async".to_vec());
-                Deserializer::deserialize_with_headers_bytes(&*guard, "t", &headers, &data).await
+                Deserializer::deserialize_with_headers_bytes(&*guard, "t", &mut headers, &data).await
             });
             thread.join().unwrap();
             // SAFETY: Test code: an owned string the implementation reported, freed once.
@@ -2084,7 +2122,10 @@ mod tests {
             let mut headers = RecordHeaders::new();
             headers.add_with_key_value("k", Some(b"v")).unwrap();
             poll_and_drop(std::pin::pin!(Deserializer::deserialize_with_headers_bytes(
-                &*guard, &topic, &headers, &data
+                &*guard,
+                &topic,
+                &mut headers,
+                &data
             )));
             drop((topic, data, headers));
         }
@@ -2104,5 +2145,134 @@ mod tests {
         assert_eq!(calls, ["bytes shared", "slice kept", "with_headers_bytes k=true"]);
         // SAFETY: Test code: every call reported; the handle is destroyed once.
         unsafe { kafka_common_serialization_Deserializer_destroy(handle.get().cast()) };
+    }
+
+    /// A C deserializer adds a header to the record's own headers, as Java
+    /// lets `deserialize(topic, headers, data)` do: the header is in the
+    /// headers after the trait's future (the consumer's path), the blocking
+    /// invoker and the `_cb` twin.
+    #[test]
+    fn a_c_deserializer_adds_to_the_records_headers() {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+
+        use crate::ffi::common::header::internals::record_headers::{
+            kafka_common_header_internals_RecordHeaders__as_Headers, record_headers_ref,
+        };
+        use crate::ffi::common::header::kafka_common_header_Headers_add_with_key_value;
+
+        /// The value every call reports: a static, so the test frees nothing.
+        static VALUE: u8 = 7;
+
+        /// Adds the header `added` and reports `VALUE` during the call.
+        unsafe extern "C" fn add_and_report(
+            self_: *mut c_void,
+            _topic: *const c_char,
+            headers: *mut kafka_common_header_internals_RecordHeaders_t,
+            _data: kafka_Bytes_t,
+            callback_id: i64,
+        ) {
+            // SAFETY: Test code: `headers` are the record's, writable and used by nothing else until
+            // the report; `self_` is the `AtomicPtr` holding the live handle; `err` is a valid slot.
+            unsafe {
+                let mut err = ptr::null_mut();
+                kafka_common_header_Headers_add_with_key_value(
+                    kafka_common_header_internals_RecordHeaders__as_Headers(headers),
+                    c"added".as_ptr(),
+                    kafka_Bytes_t::from_slice(b"v"),
+                    &raw mut err,
+                );
+                assert!(err.is_null());
+                let handle =
+                    (*(self_ as *const AtomicPtr<kafka_common_serialization_Deserializer_t>)).load(Ordering::SeqCst);
+                kafka_common_serialization_Deserializer__set_callback_result(
+                    handle,
+                    callback_id,
+                    &VALUE as *const u8 as *mut c_void,
+                    ptr::null_mut(),
+                );
+            }
+        }
+        unsafe extern "C" fn unused(_: *mut c_void, _: *const c_char, _: kafka_Bytes_t, _: i64) {
+            unreachable!("only the header methods are called")
+        }
+        unsafe extern "C" fn completed(value: *mut c_void, error: *mut kafka_common_Error_t, opaque: *mut c_void) {
+            assert!(error.is_null());
+            assert_eq!(value, &VALUE as *const u8 as *mut c_void);
+            // SAFETY: Test code: `opaque` is the test's `AtomicBool`, alive until after the call.
+            unsafe { &*(opaque as *const std::sync::atomic::AtomicBool) }.store(true, Ordering::SeqCst);
+        }
+        let added = |headers: &RecordHeaders| headers.to_array().iter().filter(|h| h.key() == "added").count();
+
+        let slot = AtomicPtr::new(ptr::null_mut());
+        let handle = kafka_common_serialization_Deserializer_new_async(
+            &slot as *const AtomicPtr<_> as *mut c_void,
+            unused,
+            Some(add_and_report),
+            Some(add_and_report),
+            None,
+            None,
+        );
+        slot.store(handle, Ordering::SeqCst);
+
+        // The consumer's path: the trait's future on the record's headers.
+        let mut record_headers = RecordHeaders::new();
+        record_headers.add_with_key_value("k", Some(b"v")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(async {
+            // SAFETY: Test code: the handle is valid until destroyed below.
+            let inner = unsafe { deserializer_ref(handle.cast()) };
+            let guard = inner.imp().lock().await;
+            let data = Bytes::from_static(b"trait");
+            let value = Deserializer::deserialize_with_headers_bytes(&*guard, "t", &mut record_headers, &data)
+                .await
+                .unwrap();
+            assert_eq!(value.as_ptr(), &VALUE as *const u8 as *mut c_void);
+            let value = Deserializer::deserialize_with_headers(&*guard, "t", &mut record_headers, b"slice")
+                .await
+                .unwrap();
+            assert_eq!(value.as_ptr(), &VALUE as *const u8 as *mut c_void);
+        });
+        assert_eq!(added(&record_headers), 2, "the trait's future");
+        assert!(record_headers.last_header("k").is_some(), "the record's headers kept");
+
+        let headers = box_record_headers(RecordHeaders::new());
+        let topic = CString::new("t").unwrap();
+        let fired = std::sync::atomic::AtomicBool::new(false);
+        // SAFETY: Test code: the handles are valid until destroyed, once, below; `err` is a valid
+        // slot pointing at null; `topic`, the arrays, `headers` and `fired` outlive each call and
+        // its completion, which fires before `_cb` returns (the report is inline).
+        unsafe {
+            let mut err = ptr::null_mut();
+            for blocking in [
+                kafka_common_serialization_Deserializer_deserialize_with_headers,
+                kafka_common_serialization_Deserializer_deserialize_with_headers_bytes,
+            ] {
+                let out = blocking(handle, topic.as_ptr(), headers, kafka_Bytes_t::from_slice(b"x"), &raw mut err);
+                assert!(err.is_null());
+                assert_eq!(out, &VALUE as *const u8 as *mut c_void);
+            }
+            assert_eq!(added(record_headers_ref(headers)), 2, "the blocking invokers");
+            kafka_common_serialization_Deserializer_deserialize_with_headers_cb(
+                handle,
+                topic.as_ptr(),
+                headers,
+                kafka_Bytes_t::from_slice(b"x"),
+                completed,
+                &fired as *const _ as *mut c_void,
+            );
+            assert!(fired.swap(false, Ordering::SeqCst));
+            kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb(
+                handle,
+                topic.as_ptr(),
+                headers,
+                kafka_Bytes_t::from_slice(b"x"),
+                completed,
+                &fired as *const _ as *mut c_void,
+            );
+            assert!(fired.load(Ordering::SeqCst));
+            assert_eq!(added(record_headers_ref(headers)), 4, "the `_cb` twins");
+            kafka_common_header_internals_RecordHeaders_destroy(headers);
+            kafka_common_serialization_Deserializer_destroy(handle);
+        }
     }
 }

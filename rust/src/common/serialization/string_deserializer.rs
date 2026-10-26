@@ -64,7 +64,7 @@ impl Deserializer<String> for StringDeserializer {
     async fn deserialize_with_headers_bytes(
         &self,
         topic: &str,
-        _headers: &RecordHeaders,
+        _headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<String, Error> {
         self.deserialize(topic, &data[..]).await

@@ -96,9 +96,6 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// The default implementation ignores the headers and delegates to
     /// [`deserialize`](Deserializer::deserialize). The consumer skips the call for a
     /// null key or value.
-    ///
-    /// WARNING: the headers are borrowed immutably, so the implementation
-    /// cannot modify them.
     // Takes the concrete `RecordHeaders` rather than a `&dyn Headers` trait
     // object, as `Serializer::serialize_with_headers` does: the client only ever
     // passes its one implementation, which keeps the two serde traits symmetric
@@ -107,7 +104,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         let _ = headers;
@@ -145,14 +142,11 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// [`deserialize_with_headers`](Deserializer::deserialize_with_headers) with
     /// `&data[..]`, copying nothing. The consumer skips the call for a null key or
     /// value.
-    ///
-    /// WARNING: the headers are borrowed immutably, so the implementation
-    /// cannot modify them.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#deserialize")]
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         self.deserialize_with_headers(topic, headers, &data[..])
@@ -211,7 +205,7 @@ mod tests {
         async fn deserialize_with_headers(
             &self,
             _topic: &str,
-            headers: &RecordHeaders,
+            headers: &mut RecordHeaders,
             data: &[u8],
         ) -> Result<(usize, bool), Error> {
             assert!(headers.last_header("k").is_some(), "the headers are forwarded");
@@ -225,9 +219,10 @@ mod tests {
         let data = source.slice(6..);
         let mut headers = RecordHeaders::new();
         headers.add_with_key_value("k", Some(b"v")).expect("add");
-        let (address, through_headers) = Deserializer::deserialize_with_headers_bytes(&Address, "t", &headers, &data)
-            .await
-            .expect("deserialize");
+        let (address, through_headers) =
+            Deserializer::deserialize_with_headers_bytes(&Address, "t", &mut headers, &data)
+                .await
+                .expect("deserialize");
         assert!(through_headers, "the default forwards to deserialize_with_headers");
         assert_eq!(
             data.as_ptr() as usize,

@@ -403,7 +403,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_to_string(
 }
 
 /// Returns the handle as the `Headers` interface it implements. It takes a `const` handle, so the read-only
-/// handles (a deserializer's `headers`, a record's `headers()` getter) need no
+/// handles (a record's `headers()` getter) need no
 /// cast; the view is non-`const` because `Headers` mutates, and the mutating
 /// `Headers_*` functions may be called on it only when the handle was
 /// received non-`const`.

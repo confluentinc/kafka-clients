@@ -89,11 +89,11 @@ async fn all_serdes_should_roundtrip_input_with_string() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original String after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original String after serialization and deserialization"
@@ -118,11 +118,11 @@ async fn all_serdes_should_roundtrip_input_with_byte_array() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers(TOPIC, &headers, value)
+            .deserialize_with_headers(TOPIC, &mut headers, value)
             .await
             .expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
@@ -130,7 +130,7 @@ async fn all_serdes_should_roundtrip_input_with_byte_array() {
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
@@ -153,11 +153,11 @@ async fn all_serdes_should_roundtrip_input_with_bytes() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original Bytes after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original Bytes after serialization and deserialization"
@@ -240,11 +240,11 @@ async fn string_deserializer_support_byte_buffer() {
     let mut backing = vec![0u8; serialized.len() << 1];
     backing[..serialized.len()].copy_from_slice(&serialized);
     let heap_buff = Bytes::from(backing).slice(..serialized.len());
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         data,
         StringDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &heap_buff)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &heap_buff)
             .await
             .expect("deserialize")
     );
@@ -257,23 +257,23 @@ async fn string_deserializer_support_byte_buffer() {
 async fn test_deserialize_with_headers_bytes_reads_only_the_record_slice() {
     let buffer = Bytes::from_static(b"<<my string>>");
     let record = buffer.slice(2..11);
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         "my string",
         StringDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
             .await
             .expect("deserialize")
     );
     assert_eq!(
         b"my string".to_vec(),
         ByteArrayDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
             .await
             .expect("deserialize")
     );
     let bytes = BytesDeserializer::new()
-        .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+        .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
         .await
         .expect("deserialize");
     assert_eq!(&b"my string"[..], &bytes[..]);

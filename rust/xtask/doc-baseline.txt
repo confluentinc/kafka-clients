@@ -12,8 +12,6 @@ warning crate::common::ClusterResourceListener
 warning crate::common::KafkaFuture::then_apply
 warning crate::common::metrics::MetricsReporter
 warning crate::common::serialization::Deserializer
-warning crate::common::serialization::Deserializer::deserialize_with_headers
-warning crate::common::serialization::Deserializer::deserialize_with_headers_bytes
 warning crate::common::serialization::Serializer
 warning crate::common::serialization::StringDeserializer
 warning crate::common::serialization::StringSerializer
@@ -30,10 +28,6 @@ warning crate::producer::Producer::metrics
 warning crate::producer::ProducerConfig::new
 warning kafka_admin_AdminClientConfig_new
 warning kafka_common_KafkaFuture_then_apply
-warning kafka_common_serialization_Deserializer_deserialize_with_headers
-warning kafka_common_serialization_Deserializer_deserialize_with_headers_bytes
-warning kafka_common_serialization_Deserializer_deserialize_with_headers_bytes_cb
-warning kafka_common_serialization_Deserializer_deserialize_with_headers_cb
 warning kafka_common_serialization_StringDeserializer_new
 warning kafka_common_serialization_StringSerializer_new
 warning kafka_consumer_ConsumerConfig_new

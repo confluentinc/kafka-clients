@@ -96,7 +96,7 @@ pub(crate) trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static 
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -110,7 +110,7 @@ pub(crate) trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static 
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -138,7 +138,7 @@ impl<T, D: Deserializer<T>> DynDeserializer<T> for D {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -150,7 +150,7 @@ impl<T, D: Deserializer<T>> DynDeserializer<T> for D {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -186,7 +186,7 @@ impl<T: 'static> Deserializer<T> for dyn DynDeserializer<T> {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         DynDeserializer::deserialize_with_headers(self, topic, headers, data)
@@ -195,7 +195,7 @@ impl<T: 'static> Deserializer<T> for dyn DynDeserializer<T> {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         DynDeserializer::deserialize_with_headers_bytes(self, topic, headers, data)
@@ -250,8 +250,8 @@ mod tests {
         let boxed: Box<dyn DynDeserializer<Bytes>> = Box::new(BytesDeserializer::new());
         let source = Bytes::from(vec![1u8, 2, 3, 4]);
         let data = source.slice(1..3);
-        let headers = RecordHeaders::new();
-        let result = DynDeserializer::deserialize_with_headers_bytes(&*boxed, "topic", &headers, &data)
+        let mut headers = RecordHeaders::new();
+        let result = DynDeserializer::deserialize_with_headers_bytes(&*boxed, "topic", &mut headers, &data)
             .await
             .expect("deserialize");
         assert_eq!(
@@ -271,13 +271,16 @@ mod tests {
         // Slicing promotes the buffer to a shared one, so the clone below is a
         // reference count increment.
         let data = source.slice(1..3);
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let (count, result) = {
             let _guard = crate::AllocTrackingGuard::new();
             crate::AllocTrackingGuard::reset();
             let mut future = std::pin::pin!(DynDeserializer::deserialize_with_headers_bytes(
-                &*boxed, "topic", &headers, &data
+                &*boxed,
+                "topic",
+                &mut headers,
+                &data
             ));
             let result = future.as_mut().poll(&mut cx);
             (crate::AllocTrackingGuard::count(), result)

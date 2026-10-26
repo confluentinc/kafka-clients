@@ -272,11 +272,10 @@ pub(crate) fn block_on_thread<F: Future>(future: F) -> F::Output {
 pub(crate) struct CallArgs {
     /// The topic, NUL-terminated, truncated at an interior NUL.
     topic: Vec<u8>,
-    /// The record's headers, for the methods that take them: a shared
-    /// reference to a deserializer's (a refcount, no copy), or a serializer's
-    /// moved here for the call and moved back by [`Self::restore_headers`].
+    /// The record's headers, for the methods that take them: moved here for
+    /// the call and moved back by [`Self::restore_headers`].
     headers: Option<RecordHeadersInner>,
-    /// Where a serializer's headers came from and go back to when it
+    /// Where the headers came from and go back to when the implementation
     /// reports; valid while the call's future lives, which is the only time
     /// the report is read (see [`Self::take_headers`]).
     headers_home: Option<SendPtr>,
@@ -302,17 +301,7 @@ impl CallArgs {
         self.topic.as_ptr().cast()
     }
 
-    /// Shares a deserializer's `headers` (a refcount, no copy) and returns the
-    /// read-only handle C reads, at the stable address of the boxed
-    /// `CallArgs`, valid until the report even if the future is dropped first.
-    pub(crate) fn share_headers(
-        &mut self,
-        headers: &RecordHeaders,
-    ) -> *const kafka_common_header_internals_RecordHeaders_t {
-        self.headers.insert(RecordHeadersInner::new(headers.clone())).as_ptr()
-    }
-
-    /// Moves a serializer's `headers` here for the call (a move, no copy),
+    /// Moves a serializer's or deserializer's `headers` here for the call (a move, no copy),
     /// leaving them empty, and returns the handle C reads and changes, at the
     /// stable address of the boxed `CallArgs`. [`Self::restore_headers`] moves
     /// them back, with C's changes, when the report is read; if the future is

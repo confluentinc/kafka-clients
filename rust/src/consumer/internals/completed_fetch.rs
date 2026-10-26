@@ -1019,7 +1019,7 @@ impl CompletedFetch {
             let timestamp;
             let record_size_in_bytes;
             let record_bytes_consumed;
-            let headers_owned;
+            let mut headers_owned;
             {
                 // Verified non-empty: `advance_to_next_fetched_record` returned
                 // `true` (or a cached exception positioned us here and the
@@ -1071,11 +1071,14 @@ impl CompletedFetch {
             let topic_str: &str = &self.topic_arc;
             let key_result = match &key_bytes {
                 None => Ok(None),
-                Some(key) => {
-                    DynDeserializer::deserialize_with_headers_bytes(key_deserializer, topic_str, &headers_owned, key)
-                        .await
-                        .map(Some)
-                },
+                Some(key) => DynDeserializer::deserialize_with_headers_bytes(
+                    key_deserializer,
+                    topic_str,
+                    &mut headers_owned,
+                    key,
+                )
+                .await
+                .map(Some),
             };
             // Java's `org.apache.kafka.clients.consumer.internals.CompletedFetch#parseRecord` is
             // two sequential `try` blocks and the first one's catch *throws*, so the value
@@ -1091,7 +1094,7 @@ impl CompletedFetch {
                     Some(value) => DynDeserializer::deserialize_with_headers_bytes(
                         value_deserializer,
                         topic_str,
-                        &headers_owned,
+                        &mut headers_owned,
                         value,
                     )
                     .await
@@ -3325,7 +3328,7 @@ mod tests {
         async fn deserialize_with_headers_bytes(
             &self,
             _topic: &str,
-            _headers: &RecordHeaders,
+            _headers: &mut RecordHeaders,
             data: &bytes::Bytes,
         ) -> Result<String, Error> {
             Ok(format!("bytes:{}", String::from_utf8_lossy(data)))
@@ -3351,6 +3354,47 @@ mod tests {
                 "value {:?}",
                 record.value()
             );
+        }
+    }
+
+    /// A deserializer that adds a header naming the side it read.
+    struct HeaderAdding(&'static str);
+
+    impl Deserializer<String> for HeaderAdding {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            Ok(String::from_utf8_lossy(data).into_owned())
+        }
+
+        async fn deserialize_with_headers_bytes(
+            &self,
+            topic: &str,
+            headers: &mut RecordHeaders,
+            data: &bytes::Bytes,
+        ) -> Result<String, Error> {
+            crate::common::header::Headers::add_with_key_value(headers, self.0, Some(b"added"))
+                .map_err(Error::LocalIllegalState)?;
+            Deserializer::deserialize(self, topic, data).await
+        }
+    }
+
+    /// The headers a deserializer adds are on the record it returns, as Java's
+    /// `CompletedFetch#parseRecord` passes the record's own `Headers` to both
+    /// deserializers and then builds the `ConsumerRecord` with them.
+    #[test]
+    fn test_headers_added_by_the_deserializers_are_on_the_record() {
+        let bytes = new_records(0, 2, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records_now::<String, String>(&fetch_config, &HeaderAdding("by-key"), &HeaderAdding("by-value"), 10)
+            .unwrap();
+        assert_eq!(2, records.len());
+        for record in &records {
+            let keys: Vec<&str> = crate::common::header::Headers::to_array(record.headers())
+                .iter()
+                .map(crate::common::header::Header::key)
+                .collect();
+            assert_eq!(keys, ["by-key", "by-value"], "offset {}", record.offset());
         }
     }
 
