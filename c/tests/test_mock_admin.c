@@ -945,7 +945,7 @@ static void test_mock_admin_describe_consumer_groups_result_new(void) {
 /* `new DescribeClassicGroupsResult(futures)`, keyed by group id. */
 static void test_mock_admin_describe_classic_groups_result_new(void) {
     kafka_admin_ClassicGroupDescription_t *description = kafka_admin_ClassicGroupDescription_new(
-        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
+        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL);
     TEST_ASSERT_NOT_NULL(description);
     kafka_common_KafkaFuture_t *future = kafka_common_KafkaFuture_completed_future(description, NULL);
     kafka_Map_t *futures = kafka_Map_new();
@@ -3838,6 +3838,10 @@ static void test_mock_admin_remove_members_reports_unsupported_per_member(void) 
     assert_ok(err, "RemoveMembersFromConsumerGroupOptions_with_members");
     kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, "rolling restart");
     TEST_ASSERT_EQUAL_STRING("rolling restart", kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(options));
+    /* Java's `reason(null)` clears the reason set earlier. */
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, NULL);
+    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(options));
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, "rolling restart");
     TEST_ASSERT_FALSE(kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all(options));
     kafka_List_t *copy = kafka_admin_RemoveMembersFromConsumerGroupOptions_members(options);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(copy));
@@ -4546,6 +4550,12 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     kafka_admin_CreateDelegationTokenOptions_set_max_lifetime_ms(options, 86400000);
     TEST_ASSERT_EQUAL_INT64(86400000, kafka_admin_CreateDelegationTokenOptions_max_lifetime_ms(options));
     TEST_ASSERT_NULL(kafka_admin_CreateDelegationTokenOptions_owner(options));
+    /* Java's `owner(null)` clears an owner set earlier. */
+    kafka_admin_CreateDelegationTokenOptions_set_owner(options, second);
+    TEST_ASSERT_EQUAL_STRING("second-renewer",
+                             kafka_common_security_auth_KafkaPrincipal_name(kafka_admin_CreateDelegationTokenOptions_owner(options)));
+    kafka_admin_CreateDelegationTokenOptions_set_owner(options, NULL);
+    TEST_ASSERT_NULL(kafka_admin_CreateDelegationTokenOptions_owner(options));
     kafka_List_t *copy = kafka_admin_CreateDelegationTokenOptions_renewers(options);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(copy));
     kafka_List_destroy(copy);
@@ -5218,10 +5228,17 @@ static void test_admin_descriptions_and_options_to_string_follow_java(void) {
                         kafka_admin_ConsumerGroupDescription_to_string(consumer));
     kafka_admin_ConsumerGroupDescription_destroy(consumer);
 
-    kafka_admin_ClassicGroupDescription_t *classic = kafka_admin_ClassicGroupDescription_new(
+    kafka_admin_ClassicGroupDescription_t *classic = kafka_admin_ClassicGroupDescription_with_authorized_operations(
         "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
     assert_owned_string("(groupId=classic, protocol='consumer', protocolData=range, members=, state=Stable, "
                         "coordinator=null, authorizedOperations=null)",
+                        kafka_admin_ClassicGroupDescription_to_string(classic));
+    kafka_admin_ClassicGroupDescription_destroy(classic);
+    /* Java's six-argument constructor passes `Set.of()`, an empty set, not null. */
+    classic = kafka_admin_ClassicGroupDescription_new("classic", "consumer", "range", NULL,
+                                                      kafka_common_ClassicGroupState_stable(), NULL);
+    assert_owned_string("(groupId=classic, protocol='consumer', protocolData=range, members=, state=Stable, "
+                        "coordinator=null, authorizedOperations=[])",
                         kafka_admin_ClassicGroupDescription_to_string(classic));
     kafka_admin_ClassicGroupDescription_destroy(classic);
 
