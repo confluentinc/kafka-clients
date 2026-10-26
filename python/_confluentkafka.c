@@ -8480,12 +8480,12 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
         if (configs != Py_None) {
             PyObject* cfast = PySequence_Fast(configs, "configs must be a sequence of (key, value)");
             if (cfast == NULL) goto fail;
-            kafka_Map_t* cmap = NULL;   // borrowed char* -> char* (owned by cfast's str objects)
+            kafka_Map_t* cmap = NULL;   // borrowed char* -> char* | NULL (owned by cfast's str objects)
             if (ffi_raise((cmap = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(cfast); goto fail; }
             int ok = 1;
             for (Py_ssize_t j = 0; j < PySequence_Fast_GET_SIZE(cfast); j++) {
-                const char *k, *v;
-                if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(cfast, j), "ss", &k, &v)
+                const char *k, *v;  // "z": a None value is Java's null config value, sent as NULL
+                if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(cfast, j), "sz", &k, &v)
                     || ffi_raise((kafka_Map_put_err(cmap, (void*)k, (void*)v, &ffi_err), ffi_take(&ffi_err)))) { ok = 0; break; }
             }
             if (ok) ok = !ffi_raise((kafka_admin_NewTopic_set_configs_err(t, cmap, &ffi_err), ffi_take(&ffi_err)));
