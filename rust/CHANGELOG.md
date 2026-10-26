@@ -5,6 +5,23 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
+## [Unreleased]
+
+### Common
+
+- The minimum rustls version is now 0.23.46, which fixes
+  [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
+  `Debug` output of rustls's client session values exposed TLS session secrets.
+  The client never formats those values, but the C and Python bindings were
+  built with the affected 0.23.45.
+- rustls-webpki 0.103.16 and webpki-roots 1.0.11 stop trusting the emSign
+  (eMudhra) intermediate CAs whose private keys leaked
+  ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382),
+  [RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381)): a
+  certificate signed with one of those keys could impersonate a broker. The C
+  and Python bindings are built with the fixed versions; a Rust application
+  picks them up by updating its lockfile.
+
 ## [0.3.0-beta.1] - 2026-10-23
 
 ### Producer
