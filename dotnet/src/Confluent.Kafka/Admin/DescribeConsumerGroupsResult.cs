@@ -1,0 +1,103 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+using System;
+using System.Collections.Generic;
+
+using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
+
+namespace Confluent.Kafka.Admin;
+
+/// <summary>
+/// The result of <see cref="IAdmin.DescribeConsumerGroups"/>, Java's <c>DescribeConsumerGroupsResult</c>:
+/// one future per group id.
+/// </summary>
+public sealed class DescribeConsumerGroupsResult
+{
+    private readonly IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> _futures;
+    private readonly SafeAdminResultHandle? _native;
+
+    /// <summary>
+    /// Creates a result over the given futures, keyed by group id, as Java's public constructor does.
+    /// </summary>
+    /// <param name="futures">The future of each group's description.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    public DescribeConsumerGroupsResult(IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> futures)
+    {
+        if (futures is null)
+        {
+            throw new ArgumentNullException(nameof(futures));
+        }
+
+        Dictionary<string, KafkaFuture<ConsumerGroupDescription>> copy = new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>(futures.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> entry in futures)
+        {
+            copy.Add(entry.Key, entry.Value);
+        }
+
+        _futures = copy;
+    }
+
+    private DescribeConsumerGroupsResult(IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> futures, SafeAdminResultHandle native)
+    {
+        _futures = futures;
+        _native = native;
+    }
+
+    internal SafeAdminResultHandle? Native => _native;
+
+    /// <summary>
+    /// The future of each group's description, keyed by group id.
+    /// </summary>
+    public IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> DescribedGroups => _futures;
+
+    /// <summary>
+    /// A future that yields every group's description once all of them succeeded; it fails with the
+    /// first failure to complete. Each call builds a new future.
+    /// </summary>
+    public KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> All()
+    {
+        IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> futures = _futures;
+        KafkaFuture<ConsumerGroupDescription>[] values = new KafkaFuture<ConsumerGroupDescription>[futures.Count];
+        int next = 0;
+        foreach (KafkaFuture<ConsumerGroupDescription> future in futures.Values)
+        {
+            values[next++] = future;
+        }
+
+        return KafkaFuture.AllOf(values).ThenApply<IReadOnlyDictionary<string, ConsumerGroupDescription>>(() =>
+        {
+            Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> entry in futures)
+            {
+                descriptions.Add(entry.Key, entry.Value.GetNow(null!));
+            }
+
+            return descriptions;
+        });
+    }
+
+    internal static DescribeConsumerGroupsResult OfClient(
+        (IReadOnlyDictionary<string, KafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result) native)
+    {
+        Dictionary<string, KafkaFuture<ConsumerGroupDescription>> futures =
+            new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>(native.DescribedGroups.Count, StringComparer.Ordinal);
+        foreach (KeyValuePair<string, KafkaFutureImpl<ConsumerGroupDescription>> entry in native.DescribedGroups)
+        {
+            futures.Add(entry.Key, new KafkaFuture<ConsumerGroupDescription>(entry.Value));
+        }
+
+        return new DescribeConsumerGroupsResult(futures, native.Result);
+    }
+}
