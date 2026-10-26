@@ -1321,11 +1321,11 @@ mod tests {
             .unwrap();
 
         // Increment each sensor one time.
-        parent1.record();
-        parent2.record();
-        child1.record();
-        child2.record();
-        grandchild.record();
+        parent1.record().unwrap();
+        parent2.record().unwrap();
+        child1.record().unwrap();
+        child2.record().unwrap();
+        grandchild.record().unwrap();
 
         let p1 = double_value(&parent1.metrics()[0]);
         let p2 = double_value(&parent2.metrics()[0]);
@@ -1543,7 +1543,7 @@ mod tests {
         assert!(metrics.metric(&metrics.metric_name("test.s2.count", "grp1")).is_some());
 
         // Record on s2; resets its clock so it is not purged at the 3s mark.
-        s2.record();
+        s2.record().unwrap();
         time.sleep(2000);
         metrics.expire_sensors();
         assert!(metrics.get_sensor("test.s2").is_some(), "Sensor test.s2 must be present");
@@ -1574,6 +1574,49 @@ mod tests {
         assert!(metrics.metric(&metrics.metric_name("test.s1.count", "grp1")).is_some());
     }
 
+    // MetricsTest.testQuotas
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.MetricsTest#testQuotas")]
+    fn test_quotas() {
+        use crate::common::metrics::Quota;
+        let metrics = Metrics::new();
+        let sensor = metrics.sensor("test").unwrap();
+        sensor
+            .add_with_metric_name_config(
+                metrics.metric_name("test1.total", "grp1"),
+                Box::new(CumulativeSum::new()),
+                Some(Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(5.0)))),
+            )
+            .unwrap();
+        sensor
+            .add_with_metric_name_config(
+                metrics.metric_name("test2.total", "grp1"),
+                Box::new(CumulativeSum::new()),
+                Some(Arc::new(MetricConfig::new().set_quota(Quota::lower_bound(0.0)))),
+            )
+            .unwrap();
+        sensor.record_with_value(5.0).unwrap();
+        let error = sensor
+            .record_with_value(1.0)
+            .expect_err("Should have gotten a quota violation.");
+        assert!(error.is_quota_violation_error());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "QuotaViolationError: '{}' violated quota. Actual: 6, Threshold: 5",
+                metrics.metric_name("test1.total", "grp1")
+            )
+        );
+        assert!(
+            (6.0 - double_value(&metrics.metric(&metrics.metric_name("test1.total", "grp1")).unwrap())).abs() < EPS
+        );
+        sensor.record_with_value(-6.0).unwrap();
+        let error = sensor
+            .record_with_value(-1.0)
+            .expect_err("Should have gotten a quota violation.");
+        assert!(error.is_quota_violation_error());
+    }
+
     // The M1-relevant part of MetricsTest.testSimpleStats: the CumulativeSum row.
     #[test]
     fn test_simple_stats_cumulative() {
@@ -1581,7 +1624,7 @@ mod tests {
         let s2 = metrics.sensor("test.sensor2").unwrap();
         s2.add_with_metric_name(metrics.metric_name("s2.total", "grp1"), Box::new(CumulativeSum::new()))
             .unwrap();
-        s2.record_with_value(5.0);
+        s2.record_with_value(5.0).unwrap();
         assert_eq!(
             5.0,
             double_value(&metrics.metric(&metrics.metric_name("s2.total", "grp1")).unwrap()),
@@ -1593,7 +1636,7 @@ mod tests {
         s.add_with_metric_name(metrics.metric_name("test.count", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
         for i in 0..10 {
-            s.record_with_value(i as f64);
+            s.record_with_value(i as f64).unwrap();
         }
         assert_eq!(
             10.0,
@@ -1641,12 +1684,12 @@ mod tests {
         let s2 = metrics.sensor("test.sensor2").unwrap();
         s2.add_with_metric_name(metrics.metric_name("s2.total", "grp1"), Box::new(CumulativeSum::new()))
             .unwrap();
-        s2.record_with_value(5.0);
+        s2.record_with_value(5.0).unwrap();
 
         let mut sum = 0i64;
         let count = 10i64;
         for i in 0..count {
-            s.record_with_value(i as f64);
+            s.record_with_value(i as f64).unwrap();
             sum += i;
         }
 
@@ -1753,7 +1796,7 @@ mod tests {
         let count = cfg.samples() as i64 - 1;
         // Advance 1 window after every record.
         for _ in 0..count {
-            s.record_with_value(100.0);
+            s.record_with_value(100.0).unwrap();
             sum += 100;
             time.sleep(cfg.time_window_ms());
             assert!((sum as f64 - double_value(&total_metric)).abs() <= EPS);
@@ -2115,7 +2158,7 @@ mod tests {
                 .add_with_metric_name(MetricName::new("late", "grp1", "", BTreeMap::new()), Box::new(Value::new()))
                 .expect("add after the registry is gone")
         );
-        sensor.record_with_value(1.0);
+        sensor.record_with_value(1.0).unwrap();
     }
 
     /// A provider capturing an object that holds one of the registry's sensors

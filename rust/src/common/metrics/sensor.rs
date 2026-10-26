@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::common::Metric;
 use crate::common::metrics::MetricsShared;
 use crate::common::metrics::{
-    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, QuotaViolationError, Stat,
+    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, Quota, QuotaViolationError, Stat,
 };
 use crate::common::utils::Time;
 use crate::common::{Error, MetricName};
@@ -294,17 +294,22 @@ impl Sensor {
         self.recording_level.should_record(self.config.record_level().id())
     }
 
-    // Java's `record` overloads (plus the `checkQuotas` form deferred below)
-    // have an EMPTY parameter-name intersection, and the no-arg `record()`
-    // matches it, so that one keeps the plain name and the others carry their
-    // Rust parameters.
+    // Java's `record` overloads have an EMPTY parameter-name intersection, and
+    // the no-arg `record()` matches it, so that one keeps the plain name and the
+    // others carry their Rust parameters.
 
     /// Record an occurrence, this is just short-hand for `record_with_value(1.0)`.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_quota_violation_error` if recording moves a metric beyond its
+    ///   configured maximum or minimum bound
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
-    pub fn record(&self) {
+    pub fn record(&self) -> Result<(), Error> {
         if self.should_record() {
-            self.record_internal(1.0, self.time.milliseconds());
+            self.record_internal(1.0, self.time.milliseconds(), true)?;
         }
+        Ok(())
     }
 
     /// Record a value with this sensor
@@ -313,19 +318,16 @@ impl Sensor {
     ///
     /// - `value` - The value to record
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - `QuotaViolationError` never: see the notes.
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: no quota is checked, so a violation is never reported; call
-    /// `check_quotas` after recording.
+    /// - `Error::is_quota_violation_error` if recording this value moves a metric
+    ///   beyond its configured maximum or minimum bound
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
-    pub fn record_with_value(&self, value: f64) {
+    pub fn record_with_value(&self, value: f64) -> Result<(), Error> {
         if self.should_record() {
-            self.record_internal(value, self.time.milliseconds());
+            self.record_internal(value, self.time.milliseconds(), true)?;
         }
+        Ok(())
     }
 
     /// Record a value at a known time. This method is slightly faster than
@@ -336,23 +338,46 @@ impl Sensor {
     /// - `value` - The value we are recording
     /// - `time_ms` - The current POSIX time in milliseconds
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - `QuotaViolationError` never: see the notes.
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: no quota is checked, so a violation is never reported; call
-    /// `check_quotas` after recording.
+    /// - `Error::is_quota_violation_error` if recording this value moves a metric
+    ///   beyond its configured maximum or minimum bound
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
-    pub fn record_with_value_time_ms(&self, value: f64, time_ms: i64) {
+    pub fn record_with_value_time_ms(&self, value: f64, time_ms: i64) -> Result<(), Error> {
         if self.should_record() {
-            self.record_internal(value, time_ms);
+            self.record_internal(value, time_ms, true)?;
         }
+        Ok(())
+    }
+
+    /// Record a value at a known time. This method is slightly faster than
+    /// `record_with_value` since it will reuse the time stamp.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` - The value we are recording
+    /// - `time_ms` - The current POSIX time in milliseconds
+    /// - `check_quotas` - Indicate if quota must be enforced or not
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_quota_violation_error` if recording this value moves a metric
+    ///   beyond its configured maximum or minimum bound
+    #[doc(alias = "org.apache.kafka.common.metrics.Sensor#record")]
+    pub fn record_with_value_time_ms_check_quotas(
+        &self,
+        value: f64,
+        time_ms: i64,
+        check_quotas: bool,
+    ) -> Result<(), Error> {
+        if self.should_record() {
+            self.record_internal(value, time_ms, check_quotas)?;
+        }
+        Ok(())
     }
 
     #[doc(alias = "org.apache.kafka.common.metrics.Sensor#recordInternal")]
-    fn record_internal(&self, value: f64, time_ms: i64) {
+    fn record_internal(&self, value: f64, time_ms: i64, check_quotas: bool) -> Result<(), Error> {
         self.last_record_time.store(time_ms, Ordering::SeqCst);
         {
             let inner = self.inner.lock().expect("sensor mutex poisoned");
@@ -361,26 +386,13 @@ impl Sensor {
                 stat_and_config.record(value, time_ms);
             }
         }
-        // Java runs `if (checkQuotas) checkQuotas(timeMs);` here and lets the `QuotaViolationException`
-        // propagate out of `record`. The check itself IS translated — see
-        // [`check_quotas`](Self::check_quotas) / [`check_quotas_with_time_ms`] — but it
-        // cannot be called from here yet, and the blocker is the signature, not
-        // the stats: `record` / `record_with_value` / `record_with_value_time_ms` return `()`,
-        // so there is nowhere to put the `Result` that CLAUDE.md §11.1/§12.2
-        // requires, and Java's `record(value, timeMs, checkQuotas)` overload —
-        // the boolean that selects enforcement — has no Rust counterpart for the
-        // same reason. Adding the `Result` reaches 45 call sites across
-        // `src/consumer/`, so it is its own piece of work; swallowing the
-        // violation into a log here instead would both diverge from Java (which
-        // stops the caller) and put a per-metric scan on the per-record path
-        // (CLAUDE.md §13 / DoD #10).
-        //
-        // Until then a caller that configures a `Quota` enforces it by calling
-        // `check_quotas()` itself, which is what Java's broker-side
-        // `ClientQuotaManager` does too.
-        for parent in &self.parents {
-            parent.record_with_value_time_ms(value, time_ms);
+        if check_quotas {
+            self.check_quotas_with_time_ms(time_ms)?;
         }
+        for parent in &self.parents {
+            parent.record_with_value_time_ms_check_quotas(value, time_ms, check_quotas)?;
+        }
+        Ok(())
     }
 
     /// Check if we have violated our quota for any metric that has a configured
@@ -416,21 +428,25 @@ impl Sensor {
         // holding the sensor lock across that would let a measurable that
         // re-enters the sensor deadlock. Java has the same call under
         // `synchronized (this)` but its monitor is reentrant.
-        let metrics: Vec<Arc<KafkaMetric>> = {
+        // Only the metrics with a quota are collected, so the common case (no
+        // quota anywhere, as for every client sensor) collects nothing and does
+        // not allocate on the per-record path `record` calls this from.
+        let metrics: Vec<(Arc<KafkaMetric>, Quota)> = {
             let inner = self.inner.lock().expect("sensor mutex poisoned");
-            inner.metrics.values().map(Arc::clone).collect()
+            inner
+                .metrics
+                .values()
+                .filter_map(|metric| metric.config().quota().map(|quota| (Arc::clone(metric), quota.clone())))
+                .collect()
         };
-        for metric in metrics {
-            let config = metric.config();
-            if let Some(quota) = config.quota() {
-                let value = metric.measurable_value(time_ms);
-                if !quota.acceptable(value) {
-                    return Err(Error::QuotaViolation(Box::new(QuotaViolationError::new(
-                        metric.metric_name().clone(),
-                        value,
-                        quota.bound(),
-                    ))));
-                }
+        for (metric, quota) in metrics {
+            let value = metric.measurable_value(time_ms);
+            if !quota.acceptable(value) {
+                return Err(Error::QuotaViolation(Box::new(QuotaViolationError::new(
+                    metric.metric_name().clone(),
+                    value,
+                    quota.bound(),
+                ))));
             }
         }
         Ok(())
@@ -711,9 +727,8 @@ mod tests {
         Arc::new(MetricConfig::new().set_quota(quota).set_record_level(RecordingLevel::Info))
     }
 
-    /// `SensorTest.testStrictQuotaEnforcement`, reduced to the check itself:
-    /// Java's `strictRecord` is `sensor.record(value, timeMs, true)`, whose only
-    /// effect beyond `record` is the `checkQuotas(timeMs)` this asserts on.
+    /// The check itself, recording with `check_quotas = false` as Java's
+    /// `SensorTest.strictRecord` does and then calling `check_quotas`.
     ///
     /// An upper bound is crossed once the recorded value exceeds it, and the
     /// error carries the metric, the offending value and the bound — Java's
@@ -729,12 +744,12 @@ mod tests {
         );
 
         // Under the bound: no violation, in either accessor.
-        sensor.record_with_value_time_ms(4.0, 1);
+        sensor.record_with_value_time_ms(4.0, 1).unwrap();
         assert!(sensor.check_quotas_with_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
 
         // Over it: Java throws `QuotaViolationException(metric, value, bound)`.
-        sensor.record_with_value_time_ms(10.0, 2);
+        sensor.record_with_value_time_ms_check_quotas(10.0, 2, false).unwrap();
         let error = sensor
             .check_quotas_with_time_ms(2)
             .expect_err("10.0 exceeds the upper bound of 5.0");
@@ -772,10 +787,10 @@ mod tests {
                 .unwrap()
         );
 
-        sensor.record_with_value_time_ms(10.0, 1);
+        sensor.record_with_value_time_ms(10.0, 1).unwrap();
         assert!(sensor.check_quotas_with_time_ms(1).is_ok());
 
-        sensor.record_with_value_time_ms(1.0, 2);
+        sensor.record_with_value_time_ms_check_quotas(1.0, 2, false).unwrap();
         let error = sensor
             .check_quotas_with_time_ms(2)
             .expect_err("1.0 is below the lower bound of 5.0");
@@ -784,6 +799,182 @@ mod tests {
         };
         assert_eq!(violation.value(), 1.0);
         assert_eq!(violation.bound(), 5.0);
+    }
+
+    /// Java's `record` checks the quotas after recording the stats and throws
+    /// on a violation, which stops the parents from recording: a child whose
+    /// quota is violated leaves its parent untouched, while
+    /// `check_quotas = false` records both.
+    #[test]
+    fn test_record_violation_does_not_record_the_parents() {
+        use crate::common::metrics::Metrics;
+        let metrics = Metrics::new();
+        let parent = metrics.sensor("parent").unwrap();
+        let parent_count = metrics.metric_name("parent.count", "grp1");
+        parent
+            .add_with_metric_name(parent_count.clone(), Box::new(CumulativeCount::new()))
+            .unwrap();
+        let child = metrics
+            .sensor_with_config_parents("child", Some(quota_config(Quota::upper_bound(5.0))), &[Arc::clone(&parent)])
+            .unwrap();
+        let child_value = metrics.metric_name("child.value", "grp1");
+        child.add_with_metric_name(child_value.clone(), Box::new(Value::new())).unwrap();
+        let value_of = |name: &MetricName| metrics.metric(name).unwrap().measurable_value(0);
+
+        child.record_with_value(1.0).unwrap();
+        assert_eq!(value_of(&parent_count), 1.0);
+
+        let error = child.record_with_value(10.0).expect_err("10.0 exceeds the upper bound of 5.0");
+        assert!(error.is_quota_violation_error());
+        assert_eq!(
+            error.to_string(),
+            format!("QuotaViolationError: '{child_value}' violated quota. Actual: 10, Threshold: 5")
+        );
+        // The child's stats are recorded before the check, the parent's are not.
+        assert_eq!(value_of(&child_value), 10.0);
+        assert_eq!(value_of(&parent_count), 1.0);
+
+        child.record_with_value_time_ms_check_quotas(10.0, 0, false).unwrap();
+        assert_eq!(value_of(&parent_count), 2.0);
+    }
+
+    /// `SensorTest.testStrictQuotaEnforcementWithRate`
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testStrictQuotaEnforcementWithRate")]
+    fn test_strict_quota_enforcement_with_rate() {
+        use crate::common::metrics::stats::Rate;
+        use crate::common::metrics::{Metrics, TimeUnit};
+        let wall_clock_ms = SystemTime.milliseconds();
+        let time = Arc::new(MockTime::with_auto_tick_ms_current_time_ms_current_high_res_time_ns(
+            0,
+            wall_clock_ms,
+            0,
+        ));
+        let metrics = Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>);
+        let config = MetricConfig::new()
+            .set_quota(Quota::upper_bound(2.0))
+            .set_time_window(1, TimeUnit::Seconds)
+            .set_samples(11);
+        let sensor = metrics
+            .sensor_with_config_parents("sensor", Some(Arc::new(config)), &[])
+            .unwrap();
+        let metric_name = metrics.metric_name("rate", "test-group");
+        assert!(sensor.add_with_metric_name(metric_name.clone(), Box::new(Rate::new())).unwrap());
+        let rate_metric = metrics.metric(&metric_name).unwrap();
+        let strict_record = |value: f64, time_ms: i64| -> Result<(), Error> {
+            sensor.check_quotas_with_time_ms(time_ms)?;
+            sensor.record_with_value_time_ms_check_quotas(value, time_ms, false)
+        };
+
+        // Recording a first value at T+0 to bring the avg rate to 3 which is already
+        // above the quota.
+        strict_record(30.0, time.milliseconds()).unwrap();
+        assert!((rate_metric.measurable_value(time.milliseconds()) - 3.0).abs() <= 0.1);
+
+        // Theoretically, we should wait 5s to bring back the avg rate to the define quota:
+        // ((30 / 10) - 2) / 2 * 10 = 5s
+        time.sleep(5000);
+
+        // But, recording a second value is rejected because the avg rate is still equal
+        // to 3 after 5s.
+        assert!((rate_metric.measurable_value(time.milliseconds()) - 3.0).abs() <= 0.1);
+        let error = strict_record(30.0, time.milliseconds()).expect_err("the rate is still above the quota");
+        assert!(error.is_quota_violation_error());
+    }
+
+    /// A `MeasurableStat` that logs the quota bound of the config each call
+    /// receives: Java's `Mockito.verify(stat).record(config, ..)` /
+    /// `.measure(config, ..)`.
+    struct RecordingStat(Arc<Mutex<Vec<StatCall>>>);
+
+    /// One call a `RecordingStat` received: method, quota bound, value, time.
+    type StatCall = (&'static str, f64, f64, i64);
+
+    impl Stat for RecordingStat {
+        fn record(&self, config: &MetricConfig, value: f64, time_ms: i64) {
+            let bound = config.quota().map_or(f64::NAN, Quota::bound);
+            self.0.lock().unwrap().push(("record", bound, value, time_ms));
+        }
+    }
+
+    impl Measurable for RecordingStat {
+        fn measure(&self, config: &MetricConfig, now: i64) -> f64 {
+            let bound = config.quota().map_or(f64::NAN, Quota::bound);
+            self.0.lock().unwrap().push(("measure", bound, 0.0, now));
+            0.0
+        }
+    }
+
+    /// `SensorTest.testRecordAndCheckQuotaUseMetricConfigOfEachStat`
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testRecordAndCheckQuotaUseMetricConfigOfEachStat")]
+    fn test_record_and_check_quota_use_metric_config_of_each_stat() {
+        use crate::common::metrics::Metrics;
+        let metrics = Metrics::with_time(Arc::new(MockTime::new()));
+        let sensor = metrics.sensor("sensor").unwrap();
+
+        let calls1 = Arc::new(Mutex::new(Vec::new()));
+        let stat1_config = Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(5.0)));
+        sensor
+            .add_with_metric_name_config(
+                metrics.metric_name("stat1", "test-group"),
+                Box::new(RecordingStat(Arc::clone(&calls1))),
+                Some(stat1_config),
+            )
+            .unwrap();
+        let calls2 = Arc::new(Mutex::new(Vec::new()));
+        let stat2_config = Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(10.0)));
+        sensor
+            .add_with_metric_name_config(
+                metrics.metric_name("stat2", "test-group"),
+                Box::new(RecordingStat(Arc::clone(&calls2))),
+                Some(stat2_config),
+            )
+            .unwrap();
+
+        sensor.record_with_value_time_ms(10.0, 1).unwrap();
+        assert!(calls1.lock().unwrap().contains(&("record", 5.0, 10.0, 1)));
+        assert!(calls2.lock().unwrap().contains(&("record", 10.0, 10.0, 1)));
+
+        sensor.check_quotas_with_time_ms(2).unwrap();
+        assert!(calls1.lock().unwrap().contains(&("measure", 5.0, 0.0, 2)));
+        assert!(calls2.lock().unwrap().contains(&("measure", 10.0, 0.0, 2)));
+    }
+
+    /// `SensorTest.testUpdatingMetricConfigIsReflectedInTheSensor`
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.metrics.SensorTest#testUpdatingMetricConfigIsReflectedInTheSensor")]
+    fn test_updating_metric_config_is_reflected_in_the_sensor() {
+        use crate::common::metrics::Metrics;
+        let metrics = Metrics::with_time(Arc::new(MockTime::new()));
+        let sensor = metrics.sensor("sensor").unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let stat_name = metrics.metric_name("stat", "test-group");
+        let stat_config = Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(5.0)));
+        sensor
+            .add_with_metric_name_config(
+                stat_name.clone(),
+                Box::new(RecordingStat(Arc::clone(&calls))),
+                Some(stat_config),
+            )
+            .unwrap();
+
+        sensor.record_with_value_time_ms(10.0, 1).unwrap();
+        assert!(calls.lock().unwrap().contains(&("record", 5.0, 10.0, 1)));
+
+        sensor.check_quotas_with_time_ms(2).unwrap();
+        assert!(calls.lock().unwrap().contains(&("measure", 5.0, 0.0, 2)));
+
+        // Update the config of the KafkaMetric
+        let new_config = Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(10.0)));
+        metrics.metric(&stat_name).unwrap().set_config(new_config);
+
+        sensor.record_with_value_time_ms(10.0, 3).unwrap();
+        assert!(calls.lock().unwrap().contains(&("record", 10.0, 10.0, 3)));
+
+        sensor.check_quotas_with_time_ms(4).unwrap();
+        assert!(calls.lock().unwrap().contains(&("measure", 10.0, 0.0, 4)));
     }
 
     /// A sensor whose config carries no quota can never violate one, however
@@ -796,7 +987,7 @@ mod tests {
                 .add_with_metric_name(name("value", "test-group"), Box::new(Value::new()))
                 .unwrap()
         );
-        sensor.record_with_value_time_ms(f64::MAX, 1);
+        sensor.record_with_value_time_ms(f64::MAX, 1).unwrap();
         assert!(sensor.check_quotas_with_time_ms(1).is_ok());
         assert!(sensor.check_quotas().is_ok());
     }
@@ -818,7 +1009,9 @@ mod tests {
             let sensor = Arc::clone(&sensor);
             handles.push(std::thread::spawn(move || {
                 for j in 0..20i64 {
-                    sensor.record_with_value_time_ms((j * index) as f64, j);
+                    sensor
+                        .record_with_value_time_ms_check_quotas((j * index) as f64, j, false)
+                        .unwrap();
                     sensor.check_quotas().expect("an upper bound of f64::MAX is never violated");
                 }
             }));
@@ -965,7 +1158,7 @@ mod tests {
         // Java's `record` does not gate on expiry; recording resets
         // `last_record_time`, so the sensor is no longer expired afterwards and
         // the metric count remains unchanged.
-        sensor.record_with_value(1.0);
+        sensor.record_with_value(1.0).unwrap();
         assert!(!sensor.has_expired());
         assert_eq!(2, sensor.metrics().len());
     }
@@ -1014,7 +1207,7 @@ mod tests {
         // the first sample-buffer allocation outside the timed loop).
         let mut now = time.milliseconds();
         for i in 0..10_000 {
-            sensor.record_with_value_time_ms(i as f64, now);
+            sensor.record_with_value_time_ms(i as f64, now).unwrap();
         }
 
         const ITERS: u64 = 2_000_000;
@@ -1025,7 +1218,7 @@ mod tests {
             if i % 4096 == 0 {
                 now += 1;
             }
-            sensor.record_with_value_time_ms(i as f64, now);
+            sensor.record_with_value_time_ms(i as f64, now).unwrap();
         }
         let elapsed = start.elapsed();
         let ns_per_call = elapsed.as_nanos() as f64 / ITERS as f64;

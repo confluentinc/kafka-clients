@@ -538,7 +538,7 @@ mod tests {
 
     /// Extreme caller-given times and sample counts wrap as Java's `long` and
     /// `int` arithmetic does instead of panicking (they reach here from C
-    /// through the void `kafka_common_metrics_Sensor_record_with_value_time_ms`
+    /// through `kafka_common_metrics_Sensor_record_with_value_time_ms`
     /// and `kafka_common_metrics_MetricConfig_set_samples`). No Java
     /// counterpart.
     #[test]

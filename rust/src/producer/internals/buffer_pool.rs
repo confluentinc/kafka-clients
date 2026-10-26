@@ -514,11 +514,9 @@ impl BufferPool {
     /// timeNs)`, which records against the
     /// `bufferpool-wait-time` sensor at the current wall-clock millisecond.
     ///
-    /// Java's method is `void` but can throw (its tests inject an
-    /// `OutOfMemoryError` via a Mockito spy). Rust sensor recording is
-    /// infallible, so this always returns `Ok` in production; the `Result`
-    /// return type is the faithful translation of the throwing contract, and
-    /// tests inject a failure through `fail_record_wait_time`.
+    /// Java's method is `void` but can throw: the sensor's `record` throws
+    /// `QuotaViolationException`, and its tests inject an `OutOfMemoryError`
+    /// via a Mockito spy. Tests inject a failure through `fail_record_wait_time`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#recordWaitTime")]
     fn record_wait_time(&self, time_ns: i64) -> Result<(), Error> {
         #[cfg(test)]
@@ -529,8 +527,7 @@ impl BufferPool {
             ));
         }
         self.wait_time_sensor
-            .record_with_value_time_ms(time_ns as f64, self.time.milliseconds());
-        Ok(())
+            .record_with_value_time_ms(time_ns as f64, self.time.milliseconds())
     }
 
     /// Attempt to ensure we have at least the requested number of bytes of memory for
@@ -966,7 +963,10 @@ impl BufferPool {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#recordBufferExhausted")]
     pub(crate) fn record_buffer_exhausted(&self) {
         // Recorded outside the pool lock (value/timestamp are independent of pool state).
-        self.buffer_exhausted_sensor
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self
+            .buffer_exhausted_sensor
             .record_with_value_time_ms(1.0, self.time.milliseconds());
     }
 

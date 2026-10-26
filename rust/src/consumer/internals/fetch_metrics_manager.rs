@@ -258,11 +258,13 @@ impl FetchMetricsManager {
     /// and, if present, the per-node latency sensor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordLatency")]
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        self.fetch_latency.record_with_value(request_latency_ms as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.fetch_latency.record_with_value(request_latency_ms as f64);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.inner.metrics().get_sensor(&node_time_name) {
-                node_request_time.record_with_value(request_latency_ms as f64);
+                let _ = node_request_time.record_with_value(request_latency_ms as f64);
             }
         }
     }
@@ -270,13 +272,13 @@ impl FetchMetricsManager {
     /// Records the number of bytes fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordBytesFetched")]
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        self.bytes_fetched.record_with_value(bytes as f64);
+        let _ = self.bytes_fetched.record_with_value(bytes as f64);
     }
 
     /// Records the number of records fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordRecordsFetched")]
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        self.records_fetched.record_with_value(records as f64);
+        let _ = self.records_fetched.record_with_value(records as f64);
     }
 
     /// Records the number of bytes fetched for a single topic.
@@ -299,7 +301,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        bytes_fetched.record_with_value(bytes as f64);
+        let _ = bytes_fetched.record_with_value(bytes as f64);
     }
 
     /// Records the number of records fetched for a single topic.
@@ -322,7 +324,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_fetched.record_with_value(records as f64);
+        let _ = records_fetched.record_with_value(records as f64);
     }
 
     /// Records the lag for a single partition.
@@ -334,7 +336,7 @@ impl FetchMetricsManager {
     /// metric set per partition per poll — the accepted Java-parity cost.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLag")]
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        self.records_lag.record_with_value(lag as f64);
+        let _ = self.records_lag.record_with_value(lag as f64);
 
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
 
@@ -350,7 +352,7 @@ impl FetchMetricsManager {
         let Some(records_lag) = FetchMetricsManager::resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        records_lag.record_with_value(lag as f64);
+        let _ = records_lag.record_with_value(lag as f64);
     }
 
     /// Records the lead for a single partition.
@@ -360,7 +362,7 @@ impl FetchMetricsManager {
     /// as Java does (see [`Self::record_partition_lag`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLead")]
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        self.records_lead.record_with_value(lead as f64);
+        let _ = self.records_lead.record_with_value(lead as f64);
 
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
 
@@ -377,7 +379,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_lead.record_with_value(lead as f64);
+        let _ = records_lead.record_with_value(lead as f64);
     }
 
     /// Called before requesting fetches to update the set of per-partition
@@ -980,9 +982,9 @@ mod tests {
     fn test_throttle_time_sensor_records() {
         let f = setup();
         let sensor = f.manager.throttle_time_sensor();
-        sensor.record_with_value(100.0);
+        sensor.record_with_value(100.0).unwrap();
         f.time.sleep(time_window_ms(&f) + 1);
-        sensor.record_with_value(200.0);
+        sensor.record_with_value(200.0).unwrap();
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);

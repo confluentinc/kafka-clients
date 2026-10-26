@@ -332,7 +332,7 @@ mod tests {
         sensor
             .add_with_metric_name(metrics.metric_name("avg", "g"), Box::new(Avg::new()))
             .unwrap();
-        sensor.record_with_value_time_ms(4.0, 0);
+        sensor.record_with_value_time_ms(4.0, 0).unwrap();
         let handle = box_kafka_metric(metrics.metric(&metrics.metric_name("avg", "g")).unwrap());
         // SAFETY: Test code: `handle` comes from `box_kafka_metric` and is destroyed once, after
         // the views read from it (`as_metric`, its name, `measurable`); `value` and each `config`

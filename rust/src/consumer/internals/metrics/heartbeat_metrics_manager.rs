@@ -140,7 +140,9 @@ impl HeartbeatMetricsManager {
 
     /// Java: `recordRequestLatency(long requestLatencyMs)`.
     pub(crate) fn record_request_latency(&self, request_latency_ms: i64) {
-        self.heartbeat_sensor.record_with_value(request_latency_ms as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.heartbeat_sensor.record_with_value(request_latency_ms as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

@@ -327,33 +327,39 @@ impl SenderMetrics {
                 // Per-topic record send rate.
                 let topic_records_count_name = format!("topic.{topic}.records-per-batch");
                 if let Some(s) = self.metrics.get_sensor(&topic_records_count_name) {
-                    s.record_with_value_time_ms(batch.record_count as f64, now);
+                    // The client's sensors are built from a `MetricConfig` without a quota, so
+                    // `record` cannot fail and its result is discarded.
+                    let _ = s.record_with_value_time_ms(batch.record_count as f64, now);
                 }
 
                 // Per-topic bytes send rate.
                 let topic_byte_rate_name = format!("topic.{topic}.bytes");
                 if let Some(s) = self.metrics.get_sensor(&topic_byte_rate_name) {
-                    s.record_with_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
+                    let _ = s.record_with_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
                 }
 
                 // Per-topic compression rate.
                 let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
                 if let Some(s) = self.metrics.get_sensor(&topic_compression_rate_name) {
-                    s.record_with_value_time_ms(batch.compression_ratio(), now);
+                    let _ = s.record_with_value_time_ms(batch.compression_ratio(), now);
                 }
 
                 // Global metrics.
-                self.batch_size_sensor
+                let _ = self
+                    .batch_size_sensor
                     .record_with_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
-                self.queue_time_sensor
+                let _ = self
+                    .queue_time_sensor
                     .record_with_value_time_ms(batch.queue_time_ms() as f64, now);
-                self.compression_rate_sensor
+                let _ = self
+                    .compression_rate_sensor
                     .record_with_value_time_ms(batch.compression_ratio(), now);
-                self.max_record_size_sensor
+                let _ = self
+                    .max_record_size_sensor
                     .record_with_value_time_ms(batch.max_record_size as f64, now);
                 records += batch.record_count;
             }
-            self.records_per_request_sensor.record_with_value_time_ms(records as f64, now);
+            let _ = self.records_per_request_sensor.record_with_value_time_ms(records as f64, now);
         }
     }
 
@@ -362,10 +368,10 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordRetries")]
     fn record_retries(&self, topic: &str, count: i32) {
         let now = self.time.milliseconds();
-        self.retry_sensor.record_with_value_time_ms(count as f64, now);
+        let _ = self.retry_sensor.record_with_value_time_ms(count as f64, now);
         let topic_retry_name = format!("topic.{topic}.record-retries");
         if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
-            topic_retry_sensor.record_with_value_time_ms(count as f64, now);
+            let _ = topic_retry_sensor.record_with_value_time_ms(count as f64, now);
         }
     }
 
@@ -374,10 +380,10 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordErrors")]
     fn record_errors(&self, topic: &str, count: i32) {
         let now = self.time.milliseconds();
-        self.error_sensor.record_with_value_time_ms(count as f64, now);
+        let _ = self.error_sensor.record_with_value_time_ms(count as f64, now);
         let topic_error_name = format!("topic.{topic}.record-errors");
         if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
-            topic_error_sensor.record_with_value_time_ms(count as f64, now);
+            let _ = topic_error_sensor.record_with_value_time_ms(count as f64, now);
         }
     }
 
@@ -387,11 +393,11 @@ impl SenderMetrics {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordLatency")]
     fn record_latency(&self, node: &str, latency: i64) {
         let now = self.time.milliseconds();
-        self.request_time_sensor.record_with_value_time_ms(latency as f64, now);
+        let _ = self.request_time_sensor.record_with_value_time_ms(latency as f64, now);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
-                node_request_time.record_with_value_time_ms(latency as f64, now);
+                let _ = node_request_time.record_with_value_time_ms(latency as f64, now);
             }
         }
     }
@@ -400,7 +406,7 @@ impl SenderMetrics {
     /// (Java's no-arg `Sensor.record()` records the value `1.0`).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.Sender$SenderMetrics#recordBatchSplit")]
     fn record_batch_split(&self) {
-        self.batch_split_sensor.record_with_value(1.0);
+        let _ = self.batch_split_sensor.record_with_value(1.0);
     }
 }
 

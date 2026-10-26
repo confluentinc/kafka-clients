@@ -375,17 +375,30 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_should_record(self_: *const
     i8::from(unsafe { sensor_ref(self_) }.should_record())
 }
 
-/// `record()`: an occurrence, as the value `1.0`.
+/// Record an occurrence, this is just short-hand for
+/// `kafka_common_metrics_Sensor_record_with_value(1.0)`.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_quota_violation_error` if recording this value moves a metric beyond
+///   its configured maximum or minimum bound
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sensor handle.
+/// `self_` must be a valid sensor handle. `out_err` must be a valid slot pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(self_: *const kafka_common_metrics_Sensor_t) {
+pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(
+    self_: *const kafka_common_metrics_Sensor_t,
+    out_err: *mut *mut kafka_common_Error_t,
+) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    unsafe { sensor_ref(self_) }.record();
+    match unsafe { sensor_ref(self_) }.record() {
+        Ok(()) => {},
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
 }
 
 /// Record a value with this sensor
@@ -394,27 +407,28 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(self_: *const kafka_
 ///
 /// - `value` - The value to record
 ///
-/// # Panics
+/// # Errors
 ///
-/// - `QuotaViolationError` never: see the notes.
-///
-/// # Translation notes
-///
-/// WARNING: no quota is checked, so a violation is never reported; call
-/// `kafka_common_metrics_Sensor_check_quotas` after recording.
+/// - `kafka_common_Error_is_quota_violation_error` if recording this value moves a metric beyond
+///   its configured maximum or minimum bound
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sensor handle.
+/// `self_` must be a valid sensor handle. `out_err` must be a valid slot pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value(
     self_: *const kafka_common_metrics_Sensor_t,
     value: f64,
+    out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    unsafe { sensor_ref(self_) }.record_with_value(value);
+    match unsafe { sensor_ref(self_) }.record_with_value(value) {
+        Ok(()) => {},
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
 }
 
 /// Record a value at a known time. This method is slightly faster than
@@ -425,28 +439,64 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value(
 /// - `value` - The value we are recording
 /// - `time_ms` - The current POSIX time in milliseconds
 ///
-/// # Panics
+/// # Errors
 ///
-/// - `QuotaViolationError` never: see the notes.
-///
-/// # Translation notes
-///
-/// WARNING: no quota is checked, so a violation is never reported; call
-/// `kafka_common_metrics_Sensor_check_quotas` after recording.
+/// - `kafka_common_Error_is_quota_violation_error` if recording this value moves a metric beyond
+///   its configured maximum or minimum bound
 ///
 /// # Safety
 ///
-/// `self_` must be a valid sensor handle.
+/// `self_` must be a valid sensor handle. `out_err` must be a valid slot pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms(
     self_: *const kafka_common_metrics_Sensor_t,
     value: f64,
     time_ms: i64,
+    out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    unsafe { sensor_ref(self_) }.record_with_value_time_ms(value, time_ms);
+    match unsafe { sensor_ref(self_) }.record_with_value_time_ms(value, time_ms) {
+        Ok(()) => {},
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
+}
+
+/// Record a value at a known time. This method is slightly faster than
+/// `kafka_common_metrics_Sensor_record_with_value` since it will reuse the time stamp.
+///
+/// # Parameters
+///
+/// - `value` - The value we are recording
+/// - `time_ms` - The current POSIX time in milliseconds
+/// - `check_quotas` - Indicate if quota must be enforced (`1`) or not (`0`)
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_quota_violation_error` if recording this value moves a metric beyond
+///   its configured maximum or minimum bound
+///
+/// # Safety
+///
+/// `self_` must be a valid sensor handle. `out_err` must be a valid slot pointing at `NULL`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms_check_quotas(
+    self_: *const kafka_common_metrics_Sensor_t,
+    value: f64,
+    time_ms: i64,
+    check_quotas: i8,
+    out_err: *mut *mut kafka_common_Error_t,
+) {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
+    // requires; the reference is used only within this call.
+    match unsafe { sensor_ref(self_) }.record_with_value_time_ms_check_quotas(value, time_ms, check_quotas != 0) {
+        Ok(()) => {},
+        // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
+        Err(error) => unsafe { fail_with(out_err, error) },
+    }
 }
 
 /// Check if we have violated our quota for any metric that has a configured quota
@@ -897,9 +947,12 @@ mod tests {
             kafka_common_metrics_MetricConfig_destroy(config);
             kafka_common_MetricName_destroy(name);
 
-            kafka_common_metrics_Sensor_record(sensor);
-            kafka_common_metrics_Sensor_record_with_value(sensor, 3.0);
-            kafka_common_metrics_Sensor_record_with_value_time_ms(sensor, 5.0, 10);
+            kafka_common_metrics_Sensor_record(sensor, &mut err);
+            assert!(err.is_null());
+            kafka_common_metrics_Sensor_record_with_value(sensor, 3.0, &mut err);
+            assert!(err.is_null());
+            kafka_common_metrics_Sensor_record_with_value_time_ms(sensor, 5.0, 10, &mut err);
+            assert!(err.is_null());
             let avg_config = metrics_ref(registry).config().clone();
             let metric = metrics_ref(registry)
                 .metric(&metrics_ref(registry).metric_name("avg", "g"))
@@ -955,6 +1008,39 @@ mod tests {
             kafka_common_metrics_Sensor_destroy(ptr::null_mut());
             assert!(metrics_ref(registry).get_sensor("s").is_some());
             kafka_common_metrics_Metrics_destroy(registry);
+        }
+    }
+
+    /// `record` checks the quotas and reports a violation through `out_err`;
+    /// `check_quotas = 0` records without checking.
+    #[test]
+    fn sensor_record_reports_a_quota_violation() {
+        use crate::common::metrics::stats::Value;
+        use crate::common::metrics::{MetricConfig, Metrics, Quota};
+        use crate::ffi::error_predicates::kafka_common_Error_is_quota_violation_error;
+        let metrics = Metrics::with_default_config(Arc::new(MetricConfig::new().set_quota(Quota::upper_bound(5.0))));
+        let rust_sensor = metrics.sensor("s").unwrap();
+        rust_sensor
+            .add_with_metric_name(metrics.metric_name("value", "g"), Box::new(Value::new()))
+            .unwrap();
+        let sensor = box_sensor(rust_sensor);
+        // SAFETY: Test code: `sensor` comes from `box_sensor` and is destroyed once, last; `err` is
+        // a valid slot pointing at null before each call, and each error stored in it is destroyed
+        // once.
+        unsafe {
+            let mut err = ptr::null_mut();
+            kafka_common_metrics_Sensor_record_with_value_time_ms(sensor, 4.0, 1, &mut err);
+            assert!(err.is_null());
+            kafka_common_metrics_Sensor_record_with_value_time_ms_check_quotas(sensor, 10.0, 2, 0, &mut err);
+            assert!(err.is_null());
+            kafka_common_metrics_Sensor_record_with_value_time_ms(sensor, 10.0, 3, &mut err);
+            assert_eq!(kafka_common_Error_is_quota_violation_error(err), 1);
+            kafka_common_Error_destroy(err);
+            let mut err = ptr::null_mut();
+            kafka_common_metrics_Sensor_record_with_value_time_ms_check_quotas(sensor, 10.0, 4, 1, &mut err);
+            assert_eq!(kafka_common_Error_is_quota_violation_error(err), 1);
+            kafka_common_Error_destroy(err);
+            kafka_common_metrics_Sensor_destroy(sensor);
         }
     }
 }
