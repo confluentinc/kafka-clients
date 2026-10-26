@@ -651,24 +651,25 @@ impl<C: KafkaClient> Sender<C> {
         format!("{}{}", response.error, error_message_suffix)
     }
 
-    /// Rebuilds the typed [`Error::Authentication`] that Java rethrows when
-    /// `awaitNodeReady` fails with an `AuthenticationException`
-    /// (`NetworkClientUtils.java:86-87`, escaping to `Sender.runOnce`'s catch at
-    /// `Sender.java:336`).
+    /// The typed authentication error Java rethrows when `awaitNodeReady` fails
+    /// with an `AuthenticationException` (`NetworkClientUtils.java:86-87`,
+    /// escaping to `Sender.runOnce`'s catch at `Sender.java:336`).
     ///
-    /// The payload's bare message is used, NOT `error.to_string()`: the latter is the
-    /// `io::Error`'s `Display`, which already carries the `"AuthenticationError: "`
-    /// prefix, so rebuilding from it would show the application that prefix twice.
-    /// Java rethrows the exception object with its message untouched.
+    /// Java rethrows the exception object itself, so the error the carrier holds
+    /// is handed over unchanged: its class (a `SaslAuthenticationException` for a
+    /// rejected password, an `SslAuthenticationException` for a rejected
+    /// certificate) and its bare message. Every such class answers `true` to
+    /// `run_once`'s `is_authentication_error()` arm (CLAUDE.md §12.4) and so to
+    /// `request_utils::RequestUtils::is_fatal_error`.
     ///
-    /// `Error::Authentication` is the class `run_once`'s `is_authentication_error()`
-    /// arm tests for (CLAUDE.md §12.4) — a codeless `UnknownServerError` would answer
-    /// `false` to it and therefore to `request_utils::RequestUtils::is_fatal_error` too.
+    /// The fallback rebuilds the base class from the `io::Error`'s `Display` for an
+    /// error without a typed payload, which carries no crate class prefix to
+    /// duplicate; the call site is guarded by `network::is_authentication_error`, so
+    /// production never reaches it.
     fn authentication_error_from_io(error: &std::io::Error) -> Error {
-        let message = network::authentication_error_message(error)
-            .map(str::to_string)
-            .unwrap_or_else(|| error.to_string());
-        Error::Authentication(AuthenticationError::new(message))
+        network::authentication_error(error)
+            .cloned()
+            .unwrap_or_else(|| Error::Authentication(AuthenticationError::new(error.to_string())))
     }
 
     /// Builds the `produce-throttle-time` sensor with its avg/max metrics.
@@ -3762,15 +3763,32 @@ mod tests {
         assert!(error.is_authentication_error());
         assert!(crate::common::requests::RequestUtils::is_fatal_error(&error));
 
-        // Defensive fallback: an `io::Error` with no `AuthenticationError` payload
-        // has no bare message to read, so its `Display` is used — and it carries no
-        // crate class prefix to duplicate. Production never reaches this branch,
-        // because the call site is guarded by `network::is_authentication_error`.
+        // Defensive fallback: an `io::Error` with no typed payload has no bare
+        // message to read, so its `Display` is used — and it carries no crate class
+        // prefix to duplicate. Production never reaches this branch, because the
+        // call site is guarded by `network::is_authentication_error`.
         let plain = std::io::Error::new(std::io::ErrorKind::TimedOut, "connection setup timed out");
         assert_eq!(
             Sender::<MockClient>::authentication_error_from_io(&plain).message(),
             "connection setup timed out"
         );
+    }
+
+    /// Java rethrows the node's `AuthenticationException` object, so its class
+    /// survives: a rejected password reaches the transaction manager as a
+    /// `SaslAuthenticationException` (code 58), not the base class.
+    #[test]
+    fn test_authentication_error_from_io_keeps_the_subclass() {
+        let cause = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::new(
+            "Authentication failed: Invalid username or password",
+        ));
+        let io_error = network::authentication_io_error(cause.clone());
+
+        let error = Sender::<MockClient>::authentication_error_from_io(&io_error);
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::SaslAuthenticationFailed);
+        assert_eq!(error.message(), cause.message());
+        assert!(crate::common::requests::RequestUtils::is_fatal_error(&error));
     }
 
     /// Test that can_retry returns true for retriable errors within limits.

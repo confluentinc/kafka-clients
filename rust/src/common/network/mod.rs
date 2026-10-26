@@ -58,7 +58,8 @@ mod transport_layer;
 // `org.apache.kafka.common.errors.AuthenticationException` lives at
 // `crate::common::errors::AuthenticationError`, and one type deserves one path.
 pub use authentication_error::{
-    auth_io_error, auth_io_error_with_source, authentication_error_message, is_authentication_error,
+    auth_io_error, auth_io_error_with_source, authentication_error, authentication_error_message,
+    authentication_io_error, is_authentication_error,
 };
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;

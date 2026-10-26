@@ -43,7 +43,7 @@ use super::Receive;
 use super::Selectable;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
-use super::{is_authentication_error, is_invalid_receive_error};
+use super::{authentication_error_message, is_invalid_receive_error};
 
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1878,20 +1878,25 @@ impl Selectable for Selector {
 /// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
 /// `instanceof`:
 ///
-///   - an authentication failure logs "Failed authentication" (Java: INFO,
-///     `:622`; this client logs it at ERROR, left as it was);
-///   - an invalid receive logs "Unexpected error" at WARN (`:625`). Java gets
-///     there because `InvalidReceiveException` is a `KafkaException`, not an
-///     `IOException`, and it is the one such payload the receive path raises
-///     here, so the `else` of the Java chain reduces to it. At DEBUG, as it
-///     was, a size header the client refuses left no trace: the client closed,
-///     reconnected and refetched with nothing in the logs;
+///   - an authentication failure logs Java's "Failed authentication with
+///     <desc> (<message>)" (`:614-623`). Like Java's `e.getMessage()` it
+///     prints the error's message, not its class. Java logs it at INFO; this
+///     client logs it at ERROR, left as it was;
+///   - an invalid receive, or any other error of a Kafka class, logs
+///     "Unexpected error" at WARN (`:625`). Java gets there because neither is
+///     an `IOException`: `InvalidReceiveException` is a `KafkaException`, and
+///     the other such payload is a `SaslAuthenticate` error whose class is not
+///     an `AuthenticationException` (`UnknownServerException`, say), which the
+///     authenticator raises as Java's `error.exception(errMsg)` does. At DEBUG,
+///     as it was, a size header the client refuses left no trace: the client
+///     closed, reconnected and refetched with nothing in the logs;
 ///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
 ///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
 fn channel_error_log(desc: &str, e: &io::Error) -> (log::Level, String) {
-    if is_authentication_error(e) {
-        (log::Level::Error, format!("Failed authentication with {desc} ({e})"))
-    } else if is_invalid_receive_error(e) {
+    let is_kafka_class_error = e.get_ref().is_some_and(|inner| inner.is::<crate::common::Error>());
+    if let Some(message) = authentication_error_message(e) {
+        (log::Level::Error, format!("Failed authentication with {desc} ({message})"))
+    } else if is_invalid_receive_error(e) || is_kafka_class_error {
         (
             log::Level::Warn,
             format!("Unexpected error from {desc}; closing connection: {e}"),
@@ -4232,14 +4237,29 @@ mod tests {
             channel_error_log(desc, &reset)
         );
 
+        // Java prints `e.getMessage()`, the message without the class name.
         let auth = auth_io_error("bad credentials");
         assert_eq!(
             (
                 log::Level::Error,
-                "Failed authentication with 127.0.0.1:9092 (channelId=0) (AuthenticationError: bad credentials)"
-                    .to_string()
+                "Failed authentication with 127.0.0.1:9092 (channelId=0) (bad credentials)".to_string()
             ),
             channel_error_log(desc, &auth)
+        );
+
+        // A `SaslAuthenticate` error whose class is not an authentication error
+        // is neither an `IOException` nor an `AuthenticationException` in Java.
+        let unknown_server = io::Error::other(crate::common::Error::UnknownServer(
+            crate::common::errors::UnknownServerError::new("broker trouble"),
+        ));
+        assert_eq!(
+            (
+                log::Level::Warn,
+                "Unexpected error from 127.0.0.1:9092 (channelId=0); closing connection: \
+                 UnknownServerError: broker trouble"
+                    .to_string()
+            ),
+            channel_error_log(desc, &unknown_server)
         );
     }
 }
