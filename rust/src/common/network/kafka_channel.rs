@@ -29,6 +29,7 @@ use super::ChannelMetadataRegistry;
 use super::ChannelState;
 use super::NetworkReceive;
 use super::NetworkSend;
+use super::ReauthenticationContext;
 use super::Receive;
 use super::authentication_error;
 use super::channel_state::State;
@@ -754,9 +755,9 @@ impl KafkaChannel {
     /// For PLAINTEXT, this always returns `false` since re-authentication does not
     /// apply.
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeBeginServerReauthentication")]
-    pub fn maybe_begin_server_reauthentication(
+    pub async fn maybe_begin_server_reauthentication(
         &mut self,
-        _sasl_handshake_network_receive: &NetworkReceive,
+        sasl_handshake_network_receive: &NetworkReceive,
         now_nanos_supplier: impl FnOnce() -> i64,
     ) -> io::Result<bool> {
         if !self.ready() {
@@ -775,7 +776,15 @@ impl KafkaChannel {
             return Ok(false);
         }
         self.last_reauthentication_start_nanos = now_nanos;
-        self.authenticator.reauthenticate()?;
+        // Java hands the receive itself to the new authenticator; this method
+        // only borrows it, so the context gets a copy of the (small)
+        // SaslHandshake request.
+        let receive = NetworkReceive::with_source_buffer(
+            sasl_handshake_network_receive.source(),
+            sasl_handshake_network_receive.payload().unwrap_or_default().to_vec(),
+        );
+        self.swap_authenticators_and_begin_reauthentication(ReauthenticationContext::new(Some(receive), now_nanos))
+            .await?;
         Ok(true)
     }
 
@@ -784,9 +793,20 @@ impl KafkaChannel {
     /// passed, then begin the process of re-authenticating and return true,
     /// otherwise return false.
     ///
+    /// Re-authentication starts by sending the SASL handshake, so this awaits
+    /// that write, as Java's `SaslClientAuthenticator.reauthenticate` does it
+    /// before returning. The channel is not [`ready`](Self::ready) again until
+    /// the authenticator completes, which [`prepare`](Self::prepare) drives;
+    /// the queued send stays queued until then.
+    ///
+    /// The receive in progress, if any, is handed to the authenticator, which
+    /// reads the rest of it: it is a response to a request sent before
+    /// re-authentication began, and the authenticator hands it back through
+    /// [`poll_response_received_during_reauthentication`](Self::poll_response_received_during_reauthentication).
+    ///
     /// For PLAINTEXT, this always returns `false`.
     #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#maybeBeginClientReauthentication")]
-    pub fn maybe_begin_client_reauthentication(
+    pub async fn maybe_begin_client_reauthentication(
         &mut self,
         now_nanos_supplier: impl FnOnce() -> i64,
     ) -> io::Result<bool> {
@@ -806,9 +826,26 @@ impl KafkaChannel {
         if now_nanos < self.authenticator.client_session_reauthentication_time_nanos().unwrap() {
             return Ok(false);
         }
-        self.receive = None;
-        self.authenticator.reauthenticate()?;
+        let receive = self.receive.take();
+        self.swap_authenticators_and_begin_reauthentication(ReauthenticationContext::new(receive, now_nanos))
+            .await?;
         Ok(true)
+    }
+
+    /// Begins re-authentication with `reauthentication_context`.
+    ///
+    /// Java builds a new authenticator here (`authenticatorCreator.get()`),
+    /// which takes over from the previous one; this channel keeps its one
+    /// authenticator, which starts over as a new one would (see
+    /// [`ReauthenticationContext`]).
+    #[doc(alias = "org.apache.kafka.common.network.KafkaChannel#swapAuthenticatorsAndBeginReauthentication")]
+    async fn swap_authenticators_and_begin_reauthentication(
+        &mut self,
+        reauthentication_context: ReauthenticationContext,
+    ) -> io::Result<()> {
+        let authenticator = &mut *self.authenticator;
+        let transport = &mut *self.transport_layer;
+        authenticator.reauthenticate(reauthentication_context, transport).await
     }
 
     /// Returns a mutable reference to the transport layer.
@@ -1377,5 +1414,124 @@ mod tests {
             "the class the authenticator raised: {state_error:?}"
         );
         assert_eq!(state_error.error(), crate::common::protocol::Errors::SaslAuthenticationFailed);
+    }
+
+    /// An authenticator whose session is due for re-authentication at
+    /// `reauthentication_time_nanos`; `reauthenticate` records how many bytes
+    /// of the receive it was handed had been read.
+    struct ReauthenticatingAuthenticator {
+        reauthentication_time_nanos: i64,
+        complete: bool,
+        handed_receive: std::sync::Arc<std::sync::Mutex<Option<Option<usize>>>>,
+    }
+
+    impl Authenticator for ReauthenticatingAuthenticator {
+        fn authenticate<'a>(
+            &'a mut self,
+            _transport: &'a mut (dyn TransportLayer + Send),
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn complete(&self) -> bool {
+            self.complete
+        }
+
+        fn reauthenticate<'a>(
+            &'a mut self,
+            mut reauthentication_context: ReauthenticationContext,
+            _transport: &'a mut (dyn TransportLayer + Send),
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+            *self.handed_receive.lock().unwrap() =
+                Some(reauthentication_context.network_receive().map(|receive| receive.bytes_read()));
+            self.complete = false;
+            Box::pin(async { Ok(()) })
+        }
+
+        fn client_session_reauthentication_time_nanos(&self) -> Option<i64> {
+            Some(self.reauthentication_time_nanos)
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// Java's `maybeBeginClientReauthentication` hands the receive the channel
+    /// has in progress to the authenticator (`new ReauthenticationContext(
+    /// authenticator, receive, nowNanos)`), which reads the rest of it. It used
+    /// to be dropped, losing the bytes already read of a response and leaving
+    /// the rest of the stream misframed.
+    #[tokio::test]
+    async fn test_client_reauthentication_hands_the_receive_in_progress_to_the_authenticator() {
+        // The channel has read 6 bytes of a 14-byte response.
+        let mut frame = 10_i32.to_be_bytes().to_vec();
+        frame.extend_from_slice(&[7u8; 10]);
+        let transport = MockTransportLayer::new().with_read_data(frame[..6].to_vec());
+        let handed_receive = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let authenticator = ReauthenticatingAuthenticator {
+            reauthentication_time_nanos: 1_000,
+            complete: true,
+            handed_receive: handed_receive.clone(),
+        };
+        let mut channel = KafkaChannel::new(
+            "0",
+            Box::new(transport),
+            Box::new(authenticator),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert_eq!(channel.read().await.unwrap(), 6);
+        assert_eq!(channel.current_receive_bytes_read(), 6);
+
+        // Not due yet: the channel writes as usual.
+        assert!(!channel.maybe_begin_client_reauthentication(|| 999).await.unwrap());
+        assert_eq!(channel.current_receive_bytes_read(), 6);
+        assert!(handed_receive.lock().unwrap().is_none());
+
+        // Due: the authenticator takes the receive over, as read so far, and the
+        // channel is not ready until it completes.
+        assert!(channel.maybe_begin_client_reauthentication(|| 1_000).await.unwrap());
+        assert_eq!(*handed_receive.lock().unwrap(), Some(Some(6)));
+        assert!(channel.current_receive().is_none());
+        assert!(!channel.ready());
+    }
+
+    /// Java checks the clock only for a session that has a re-authentication
+    /// time, and not while the channel is muted.
+    #[tokio::test]
+    async fn test_client_reauthentication_waits_while_muted() {
+        let handed_receive = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let authenticator = ReauthenticatingAuthenticator {
+            reauthentication_time_nanos: 1_000,
+            complete: true,
+            handed_receive: handed_receive.clone(),
+        };
+        let mut channel = KafkaChannel::new(
+            "0",
+            Box::new(MockTransportLayer::new()),
+            Box::new(authenticator),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        channel.mute();
+        assert!(!channel.maybe_begin_client_reauthentication(|| 5_000).await.unwrap());
+        assert!(handed_receive.lock().unwrap().is_none());
+        assert!(channel.maybe_unmute());
+        assert!(channel.maybe_begin_client_reauthentication(|| 5_000).await.unwrap());
+        assert_eq!(*handed_receive.lock().unwrap(), Some(None));
+
+        // A channel without a session lifetime never reads the clock.
+        let mut plaintext = KafkaChannel::new(
+            "1",
+            Box::new(MockTransportLayer::new()),
+            Box::new(MockAuthenticator::new(true)),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert!(
+            !plaintext
+                .maybe_begin_client_reauthentication(|| panic!("the clock is not read"))
+                .await
+                .unwrap()
+        );
     }
 }

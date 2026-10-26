@@ -45,6 +45,14 @@
 //! (UNSUPPORTED_SASL_MECHANISM) on later ones
 //! ([`FakeBroker::accept_sasl_handshakes`]).
 //!
+//! With [`FakeBroker::set_sasl_session_lifetime_ms`] it acts as a broker with
+//! `connections.max.reauth.ms` set (KIP-368): each successful
+//! `SaslAuthenticate` grants the session that lifetime, and a connection whose
+//! session has expired is closed when it next sends a request other than a
+//! `SaslHandshake` or `SaslAuthenticate`, as Kafka's `SocketServer` closes it
+//! (`expired-connections-killed-count`). A client that re-authenticates in time
+//! never meets that rule; one that does not loses its connection every lifetime.
+//!
 //! [`FakeBroker::start_with_group_coordinator`] additionally acts as the group
 //! coordinator: a joining or heartbeating `ConsumerGroupHeartbeat` gets
 //! member epoch 1 with an empty assignment. A leave heartbeat (member epoch -1) is recorded and left
@@ -60,7 +68,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -165,6 +173,13 @@ struct Shared {
     /// later ones are answered UNSUPPORTED_SASL_MECHANISM.
     sasl_handshakes: AtomicUsize,
     sasl_handshakes_accepted: AtomicUsize,
+    /// The lifetime each successful `SaslAuthenticate` grants the session, in
+    /// milliseconds; 0 grants none.
+    sasl_session_lifetime_ms: AtomicI64,
+    /// `SaslAuthenticate`s answered with success, re-authentications included.
+    sasl_authentications: AtomicUsize,
+    /// Connections closed because their session had expired.
+    expired_connections_killed: AtomicUsize,
     /// The serving task of every accepted connection, so [`FakeBroker::kill`]
     /// can close them.
     connections: Mutex<Vec<JoinHandle<()>>>,
@@ -232,6 +247,9 @@ impl FakeBroker {
             heartbeat_epochs: Mutex::new(Vec::new()),
             sasl_handshakes: AtomicUsize::new(0),
             sasl_handshakes_accepted: AtomicUsize::new(usize::MAX),
+            sasl_session_lifetime_ms: AtomicI64::new(0),
+            sasl_authentications: AtomicUsize::new(0),
+            expired_connections_killed: AtomicUsize::new(0),
             connections: Mutex::new(Vec::new()),
             offset_fetch_requests: AtomicUsize::new(0),
             committed_offset: Mutex::new(-1),
@@ -296,6 +314,23 @@ impl FakeBroker {
     /// the metadata and the connection to the partition leader fails.
     pub(crate) fn accept_sasl_handshakes(&self, accepted: usize) {
         self.shared.sasl_handshakes_accepted.store(accepted, Ordering::SeqCst);
+    }
+
+    /// Grants every SASL session `lifetime_ms` from now on, and closes a
+    /// connection whose session has expired as a broker with
+    /// `connections.max.reauth.ms` does (see the module docs).
+    pub(crate) fn set_sasl_session_lifetime_ms(&self, lifetime_ms: i64) {
+        self.shared.sasl_session_lifetime_ms.store(lifetime_ms, Ordering::SeqCst);
+    }
+
+    /// How many `SaslAuthenticate`s succeeded, re-authentications included.
+    pub(crate) fn sasl_authentications(&self) -> usize {
+        self.shared.sasl_authentications.load(Ordering::SeqCst)
+    }
+
+    /// How many connections were closed because their session had expired.
+    pub(crate) fn expired_connections_killed(&self) -> usize {
+        self.shared.expired_connections_killed.load(Ordering::SeqCst)
     }
 
     /// Kills the broker: stops listening, so later connection attempts are
@@ -405,6 +440,8 @@ async fn read_requests(
     topic_id: Uuid,
     pending: mpsc::UnboundedSender<Pending>,
 ) {
+    // When the session the last successful `SaslAuthenticate` granted expires.
+    let mut session_expiry: Option<tokio::time::Instant> = None;
     loop {
         let mut size = [0u8; 4];
         if stream.read_exact(&mut size).await.is_err() {
@@ -418,6 +455,17 @@ async fn read_requests(
         let header = RequestHeader::parse(&mut accessor).expect("fake broker: request header");
         let version = header.api_version();
         let response_header = header.to_response_header();
+        // Kafka's `SocketServer` closes a connection whose session has expired
+        // when it receives anything but a re-authentication. The fake allows a
+        // fifth of the lifetime on top, so a client that re-authenticates on
+        // time is not caught out by scheduling delay on a loaded machine; one
+        // that never re-authenticates still loses its connection.
+        let reauthenticating =
+            *header.api_key() == ApiKeys::SASL_HANDSHAKE || *header.api_key() == ApiKeys::SASL_AUTHENTICATE;
+        if !reauthenticating && session_expiry.is_some_and(|expiry| tokio::time::Instant::now() > expiry) {
+            seen.expired_connections_killed.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
         let request = if *header.api_key() == ApiKeys::API_VERSIONS {
             let data = ApiVersionsRequestData::read(&mut accessor, version).expect("fake broker: ApiVersions body");
             seen.api_versions
@@ -469,6 +517,13 @@ async fn read_requests(
             let mut body = SaslAuthenticateResponseData::new();
             body.set_error_code(Errors::None.code());
             body.set_auth_bytes(Vec::new());
+            seen.sasl_authentications.fetch_add(1, Ordering::SeqCst);
+            let lifetime_ms = seen.sasl_session_lifetime_ms.load(Ordering::SeqCst);
+            if lifetime_ms > 0 {
+                body.set_session_lifetime_ms(lifetime_ms);
+                let lifetime = Duration::from_millis(lifetime_ms as u64);
+                session_expiry = Some(tokio::time::Instant::now() + lifetime + lifetime / 5);
+            }
             Pending::Ready(serialize(RequestUtils::serialize(
                 response_header.data(),
                 response_header.header_version(),
