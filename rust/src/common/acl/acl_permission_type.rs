@@ -35,6 +35,19 @@ pub enum AclPermissionType {
 }
 
 impl AclPermissionType {
+    /// All permission types, in declaration (code) order.
+    ///
+    /// Mirrors `AclPermissionType.values()`.
+    #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#values")]
+    pub fn values() -> &'static [Self] {
+        &[
+            AclPermissionType::Unknown,
+            AclPermissionType::Any,
+            AclPermissionType::Deny,
+            AclPermissionType::Allow,
+        ]
+    }
+
     /// Return the code of this permission type.
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionType#code")]
     pub fn code(&self) -> i8 {
@@ -113,14 +126,6 @@ mod tests {
         Info { ty: AclPermissionType::Allow, code: 3, name: "allow", unknown: false },
     ];
 
-    // Test-local mirror of Java's `AclPermissionType.values()` (declaration order).
-    const VALUES: [AclPermissionType; 4] = [
-        AclPermissionType::Unknown,
-        AclPermissionType::Any,
-        AclPermissionType::Deny,
-        AclPermissionType::Allow,
-    ];
-
     /// Mirrors `AclPermissionTypeTest.testIsUnknown`.
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testIsUnknown")]
@@ -140,7 +145,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testCode")]
     fn test_code() {
-        assert_eq!(VALUES.len(), INFOS.len());
+        assert_eq!(AclPermissionType::values().len(), INFOS.len());
         for info in &INFOS {
             assert_eq!(
                 info.code,
@@ -180,9 +185,9 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclPermissionTypeTest#testExhaustive")]
     fn test_exhaustive() {
-        assert_eq!(INFOS.len(), VALUES.len());
+        assert_eq!(INFOS.len(), AclPermissionType::values().len());
         for (i, info) in INFOS.iter().enumerate() {
-            assert_eq!(info.ty, VALUES[i]);
+            assert_eq!(info.ty, AclPermissionType::values()[i]);
         }
     }
 }
