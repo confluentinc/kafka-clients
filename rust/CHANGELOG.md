@@ -62,6 +62,11 @@ breaking changes.
   printed `type=UNKNOWN`, and now report `None`, print `type=null` and differ
   from an entry whose type is `Unknown`. In Python `ConfigEntry.type()` returns
   `None` for them.
+- **Breaking:** `GroupState::name()`, `ClassicGroupState::name()` and
+  `GroupType::name()` return Java's `Enum.name()`, the constant name
+  (`PREPARING_REBALANCE`, `CONSUMER`), instead of the `toString()` text
+  (`PreparingRebalance`, `Consumer`), which `Display` still prints and `parse`
+  still reads.
 
 ### Common
 
@@ -89,6 +94,11 @@ breaking changes.
   `kafka_admin_ConfigEntry_ConfigType__enum`, and
   `kafka_admin_ConfigEntryOptionsBuilder_set_config_type` takes `NULL` for
   Java's `null` type.
+- **Breaking (C API):** `kafka_common_GroupState_name`,
+  `kafka_common_ClassicGroupState_name` and `kafka_common_GroupType_name`
+  return the constant name (`PREPARING_REBALANCE`), as Java's `Enum.name()`
+  does. The text `_parse` reads (`PreparingRebalance`) is what the
+  `_to_string` functions return.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
