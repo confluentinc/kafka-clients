@@ -402,8 +402,10 @@ impl KafkaAdminClient {
         //
         // The `closeQuietly(metrics, ..)` / `closeQuietly(networkClient, ..)` half of
         // Java's catch is not needed here: the `Selector` / `NetworkClient` are
-        // RVO'd locals that `Drop` cleans up, and every fallible point precedes
-        // their construction.
+        // RVO'd locals, so a failure after they are built (the bootstrap
+        // configuration, or `configure_default_api_timeout_ms` in `build`) just
+        // drops them. Nothing has connected by then, so there is nothing else to
+        // release.
         Self::new_inner(config).map_err(|e| Error::kafka_message_source("Failed to create new KafkaAdminClient", e))
     }
 
@@ -8104,6 +8106,7 @@ mod tests {
         time.sleep(request_timeout_ms + 1);
 
         pump_until(&mut runnable, 40, |_| future.is_done()).await;
+        assert!(future.is_done(), "Timed out waiting for the listTopics call to time out");
         let error = future.get().await.unwrap_err();
         assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
     }
@@ -8161,6 +8164,7 @@ mod tests {
         // Now sleep the remaining time for the request timeout to expire
         time.sleep(60000);
         pump_until(&mut runnable, 40, |_| future.is_done()).await;
+        assert!(future.is_done(), "Timed out waiting for the listTopics call to time out");
         let error = future.get().await.unwrap_err();
         assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
     }
@@ -15370,12 +15374,13 @@ mod tests {
     #[tokio::test]
     async fn test_remove_all_describe_uses_default_api_timeout() {
         use crate::common::protocol::ApiKeys;
-        // request.timeout.ms equals default.api.timeout.ms (20000), so the
-        // describe budget is observable uncapped (an explicit API timeout below
-        // the request timeout is a `ConfigException`, see
-        // `configure_default_api_timeout_ms`); options.timeout (5000) is
-        // smaller, so the buggy and fixed budgets are distinguishable.
-        let (admin, mut runnable, _time, _nodes) = env_with_props(&[
+        // request.timeout.ms equals default.api.timeout.ms (20000): an explicit
+        // API timeout below the request timeout is a `ConfigException` (see
+        // `configure_default_api_timeout_ms`). The clock moves 2000 ms between
+        // the call and the send, so the budget tells all three sources apart:
+        // the default-API-timeout deadline leaves 18000, the options.timeout
+        // (5000) deadline 3000, and request.timeout.ms alone would be 20000.
+        let (admin, mut runnable, time, _nodes) = env_with_props(&[
             ("request.timeout.ms", "20000"),
             ("default.api.timeout.ms", "20000"),
             ("retries", "2147483647"),
@@ -15386,6 +15391,7 @@ mod tests {
         let options = RemoveMembersFromConsumerGroupOptions::default().set_timeout_ms(Some(5000));
         assert!(options.remove_all());
         let _result = admin.remove_members_from_consumer_group_with_options(GROUP_ID, options);
+        time.sleep(2000);
 
         pump_until(&mut runnable, 40, |r| r.client_mut().request_count() >= 1).await;
 
@@ -15393,13 +15399,14 @@ mod tests {
         assert_eq!(requests.len(), 1, "only the describe coordinator lookup should be queued");
         let describe_lookup = &requests[0];
         assert_eq!(describe_lookup.api_key(), &ApiKeys::FIND_COORDINATOR);
-        // now == 1000, describe deadline == now + default.api.timeout.ms == 21000,
-        // budget == min(request.timeout.ms=20000, 21000-1000) == 20000. The buggy
-        // code (describe deadline tied to options.timeout=5000) would instead
-        // yield min(20000, 5000) == 5000.
+        // The call at 1000 sets the describe deadline to 1000 +
+        // default.api.timeout.ms == 21000; sent at 3000, the budget is
+        // min(request.timeout.ms=20000, 21000-3000) == 18000. The buggy code
+        // (describe deadline tied to options.timeout=5000) would yield
+        // min(20000, 6000-3000) == 3000.
         assert_eq!(
             describe_lookup.request_timeout_ms(),
-            20000,
+            18000,
             "describe step must use default.api.timeout.ms (20000), not options.timeout (5000)"
         );
     }
