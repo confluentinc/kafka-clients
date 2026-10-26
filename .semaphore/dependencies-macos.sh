@@ -70,8 +70,9 @@ if [ "${MACOS_ENSURE_ROSETTA:-}" = "true" ]; then
 fi
 
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
-# setup above always runs). Intended for blocks whose tests need no container;
-# no block currently sets it.
+# setup above always runs). Intended for jobs whose tests need no container, or
+# that start Colima themselves: the "verify-dotnet (macOS arm64)" job sets it and
+# starts Colima after its unit tests.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else
