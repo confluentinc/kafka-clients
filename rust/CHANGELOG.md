@@ -7,6 +7,23 @@ breaking changes.
 
 ## [Unreleased]
 
+### Consumer
+
+- **Breaking:** `Consumer::committed` / `committed_with_timeout` return
+  `HashMap<TopicPartition, Option<OffsetAndMetadata>>`: every queried
+  partition is a key, `None` for one with no committed offset, as Java maps it
+  to `null`. It was absent from the map before.
+- **Breaking:** `Consumer::offsets_for_times` /
+  `offsets_for_times_with_timeout` return
+  `HashMap<TopicPartition, Option<OffsetAndTimestamp>>`: every queried
+  partition is a key, `None` for one without an offset for its timestamp, as
+  in Java. A zero timeout maps every queried partition to `None`, as Java's
+  `emptyResults()`. The same holds for `ConsumerHandle`.
+- **Breaking:** `Deserializer::deserialize_with_headers` and
+  `deserialize_with_headers_bytes` take the record's headers as
+  `&mut RecordHeaders`, so a deserializer can change them, as Java's can.
+  Update the parameter type in your implementations.
+
 ### Admin client
 
 - **Behaviour change:** a retriable error during `close(timeout)` no longer
@@ -35,6 +52,16 @@ breaking changes.
 
 ### Common
 
+- **Breaking:** `Sensor::record`, `record_with_value` and
+  `record_with_value_time_ms` return `Result<(), Error>` and check the
+  sensor's quotas, as Java's do: a violated quota returns
+  `QuotaViolationError` and stops the parent sensors from recording. New
+  `record_with_value_time_ms_check_quotas` translates Java's
+  `record(double, long, boolean)`.
+- **Breaking:** `GroupAuthorizationError::group_id` returns `Option<&str>`,
+  `None` where Java's `groupId()` is `null`. `GroupAuthorizationError::new`
+  takes the message only, as Java's `(String message)`;
+  `with_group_id(group_id, message)` takes the pair.
 - The minimum rustls version is now 0.23.46, which fixes
   [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
   `Debug` output of rustls's client session values exposed TLS session secrets.
@@ -46,6 +73,22 @@ breaking changes.
   A Rust application should also update rustls-webpki to 0.103.16
   ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382)) in
   its lockfile.
+
+### C API
+
+- **Breaking:** `kafka_consumer_Consumer_committed*` and
+  `kafka_consumer_Consumer_offsets_for_times*` (and the `ConsumerHandle`
+  ones) keep every queried partition in the returned map, with a `NULL` value
+  for one with no offset.
+- **Breaking:** `kafka_common_metrics_Sensor_record`,
+  `_record_with_value` and `_record_with_value_time_ms` take a trailing
+  `out_err`; new `kafka_common_metrics_Sensor_record_with_value_time_ms_check_quotas`.
+- **Breaking:** `kafka_common_GroupAuthorizationError_new` takes the message
+  only, `kafka_common_GroupAuthorizationError_with_group_id` the pair, and
+  `kafka_common_GroupAuthorizationError_group_id` returns `NULL` when the
+  group is unknown.
+- **Breaking:** a C deserializer's `*_with_headers*` methods receive the record's headers
+  as a mutable `kafka_common_header_internals_RecordHeaders_t *`.
 
 ## [0.3.0-beta.1] - 2026-10-23
 

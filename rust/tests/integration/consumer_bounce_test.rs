@@ -677,6 +677,7 @@ async fn consume_with_broker_failures(num_iters: usize) {
                     .await
                     .expect("committed")
                     .get(&topic_partition)
+                    .and_then(Option::as_ref)
                     .expect("a committed offset for the partition")
                     .offset();
                 assert_eq!(current_position, committed_offset);
@@ -790,6 +791,7 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
                     .await
                     .expect("committed")
                     .get(&topic_partition)
+                    .and_then(Option::as_ref)
                     .expect("a committed offset for the partition")
                     .offset();
                 assert_eq!(position, committed);
@@ -1046,6 +1048,7 @@ async fn check_closed_state(
             .expect("committed should succeed");
         let offset = committed
             .get(topic_partition)
+            .and_then(Option::as_ref)
             .expect("a committed offset for the partition")
             .offset();
         assert_eq!(committed_records, offset, "Committed offset does not match expected value.");

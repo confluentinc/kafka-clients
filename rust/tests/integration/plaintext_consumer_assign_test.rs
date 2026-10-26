@@ -542,14 +542,11 @@ async fn test_async_assign_and_commit_async_not_committed() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    // Java: `assertNotNull(committedOffset)`. The Rust analog is "we got
-    // a Map back, not an error" — which we already have. Java then
-    // asserts `committedOffset.get(tp)` is null; in the Rust map, no
-    // entry exists for `tp` (since nothing was actually committed).
-    assert!(
-        !committed_offset.contains_key(&tp),
-        "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
-        committed_offset.get(&tp)
+    // Java: `assertNotNull(committedOffset)`, then `assertNull(committedOffset.get(tp))`.
+    assert_eq!(
+        committed_offset.get(&tp),
+        Some(&None),
+        "committed offset for {tp} should be None (no fetch position was established)"
     );
 
     let assignment = consumer.assignment();
@@ -594,10 +591,10 @@ async fn test_async_assign_and_commit_sync_not_committed() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert!(
-        !committed_offset.contains_key(&tp),
-        "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
-        committed_offset.get(&tp)
+    assert_eq!(
+        committed_offset.get(&tp),
+        Some(&None),
+        "committed offset for {tp} should be None (no fetch position was established)"
     );
 
     let assignment = consumer.assignment();
@@ -645,6 +642,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
         .expect("committed should succeed");
     let entry = committed_offset
         .get(&tp)
+        .and_then(Option::as_ref)
         .expect("committed offset for tp should be present after commit_sync");
     assert_eq!(
         entry.offset(),
@@ -780,7 +778,10 @@ async fn test_async_assign_and_fetch_committed_offsets() {
             .committed(std::slice::from_ref(&tp))
             .await
             .expect("committed should succeed");
-        let entry = committed.get(&tp).expect("committed offset for tp should be present");
+        let entry = committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed offset for tp should be present");
         assert_eq!(entry.offset(), num_records as i64);
 
         consumer.close().await.expect("consumer 1 close should succeed");
@@ -801,6 +802,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
             .expect("committed should succeed");
         let entry = committed
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed offset for tp should be visible to another consumer in same group");
         assert_eq!(entry.offset(), num_records as i64);
 
@@ -853,7 +855,10 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             .committed(std::slice::from_ref(&tp))
             .await
             .expect("committed should succeed");
-        let entry = committed.get(&tp).expect("committed entry should be present");
+        let entry = committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed entry should be present");
         assert_eq!(entry.offset(), offset);
 
         consumer.close().await.expect("consumer 1 close should succeed");
@@ -873,6 +878,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             .expect("committed should succeed");
         let entry = committed
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed entry should be visible to another consumer in same group");
         assert_eq!(entry.offset(), offset);
 
@@ -929,7 +935,11 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
         .await
         .expect("committed (first call) should succeed");
     assert_eq!(
-        first.get(&tp).expect("committed entry should be present (first call)").offset(),
+        first
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed entry should be present (first call)")
+            .offset(),
         num_records as i64
     );
 
@@ -940,6 +950,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     assert_eq!(
         second
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed entry should be present (second call)")
             .offset(),
         num_records as i64

@@ -851,7 +851,7 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
         .await
         .expect("committed");
     assert_eq!(
-        committed.get(&input_tp).map(OffsetAndMetadata::offset),
+        committed.get(&input_tp).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
         Some(next_offset),
         "sendOffsetsToTransaction must have committed the input offsets with the transaction"
     );
@@ -1543,7 +1543,7 @@ async fn test_offset_metadata_in_send_offsets_to_transaction() {
     let start = Instant::now();
     loop {
         let committed = consumer.committed(std::slice::from_ref(&tp)).await;
-        if committed.is_ok_and(|committed| committed.get(&tp) == Some(&offset_and_metadata)) {
+        if committed.is_ok_and(|committed| committed.get(&tp) == Some(&Some(offset_and_metadata.clone()))) {
             break;
         }
         assert!(
@@ -1597,15 +1597,14 @@ pub(crate) async fn consumer_positions(
 
 /// `TestUtils.resetToCommittedPositions(consumer)` (`TestUtils.scala:1293-1303`):
 /// seek every assigned partition to its committed offset, or to the beginning if
-/// it has none. (Java filters `null` values out of `committed`; the Rust map omits
-/// partitions without a committed offset, which is the same set.)
+/// it has none.
 pub(crate) async fn reset_to_committed_positions(consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>) {
     let assignment: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
     let committed = consumer.committed(&assignment).await.expect("committed");
     for topic_partition in assignment {
         match committed.get(&topic_partition) {
-            Some(offset) => consumer.seek_with_offset(topic_partition, offset.offset()).await.expect("seek"),
-            None => consumer
+            Some(Some(offset)) => consumer.seek_with_offset(topic_partition, offset.offset()).await.expect("seek"),
+            _ => consumer
                 .seek_to_beginning(std::slice::from_ref(&topic_partition))
                 .await
                 .expect("seekToBeginning"),
@@ -1723,11 +1722,6 @@ async fn test_send_offsets_with_group_metadata() {
 ///
 /// Translates `TransactionsTest.testReadCommittedConsumerShouldNotSeeUndecidedData`
 /// (`TransactionsTest.scala:177-241`).
-///
-/// Deviation: Java asserts `offsetsForTimes(...).get(tp)` is `null` for the
-/// undecided partitions. The Rust `offsets_for_times` omits an unresolved
-/// partition instead of mapping it to `null` (see `Consumer::offsets_for_times`),
-/// so the assertion is that the key is absent.
 #[tokio::test]
 async fn test_read_committed_consumer_should_not_see_undecided_data() {
     let mut ctx = TestContext::new(cluster_config()).await;
@@ -1800,8 +1794,20 @@ async fn test_read_committed_consumer_should_not_see_undecided_data() {
         .await
         .expect("offsetsForTimes");
     assert_eq!(2, read_uncommitted_offsets_for_times.len());
-    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp1].timestamp());
-    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp2].timestamp());
+    assert_eq!(
+        latest_written_timestamp,
+        read_uncommitted_offsets_for_times[&tp1]
+            .as_ref()
+            .expect("tp1 resolves")
+            .timestamp()
+    );
+    assert_eq!(
+        latest_written_timestamp,
+        read_uncommitted_offsets_for_times[&tp2]
+            .as_ref()
+            .expect("tp2 resolves")
+            .timestamp()
+    );
     read_uncommitted_consumer.unsubscribe().await.expect("unsubscribe");
 
     // we should only see the first two records which come before the undecided second transaction
@@ -1831,12 +1837,14 @@ async fn test_read_committed_consumer_should_not_see_undecided_data() {
         ]))
         .await
         .expect("offsetsForTimes");
-    assert!(
-        !read_committed_offsets_for_times.contains_key(&tp1),
+    assert_eq!(
+        read_committed_offsets_for_times.get(&tp1),
+        Some(&None),
         "undecided data in {tp1:?} must not be searchable: {read_committed_offsets_for_times:?}"
     );
-    assert!(
-        !read_committed_offsets_for_times.contains_key(&tp2),
+    assert_eq!(
+        read_committed_offsets_for_times.get(&tp2),
+        Some(&None),
         "undecided data in {tp2:?} must not be searchable: {read_committed_offsets_for_times:?}"
     );
 

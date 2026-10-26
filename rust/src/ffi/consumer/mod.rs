@@ -123,7 +123,7 @@ pub(crate) use crate::ffi::consumer::offset_and_metadata::{
     OffsetAndMetadataInner, box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy,
     kafka_consumer_OffsetAndMetadata_t, offset_and_metadata_ref,
 };
-use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
+use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, nullable_offset_and_metadata_map};
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
 use crate::ffi::consumer::subscription_pattern::{kafka_consumer_SubscriptionPattern_t, subscription_pattern_ref};
@@ -3247,8 +3247,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 ///
 /// # Returns
 ///
-/// The latest committed offsets for the given partitions; a partition with no committed offset is
-/// absent from the map.
+/// The latest committed offsets for the given partitions; `NULL` will be returned for the partition
+/// if there is no such message.
 ///
 /// # Errors
 ///
@@ -3267,11 +3267,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 ///   timeout specified by `default.api.timeout.ms` expires.
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no committed offset is absent from the returned map; Java maps it to
-/// null.
 ///
 /// # Safety
 ///
@@ -3298,7 +3293,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.committed(&partitions).await })) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3333,11 +3328,6 @@ pub type kafka_consumer_Consumer_committed_cb_t =
 ///   timeout specified by `default.api.timeout.ms` expires.
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no committed offset is absent from the returned map; Java maps it to
-/// null.
 ///
 /// # Safety
 ///
@@ -3374,7 +3364,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
             self_,
             move |c| Box::pin(async move { c.committed(&partitions).await }),
             move |client, result| {
-                deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets))
+                deliver_ptr(client, cb, opaque, result, move |offsets| {
+                    nullable_offset_and_metadata_map(&offsets)
+                })
             },
         )
     }
@@ -3391,8 +3383,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 ///
 /// # Returns
 ///
-/// The latest committed offsets for the given partitions; a partition with no committed offset is
-/// absent from the map.
+/// The latest committed offsets for the given partitions; `NULL` will be returned for the partition
+/// if there is no such message.
 ///
 /// # Errors
 ///
@@ -3407,11 +3399,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 /// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 /// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before
 ///   expiration of the timeout
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no committed offset is absent from the returned map; Java maps it to
-/// null.
 ///
 /// # Safety
 ///
@@ -3443,7 +3430,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
     };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
     // write the result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -3475,11 +3462,6 @@ pub type kafka_consumer_Consumer_committed_with_timeout_cb_t =
 /// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 /// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before
 ///   expiration of the timeout
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no committed offset is absent from the returned map; Java maps it to
-/// null.
 ///
 /// # Safety
 ///
@@ -3517,7 +3499,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
             self_,
             move |c| Box::pin(async move { c.committed_with_timeout(&partitions, ms(timeout)?).await }),
             move |client, result| {
-                deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets))
+                deliver_ptr(client, cb, opaque, result, move |offsets| {
+                    nullable_offset_and_metadata_map(&offsets)
+                })
             },
         )
     }
@@ -4023,7 +4007,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch)`: the
 /// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the result
 /// maps `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndTimestamp_t *`, unresolved partitions absent.
+/// `kafka_consumer_OffsetAndTimestamp_t *`, `NULL` for an unresolved partition.
 ///
 /// Blocking; on failure the error is stored in `*out_err`.
 ///
@@ -4035,8 +4019,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 ///
 /// a mapping from partition to the timestamp and offset of the first message with timestamp greater
 /// than or equal to the target timestamp. If the timestamp and offset for a specific partition
-/// cannot be found within the default timeout, and no corresponding message exists, the partition
-/// is absent from the returned map
+/// cannot be found within the default timeout, and no corresponding message exists, the entry in
+/// the returned map will be `NULL`
 ///
 /// # Errors
 ///
@@ -4051,11 +4035,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 ///   the offsets by timestamp
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no offset for the timestamp is absent from the returned map; Java
-/// maps it to null.
 ///
 /// # Safety
 ///
@@ -4097,7 +4076,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
 /// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
-/// `cb` receives the map of the blocking form, unresolved partitions absent.
+/// `cb` receives the map of the blocking form, `NULL` for an unresolved partition.
 ///
 /// # Parameters
 ///
@@ -4118,11 +4097,6 @@ pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
 ///   the offsets by timestamp
 /// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
 ///   fails within `bootstrap.resolve.timeout.ms`
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no offset for the timestamp is absent from the returned map; Java
-/// maps it to null.
 ///
 /// # Safety
 ///
@@ -4178,8 +4152,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 ///
 /// a mapping from partition to the timestamp and offset of the first message with timestamp greater
 /// than or equal to the target timestamp. If the timestamp and offset for a specific partition
-/// cannot be found within timeout, and no corresponding message exists, the partition is absent
-/// from the returned map
+/// cannot be found within timeout, and no corresponding message exists, the entry in the returned
+/// map will be `NULL`
 ///
 /// # Errors
 ///
@@ -4192,11 +4166,6 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 ///   expiration of the passed timeout
 /// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
 ///   the offsets by timestamp
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no offset for the timestamp is absent from the returned map; Java
-/// maps it to null.
 ///
 /// # Safety
 ///
@@ -4239,7 +4208,7 @@ pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
 /// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
-/// `cb` receives the map of the blocking form, unresolved partitions absent.
+/// `cb` receives the map of the blocking form, `NULL` for an unresolved partition.
 ///
 /// # Parameters
 ///
@@ -4259,11 +4228,6 @@ pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
 ///   expiration of the passed timeout
 /// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
 ///   the offsets by timestamp
-///
-/// # Translation notes
-///
-/// WARNING: a partition with no offset for the timestamp is absent from the returned map; Java
-/// maps it to null.
 ///
 /// # Safety
 ///

@@ -15,11 +15,7 @@ warning crate::common::serialization::Deserializer
 warning crate::common::serialization::Serializer
 warning crate::common::serialization::StringDeserializer
 warning crate::common::serialization::StringSerializer
-warning crate::consumer::Consumer::committed
-warning crate::consumer::Consumer::committed_with_timeout
 warning crate::consumer::Consumer::metrics
-warning crate::consumer::Consumer::offsets_for_times
-warning crate::consumer::Consumer::offsets_for_times_with_timeout
 warning crate::consumer::ConsumerConfig::DEFAULT_ISOLATION_LEVEL
 warning crate::consumer::ConsumerConfig::new
 warning crate::producer::Partitioner
@@ -31,14 +27,6 @@ warning kafka_common_KafkaFuture_then_apply
 warning kafka_common_serialization_StringDeserializer_new
 warning kafka_common_serialization_StringSerializer_new
 warning kafka_consumer_ConsumerConfig_new
-warning kafka_consumer_Consumer_committed
-warning kafka_consumer_Consumer_committed_cb
-warning kafka_consumer_Consumer_committed_with_timeout
-warning kafka_consumer_Consumer_committed_with_timeout_cb
 warning kafka_consumer_Consumer_metrics
-warning kafka_consumer_Consumer_offsets_for_times
-warning kafka_consumer_Consumer_offsets_for_times_cb
-warning kafka_consumer_Consumer_offsets_for_times_with_timeout
-warning kafka_consumer_Consumer_offsets_for_times_with_timeout_cb
 warning kafka_producer_ProducerConfig_new
 warning kafka_producer_Producer_metrics

@@ -1790,7 +1790,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     TpList partitions(req->partitions());
-    // An owned map of owned TopicPartition -> owned OffsetAndMetadata handles;
+    // An owned map of owned TopicPartition -> owned OffsetAndMetadata handles,
+    // NULL for a partition with no committed offset (Java's null value);
     // destroying the map frees both sides of every entry.
     kafka_common_Error_t* err = nullptr;
     kafka_Map_t* map = req->has_timeout_ms()
@@ -1806,8 +1807,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       OffsetMapEntry* entry = out->add_entries();
       tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(map, i)),
                   entry->mutable_partition());
-      oam_to_proto(static_cast<const kafka_consumer_OffsetAndMetadata_t*>(kafka_Map_value(map, i)),
-                   entry->mutable_offset());
+      // A null value leaves the offset unset: no committed offset, not offset 0.
+      const auto* oam = static_cast<const kafka_consumer_OffsetAndMetadata_t*>(kafka_Map_value(map, i));
+      if (oam != nullptr) oam_to_proto(oam, entry->mutable_offset());
     }
     kafka_Map_destroy(map);
     return grpc::Status::OK;
@@ -1900,7 +1902,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     TimestampMapHandles timestamps(req->timestamps());
     // An owned map of owned TopicPartition -> owned OffsetAndTimestamp handles;
-    // partitions the broker could not resolve are absent (Java's null values).
+    // NULL for a partition the broker could not resolve (Java's null value).
     kafka_common_Error_t* err = nullptr;
     kafka_Map_t* map =
         req->has_timeout_ms()
@@ -1917,6 +1919,8 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       tp_to_proto(static_cast<const kafka_common_TopicPartition_t*>(kafka_Map_key(map, i)),
                   entry->mutable_partition());
       const auto* v = static_cast<const kafka_consumer_OffsetAndTimestamp_t*>(kafka_Map_value(map, i));
+      // A null value leaves the offset unset.
+      if (v == nullptr) continue;
       OffsetAndTimestamp* oat = entry->mutable_offset();
       oat->set_offset(kafka_consumer_OffsetAndTimestamp_offset(v));
       oat->set_timestamp(kafka_consumer_OffsetAndTimestamp_timestamp(v));

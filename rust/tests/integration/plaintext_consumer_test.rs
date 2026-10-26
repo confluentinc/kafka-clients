@@ -1009,16 +1009,18 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let search = HashMap::from([(tp0.clone(), 0i64), (tp1.clone(), 20i64)]);
     let offsets = consumer.offsets_for_times(search).await.expect("offsets_for_times");
 
-    // `offsets_for_times` returns `HashMap<TopicPartition,
-    // OffsetAndTimestamp>` — a missing key means "no offset"; a present key
-    // carries the resolved offset directly (no nested Option, unlike Java's
-    // null-valued map entries).
-    let r0 = offsets.get(&tp0).expect("offset present for ts 0 on partition 0");
+    let r0 = offsets
+        .get(&tp0)
+        .and_then(Option::as_ref)
+        .expect("offset present for ts 0 on partition 0");
     assert_eq!(r0.offset(), base0, "first record at-or-after ts 0 is the base offset");
     assert_eq!(r0.timestamp(), 0);
     assert_eq!(r0.leader_epoch(), Some(0));
 
-    let r1 = offsets.get(&tp1).expect("offset present for ts 20 on partition 1");
+    let r1 = offsets
+        .get(&tp1)
+        .and_then(Option::as_ref)
+        .expect("offset present for ts 20 on partition 1");
     assert_eq!(r1.offset(), base1 + 20, "first record at-or-after ts 20 is base+20");
     assert_eq!(r1.timestamp(), 20);
     assert_eq!(r1.leader_epoch(), Some(0));
@@ -1278,15 +1280,12 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
         .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), 0i64)]), Duration::ZERO)
         .await
         .expect("offsets_for_times(ZERO)");
-    // Translation deviation: Java's zero-timeout arm returns a map of
-    // size 1 with the key mapped to `null` (no offset yet). Rust's
-    // `OffsetAndTimestamp` is not nullable, so the zero-timeout arm omits
-    // the key entirely (`async_kafka_consumer.rs:3413-3428`). The user
-    // observes "no data yet" via the absent key rather than a null value —
-    // an equivalent, documented contract reduction.
-    assert!(
-        !result3.contains_key(&tp),
-        "offsets_for_times with zero timeout should not resolve an offset (key absent in Rust)"
+    // Java: `assertEquals(1, result3.size())` and `assertNull(result3.get(tp))`.
+    assert_eq!(result3.len(), 1, "offsets_for_times with zero timeout: {result3:?}");
+    assert_eq!(
+        result3.get(&tp),
+        Some(&None),
+        "offsets_for_times with zero timeout should not resolve an offset"
     );
 
     consumer.close().await.expect("consumer close");

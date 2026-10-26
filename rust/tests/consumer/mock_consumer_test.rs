@@ -127,7 +127,7 @@ async fn test_simple_mock() {
 
     consumer.commit_sync().await.unwrap();
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.unwrap();
-    assert_eq!(2, committed.get(&tp).unwrap().offset());
+    assert_eq!(2, committed.get(&tp).unwrap().as_ref().unwrap().offset());
 }
 
 /// Translated from `MockConsumerTest.testConsumerRecordsIsEmptyWhenReturningNoRecords`.

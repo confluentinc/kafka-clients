@@ -1510,26 +1510,15 @@ class _ConsumerState:
 
     def _committed_spec(self, partitions: list[TopicPartition], timeout_ms: int = _NO_TIMEOUT
                         ) -> tuple[Any, Any, Any, bool]:
-        def convert(raw: Any) -> dict[TopicPartition, OffsetAndMetadata | None]:
-            result = to_offset_map(raw or {})
-            # Java maps a partition without a committed offset to null.
-            for tp in partitions:
-                result.setdefault(tp, None)
-            return result
-
-        return self._value_spec(_lib.Consumer_committed_cb, convert, tp_to_spec(partitions),
-                                timeout_ms, wakeable=True)
+        # The core maps a partition without a committed offset to None, as Java to null.
+        return self._value_spec(_lib.Consumer_committed_cb, lambda raw: to_offset_map(raw or {}),
+                                tp_to_spec(partitions), timeout_ms, wakeable=True)
 
     def _offsets_for_times_spec(self, timestamps_to_search: dict[TopicPartition, int],
                                 timeout_ms: int = _NO_TIMEOUT) -> tuple[Any, Any, Any, bool]:
-        def convert(raw: Any) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-            result = to_offset_and_timestamp_map(raw or {})
-            # Java maps a partition without an offset for its timestamp to null.
-            for tp in timestamps_to_search:
-                result.setdefault(tp, None)
-            return result
-
-        return self._value_spec(_lib.Consumer_offsets_for_times_cb, convert,
+        # The core maps a partition without an offset for its timestamp to None, as Java to null.
+        return self._value_spec(_lib.Consumer_offsets_for_times_cb,
+                                lambda raw: to_offset_and_timestamp_map(raw or {}),
                                 timestamps_to_spec(timestamps_to_search), timeout_ms)
 
     def _long_offsets_spec(self, fn: Callable[..., None], partitions: list[TopicPartition],
@@ -1894,10 +1883,7 @@ class _ConsumerState:
                 raw, error = _lib.ConsumerHandle_committed(handle, tp_to_spec(partitions),
                                                            timeout_ms)
             raise_if_error(error)
-            result = to_offset_map(raw or {})
-            for tp in partitions:
-                result.setdefault(tp, None)
-            return result
+            return to_offset_map(raw or {})
         if op in ("beginning_offsets", "end_offsets"):
             partitions, timeout_ms = args
             raw, error = getattr(_lib, "ConsumerHandle_" + op)(handle, tp_to_spec(partitions),
@@ -1909,10 +1895,7 @@ class _ConsumerState:
             raw, error = _lib.ConsumerHandle_offsets_for_times(
                 handle, timestamps_to_spec(timestamps), timeout_ms)
             raise_if_error(error)
-            result_t = to_offset_and_timestamp_map(raw or {})
-            for tp in timestamps:
-                result_t.setdefault(tp, None)
-            return result_t
+            return to_offset_and_timestamp_map(raw or {})
         if op == "partitions_for":
             # Wakeable, as Java's
             # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer

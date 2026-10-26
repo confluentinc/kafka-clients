@@ -705,7 +705,7 @@ impl ConsumerHandle {
     pub fn committed(
         &self,
         partitions: &[TopicPartition],
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send {
         async move {
             let state = self.async_state()?;
             let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
@@ -734,7 +734,7 @@ impl ConsumerHandle {
         &self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send {
         async move { self.async_state()?.committed(partitions, timeout).await }
     }
 
@@ -957,7 +957,7 @@ impl ConsumerHandle {
     pub fn offsets_for_times(
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         async move {
             let state = self.async_state()?;
             let timeout = Duration::from_millis(state.default_api_timeout_ms as u64);
@@ -986,7 +986,7 @@ impl ConsumerHandle {
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         async move { self.async_state()?.offsets_for_times(timestamps_to_search, timeout).await }
     }
 
@@ -1556,7 +1556,7 @@ impl AsyncConsumerHandleState {
         &self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         if partitions.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1564,9 +1564,9 @@ impl AsyncConsumerHandleState {
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
-            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+            CompletableEvent::make_completable_event::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>(deadline_ms);
         let result = self
-            .submit_and_await::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>(
                 ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
                 receiver,
                 deadline_ms,
@@ -1648,7 +1648,7 @@ impl AsyncConsumerHandleState {
         &self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         for (tp, ts) in &timestamps_to_search {
             if *ts < 0 {
                 return Err(Error::local_illegal_argument(format!(
@@ -1666,11 +1666,13 @@ impl AsyncConsumerHandleState {
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
                 HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>,
             >(deadline_ms);
+            // `emptyResults()`: every requested partition mapped to `null`.
+            let empty_results = timestamps_to_search.keys().map(|tp| (tp.clone(), None)).collect();
             self.application_event_handler.add(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
                 now_ms,
             )?;
-            return Ok(HashMap::new());
+            return Ok(empty_results);
         }
 
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -1689,9 +1691,11 @@ impl AsyncConsumerHandleState {
             Ok(offsets_map) => {
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {
-                    if let Some(oat) = opt {
-                        out.insert(tp, oat.build_offset_and_timestamp()?);
-                    }
+                    let value = match opt {
+                        Some(oat) => Some(oat.build_offset_and_timestamp()?),
+                        None => None,
+                    };
+                    out.insert(tp, value);
                 }
                 Ok(out)
             },
@@ -6690,7 +6694,7 @@ where
     pub async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         self.committed_with_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
             .await
     }
@@ -6701,7 +6705,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         self.ensure_open()?;
         // Java: `long start = time.nanoseconds()` after `acquireAndEnsureOpen`
         // in `org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#committed(Set,Duration)`, recorded in
@@ -6720,7 +6724,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         self.return_error_if_group_id_not_defined()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
@@ -6729,12 +6733,12 @@ where
         let deadline_ms = CompletableEvent::calculate_deadline_ms(now_ms, ConsumerUtils::duration_to_millis(timeout));
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
-            CompletableEvent::make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+            CompletableEvent::make_completable_event::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>(deadline_ms);
         // Java's `committed(...)` calls `setActiveTask(event.future())`
         // so a concurrent `wakeup()`
         // interrupts the wait — `enable_wakeup=true`.
         let result = self
-            .submit_and_await::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            .submit_and_await::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>(
                 ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
                 receiver,
                 deadline_ms,
@@ -6917,7 +6921,7 @@ where
     pub async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         self.offsets_for_times_with_timeout(
             timestamps_to_search,
             Duration::from_millis(self.default_api_timeout_ms as u64),
@@ -6931,7 +6935,7 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         self.ensure_open()?;
         // Java's per-entry argument validation: negative targets rejected.
         for (tp, ts) in &timestamps_to_search {
@@ -6952,18 +6956,13 @@ where
             let (handle, _receiver, _erased) = CompletableEvent::make_completable_event::<
                 HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>,
             >(deadline_ms);
-            let empty_keys = timestamps_to_search.keys().cloned().collect::<Vec<_>>();
+            // `emptyResults()`: every requested partition mapped to `null`.
+            let empty_results = timestamps_to_search.keys().map(|tp| (tp.clone(), None)).collect();
             self.application_event_handler.add(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
                 now_ms,
             )?;
-            // Java's `emptyResults()` returns a map with each input key
-            // mapped to `null`; here we omit the key entirely, since
-            // `OffsetAndTimestamp` is not nullable in Rust. The user
-            // observes "no data yet" via a missing key, matching Java's
-            // null-key semantic for the timeout-zero arm.
-            let _ = empty_keys;
-            return Ok(HashMap::new());
+            return Ok(empty_results);
         }
 
         let (handle, receiver, _erased) = CompletableEvent::make_completable_event::<
@@ -6986,10 +6985,7 @@ where
                 // keeps a partition with no offset as a `null` value and
                 // converts each other `OffsetAndTimestampInternal` to the
                 // public-class `OffsetAndTimestamp` via
-                // `buildOffsetAndTimestamp()`. `OffsetAndTimestamp` is not
-                // nullable here, so such a partition is left out of the
-                // map (a documented contract change on
-                // `Consumer::offsets_for_times`). The
+                // `buildOffsetAndTimestamp()`. The
                 // `require_timestamps=true` path guarantees the broker
                 // returns a non-negative timestamp (matching the
                 // user-supplied target time), so the build should not
@@ -6999,9 +6995,11 @@ where
                 // dropping the entry.
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {
-                    if let Some(oat) = opt {
-                        out.insert(tp, oat.build_offset_and_timestamp()?);
-                    }
+                    let value = match opt {
+                        Some(oat) => Some(oat.build_offset_and_timestamp()?),
+                        None => None,
+                    };
+                    out.insert(tp, value);
                 }
                 Ok(out)
             },
@@ -7800,7 +7798,7 @@ where
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         AsyncKafkaConsumer::committed(self, partitions).await
     }
 
@@ -7808,7 +7806,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         AsyncKafkaConsumer::committed_with_timeout(self, partitions, timeout).await
     }
 
@@ -7840,7 +7838,7 @@ where
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         AsyncKafkaConsumer::offsets_for_times(self, timestamps_to_search).await
     }
 
@@ -7848,7 +7846,7 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         AsyncKafkaConsumer::offsets_for_times_with_timeout(self, timestamps_to_search, timeout).await
     }
 
@@ -15174,17 +15172,18 @@ mod tests {
     /// asserts `never().addAndGet(ListOffsets)`; the Rust analog is
     /// that no event is `add_and_get`-ed — the bg path is empty.)
     #[tokio::test]
-    async fn offsets_for_times_with_zero_timeout_returns_empty_map() {
+    async fn offsets_for_times_with_zero_timeout_maps_every_partition_to_none() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("topic1".to_string(), 0);
         let mut search: HashMap<TopicPartition, i64> = HashMap::new();
-        search.insert(tp, 5);
+        search.insert(tp.clone(), 5);
 
         let map = consumer
             .offsets_for_times_with_timeout(search, Duration::from_millis(0))
             .await
             .expect("zero-timeout returns Ok");
-        assert!(map.is_empty(), "expected empty map, got {map:?}");
+        // Java: `Collections.singletonMap(tp, null)`.
+        assert_eq!(map, HashMap::from([(tp, None)]));
     }
 
     /// Java: `testOffsetsForTimesFailsOnNegativeTargetTimes`
@@ -15311,8 +15310,14 @@ mod tests {
             .offsets_for_times_with_timeout(ts_search, Duration::from_millis(100))
             .await
             .expect("ok");
-        assert_eq!(result.get(&t0).map(|x| x.offset()), Some(5));
-        assert_eq!(result.get(&t1).map(|x| x.offset()), Some(6));
+        assert_eq!(
+            result.get(&t0).map(|x| x.as_ref().map(OffsetAndTimestamp::offset)),
+            Some(Some(5))
+        );
+        assert_eq!(
+            result.get(&t1).map(|x| x.as_ref().map(OffsetAndTimestamp::offset)),
+            Some(Some(6))
+        );
         drainer.await.expect("task ok");
     }
 

@@ -325,7 +325,7 @@ impl MultilanguageConsumer {
         &self,
         partitions: &[TopicPartition],
         timeout: Option<Duration>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         let mut client = self.client.clone();
         let req = proto::CommittedRequest {
             consumer_id: self.consumer_id,
@@ -338,7 +338,7 @@ impl MultilanguageConsumer {
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
         match response.result {
-            Some(proto::committed_response::Result::Offsets(map)) => Ok(offset_map_from_proto(map)),
+            Some(proto::committed_response::Result::Offsets(map)) => Ok(nullable_offset_map_from_proto(map)),
             Some(proto::committed_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
             None => Ok(HashMap::new()),
         }
@@ -393,7 +393,7 @@ impl MultilanguageConsumer {
         &self,
         timestamps_to_search: &HashMap<TopicPartition, i64>,
         timeout: Option<Duration>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         let mut client = self.client.clone();
         let timestamps = timestamps_to_search
             .iter()
@@ -748,7 +748,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         self.committed_rpc(partitions, None).await
     }
 
@@ -756,7 +756,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         self.committed_rpc(partitions, Some(timeout)).await
     }
 
@@ -798,7 +798,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     async fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         self.offsets_for_times_rpc(&timestamps_to_search, None).await
     }
 
@@ -806,7 +806,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         self.offsets_for_times_rpc(&timestamps_to_search, Some(timeout)).await
     }
 
@@ -918,12 +918,14 @@ pub(crate) fn offset_map_to_proto(offsets: &HashMap<TopicPartition, OffsetAndMet
         .collect()
 }
 
-fn offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, OffsetAndMetadata> {
+/// The `committed()` map: an entry without an offset is a partition with no
+/// committed offset, Java's `null` value.
+fn nullable_offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
     map.entries
         .into_iter()
         .filter_map(|e| {
             let tp = tp_from_proto(e.partition?);
-            Some((tp, offset_and_metadata_from_proto(e.offset?)))
+            Some((tp, e.offset.map(offset_and_metadata_from_proto)))
         })
         .collect()
 }
@@ -962,15 +964,19 @@ fn long_offset_map_from_proto(map: proto::LongOffsetMap) -> HashMap<TopicPartiti
         .collect()
 }
 
+/// The `offsets_for_times()` map: an entry without an offset is a partition
+/// with no such message, Java's `null` value.
 fn offset_and_timestamp_map_from_proto(
     map: proto::OffsetAndTimestampMap,
-) -> HashMap<TopicPartition, OffsetAndTimestamp> {
+) -> HashMap<TopicPartition, Option<OffsetAndTimestamp>> {
     map.entries
         .into_iter()
         .filter_map(|e| {
             let tp = tp_from_proto(e.partition?);
-            let o = e.offset?;
-            let oat = OffsetAndTimestamp::with_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?;
+            let oat = match e.offset {
+                Some(o) => Some(OffsetAndTimestamp::with_leader_epoch(o.offset, o.timestamp, o.leader_epoch).ok()?),
+                None => None,
+            };
             Some((tp, oat))
         })
         .collect()

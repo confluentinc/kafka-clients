@@ -1022,7 +1022,7 @@ where
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         // Java `MockConsumer#committed(Set)`.
         self.ensure_not_closed()?;
         let mut result = HashMap::new();
@@ -1037,7 +1037,7 @@ where
                     // `OffsetAndMetadata::new(0)` is infallible for offset=0.
                     OffsetAndMetadata::new(0).expect("0 is non-negative")
                 };
-                result.insert(tp.clone(), value);
+                result.insert(tp.clone(), Some(value));
             }
         }
         Ok(result)
@@ -1047,7 +1047,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         // Java's `committed(Set, Duration)` ignores the timeout.
         self.committed(partitions).await
     }
@@ -1088,7 +1088,7 @@ where
     async fn offsets_for_times(
         &mut self,
         _timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         // Java throws UnsupportedOperationException("Not implemented yet.")
         // (`org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes`), translated as Error::LocalUnsupportedOperation
         // (`admin-client.md` §9). DoD #3 makes the message text part of the
@@ -1101,7 +1101,7 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         // Java's `offsetsForTimes(Map, Duration)` delegates to the no-timeout variant.
         self.offsets_for_times(timestamps_to_search).await
     }
@@ -1528,6 +1528,11 @@ mod tests {
         HashMap::from([(tp.clone(), OffsetAndMetadata::new(offset).expect("non-negative"))])
     }
 
+    /// `offsets`, as `committed()` returns them.
+    fn committed_offsets(tp: &TopicPartition, offset: i64) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(offset).expect("non-negative")))])
+    }
+
     /// Java's `MockConsumer.commitSync(Map)` records the offsets in the
     /// mock's `committed` map; through a handle it records them in the same
     /// map, so the consumer's `committed()` returns them.
@@ -1542,7 +1547,7 @@ mod tests {
         handle.commit_sync_with_offsets(offsets(&tp, 5)).await.expect("commit sync");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 5)
+            committed_offsets(&tp, 5)
         );
 
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1553,7 +1558,7 @@ mod tests {
             .expect("commit async");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 6)
+            committed_offsets(&tp, 6)
         );
         assert_eq!(*seen.lock().unwrap(), vec![("async", offsets(&tp, 6))]);
     }
@@ -1625,7 +1630,7 @@ mod tests {
         );
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 9)
+            committed_offsets(&tp, 9)
         );
     }
 
@@ -1656,14 +1661,14 @@ mod tests {
         handle.commit_sync().await.expect("commit sync");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 1)
+            committed_offsets(&tp, 1)
         );
 
         consume(&mut c, &tp, 1, 2).await;
         handle.commit_async().await.expect("commit async");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
 
         consume(&mut c, &tp, 3, 1).await;
@@ -1679,7 +1684,7 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![("cb", offsets(&tp, 4))]);
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 4)
+            committed_offsets(&tp, 4)
         );
     }
 
@@ -1859,14 +1864,14 @@ mod tests {
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 2)
+            committed_offsets(&tp, 2)
         );
 
         let err = c.commit_async_with_callback(Arc::new(Raising)).await.expect_err("propagates");
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
 
         let handle = c.handle();
@@ -1882,7 +1887,7 @@ mod tests {
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
     }
 

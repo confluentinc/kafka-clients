@@ -71,7 +71,8 @@ use crate::ffi::common::{
 use crate::ffi::common::{deliver_unit, deliver_value};
 use crate::ffi::consumer::consumer_group_metadata::{box_group_metadata, kafka_consumer_ConsumerGroupMetadata_t};
 use crate::ffi::consumer::offset_and_metadata::{
-    kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, offset_and_metadata_map, offset_and_metadata_ref,
+    kafka_consumer_OffsetAndMetadata_t, map_offset_and_metadata, nullable_offset_and_metadata_map,
+    offset_and_metadata_ref,
 };
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
@@ -1165,7 +1166,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -1224,7 +1225,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_committed_cb",
         async move { h.committed(&partitions).await },
-        move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
+        move |client, result| {
+            deliver_ptr(client, cb, opaque, result, move |offsets| {
+                nullable_offset_and_metadata_map(&offsets)
+            })
+        },
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
         // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
@@ -1285,7 +1290,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
     });
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -1346,7 +1351,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     inner.run_cb(
         "kafka_consumer_ConsumerHandle_committed_with_timeout_cb",
         async move { h.committed_with_timeout(&partitions, ms(timeout)?).await },
-        move |client, result| deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets)),
+        move |client, result| {
+            deliver_ptr(client, cb, opaque, result, move |offsets| {
+                nullable_offset_and_metadata_map(&offsets)
+            })
+        },
         // SAFETY: `cb` and `opaque` are this call's own arguments, and `cb` is valid per this
         // function's `# Safety`. `run_cb` calls this fallback only when the consumer is gone and
         // nothing was spawned, so `deliver` never runs and `cb` fires here exactly once, with an
@@ -2284,8 +2293,8 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch)`: the
 /// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the result
 /// maps `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndTimestamp_t *`, a partition with no offset for its
-/// timestamp being absent from the map, not mapped to `NULL`.
+/// `kafka_consumer_OffsetAndTimestamp_t *`, `NULL` for a partition with no
+/// offset for its timestamp.
 ///
 /// Blocking; callable from inside a listener. On failure the error is stored
 /// in `*out_err`.
@@ -2343,7 +2352,7 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
-/// blocking form, unresolved partitions absent.
+/// blocking form, `NULL` for an unresolved partition.
 ///
 /// # Parameters
 ///
@@ -2466,7 +2475,7 @@ pub type kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t =
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
-/// blocking form, unresolved partitions absent.
+/// blocking form, `NULL` for an unresolved partition.
 ///
 /// # Parameters
 ///

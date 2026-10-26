@@ -251,7 +251,12 @@ async fn commit_and_committed<F: ConsumerBackendFactory>(ctx: &mut TestContext, 
     assert_eq!(position, 2, "{} backend", factory.name());
     consumer.commit_sync().await.expect("commit_sync");
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    assert_eq!(committed.get(&tp).map(|o| o.offset()), Some(2), "{} backend", factory.name());
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).map(|o| o.offset()),
+        Some(2),
+        "{} backend",
+        factory.name()
+    );
 
     consumer.close().await.expect("close");
 }
@@ -389,7 +394,12 @@ async fn offsets_for_times_lookup<F: ConsumerBackendFactory>(ctx: &mut TestConte
     // Timestamp 0 (epoch) resolves to the earliest offset, i.e. 0.
     let spec = HashMap::from([(tp.clone(), 0i64)]);
     let result = consumer.offsets_for_times(spec).await.expect("offsets_for_times");
-    assert_eq!(result.get(&tp).map(|o| o.offset()), Some(0), "{} backend", factory.name());
+    assert_eq!(
+        result.get(&tp).and_then(Option::as_ref).map(|o| o.offset()),
+        Some(0),
+        "{} backend",
+        factory.name()
+    );
 
     consumer.close().await.expect("close");
 }
@@ -430,7 +440,7 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
         .await
         .expect("commit_sync_with_offsets");
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    let entry = committed.get(&tp).expect("committed entry");
+    let entry = committed.get(&tp).and_then(Option::as_ref).expect("committed entry");
     assert_eq!(entry.offset(), 1, "{} backend", factory.name());
     assert_eq!(entry.metadata(), "ck", "{} backend", factory.name());
 
@@ -653,7 +663,12 @@ async fn commit_async_callback_logs_offsets<F: ConsumerBackendFactory>(ctx: &mut
 
     // The callback's offsets must match what was actually committed.
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    assert_eq!(committed.get(&tp).map(|o| o.offset()), Some(2), "{} backend", factory.name());
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).map(|o| o.offset()),
+        Some(2),
+        "{} backend",
+        factory.name()
+    );
 
     consumer.close().await.expect("close");
 }
@@ -834,7 +849,7 @@ async fn commit_async_offsets_callback_logs_offsets<F: ConsumerBackendFactory>(c
     );
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    let entry = committed.get(&tp).expect("committed entry");
+    let entry = committed.get(&tp).and_then(Option::as_ref).expect("committed entry");
     assert_eq!(entry.offset(), 1, "{} backend", factory.name());
     assert_eq!(entry.metadata(), "explicit", "{} backend", factory.name());
 
@@ -930,7 +945,7 @@ async fn timed_commit_committed_and_position<F: ConsumerBackendFactory>(ctx: &mu
         .await
         .expect("committed with timeout");
     assert_eq!(
-        committed.get(&tp).map(OffsetAndMetadata::offset),
+        committed.get(&tp).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
         Some(3),
         "{} backend: commitSync(Duration) commits the consumed position",
         factory.name()
@@ -947,7 +962,7 @@ async fn timed_commit_committed_and_position<F: ConsumerBackendFactory>(ctx: &mu
         .committed_with_timeout(std::slice::from_ref(&tp), EXPLICIT_TIMEOUT)
         .await
         .expect("committed with timeout");
-    let entry = committed.get(&tp).expect("committed entry");
+    let entry = committed.get(&tp).and_then(Option::as_ref).expect("committed entry");
     assert_eq!(entry.offset(), 2, "{} backend", factory.name());
     assert_eq!(entry.metadata(), "timed", "{} backend", factory.name());
 
@@ -1005,20 +1020,21 @@ async fn timed_offset_lookups<F: ConsumerBackendFactory>(ctx: &mut TestContext, 
     );
 
     // Timestamp 0 resolves to the first record; a timestamp in the future to
-    // none, which Java reports as a null value and the wire omits.
+    // none, which Java reports as a null value.
     let found = consumer
         .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), 0)]), EXPLICIT_TIMEOUT)
         .await
         .expect("offsets_for_times with timeout");
-    let first = found.get(&tp).expect("timestamp 0 resolves");
+    let first = found.get(&tp).and_then(Option::as_ref).expect("timestamp 0 resolves");
     assert_eq!(first.offset(), 0, "{} backend", factory.name());
     assert!(first.timestamp() > 0, "{} backend: the record's create time", factory.name());
     let future = consumer
         .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), i64::MAX / 2)]), EXPLICIT_TIMEOUT)
         .await
         .expect("offsets_for_times in the future");
-    assert!(
-        !future.contains_key(&tp),
+    assert_eq!(
+        future.get(&tp),
+        Some(&None),
         "{} backend: no record at or after a future timestamp, got {future:?}",
         factory.name()
     );

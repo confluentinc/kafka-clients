@@ -409,7 +409,7 @@ where
     fn committed<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>;
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>>;
 
     /// See [`Consumer::committed_with_timeout`].
     ///
@@ -429,7 +429,7 @@ where
         &'a mut self,
         partitions: &'a [TopicPartition],
         timeout: Duration,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>;
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>>;
 
     /// See [`Consumer::partitions_for`].
     ///
@@ -511,7 +511,7 @@ where
     fn offsets_for_times<'a>(
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>>;
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>>;
 
     /// See [`Consumer::offsets_for_times_with_timeout`].
     ///
@@ -531,7 +531,7 @@ where
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>>;
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>>;
 
     /// See [`Consumer::beginning_offsets`].
     ///
@@ -821,7 +821,7 @@ where
     fn committed<'a>(
         &'a mut self,
         partitions: &'a [TopicPartition],
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> {
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> {
         Box::pin(Consumer::committed(self, partitions))
     }
 
@@ -829,7 +829,7 @@ where
         &'a mut self,
         partitions: &'a [TopicPartition],
         timeout: Duration,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> {
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> {
         Box::pin(Consumer::committed_with_timeout(self, partitions, timeout))
     }
 
@@ -859,7 +859,7 @@ where
     fn offsets_for_times<'a>(
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> {
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> {
         Box::pin(Consumer::offsets_for_times(self, timestamps_to_search))
     }
 
@@ -867,7 +867,7 @@ where
         &'a mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> {
+    ) -> BoxFuture<'a, Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> {
         Box::pin(Consumer::offsets_for_times_with_timeout(self, timestamps_to_search, timeout))
     }
 
@@ -1086,7 +1086,7 @@ where
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         DynConsumer::committed(self, partitions).await
     }
 
@@ -1094,7 +1094,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
         DynConsumer::committed_with_timeout(self, partitions, timeout).await
     }
 
@@ -1124,7 +1124,7 @@ where
     fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         DynConsumer::offsets_for_times(self, timestamps_to_search)
     }
 
@@ -1132,7 +1132,7 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         DynConsumer::offsets_for_times_with_timeout(self, timestamps_to_search, timeout)
     }
 

@@ -97,6 +97,33 @@ pub(crate) fn offset_and_metadata_map(map: &HashMap<TopicPartition, OffsetAndMet
     )
 }
 
+/// Hands the Java `Map<TopicPartition, OffsetAndMetadata>` that
+/// `Consumer.committed` returns to C as an owned map, as
+/// [`offset_and_metadata_map`] does, except that a partition without a
+/// committed offset (Java's `null` value) has a `NULL` value.
+pub(crate) fn nullable_offset_and_metadata_map(
+    map: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+) -> *mut kafka_Map_t {
+    let mut entries: Vec<(&TopicPartition, &Option<OffsetAndMetadata>)> = map.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+    let entries = entries
+        .into_iter()
+        .map(|(tp, oam)| {
+            (
+                box_topic_partition(tp.clone()) as *mut c_void,
+                oam.as_ref()
+                    .map_or(std::ptr::null_mut(), |oam| box_offset_and_metadata(oam.clone()) as *mut c_void),
+            )
+        })
+        .collect();
+    box_map(
+        entries,
+        Some(destroy_boxed::<TopicPartitionInner>),
+        Some(destroy_boxed::<OffsetAndMetadataInner>),
+        Some(topic_partition_key_eq),
+    )
+}
+
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
 /// `const kafka_consumer_OffsetAndMetadata_t *` values; null reads as empty.
 ///
@@ -449,6 +476,39 @@ mod tests {
         // handles, not mutated during the call.
         assert_eq!(unsafe { map_offset_and_metadata(c_map) }, map);
         // SAFETY: Test code: `c_map` is the map built above, destroyed once.
+        unsafe { kafka_Map_destroy(c_map) };
+    }
+
+    /// Java's `committed` maps a partition without a committed offset to `null`: the C map keeps
+    /// the partition as a key, with a `NULL` value, and frees only the non-`NULL` values.
+    #[test]
+    fn nullable_map_keeps_a_partition_without_an_offset_as_a_null_value() {
+        let map = HashMap::from([
+            (TopicPartition::new("a", 0), Some(OffsetAndMetadata::new(3).unwrap())),
+            (TopicPartition::new("a", 1), None),
+        ]);
+        let c_map = nullable_offset_and_metadata_map(&map);
+        // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
+        // are read; every key is a live topic-partition handle and every non-null value a live
+        // offset-and-metadata handle the map owns.
+        let entries: Vec<_> = unsafe { map_entries(c_map) }
+            .iter()
+            .map(|&(k, v)| unsafe {
+                (
+                    topic_partition_ref(k as *const _).clone(),
+                    (!v.is_null()).then(|| offset_and_metadata_ref(v as *const _).offset()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (TopicPartition::new("a", 0), Some(3)),
+                (TopicPartition::new("a", 1), None)
+            ]
+        );
+        // SAFETY: Test code: `c_map` is the map built above, destroyed once; its destructor skips
+        // the `NULL` value.
         unsafe { kafka_Map_destroy(c_map) };
     }
 }

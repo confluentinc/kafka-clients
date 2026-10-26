@@ -356,7 +356,7 @@ where
     fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send {
         Consumer::committed(&mut self.delegate, partitions)
     }
 
@@ -364,7 +364,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send {
         Consumer::committed_with_timeout(&mut self.delegate, partitions, timeout)
     }
 
@@ -394,7 +394,7 @@ where
     fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         Consumer::offsets_for_times(&mut self.delegate, timestamps_to_search)
     }
 
@@ -402,7 +402,7 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send {
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send {
         Consumer::offsets_for_times_with_timeout(&mut self.delegate, timestamps_to_search, timeout)
     }
 

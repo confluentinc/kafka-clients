@@ -522,8 +522,22 @@ async fn test_async_consumer_auto_commit_on_close() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed present").offset(), 500);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        300
+    );
+    assert_eq!(
+        committed
+            .get(&tp1)
+            .and_then(Option::as_ref)
+            .expect("tp1 committed present")
+            .offset(),
+        500
+    );
     another.close().await.expect("another close should succeed");
 }
 
@@ -571,8 +585,22 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed present").offset(), 500);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        300
+    );
+    assert_eq!(
+        committed
+            .get(&tp1)
+            .and_then(Option::as_ref)
+            .expect("tp1 committed present")
+            .offset(),
+        500
+    );
     another.close().await.expect("another close should succeed");
 }
 
@@ -604,7 +632,10 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &sync_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &sync_metadata
+    );
 
     // Async commit: offset 10, metadata "bar".
     let async_metadata = OffsetAndMetadata::with_metadata(10, "bar").expect("OffsetAndMetadata");
@@ -615,7 +646,10 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &async_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &async_metadata
+    );
 
     // Null metadata: Java `new OffsetAndMetadata(5, null)` normalizes to
     // empty metadata. Rust `OffsetAndMetadata::new(5)` is the same
@@ -631,7 +665,10 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &null_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &null_metadata
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -692,7 +729,14 @@ async fn test_async_consumer_async_commit() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), count);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        count
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -733,7 +777,14 @@ async fn test_async_consumer_commit_specified_offsets() {
         .expect("commit_sync_with_offsets tp");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed tp");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 3);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        3
+    );
     let committed_tp1 = consumer.committed(std::slice::from_ref(&tp1)).await.expect("committed tp1");
     assert!(!committed_tp1.contains_key(&tp1), "tp1 should not be committed yet");
 
@@ -749,15 +800,15 @@ async fn test_async_consumer_commit_specified_offsets() {
         .expect("commit_sync_with_offsets tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed both");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 5);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 3);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 5);
 
     // Async should pick up the committed changes after commit completes.
     let mut commit3 = HashMap::new();
     commit3.insert(tp1.clone(), OffsetAndMetadata::new(7).expect("OffsetAndMetadata"));
     send_and_await_async_commit(consumer.as_mut(), commit3).await;
     let committed = consumer.committed(std::slice::from_ref(&tp1)).await.expect("committed tp1");
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 7);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 7);
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -840,8 +891,11 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 500);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 300);
+    assert_eq!(
+        committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(),
+        500
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -929,7 +983,7 @@ async fn test_async_consumer_position_and_commit() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 0);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 0);
 
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     assert_eq!(
@@ -943,7 +997,7 @@ async fn test_async_consumer_position_and_commit() {
         .await
         .expect("committed should succeed");
     assert_eq!(
-        committed.get(&tp).expect("tp committed").offset(),
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(),
         5,
         "committed offset should be returned"
     );
@@ -1076,7 +1130,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
         .expect("commit_sync empty");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 1);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 1);
     assert_eq!(cb.success_count(), 1, "async callback should fire before commitSync returns");
 
     // Try with coordinator known.
@@ -1091,8 +1145,8 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     consumer.commit_sync_with_offsets(sync2).await.expect("commit_sync tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 2);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 2);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 2);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 2);
     assert_eq!(cb.success_count(), 2);
 
     // Try with empty sync commit.
@@ -1108,8 +1162,8 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
         .expect("commit_sync empty");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 2);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 3);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 2);
     assert_eq!(cb.success_count(), 3);
 
     consumer.close().await.expect("consumer close should succeed");
@@ -1234,15 +1288,6 @@ fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
 /// Fetches committed offsets for three partitions: `tp` (committed), `tp1`
 /// (exists, never committed) and `tp2` (partition 2 of a 2-partition topic —
 /// does not exist).
-///
-/// **Deviation (representation only):** Java asserts `committed.size() == 3`
-/// with `null` values for `tp1`/`tp2`. The Rust `committed` API returns
-/// `HashMap<TopicPartition, OffsetAndMetadata>`, where "no committed offset"
-/// is represented by *absence* (the `null`s of Java's
-/// `toOffsetMapWithNulls()` are stripped in
-/// `ApplicationEventProcessor::process_fetch_committed_offsets`). So the
-/// Rust assertions are: exactly one entry (`tp`), and `tp1`/`tp2` absent —
-/// the same observable contract `committed.get(tpN) == null` checks in Java.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_no_committed_offsets() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -1274,11 +1319,10 @@ async fn test_async_consumer_no_committed_offsets() {
         .committed(&[tp.clone(), tp1.clone(), tp2.clone()])
         .await
         .expect("committed should succeed");
-    // Java: `assertEquals(3, committed.size())` — see the deviation note above.
-    assert_eq!(1, committed.len(), "unexpected committed map: {committed:?}");
-    assert_eq!(Some(&metadata), committed.get(&tp));
-    assert_eq!(None, committed.get(&tp1));
-    assert_eq!(None, committed.get(&tp2));
+    assert_eq!(3, committed.len(), "unexpected committed map: {committed:?}");
+    assert_eq!(Some(&Some(metadata)), committed.get(&tp));
+    assert_eq!(Some(&None), committed.get(&tp1));
+    assert_eq!(Some(&None), committed.get(&tp2));
 
     consumer.close().await.expect("consumer close should succeed");
 }
@@ -1288,7 +1332,7 @@ async fn test_async_consumer_no_committed_offsets() {
 /// KAFKA-20165.
 ///
 /// Calling `committed()` for a deleted topic eventually returns "no offset"
-/// (Java `null`, Rust absent entry) for the partition: the group coordinator
+/// (Java `null`, Rust `None`) for the partition: the group coordinator
 /// answers `UNKNOWN_TOPIC_ID` for the deleted topic when the client uses topic
 /// ids, which the consumer handles as a retriable partition error and reports
 /// as no committed offset.
@@ -1323,7 +1367,14 @@ async fn test_async_consumer_committed_deleted_topic() {
         .committed(std::slice::from_ref(&tp_to_delete))
         .await
         .expect("committed should succeed");
-    assert_eq!(0, committed.get(&tp_to_delete).expect("committed entry present").offset());
+    assert_eq!(
+        0,
+        committed
+            .get(&tp_to_delete)
+            .and_then(Option::as_ref)
+            .expect("committed entry present")
+            .offset()
+    );
 
     // Delete the topic
     admin
@@ -1342,7 +1393,7 @@ async fn test_async_consumer_committed_deleted_topic() {
             .committed_with_timeout(std::slice::from_ref(&tp_to_delete), Duration::from_millis(5000))
             .await
         {
-            Ok(committed) if !committed.contains_key(&tp_to_delete) => break,
+            Ok(committed) if committed.get(&tp_to_delete).is_some_and(Option::is_none) => break,
             Ok(committed) => format!(
                 "Condition not met within timeout 10000. Expected null for deleted topic partition (got {committed:?})"
             ),

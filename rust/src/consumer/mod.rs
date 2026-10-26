@@ -1055,7 +1055,8 @@ where
     /// this process or another). The returned offsets will be used as the position for the
     /// consumer in the event of a failure.
     ///
-    /// A partition with no committed offset is absent from the result map.
+    /// If any of the partitions requested do not exist, the result map will contain `None` as the
+    /// value for that partition.
     ///
     /// This call will do a remote call to get the latest committed offsets from the server, and
     /// will block until the committed offsets are gotten successfully, an unrecoverable error
@@ -1069,8 +1070,8 @@ where
     ///
     /// # Returns
     ///
-    /// The latest committed offsets for the given partitions; a partition with no committed offset
-    /// is absent from the map.
+    /// The latest committed offsets for the given partitions; `None` will be returned for the
+    /// partition if there is no such message.
     ///
     /// # Errors
     ///
@@ -1088,22 +1089,18 @@ where
     ///   specified by `default.api.timeout.ms` expires.
     /// - `Error::is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers fails
     ///   within `bootstrap.resolve.timeout.ms`
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: a partition with no committed offset is absent from the returned map; Java maps it
-    /// to `null`, so every queried partition is a key of Java's result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
     fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send;
 
     /// Get the last committed offsets for the given partitions (whether the commit happened by
     /// this process or another). The returned offsets will be used as the position for the
     /// consumer in the event of a failure.
     ///
-    /// A partition with no committed offset is absent from the result map.
+    /// If any of the partitions requested do not exist, the result map will contain `None` as the
+    /// value for that partition.
     ///
     /// This call will block to do a remote call to get the latest committed offsets from the
     /// server.
@@ -1115,8 +1112,8 @@ where
     ///
     /// # Returns
     ///
-    /// The latest committed offsets for the given partitions; a partition with no committed offset
-    /// is absent from the map.
+    /// The latest committed offsets for the given partitions; `None` will be returned for the
+    /// partition if there is no such message.
     ///
     /// # Errors
     ///
@@ -1130,17 +1127,12 @@ where
     /// - `Error::is_kafka_error` for any other unrecoverable errors
     /// - `Error::is_timeout_error` if the committed offset cannot be found before expiration of the
     ///   timeout
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: a partition with no committed offset is absent from the returned map; Java maps it
-    /// to `null`, so every queried partition is a key of Java's result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#committed")]
     fn committed_with_timeout(
         &mut self,
         partitions: &[TopicPartition],
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>> + Send;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>> + Send;
 
     // ── Metadata (async — may fetch from broker) ──
 
@@ -1274,8 +1266,8 @@ where
     /// partition is the earliest offset whose timestamp is greater than or equal to the given
     /// timestamp in the corresponding partition. This is a blocking call. The consumer does not
     /// have to be assigned the partitions. If the message format version in a partition is
-    /// before 0.10.0, i.e. the messages do not have timestamps, that partition will be absent
-    /// from the returned map.
+    /// before 0.10.0, i.e. the messages do not have timestamps, `None` will be returned for
+    /// that partition.
     ///
     /// # Arguments
     ///
@@ -1286,7 +1278,7 @@ where
     /// a mapping from partition to the timestamp and offset of the first message with timestamp
     /// greater than or equal to the target timestamp. If the timestamp and offset for a specific
     /// partition cannot be found within the default timeout, and no corresponding message exists,
-    /// the partition is absent from the returned map
+    /// the entry in the returned map will be `None`
     ///
     /// # Errors
     ///
@@ -1300,23 +1292,18 @@ where
     ///   offsets by timestamp
     /// - `Error::is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers fails
     ///   within `bootstrap.resolve.timeout.ms`
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: a partition with no offset for the timestamp is absent from the returned map;
-    /// Java maps it to `null`, so every queried partition is a key of Java's result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
     fn offsets_for_times(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send;
 
     /// Look up the offsets for the given partitions by timestamp. The returned offset for each
     /// partition is the earliest offset whose timestamp is greater than or equal to the given
     /// timestamp in the corresponding partition. This is a blocking call. The consumer does not
     /// have to be assigned the partitions. If the message format version in a partition is
-    /// before 0.10.0, i.e. the messages do not have timestamps, that partition will be absent
-    /// from the returned map.
+    /// before 0.10.0, i.e. the messages do not have timestamps, `None` will be returned for
+    /// that partition.
     ///
     /// # Arguments
     ///
@@ -1328,7 +1315,7 @@ where
     /// a mapping from partition to the timestamp and offset of the first message with timestamp
     /// greater than or equal to the target timestamp. If the timestamp and offset for a specific
     /// partition cannot be found within timeout, and no corresponding message exists, the
-    /// partition is absent from the returned map
+    /// entry in the returned map will be `None`
     ///
     /// # Errors
     ///
@@ -1340,17 +1327,12 @@ where
     ///   the passed timeout
     /// - `Error::is_unsupported_version_error` if the broker does not support looking up the
     ///   offsets by timestamp
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: a partition with no offset for the timestamp is absent from the returned map;
-    /// Java maps it to `null`, so every queried partition is a key of Java's result.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#offsetsForTimes")]
     fn offsets_for_times_with_timeout(
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         timeout: Duration,
-    ) -> impl Future<Output = Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error>> + Send;
+    ) -> impl Future<Output = Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error>> + Send;
 
     /// Get the first offset for the given partitions.
     ///
