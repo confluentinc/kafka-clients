@@ -2857,7 +2857,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
                 .set_synonyms(synonyms)
-                .set_config_type(ConfigType::for_id(config.config_type))
+                .set_config_type(Some(ConfigType::for_id(config.config_type)))
                 .set_documentation(config.documentation.clone())
                 .build()
                 .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
@@ -3344,6 +3344,9 @@ fn get_create_topics_call(
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)
+                                    // Java passes `null` for the type and the
+                                    // documentation (`KafkaAdminClient.java:1992-2002`).
+                                    .set_config_type(None)
                                     .build()
                                     .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
                             )
@@ -9586,6 +9589,16 @@ mod tests {
         assert!(entry.is_read_only());
         assert!(!entry.is_sensitive());
         assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
+        // Java builds the entry with a `null` type and documentation
+        // (`KafkaAdminClient.java:1992-2002`), and prints them as `null`.
+        assert_eq!(entry.r#type(), None);
+        assert_eq!(entry.documentation(), None);
+        assert!(entry.synonyms().is_empty());
+        assert_eq!(
+            entry.to_string(),
+            "ConfigEntry(name=cleanup.policy, value=compact, source=DYNAMIC_TOPIC_CONFIG, \
+             isSensitive=false, isReadOnly=true, synonyms=[], type=null, documentation=null)"
+        );
     }
 
     #[tokio::test]
@@ -10794,6 +10807,27 @@ mod tests {
         let mut data = DescribeConfigsResponseData::new();
         data.set_results(results);
         ConcreteResponse::DescribeConfigs(DescribeConfigsResponse::new(data))
+    }
+
+    /// New test, no Java original: unlike a `createTopics` entry, every entry
+    /// `describeConfigs` builds has a type. Java's `describeConfigResult`
+    /// passes `ConfigType.forId(id).type()`, which is `UNKNOWN` for an id it
+    /// does not know, never `null`.
+    #[test]
+    fn describe_config_result_gives_every_entry_a_type() {
+        use crate::describe_configs_response_data::DescribeConfigsResourceResult;
+        let mut result = describe_configs_result("t", config_resource::Type::Topic.id(), Errors::None);
+        let mut long = DescribeConfigsResourceResult::new();
+        long.set_name("retention.ms".to_string());
+        long.set_config_type(5);
+        let mut unknown = DescribeConfigsResourceResult::new();
+        unknown.set_name("future.config".to_string());
+        unknown.set_config_type(42);
+        result.set_configs(vec![long, unknown]);
+
+        let config = describe_config_result(&result);
+        assert_eq!(config.get("retention.ms").unwrap().r#type(), Some(ConfigType::Long));
+        assert_eq!(config.get("future.config").unwrap().r#type(), Some(ConfigType::Unknown));
     }
 
     #[tokio::test]

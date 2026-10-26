@@ -532,6 +532,23 @@ def test_config_from_core_data() -> None:
         ConfigResource.Type.UNKNOWN)
 
 
+def test_config_from_core_data_keeps_a_null_type() -> None:
+    """A ``createTopics`` entry has Java's null type (``KafkaAdminClient.java:1992-2002``):
+    the extension hands it over as ``None`` and the entry keeps it, printing ``type=None``."""
+    config = _conversions.config_from_rows([
+        ("cleanup.policy", "compact", 0, 0, 1, "DYNAMIC_TOPIC_CONFIG", None, None, [])])
+    entry = config.get(name="cleanup.policy")
+    assert entry is not None
+    assert entry.type() is None
+    assert entry != ConfigEntry(name="cleanup.policy", value="compact",
+                                source=ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG,
+                                is_sensitive=False, is_read_only=True, synonyms=[],
+                                type=ConfigEntry.ConfigType.UNKNOWN, documentation=None)
+    assert str(entry) == (
+        "ConfigEntry(name=cleanup.policy, value=compact, source=DYNAMIC_TOPIC_CONFIG, "
+        "isSensitive=False, isReadOnly=True, synonyms=[], type=None, documentation=None)")
+
+
 #: ``new ConfigEntry(name, value)`` rows of a core ``Config`` (Admin__config_future).
 CORE_CONFIG = [("retention.ms", "4242"), ("cleanup.policy", None)]
 
