@@ -15739,9 +15739,9 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
 
         let mut options = members_to_remove(&["instance-1", "instance-2"]);
-        if let Some(reason) = reason {
-            options.set_reason(reason);
-        }
+        // Java calls `options.reason(reason)` with the given value, `null`
+        // included.
+        options.set_reason(reason.map(str::to_string));
         let _result = admin.remove_members_from_consumer_group_with_options(GROUP_ID, options);
 
         pump_until(&mut runnable, 40, |r| {
