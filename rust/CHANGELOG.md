@@ -73,6 +73,14 @@ breaking changes.
   taking topic names are added as `delete_topics_with_string_slice` and
   `delete_topics_with_string_slice_options`. Java names the parameter of all
   four `topics`, so each is named after its parameter's type (CLAUDE.md §2).
+- **Breaking:** `ClassicGroupDescription::new` is Java's six-argument
+  constructor, which gives the description an empty set of authorized
+  operations; the seven-argument constructor is now
+  `ClassicGroupDescription::with_authorized_operations`.
+- **Breaking:** `CreateDelegationTokenOptions::set_owner` and
+  `RemoveMembersFromConsumerGroupOptions::set_reason` take an `Option`, so
+  `None` clears a value set earlier, as Java's `owner(null)` and
+  `reason(null)` do.
 
 ### Common
 
@@ -112,6 +120,13 @@ breaking changes.
   `kafka_admin_Admin_delete_topics_with_string_slice` and
   `kafka_admin_Admin_delete_topics_with_string_slice_options` take the topic
   names as a `kafka_List_t` of `const char *`.
+- **Breaking (C API):** `kafka_admin_ClassicGroupDescription_new` takes the
+  six arguments of Java's short constructor; the seven-argument form is
+  `kafka_admin_ClassicGroupDescription_with_authorized_operations`.
+- **Breaking (C API):** `kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason`
+  with `NULL` clears the reason instead of setting an empty one, and
+  `kafka_admin_CreateDelegationTokenOptions_set_owner` with `NULL` clears the
+  owner, as Java's `reason(null)` and `owner(null)` do.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
