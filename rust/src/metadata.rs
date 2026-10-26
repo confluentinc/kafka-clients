@@ -130,6 +130,16 @@ pub struct Metadata {
     // Java uses `volatile` for this field; in Rust we protect all mutable state
     // behind the mutex for correctness.
     inner: Mutex<MetadataInner>,
+    /// The maximum amount of time that metadata can be retained without refresh
+    /// (`metadata.max.age.ms`).
+    ///
+    /// Java's `private final long metadataExpireMs`: it is never written after
+    /// construction, so it lives outside the mutex and
+    /// [`Metadata::metadata_expire_ms`] reads it without locking, like Java's
+    /// unsynchronized getter. Callers may read it while holding locks that
+    /// `Metadata::update` takes under the metadata lock (the consumer's
+    /// `SubscriptionState`), which would otherwise be a lock-order inversion.
+    metadata_expire_ms: i64,
     /// Async notification for waiting on metadata updates.
     ///
     /// Corresponds to Java's `Object.wait()/notifyAll()` on the Metadata instance.
@@ -182,7 +192,6 @@ pub struct Metadata {
 /// Inner mutable state of `Metadata`, protected by a mutex.
 struct MetadataInner {
     refresh_backoff: ExponentialBackoff,
-    metadata_expire_ms: i64,
     update_version: i32,
     request_version: i32,
     last_refresh_ms: i64,
@@ -405,7 +414,6 @@ impl Metadata {
         Self {
             inner: Mutex::new(MetadataInner {
                 refresh_backoff,
-                metadata_expire_ms,
                 last_refresh_ms: 0,
                 last_successful_refresh_ms: 0,
                 attempts: 0,
@@ -426,6 +434,7 @@ impl Metadata {
                 #[cfg(test)]
                 request_update_call_count: 0,
             }),
+            metadata_expire_ms,
             update_notify: Notify::new(),
             retain_topic_fn: None,
             retain_topic_with_id_fn: None,
@@ -470,7 +479,6 @@ impl Metadata {
         Self {
             inner: Mutex::new(MetadataInner {
                 refresh_backoff,
-                metadata_expire_ms,
                 last_refresh_ms: 0,
                 last_successful_refresh_ms: 0,
                 attempts: 0,
@@ -491,6 +499,7 @@ impl Metadata {
                 #[cfg(test)]
                 request_update_call_count: 0,
             }),
+            metadata_expire_ms,
             update_notify: Notify::new(),
             retain_topic_fn: overrides.retain_topic_fn,
             retain_topic_with_id_fn: overrides.retain_topic_with_id_fn,
@@ -524,10 +533,10 @@ impl Metadata {
     #[doc(alias = "org.apache.kafka.clients.Metadata#timeToAllowUpdate")]
     pub fn time_to_allow_update(&self, now_ms: i64) -> i64 {
         let mut inner = self.inner.lock().unwrap();
-        Self::time_to_allow_update_inner(&mut inner, now_ms)
+        self.time_to_allow_update_inner(&mut inner, now_ms)
     }
 
-    fn time_to_allow_update_inner(inner: &mut MetadataInner, now_ms: i64) -> i64 {
+    fn time_to_allow_update_inner(&self, inner: &mut MetadataInner, now_ms: i64) -> i64 {
         // Calculate the backoff for attempts which acts when metadata responses fail
         let backoff_for_attempts = 0i64.max(
             inner.last_refresh_ms
@@ -538,7 +547,7 @@ impl Metadata {
         );
 
         // Periodic updates based on expiration resets the equivalent response count
-        if 0i64.max(inner.last_successful_refresh_ms + inner.metadata_expire_ms - now_ms) == 0 {
+        if 0i64.max(inner.last_successful_refresh_ms + self.metadata_expire_ms - now_ms) == 0 {
             inner.equivalent_response_count = 0;
         }
 
@@ -561,24 +570,27 @@ impl Metadata {
     #[doc(alias = "org.apache.kafka.clients.Metadata#timeToNextUpdate")]
     pub fn time_to_next_update(&self, now_ms: i64) -> i64 {
         let mut inner = self.inner.lock().unwrap();
-        Self::time_to_next_update_inner(&mut inner, now_ms)
+        self.time_to_next_update_inner(&mut inner, now_ms)
     }
 
-    fn time_to_next_update_inner(inner: &mut MetadataInner, now_ms: i64) -> i64 {
+    fn time_to_next_update_inner(&self, inner: &mut MetadataInner, now_ms: i64) -> i64 {
         let update_requested = inner.need_full_update || inner.need_partial_update;
         let time_to_expire = if update_requested {
             0
         } else {
-            0i64.max(inner.last_successful_refresh_ms + inner.metadata_expire_ms - now_ms)
+            0i64.max(inner.last_successful_refresh_ms + self.metadata_expire_ms - now_ms)
         };
-        time_to_expire.max(Self::time_to_allow_update_inner(inner, now_ms))
+        time_to_expire.max(self.time_to_allow_update_inner(inner, now_ms))
     }
 
     /// Returns the metadata expiry time in milliseconds.
+    ///
+    /// Does not take the metadata lock, like Java's unsynchronized getter over a
+    /// `final` field, so it is safe to call while holding a lock that
+    /// `Metadata::update` acquires under the metadata lock.
     #[doc(alias = "org.apache.kafka.clients.Metadata#metadataExpireMs")]
     pub fn metadata_expire_ms(&self) -> i64 {
-        let inner = self.inner.lock().unwrap();
-        inner.metadata_expire_ms
+        self.metadata_expire_ms
     }
 
     /// Request an update of the current cluster metadata info.
@@ -1597,7 +1609,7 @@ impl Metadata {
 
         // Perform a partial update only if a full update hasn't been requested,
         // and the last successful hasn't exceeded the metadata refresh time.
-        if !inner.need_full_update && inner.last_successful_refresh_ms + inner.metadata_expire_ms > now_ms {
+        if !inner.need_full_update && inner.last_successful_refresh_ms + self.metadata_expire_ms > now_ms {
             request = self.new_metadata_request_builder_for_new_topics();
             is_partial_update = true;
         }
