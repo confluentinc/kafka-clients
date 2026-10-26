@@ -531,7 +531,9 @@ impl MultilanguageAdmin {
         }
     }
 
-    /// Rebuilds a [`GroupState`] from the enum constant name the wire carries.
+    /// Rebuilds a [`GroupState`] from the `toString()` text the wire carries
+    /// (`PreparingRebalance`), which is what `parse` reads; the constant name
+    /// `name()` returns (`PREPARING_REBALANCE`) parses as `Unknown`.
     ///
     /// `GroupState::parse` maps anything it does not recognise to `Unknown`
     /// (faithfully — Java's `parse` does the same), which would silently absorb a
@@ -541,27 +543,27 @@ impl MultilanguageAdmin {
     fn group_state(&self, name: &str, what: &str) -> Result<GroupState, Error> {
         let parsed = GroupState::parse(name);
         if parsed == GroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
-            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupState constant name")));
+            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupState toString() text")));
         }
         Ok(parsed)
     }
 
-    /// Rebuilds a [`GroupType`] from its enum constant name. See
+    /// Rebuilds a [`GroupType`] from its `toString()` text. See
     /// [`Self::group_state`] for why an unrecognised name is an error.
     fn group_type(&self, name: &str, what: &str) -> Result<GroupType, Error> {
         let parsed = GroupType::parse(name);
         if parsed == GroupType::Unknown && !name.eq_ignore_ascii_case("Unknown") {
-            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupType constant name")));
+            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupType toString() text")));
         }
         Ok(parsed)
     }
 
-    /// Rebuilds a [`ClassicGroupState`] from its enum constant name. See
+    /// Rebuilds a [`ClassicGroupState`] from its `toString()` text. See
     /// [`Self::group_state`].
     fn classic_group_state(&self, name: &str, what: &str) -> Result<ClassicGroupState, Error> {
         let parsed = ClassicGroupState::parse(name);
         if parsed == ClassicGroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
-            return Err(self.protocol_error(format!("{what} {name:?} is not a ClassicGroupState constant name")));
+            return Err(self.protocol_error(format!("{what} {name:?} is not a ClassicGroupState toString() text")));
         }
         Ok(parsed)
     }
@@ -1807,12 +1809,13 @@ impl AdminBackend for MultilanguageAdmin {
     async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, Error> {
         let request = proto::ListGroupsRequest {
             admin_id: self.admin_id,
-            // Enum filters cross as the constant names, so each server reaches
-            // its own binding's `parse` rather than forwarding a code table
-            // written here. An empty list leaves the filter unset.
-            group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
+            // Enum filters cross as Java's `toString()` text, which is what
+            // `parse` reads, so each server reaches its own binding's `parse`
+            // rather than forwarding a code table written here. An empty list
+            // leaves the filter unset.
+            group_states: options.group_states().iter().map(ToString::to_string).collect(),
             protocol_types: options.protocol_types().iter().cloned().collect(),
-            types: options.types().iter().map(|t| t.name().to_string()).collect(),
+            types: options.types().iter().map(ToString::to_string).collect(),
             timeout_ms: options.timeout_ms(),
         };
         let response = self.call(|mut c| async move { c.list_groups(request).await }).await?;
