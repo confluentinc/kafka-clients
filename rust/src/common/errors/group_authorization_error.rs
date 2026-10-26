@@ -42,8 +42,8 @@ use crate::common::protocol::Errors;
 pub struct GroupAuthorizationError {
     /// Base error fields.
     kafka_error: KafkaError,
-    /// The group ID that failed authorization.
-    group_id: String,
+    /// The group ID that failed authorization, `None` when it is not known.
+    group_id: Option<String>,
 }
 
 impl GroupAuthorizationError {
@@ -59,7 +59,7 @@ impl GroupAuthorizationError {
         let message = format!("Not authorized to access group: {group_id}");
         Self {
             kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
-            group_id,
+            group_id: Some(group_id),
         }
     }
 
@@ -68,9 +68,19 @@ impl GroupAuthorizationError {
     /// into an error.
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException")]
     pub fn with_default_message() -> Self {
+        Self { kafka_error: KafkaError::new(Errors::GroupAuthorizationFailed), group_id: None }
+    }
+
+    /// Creates a group authorization error carrying a custom message and no group ID.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error's message
+    #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException(String)")]
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
-            kafka_error: KafkaError::new(Errors::GroupAuthorizationFailed),
-            group_id: String::new(),
+            kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
+            group_id: None,
         }
     }
 
@@ -80,11 +90,13 @@ impl GroupAuthorizationError {
     ///
     /// - `group_id` - the group ID that failed authorization
     /// - `message` - the error's message
-    #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException")]
-    pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+    #[doc(
+        alias = "org.apache.kafka.common.errors.GroupAuthorizationException#GroupAuthorizationException(String,String)"
+    )]
+    pub fn with_group_id(group_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
-            group_id: group_id.into(),
+            group_id: Some(group_id.into()),
         }
     }
 
@@ -100,13 +112,9 @@ impl GroupAuthorizationError {
     /// # Returns
     ///
     /// nullable group_id
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: returns an empty string, not `None`, when unknown.
     #[doc(alias = "org.apache.kafka.common.errors.GroupAuthorizationException#groupId")]
-    pub fn group_id(&self) -> &str {
-        &self.group_id
+    pub fn group_id(&self) -> Option<&str> {
+        self.group_id.as_deref()
     }
 }
 

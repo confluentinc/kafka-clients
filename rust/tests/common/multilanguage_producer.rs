@@ -50,6 +50,7 @@ use confluent_kafka::common::errors::AuthorizationError;
 use confluent_kafka::common::errors::AuthorizerNotReadyError;
 use confluent_kafka::common::errors::BootstrapResolutionError;
 use confluent_kafka::common::errors::DisconnectError;
+use confluent_kafka::common::errors::GroupAuthorizationError;
 use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
@@ -452,8 +453,9 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
             Error::topic_authorization_message(p.unauthorized_topics.into_iter().collect(), p.message)
         },
         INVALID_TOPIC_ERROR => Error::invalid_topics_message(p.invalid_topics.into_iter().collect(), p.message),
-        GROUP_AUTHORIZATION_FAILED => {
-            Error::group_authorization_with_message(p.group_id.unwrap_or_default(), p.message)
+        GROUP_AUTHORIZATION_FAILED => match p.group_id {
+            Some(group_id) => Error::group_authorization_with_message(group_id, p.message),
+            None => Error::GroupAuthorization(GroupAuthorizationError::new(p.message)),
         },
 
         // Classes only the client raises, so `Errors` has no code for them and

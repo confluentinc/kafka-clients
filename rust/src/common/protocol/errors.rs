@@ -1024,9 +1024,7 @@ impl Errors {
                 Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message)))
             },
             Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-            Self::GroupAuthorizationFailed => {
-                Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
-            },
+            Self::GroupAuthorizationFailed => Some(Error::GroupAuthorization(GroupAuthorizationError::new(message))),
             Self::GroupDeletionFailed => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),

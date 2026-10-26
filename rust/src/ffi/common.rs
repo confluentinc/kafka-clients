@@ -82,11 +82,12 @@ use std::sync::OnceLock;
 use futures_util::FutureExt;
 
 use crate::common::Error;
+use crate::common::errors::GroupAuthorizationError;
 use crate::common::protocol::Errors;
 use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
+use crate::ffi::util::{c_str_to_option, c_str_to_string, kafka_List_t, list_strings};
 // The 168 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
@@ -1109,7 +1110,8 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
     }))
 }
 
-/// `new GroupAuthorizationException(String groupId)`.
+/// `GroupAuthorizationException.forGroupId(String groupId)`: Java's default message for the
+/// group. A `NULL` group id gives an error without a group id, as Java's `forGroupId(null)`.
 ///
 /// # Parameters
 ///
@@ -1128,12 +1130,20 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const c_char) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
-    // string, as `c_str_to_string` requires. `group_id` is only read here, into owned values,
+    // string, as `c_str_to_option` requires. `group_id` is only read here, into owned values,
     // so nothing borrows it after this call.
-    box_error(Error::group_authorization(unsafe { c_str_to_string(group_id) }))
+    match unsafe { c_str_to_option(group_id) } {
+        Some(group_id) => box_error(Error::group_authorization(group_id)),
+        // Java's `forGroupId(null)`: the string concatenation prints `null`, and the error
+        // carries no group ID.
+        None => box_error(Error::GroupAuthorization(GroupAuthorizationError::new(
+            "Not authorized to access group: null",
+        ))),
+    }
 }
 
-/// `new GroupAuthorizationException(String message, String groupId)`.
+/// `new GroupAuthorizationException(String message, String groupId)`. A `NULL` group id gives
+/// an error without a group id, as Java's `(String message)` constructor.
 ///
 /// # Parameters
 ///
@@ -1156,16 +1166,18 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
     group_id: *const c_char,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
-    box_error(Error::group_authorization_with_message(
-        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated
-        // C string, as `c_str_to_string` requires. `group_id` is only read here, into owned
-        // values, so nothing borrows it after this call.
-        unsafe { c_str_to_string(group_id) },
-        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
-        // string, as `c_str_to_string` requires. `message` is only read here, into owned
-        // values, so nothing borrows it after this call.
-        unsafe { c_str_to_string(message) },
-    ))
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    let message = unsafe { c_str_to_string(message) };
+    // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
+    // string, as `c_str_to_option` requires. `group_id` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(match unsafe { c_str_to_option(group_id) } {
+        Some(group_id) => Error::group_authorization_with_message(group_id, message),
+        // Java's `(message, null)`, which its `(message)` constructor passes.
+        None => Error::GroupAuthorization(GroupAuthorizationError::new(message)),
+    })
 }
 
 /// `new InvalidGroupIdException(String message)`.

@@ -616,7 +616,7 @@ mod tests {
         );
         let throwable = assert_fatal_old_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), Some("foo")),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }
@@ -650,7 +650,7 @@ mod tests {
         );
         let throwable = assert_fatal_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), Some("foo")),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }

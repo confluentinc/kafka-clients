@@ -2928,7 +2928,7 @@ impl Error {
     /// - `group_id` - the group the client is not authorized to access
     /// - `message` - the error message
     pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::new(group_id, message))
+        Self::GroupAuthorization(GroupAuthorizationError::with_group_id(group_id, message))
     }
 
     /// Creates an invalid group ID error, Java's `InvalidGroupIdException` (an
