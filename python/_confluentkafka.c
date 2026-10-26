@@ -6409,9 +6409,10 @@ static const char* config_source_name(const kafka_admin_ConfigEntry_ConfigSource
     return "UNKNOWN";
 }
 
+// A non-NULL type singleton -> its Java constant name, or NULL with a Python
+// error set. A NULL type is Java's null type and never reaches here.
 static const char* config_type_name(const kafka_admin_ConfigEntry_ConfigType_t* t) {
     kafka_common_Error_t *ffi_err = NULL;
-    if (t == NULL) return "UNKNOWN";
     kafka_admin_ConfigEntry_ConfigType_e e = kafka_admin_ConfigEntry_ConfigType_UNKNOWN;
     if (ffi_raise((e = kafka_admin_ConfigEntry_ConfigType__enum_err(t, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     switch (e) {
@@ -6949,7 +6950,7 @@ static PyObject* topic_listing_to_py(const kafka_admin_TopicListing_t* l) {
 
 // A ConfigEntry as `entry9`, the row `_conversions.config_from_rows` reads:
 // (name, value, is_default, is_sensitive, is_read_only, source_name,
-// type_name, documentation | None, [(name, value, source_name)]).
+// type_name | None, documentation | None, [(name, value, source_name)]).
 static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* e) {
     kafka_common_Error_t *ffi_err = NULL;
     kafka_List_t* syns = NULL;  // owned
@@ -6993,12 +6994,13 @@ static PyObject* config_entry_to_py(const kafka_admin_ConfigEntry_t* e) {
         || ffi_raise((source = kafka_admin_ConfigEntry_source_err(e, &ffi_err), ffi_take(&ffi_err)))
         || (source_name = config_source_name(source)) == NULL
         || ffi_raise((type = kafka_admin_ConfigEntry_type_err(e, &ffi_err), ffi_take(&ffi_err)))
-        || (type_name = config_type_name(type)) == NULL
+        || (type != NULL && (type_name = config_type_name(type)) == NULL)
         || ffi_raise((documentation = kafka_admin_ConfigEntry_documentation_err(e, &ffi_err), ffi_take(&ffi_err)))) {
         Py_DECREF(synonyms);
         return NULL;
     }
-    return Py_BuildValue("(sziiisszN)", name ? name : "", value, is_default ? 1 : 0, is_sensitive ? 1 : 0,
+    // type_name stays NULL for Java's null type (a createTopics entry's), which "z" maps to None.
+    return Py_BuildValue("(sziiiszzN)", name ? name : "", value, is_default ? 1 : 0, is_sensitive ? 1 : 0,
                          is_read_only ? 1 : 0, source_name, type_name, documentation, synonyms);
 }
 
