@@ -154,22 +154,14 @@ impl FetchSessionHandler {
     /// # Divergence from Java
     ///
     /// Java's `newBuilder(int initialSize, boolean copySessionPartitions)`
-    /// accepts a flag that, when `true`, pre-populates the builder's `next`
-    /// map with the current `sessionPartitions`. The Rust translation drops
-    /// that parameter because:
-    ///
-    /// - The Rust `build_request` consumes the builder's `next` map directly
-    ///   and diffs it against `self.session_partitions` (the handler owns
-    ///   the latter). The `next` map is always disjoint from
-    ///   `session_partitions`, so pre-populating would only cause a
-    ///   downstream `IndexMap::swap_remove` to immediately discard each
-    ///   pre-populated entry.
-    /// - No call site in Phase 7a passes `true` and `prepareFetchRequests`
-    ///   in Java always passes `false`.
-    ///
-    /// If a future caller needs the `true` behavior, the right place to
-    /// implement it is in `build_request`'s diff loop (so we can compute the
-    /// diff without forcing the caller to pre-populate).
+    /// takes a flag that only decides whether the built
+    /// `FetchRequestData.sessionPartitions` is a copy of the session or a
+    /// read-only view of it (`Builder.build()`); `next` starts empty either
+    /// way. Java documents the `false` form as primarily for the replica
+    /// fetcher, and the consumer uses the no-argument `newBuilder()`, which
+    /// copies. The Rust translation drops the parameter because
+    /// `build_request` always returns a copy of the session partitions, which
+    /// is the `true` behavior.
     pub fn new_builder_sized(&self, initial_size: usize) -> Builder {
         Builder { next: IndexMap::with_capacity(initial_size), ..Builder::default() }
     }
@@ -331,80 +323,81 @@ impl FetchSessionHandler {
         let mut replaced: Vec<TopicIdPartition> = Vec::new();
         let mut can_use_topic_ids = can_use_topic_ids_input;
 
-        // Walk `session_partitions` in insertion order. The Java code uses
-        // an iterator with `iter.remove()` and re-inserts touched entries
-        // at the end of `next` so that the resulting `next` map carries
-        // only the partitions whose state has changed.
+        // Walk `session_partitions` in insertion order, as Java's
+        // `sessionPartitions.entrySet().iterator()` does. Java removes each
+        // session partition from `next` (`LinkedHashMap.remove`, which keeps
+        // the order of the rest) and re-`put`s an altered or replaced one at
+        // the end of `next`, so after the walk `next` holds [the brand-new
+        // partitions, in request order] followed by [the altered/replaced
+        // partitions, in session order]; unchanged ones are dropped (implied,
+        // not in toSend). The add loop below relies on that order.
         //
-        // Rust port: collect the partition keys up front (cheap clone),
-        // then process them while we mutate `session_partitions` and `next`.
-        let session_keys: Vec<TopicPartition> = self.session_partitions.keys().cloned().collect();
-        for topic_partition in session_keys {
-            // `prev_data` is the current state in the session.
-            // We re-borrow inside the loop so we don't hold an outer
-            // reference across mutations.
-            let prev_data = self
-                .session_partitions
-                .get(&topic_partition)
-                .expect("session key collected above")
-                .clone();
-
-            // Try to look up the requested next-state for this partition.
-            let next_data_opt = builder.next.swap_remove(&topic_partition);
-            if let Some(next_data) = next_data_opt {
-                // Both prev and next exist — check for topic-id change /
-                // payload change.
-                let zero = Uuid::zero();
-                if prev_data.topic_id != next_data.topic_id && prev_data.topic_id != zero && next_data.topic_id != zero
-                {
-                    // Topic ID changed (Uuid -> different Uuid). For v13+
-                    // the replaced partition is forgotten. We re-add the
-                    // new entry to the end of `next` and update the
-                    // session entry.
-                    self.session_partitions.insert(topic_partition.clone(), next_data.clone());
-                    builder.next.insert(topic_partition.clone(), next_data);
-                    replaced.push(TopicIdPartition::new(prev_data.topic_id, topic_partition));
-                } else if prev_data != next_data {
-                    // Altered payload (offset, max bytes, etc.). Re-insert
-                    // at end of next; update session.
-                    self.session_partitions.insert(topic_partition.clone(), next_data.clone());
-                    builder.next.insert(topic_partition.clone(), next_data.clone());
-                    altered.push(TopicIdPartition::new(next_data.topic_id, topic_partition));
-                }
-                // else: identical — leave session in place; the partition
-                // remains implied (not in toSend).
-            } else {
+        // Rust port: produce the same `next` in O(n) instead of removing per
+        // partition (`IndexMap::shift_remove` is O(n), and in steady state
+        // most partitions are unchanged, so that would be O(n^2) per build;
+        // `swap_remove` is O(1) but reorders `next`, which dropped brand-new
+        // partitions from the session — audit finding C3-01). The walk only
+        // looks partitions up in `next` and collects the altered/replaced
+        // entries in session order; `retain` keeps the session order and is
+        // Java's `iter.remove()` for the partitions the next round drops.
+        // Updating the value in place is Java's `entry.setValue`.
+        let mut touched: Vec<(TopicPartition, PartitionData)> = Vec::new();
+        let next = &builder.next;
+        self.session_partitions.retain(|topic_partition, prev_data| {
+            let Some(next_data) = next.get(topic_partition) else {
                 // The next round does not include this partition — forget it.
-                let prev_topic_id = prev_data.topic_id;
-                self.session_partitions.shift_remove(&topic_partition);
-                removed.push(TopicIdPartition::new(prev_topic_id, topic_partition.clone()));
+                removed.push(TopicIdPartition::new(prev_data.topic_id, topic_partition.clone()));
                 // If we do not have a topic id for the removed partition
                 // (and were otherwise using them), we can no longer use
                 // topic IDs.
-                if can_use_topic_ids && prev_topic_id == Uuid::zero() {
+                if can_use_topic_ids && prev_data.topic_id == Uuid::zero() {
                     can_use_topic_ids = false;
                 }
+                return false;
+            };
+            // Both prev and next exist — check for topic-id change /
+            // payload change.
+            let zero = Uuid::zero();
+            if prev_data.topic_id != next_data.topic_id && prev_data.topic_id != zero && next_data.topic_id != zero {
+                // Topic ID changed (Uuid -> different Uuid). For v13+ the
+                // replaced partition is forgotten. The new entry goes to the
+                // end of `next` and replaces the session entry.
+                replaced.push(TopicIdPartition::new(prev_data.topic_id, topic_partition.clone()));
+                *prev_data = next_data.clone();
+                touched.push((topic_partition.clone(), next_data.clone()));
+            } else if prev_data != next_data {
+                // Altered payload (offset, max bytes, etc.). Goes to the end
+                // of `next`; update the session entry.
+                altered.push(TopicIdPartition::new(next_data.topic_id, topic_partition.clone()));
+                *prev_data = next_data.clone();
+                touched.push((topic_partition.clone(), next_data.clone()));
             }
-        }
+            // else: identical — leave the session entry in place; the
+            // partition remains implied (not in toSend).
+            true
+        });
 
-        // Anything left in `next` is brand new — add it to the session.
-        // The Java code uses `containsKey` plus a `break` because the
-        // earlier loop has already moved all "touched" partitions to the
-        // end. In Rust, `swap_remove` above ensured those keys are gone
-        // from `next` (we re-added them to the end). Stop on the first key
-        // that already exists in the session — those are the re-inserted
-        // touched partitions that we've already accounted for.
-        let new_partition_keys: Vec<TopicPartition> = builder.next.keys().cloned().collect();
-        for tp in new_partition_keys {
-            if self.session_partitions.contains_key(&tp) {
-                // The remaining entries are the touched (altered/replaced)
-                // ones we re-added — already counted. Stop.
-                break;
-            }
-            let data = builder.next.get(&tp).expect("just enumerated").clone();
-            self.session_partitions.insert(tp.clone(), data.clone());
-            added.push(TopicIdPartition::new(data.topic_id, tp));
+        // After the walk, `session_partitions` holds exactly the partitions
+        // that are in both the old session and `next`, so the entries of
+        // `next` it does not contain are the brand-new ones, kept in request
+        // order (`retain` is O(n) and order-preserving).
+        let session_partitions = &self.session_partitions;
+        builder
+            .next
+            .retain(|topic_partition, _| !session_partitions.contains_key(topic_partition));
+
+        // Add any new partitions to the session. Java walks `next` and
+        // `break`s at the first partition already in the session, because
+        // the walk above moved every such partition to the end of `next`;
+        // here `next` holds only the new ones at this point, so the whole
+        // map is added.
+        for (topic_partition, next_data) in &builder.next {
+            self.session_partitions.insert(topic_partition.clone(), next_data.clone());
+            added.push(TopicIdPartition::new(next_data.topic_id, topic_partition.clone()));
         }
+        // The altered/replaced partitions follow the new ones, in session
+        // order, as Java's re-`put`s left them at the end of `next`.
+        builder.next.extend(touched);
 
         // Track topic IDs based on the final state.
         self.session_topic_names = if can_use_topic_ids {
@@ -1406,6 +1399,228 @@ mod tests {
             "Node 1 was unable to process the fetch request with (sessionId=INVALID, epoch=INITIAL): \
              INVALID_FETCH_SESSION_EPOCH. Re-sending a full fetch request, which closes the existing session on \
              the broker and establishes a new one."
+        );
+    }
+
+    /// Builds a full fetch over `parts` and accepts a response that creates
+    /// session 123, so the handler's next `build_request` is incremental.
+    fn incremental_session(parts: &[(TopicPartition, PartitionData)], version: i16) -> FetchSessionHandler {
+        let mut handler = FetchSessionHandler::new(1);
+        let mut builder = handler.new_builder();
+        for (tp, data) in parts {
+            builder.add(tp.clone(), data.clone());
+        }
+        let full = handler.build_request(builder);
+        assert!(full.metadata.is_full());
+        let entries: Vec<(String, Uuid, i32, i16)> = parts
+            .iter()
+            .map(|(tp, data)| (tp.topic().to_string(), data.topic_id, tp.partition(), 0))
+            .collect();
+        assert!(handler.handle_response(&build_response(Errors::None, 123, 0, &entries), version));
+        handler
+    }
+
+    fn keys(map: &IndexMap<TopicPartition, PartitionData>) -> Vec<TopicPartition> {
+        map.keys().cloned().collect()
+    }
+
+    fn forget_keys(list: &[TopicIdPartition]) -> Vec<TopicPartition> {
+        list.iter().map(|t| t.topic_partition().clone()).collect()
+    }
+
+    /// Audit finding C3-01. Session `[foo-0, foo-1]`; the next round asks for
+    /// `[foo-0 (new offset), foo-2 (new), foo-1 (unchanged)]`.
+    ///
+    /// Java's `FetchSessionHandler.Builder.build()` (`next.remove` keeps the
+    /// order of the remaining entries, an altered partition is re-`put` at the
+    /// end of `next`) leaves `next = [foo-2, foo-0]`, so the add loop adds
+    /// foo-2 before breaking at foo-0: Java sends `[foo-2, foo-0]` and the
+    /// session becomes `[foo-0, foo-1, foo-2]`. The broker then answers with
+    /// foo-2 data, which must be accepted as a valid incremental response.
+    #[test]
+    fn test_incremental_add_after_altered_partition_keeps_new_partition_in_session() {
+        for version in [12i16, ApiKeys::FETCH.latest_version()] {
+            let mut topic_ids = HashMap::new();
+            let mut topic_names = HashMap::new();
+            add_topic_id(&mut topic_ids, &mut topic_names, "foo", version);
+            let foo_id = topic_ids.get("foo").copied().unwrap_or(Uuid::zero());
+
+            let mut handler = incremental_session(
+                &[
+                    (tp("foo", 0), pd(foo_id, 0, 100, 200)),
+                    (tp("foo", 1), pd(foo_id, 10, 110, 210)),
+                ],
+                version,
+            );
+
+            let mut builder = handler.new_builder();
+            builder.add(tp("foo", 0), pd(foo_id, 5, 100, 200)); // altered
+            builder.add(tp("foo", 2), pd(foo_id, 20, 120, 220)); // new
+            builder.add(tp("foo", 1), pd(foo_id, 10, 110, 210)); // unchanged
+            let data = handler.build_request(builder);
+            assert!(!data.metadata.is_full(), "version={version}");
+            assert_eq!(
+                vec![tp("foo", 2), tp("foo", 0)],
+                keys(&data.to_send),
+                "version={version}: Java sends the new partition, then the altered one"
+            );
+            assert_eq!(
+                vec![tp("foo", 0), tp("foo", 1), tp("foo", 2)],
+                keys(&data.session_partitions),
+                "version={version}: Java adds the new partition to the session"
+            );
+            assert_eq!(
+                Some(&pd(foo_id, 5, 100, 200)),
+                data.session_partitions.get(&tp("foo", 0)),
+                "version={version}: the altered partition's new state is in the session"
+            );
+            assert!(data.to_forget.is_empty(), "version={version}");
+            assert!(data.to_replace.is_empty(), "version={version}");
+
+            // The broker added foo-2 to its session and returns data for it.
+            let response = build_response(
+                Errors::None,
+                123,
+                0,
+                &[("foo".to_string(), foo_id, 2, 0), ("foo".to_string(), foo_id, 0, 0)],
+            );
+            assert!(
+                handler.handle_response(&response, version),
+                "version={version}: an incremental response for foo-2 is valid, as in Java"
+            );
+            assert_eq!(2, handler.next_metadata.epoch(), "version={version}: the session advances");
+        }
+    }
+
+    /// Pins the incremental `to_send` order and session contents for the
+    /// orders `test_incrementals` does not cover. Expected values are derived
+    /// by hand from Java's `FetchSessionHandler.Builder.build()`: walking the
+    /// session, `next.remove` keeps the order of the rest of `next`, an altered
+    /// or replaced partition is re-`put` at the end of `next`, an unchanged
+    /// one stays removed, and the add loop adds every leading `next` key not in
+    /// the session. So `to_send` = [new partitions in request order] followed
+    /// by [altered/replaced partitions in session order], and the new
+    /// partitions are appended to the session. `added`/`altered` are not
+    /// exposed; they are exactly the new and the altered entries of `to_send`.
+    #[test]
+    fn test_incremental_to_send_order_matches_java() {
+        for version in [12i16, ApiKeys::FETCH.latest_version()] {
+            let mut topic_ids = HashMap::new();
+            let mut topic_names = HashMap::new();
+            add_topic_id(&mut topic_ids, &mut topic_names, "foo", version);
+            add_topic_id(&mut topic_ids, &mut topic_names, "bar", version);
+            let foo_id = topic_ids.get("foo").copied().unwrap_or(Uuid::zero());
+            let bar_id = topic_ids.get("bar").copied().unwrap_or(Uuid::zero());
+            let foo0 = pd(foo_id, 0, 100, 200);
+            let foo1 = pd(foo_id, 10, 110, 210);
+            let foo2 = pd(foo_id, 20, 120, 220);
+
+            // [unchanged, new, altered]. Java: remove foo-0 -> [foo-2, foo-1];
+            // remove + put foo-1 -> [foo-2, foo-1]; add foo-2, break at foo-1.
+            let mut handler =
+                incremental_session(&[(tp("foo", 0), foo0.clone()), (tp("foo", 1), foo1.clone())], version);
+            let mut builder = handler.new_builder();
+            builder.add(tp("foo", 0), foo0.clone());
+            builder.add(tp("foo", 2), foo2.clone());
+            builder.add(tp("foo", 1), pd(foo_id, 15, 110, 210));
+            let data = handler.build_request(builder);
+            assert_eq!(vec![tp("foo", 2), tp("foo", 1)], keys(&data.to_send), "version={version}");
+            assert_eq!(
+                vec![tp("foo", 0), tp("foo", 1), tp("foo", 2)],
+                keys(&data.session_partitions),
+                "version={version}"
+            );
+            assert!(data.to_forget.is_empty() && data.to_replace.is_empty(), "version={version}");
+
+            // [new, altered, unchanged]. Java: remove + put foo-0 ->
+            // [foo-2, foo-1, foo-0]; remove foo-1 -> [foo-2, foo-0]; add foo-2.
+            let mut handler =
+                incremental_session(&[(tp("foo", 0), foo0.clone()), (tp("foo", 1), foo1.clone())], version);
+            let mut builder = handler.new_builder();
+            builder.add(tp("foo", 2), foo2.clone());
+            builder.add(tp("foo", 0), pd(foo_id, 5, 100, 200));
+            builder.add(tp("foo", 1), foo1.clone());
+            let data = handler.build_request(builder);
+            assert_eq!(vec![tp("foo", 2), tp("foo", 0)], keys(&data.to_send), "version={version}");
+            assert_eq!(
+                vec![tp("foo", 0), tp("foo", 1), tp("foo", 2)],
+                keys(&data.session_partitions),
+                "version={version}"
+            );
+            assert!(data.to_forget.is_empty() && data.to_replace.is_empty(), "version={version}");
+
+            // Removal mixed with an add: session [foo-0, foo-1, foo-2], next
+            // [foo-1 altered, bar-0 new, foo-2 unchanged]. Java: foo-0 is
+            // removed; remove + put foo-1 -> [bar-0, foo-2, foo-1]; remove
+            // foo-2 -> [bar-0, foo-1]; add bar-0, break at foo-1.
+            let mut handler = incremental_session(
+                &[
+                    (tp("foo", 0), foo0.clone()),
+                    (tp("foo", 1), foo1.clone()),
+                    (tp("foo", 2), foo2.clone()),
+                ],
+                version,
+            );
+            let mut builder = handler.new_builder();
+            builder.add(tp("foo", 1), pd(foo_id, 15, 110, 210));
+            builder.add(tp("bar", 0), pd(bar_id, 30, 130, 230));
+            builder.add(tp("foo", 2), foo2.clone());
+            let data = handler.build_request(builder);
+            assert_eq!(vec![tp("bar", 0), tp("foo", 1)], keys(&data.to_send), "version={version}");
+            assert_eq!(
+                vec![tp("foo", 1), tp("foo", 2), tp("bar", 0)],
+                keys(&data.session_partitions),
+                "version={version}"
+            );
+            assert_eq!(vec![tp("foo", 0)], forget_keys(&data.to_forget), "version={version}");
+            assert!(data.to_replace.is_empty(), "version={version}");
+            let response = build_response(Errors::None, 123, 0, &[("bar".to_string(), bar_id, 0, 0)]);
+            assert!(handler.handle_response(&response, version), "version={version}");
+        }
+    }
+
+    /// A replaced (topic-id change) partition mixed with a new one. Session
+    /// `[foo-0 (id1), bar-0]`, next `[foo-0 (id2), baz-0 new, bar-0 unchanged]`.
+    /// Derived by hand from Java's `Builder.build()`: remove + put foo-0 ->
+    /// `[baz-0, bar-0, foo-0]`; remove bar-0 -> `[baz-0, foo-0]`; add baz-0,
+    /// break at foo-0. So `to_send = [baz-0, foo-0]`, `replaced = [id1/foo-0]`,
+    /// and the session is `[foo-0 (id2), bar-0, baz-0]`.
+    #[test]
+    fn test_incremental_replaced_partition_mixed_with_new_partition() {
+        let version = ApiKeys::FETCH.latest_version();
+        let foo_id_1 = Uuid::random_uuid();
+        let foo_id_2 = Uuid::random_uuid();
+        let bar_id = Uuid::random_uuid();
+        let baz_id = Uuid::random_uuid();
+        let bar0 = pd(bar_id, 10, 110, 210);
+
+        let mut handler = incremental_session(
+            &[(tp("foo", 0), pd(foo_id_1, 0, 100, 200)), (tp("bar", 0), bar0.clone())],
+            version,
+        );
+        let mut builder = handler.new_builder();
+        builder.add(tp("foo", 0), pd(foo_id_2, 0, 100, 200));
+        builder.add(tp("baz", 0), pd(baz_id, 20, 120, 220));
+        builder.add(tp("bar", 0), bar0);
+        let data = handler.build_request(builder);
+        assert_eq!(vec![tp("baz", 0), tp("foo", 0)], keys(&data.to_send));
+        assert_eq!(vec![tp("foo", 0), tp("bar", 0), tp("baz", 0)], keys(&data.session_partitions));
+        assert_eq!(foo_id_2, data.session_partitions[&tp("foo", 0)].topic_id);
+        assert_eq!(1, data.to_replace.len());
+        assert_eq!(foo_id_1, data.to_replace[0].topic_id());
+        assert_eq!(&tp("foo", 0), data.to_replace[0].topic_partition());
+        assert!(data.to_forget.is_empty());
+        assert!(data.can_use_topic_ids);
+
+        let response = build_response(
+            Errors::None,
+            123,
+            0,
+            &[("baz".to_string(), baz_id, 0, 0), ("foo".to_string(), foo_id_2, 0, 0)],
+        );
+        assert!(
+            handler.handle_response(&response, version),
+            "an incremental response for baz-0 is valid, as in Java"
         );
     }
 }
