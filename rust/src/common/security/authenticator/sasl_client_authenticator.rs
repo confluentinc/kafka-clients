@@ -42,13 +42,14 @@
 use crate::SaslAuthenticateRequestData;
 use crate::SaslHandshakeRequestData;
 use crate::common::Error;
+use crate::common::errors::{IllegalSaslStateError, UnsupportedSaslMechanismError};
 use crate::common::network;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
 use crate::common::network::NetworkReceive;
 use crate::common::network::Receive;
 use crate::common::network::{InterestOps, TransportLayer};
-use crate::common::network::{auth_io_error, auth_io_error_with_source};
+use crate::common::network::{auth_io_error, authentication_io_error};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::AbstractRequest;
 use crate::common::requests::ApiVersionsResponse;
@@ -439,10 +440,12 @@ impl SaslClientAuthenticator {
                 // Java: `throw new IllegalSaslStateException(msg, e)` — the
                 // two-argument form, so the message is Java's literal text and the
                 // cause hangs off `getCause()` rather than being appended to it.
-                return Err(auth_io_error_with_source(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol",
-                    error,
-                ));
+                return Err(authentication_io_error(Error::IllegalSaslState(
+                    IllegalSaslStateError::with_source(
+                        "Invalid SASL mechanism response, server may be expecting a different protocol",
+                        error,
+                    ),
+                )));
             },
             Err(error) => {
                 // Outside Java's catch: propagate without touching the SASL state
@@ -469,11 +472,20 @@ impl SaslClientAuthenticator {
                     let error = response.error();
                     if error != Errors::None {
                         self.set_sasl_state(SaslState::Failed);
-                        let err_msg = response.error_message().unwrap_or(error.message());
-                        // The broker rejected the credentials. Java throws
-                        // SaslAuthenticationException (an AuthenticationException):
-                        // a fatal authentication failure, not a retriable disconnect.
-                        return Err(auth_io_error(err_msg.to_string()));
+                        // Java: `throw errMsg == null ? error.exception() :
+                        // error.exception(errMsg)` — the class the code names. A
+                        // rejected password is SASL_AUTHENTICATION_FAILED, so a
+                        // `SaslAuthenticationException` (code 58): a fatal
+                        // authentication failure, not a retriable disconnect.
+                        let error = error.error_with_optional_message(response.error_message());
+                        return Err(if error.is_authentication_error() {
+                            authentication_io_error(error)
+                        } else {
+                            // Not an `AuthenticationException`: Java's
+                            // `KafkaChannel.prepare` does not catch it, so the
+                            // selector closes the connection as a disconnect.
+                            io::Error::other(error)
+                        });
                     }
                     Ok(Some(response.sasl_auth_bytes().to_vec()))
                 },
@@ -529,25 +541,30 @@ impl SaslClientAuthenticator {
         }
         // All non-None handshake errors are AuthenticationException subclasses
         // in Java (UnsupportedSaslMechanismException / IllegalSaslStateException):
-        // genuine authentication failures, fatal and not retried.
+        // genuine authentication failures, fatal and not retried. Java formats
+        // the mechanisms as a `List` (`[PLAIN, SCRAM-SHA-256]`) and the code by
+        // its constant name (`UNKNOWN_SERVER_ERROR`).
+        let enabled_mechanisms = format!("[{}]", response.enabled_mechanisms().join(", "));
         match error {
             Errors::None => Ok(()),
-            Errors::UnsupportedSaslMechanism => Err(auth_io_error(format!(
-                "Client SASL mechanism '{}' not enabled in the server, enabled mechanisms are {:?}",
-                self.mechanism,
-                response.enabled_mechanisms()
+            Errors::UnsupportedSaslMechanism => Err(authentication_io_error(Error::UnsupportedSaslMechanism(
+                UnsupportedSaslMechanismError::new(format!(
+                    "Client SASL mechanism '{}' not enabled in the server, enabled mechanisms are {}",
+                    self.mechanism, enabled_mechanisms
+                )),
             ))),
-            Errors::IllegalSaslState => Err(auth_io_error(format!(
-                "Unexpected handshake request with client mechanism {}, enabled mechanisms are {:?}",
-                self.mechanism,
-                response.enabled_mechanisms()
+            Errors::IllegalSaslState => Err(authentication_io_error(Error::IllegalSaslState(
+                IllegalSaslStateError::new(format!(
+                    "Unexpected handshake request with client mechanism {}, enabled mechanisms are {}",
+                    self.mechanism, enabled_mechanisms
+                )),
             ))),
-            _ => Err(auth_io_error(format!(
-                "Unknown error code {:?}, client mechanism is {}, enabled mechanisms are {:?}",
-                error,
-                self.mechanism,
-                response.enabled_mechanisms()
-            ))),
+            _ => Err(authentication_io_error(Error::IllegalSaslState(IllegalSaslStateError::new(
+                format!(
+                    "Unknown error code {}, client mechanism is {}, enabled mechanisms are {}",
+                    error, self.mechanism, enabled_mechanisms
+                ),
+            )))),
         }
     }
 
@@ -679,7 +696,7 @@ mod tests {
     use crate::SaslHandshakeResponseData;
     use crate::api_versions_response_data::ApiVersion;
     use crate::common::network::InterestOps;
-    use crate::common::network::is_authentication_error;
+    use crate::common::network::{authentication_error, is_authentication_error};
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
     use crate::common::protocol::Writable;
@@ -1168,18 +1185,24 @@ mod tests {
         let handshake_bytes = build_sasl_handshake_response_bytes(
             SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::UnsupportedSaslMechanism,
-            vec!["SCRAM-SHA-256".to_string()],
+            vec!["SCRAM-SHA-256".to_string(), "SCRAM-SHA-512".to_string()],
             auth.sasl_handshake_version(),
         );
         transport.enqueue_read_data(&handshake_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("PLAIN"));
-        assert!(err.to_string().contains("SCRAM-SHA-256"));
         // An unsupported-mechanism failure is a genuine authentication failure
         // (Java: UnsupportedSaslMechanismException extends AuthenticationException)
         // and must be classified as fatal, not a retriable disconnect.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::UnsupportedSaslMechanism(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::UnsupportedSaslMechanism);
+        // Java's text, the mechanisms printed as a `List`.
+        assert_eq!(
+            error.message(),
+            "Client SASL mechanism 'PLAIN' not enabled in the server, enabled mechanisms are [SCRAM-SHA-256, SCRAM-SHA-512]"
+        );
         assert_eq!(auth.sasl_state(), SaslState::Failed);
     }
 
@@ -1232,12 +1255,78 @@ mod tests {
         transport.enqueue_read_data(&sasl_auth_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Authentication failed"));
         // A broker-side credential rejection is a genuine authentication failure
         // (Java: SaslAuthenticationException extends AuthenticationException);
         // it must be classified as fatal so it is not silently retried.
         assert!(is_authentication_error(&err));
+        // Java throws `error.exception(errMsg)`: the class the code names, with
+        // the broker's message.
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::SaslAuthenticationFailed);
+        assert_eq!(error.message(), "Authentication failed: Invalid credentials");
         assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// Drives a fresh authenticator to `Intermediate` and answers its token with
+    /// a SaslAuthenticate response carrying `error` and `error_message`.
+    async fn authenticate_response_error(error: &Errors, error_message: Option<&str>) -> io::Error {
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "wrong",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
+        let mut transport = MockTransportLayer::new();
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_api_versions_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            ApiKeys::SASL_HANDSHAKE.latest_version(),
+            ApiKeys::SASL_AUTHENTICATE.latest_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            &Errors::None,
+            vec!["PLAIN".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_authenticate_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
+            error,
+            error_message,
+            &[],
+            auth.sasl_authenticate_version(),
+        ));
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+        err
+    }
+
+    /// Without an error message, Java's `error.exception()` carries the code's
+    /// default text.
+    #[tokio::test]
+    async fn test_auth_failure_without_message_uses_the_default_text() {
+        let err = authenticate_response_error(&Errors::SaslAuthenticationFailed, None).await;
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.message(), Errors::SaslAuthenticationFailed.message());
+    }
+
+    /// A code whose class is not an `AuthenticationException` is thrown as that
+    /// class in Java, which `KafkaChannel.prepare` does not catch: the selector
+    /// closes the connection as a disconnect, to be retried.
+    #[tokio::test]
+    async fn test_non_authentication_error_code_is_not_an_authentication_failure() {
+        let err = authenticate_response_error(&Errors::UnknownServerError, Some("broker trouble")).await;
+        assert!(!is_authentication_error(&err));
+        let error = err.get_ref().and_then(|e| e.downcast_ref::<Error>()).expect("typed payload");
+        assert!(matches!(error, Error::UnknownServer(_)), "{error:?}");
+        assert_eq!(error.message(), "broker trouble");
     }
 
     /// Test 9: Legacy raw token mode (sasl_authenticate_version == -1).
@@ -1353,9 +1442,53 @@ mod tests {
         transport.enqueue_read_data(&handshake_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Unexpected handshake request"));
         // Java: IllegalSaslStateException extends AuthenticationException — fatal.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::IllegalSaslState);
+        assert_eq!(
+            error.message(),
+            "Unexpected handshake request with client mechanism PLAIN, enabled mechanisms are [PLAIN]"
+        );
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// A handshake error code other than the two Java names is reported as an
+    /// `IllegalSaslStateException` naming the code by its constant.
+    #[tokio::test]
+    async fn test_handle_sasl_handshake_unknown_error_code() {
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
+        let mut transport = MockTransportLayer::new();
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_api_versions_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            ApiKeys::SASL_HANDSHAKE.latest_version(),
+            ApiKeys::SASL_AUTHENTICATE.latest_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            &Errors::UnknownServerError,
+            vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Unknown error code UNKNOWN_SERVER_ERROR, client mechanism is PLAIN, enabled mechanisms are [PLAIN, SCRAM-SHA-256]"
+        );
         assert_eq!(auth.sasl_state(), SaslState::Failed);
     }
 
@@ -1400,5 +1533,12 @@ mod tests {
         // Java throws IllegalSaslStateException (an AuthenticationException) for
         // an unparseable SASL response — a fatal authentication failure.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Invalid SASL mechanism response, server may be expecting a different protocol"
+        );
+        assert!(error.source().is_some(), "the parse error is the cause");
     }
 }
