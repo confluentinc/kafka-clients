@@ -96,12 +96,12 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
         let data: Option<&'a [u8]> = unsafe { bytes(data) };
         Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, data).await
     }
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Serializer::<[u8]>::configure(&mut self.0, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Serializer::<[u8]>::configure(&mut self.0, configs, is_key).await
     }
 
-    async fn close(&self) {
-        Serializer::<[u8]>::close(&self.0).await;
+    async fn close(&self) -> Result<(), Error> {
+        Serializer::<[u8]>::close(&self.0).await
     }
 }
 

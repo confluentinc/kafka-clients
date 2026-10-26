@@ -58,9 +58,11 @@ impl Deserializer<String> for StringDeserializer {
 
 /// A [`StringDeserializer`] that counts its `close` calls, for the
 /// constructor-failure test below (Java's `closeQuietly` of the deserializers
-/// in the constructor's `catch`).
+/// in the constructor's `catch`), and fails its `close` with `fail_close` when
+/// set.
 struct CloseCountingDeserializer {
     closes: Arc<AtomicUsize>,
+    fail_close: Option<&'static str>,
 }
 
 impl Deserializer<String> for CloseCountingDeserializer {
@@ -68,8 +70,12 @@ impl Deserializer<String> for CloseCountingDeserializer {
         StringDeserializer.deserialize(topic, data).await
     }
 
-    async fn close(&mut self) {
+    async fn close(&mut self) -> Result<(), Error> {
         self.closes.fetch_add(1, Ordering::SeqCst);
+        match self.fail_close {
+            Some(message) => Err(Error::serialization(message)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -361,8 +367,8 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
     let value_closes = Arc::new(AtomicUsize::new(0));
     let error = KafkaConsumer::<String, String>::new(
         config,
-        CloseCountingDeserializer { closes: Arc::clone(&key_closes) },
-        CloseCountingDeserializer { closes: Arc::clone(&value_closes) },
+        CloseCountingDeserializer { closes: Arc::clone(&key_closes), fail_close: None },
+        CloseCountingDeserializer { closes: Arc::clone(&value_closes), fail_close: None },
     )
     .expect_err("construction must fail");
     assert_eq!(key_closes.load(Ordering::SeqCst), 1, "the key deserializer is closed once");
@@ -373,4 +379,33 @@ async fn test_consumer_constructor_fails_with_config_error_on_unresolvable_boots
         .expect("the cause is a crate Error");
     assert!(cause.is_config_error(), "got {cause:?}");
     assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+}
+
+/// Java's `AsyncKafkaConsumer.close` closes the deserializers through
+/// `closeQuietly(deserializers, "consumer deserializers", firstException)`,
+/// whose `Deserializers.close` closes both and throws
+/// `KafkaException("Failed to close deserializers", first)`; `close` then
+/// throws `KafkaException("Failed to close kafka consumer", it)`. A
+/// deserializer's `Err` takes that path, and the other one is still closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_close_reports_a_deserializer_close_error() {
+    let key_closes = Arc::new(AtomicUsize::new(0));
+    let value_closes = Arc::new(AtomicUsize::new(0));
+    let mut consumer = KafkaConsumer::<String, String>::new(
+        make_smoke_config(),
+        CloseCountingDeserializer { closes: Arc::clone(&key_closes), fail_close: Some("key close failed") },
+        CloseCountingDeserializer { closes: Arc::clone(&value_closes), fail_close: None },
+    )
+    .expect("KafkaConsumer::new");
+
+    let error = consumer.close().await.expect_err("the key deserializer's close failed");
+    assert_eq!(1, key_closes.load(Ordering::SeqCst));
+    assert_eq!(1, value_closes.load(Ordering::SeqCst), "the value deserializer is still closed");
+    assert!(error.is_kafka_error());
+    assert_eq!("Failed to close kafka consumer", error.message());
+    let deserializers = error.source().expect("the deserializers' error is the cause");
+    assert_eq!("Failed to close deserializers", deserializers.message());
+    let first = deserializers.source().expect("the key deserializer's error is its cause");
+    assert!(first.is_serialization_error(), "got {first:?}");
+    assert_eq!("key close failed", first.message());
 }

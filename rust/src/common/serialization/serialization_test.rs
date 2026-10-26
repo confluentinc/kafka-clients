@@ -209,10 +209,12 @@ async fn string_serde_should_support_different_encodings() {
     let value = "my string";
     let mut serializer = StringSerializer::new();
     let serializer_configs = [("key.serializer.encoding".to_string(), "UTF-8".to_string())].into();
-    Serializer::<str>::configure(&mut serializer, &serializer_configs, true).await;
+    Serializer::<str>::configure(&mut serializer, &serializer_configs, true)
+        .await
+        .expect("configure");
     let mut deserializer = StringDeserializer::new();
     let deserializer_configs = [("key.deserializer.encoding".to_string(), "UTF-8".to_string())].into();
-    deserializer.configure(&deserializer_configs, true).await;
+    deserializer.configure(&deserializer_configs, true).await.expect("configure");
     let serialized = Serializer::<str>::serialize(&serializer, TOPIC, Some(value))
         .await
         .expect("serialize")

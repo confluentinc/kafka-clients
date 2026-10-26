@@ -3227,35 +3227,39 @@ impl<K, V> KafkaProducer<K, V> {
 
     /// `Utils.closeQuietly(keySerializerPlugin, "producer keySerializer", firstException)`
     /// then `Utils.closeQuietly(valueSerializerPlugin, "producer valueSerializer", firstException)`
-    /// (`KafkaProducer#close`): both are closed, each panic is logged
-    /// as `closeQuietly` logs a failure (`Utils`), and the first
-    /// one is returned. Shared by `close` and a failed constructor
-    /// (`CloseSerializersOnError`).
+    /// (`KafkaProducer#close`): both are closed, each failure (an `Err` from
+    /// `close`, or a caught panic) is logged as `closeQuietly` logs one
+    /// (`Utils`), and the first one is returned. Shared by `close` and a failed
+    /// constructor (`CloseSerializersOnError`).
     async fn close_serializers_quietly(
         key_serializer: &dyn DynSerializer<K>,
         value_serializer: &dyn DynSerializer<V>,
         log_context: &LogContext,
     ) -> Option<Error> {
         let mut first_error = None;
-        if let Err(payload) = AssertUnwindSafe(key_serializer.close()).catch_unwind().await {
-            first_error.get_or_insert(Self::serializer_close_failure(log_context, "producer keySerializer", &*payload));
-        }
-        if let Err(payload) = AssertUnwindSafe(value_serializer.close()).catch_unwind().await {
-            first_error.get_or_insert(Self::serializer_close_failure(
-                log_context,
-                "producer valueSerializer",
-                &*payload,
-            ));
-        }
+        let key = AssertUnwindSafe(key_serializer.close()).catch_unwind().await;
+        Self::record_serializer_close_failure(&mut first_error, log_context, "producer keySerializer", key);
+        let value = AssertUnwindSafe(value_serializer.close()).catch_unwind().await;
+        Self::record_serializer_close_failure(&mut first_error, log_context, "producer valueSerializer", value);
         first_error
     }
 
-    /// The error `closeQuietly` records for a serializer whose `close`
-    /// panicked, logged as it logs one (`Utils`).
-    fn serializer_close_failure(log_context: &LogContext, name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
-        let message = panic_payload_message(payload);
-        kafka_error!(log_context, "Failed to close {}: {}", name, message);
-        Error::kafka_message(message.to_string())
+    /// Records a serializer's `close` failure, an `Err` or a caught panic, as
+    /// `closeQuietly` records a throw: logged, and kept in `first_error` when it
+    /// is the first (`Utils`).
+    fn record_serializer_close_failure(
+        first_error: &mut Option<Error>,
+        log_context: &LogContext,
+        name: &str,
+        outcome: Result<Result<(), Error>, Box<dyn std::any::Any + Send>>,
+    ) {
+        let error = match outcome {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error,
+            Err(payload) => Error::kafka_message(panic_payload_message(&*payload).to_string()),
+        };
+        kafka_error!(log_context, "Failed to close {}: {}", name, error);
+        first_error.get_or_insert(error);
     }
 }
 
@@ -4828,12 +4832,13 @@ mod tests {
     struct MockSerializer {
         close_count: Arc<AtomicUsize>,
         panic_on_close: Option<&'static str>,
+        fail_on_close: Option<&'static str>,
     }
 
     impl MockSerializer {
         fn new(init_count: &AtomicUsize, close_count: &Arc<AtomicUsize>) -> Self {
             init_count.fetch_add(1, Ordering::SeqCst);
-            Self { close_count: Arc::clone(close_count), panic_on_close: None }
+            Self { close_count: Arc::clone(close_count), panic_on_close: None, fail_on_close: None }
         }
     }
 
@@ -4846,10 +4851,14 @@ mod tests {
             Ok(data.map(|data| Cow::Borrowed(data.as_bytes())))
         }
 
-        async fn close(&self) {
+        async fn close(&self) -> Result<(), Error> {
             self.close_count.fetch_add(1, Ordering::SeqCst);
             if let Some(message) = self.panic_on_close {
                 panic!("{message}");
+            }
+            match self.fail_on_close {
+                Some(message) => Err(Error::serialization(message)),
+                None => Ok(()),
             }
         }
     }
@@ -4919,6 +4928,29 @@ mod tests {
         assert_eq!(2, close_count.load(Ordering::SeqCst));
 
         producer.close().await.expect("the serializers are not closed again");
+        assert_eq!(2, close_count.load(Ordering::SeqCst));
+    }
+
+    /// A serializer `close` returning an error takes the same path as a
+    /// throwing one in Java: it is recorded by `closeQuietly`, the other
+    /// serializer is still closed, and `close` returns it as the cause of
+    /// `Failed to close kafka producer` (`KafkaProducer#close`).
+    #[tokio::test]
+    async fn test_serializer_close_error_closes_both_and_reports_the_first() {
+        let init_count = AtomicUsize::new(0);
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let mut key = MockSerializer::new(&init_count, &close_count);
+        key.fail_on_close = Some("key close failed");
+        let mut value = MockSerializer::new(&init_count, &close_count);
+        value.panic_on_close = Some("value close failed");
+        let producer = create_producer_with_serializers(Box::new(key), Box::new(value));
+
+        let error = producer.close().await.expect_err("both closes failed");
+        assert!(error.is_kafka_error());
+        assert_eq!("Failed to close kafka producer", error.message());
+        let source = error.source().expect("the first failure is the source");
+        assert!(source.is_serialization_error(), "the serializer's own error: {source:?}");
+        assert_eq!("key close failed", source.message());
         assert_eq!(2, close_count.load(Ordering::SeqCst));
     }
 

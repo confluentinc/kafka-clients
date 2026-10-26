@@ -62,6 +62,12 @@ breaking changes.
   `None` where Java's `groupId()` is `null`. `GroupAuthorizationError::new`
   takes the message only, as Java's `(String message)`;
   `with_group_id(group_id, message)` takes the pair.
+- **Breaking:** `Serializer::configure` / `close` and `Deserializer::configure`
+  / `close` return a future of `Result<(), Error>`, so a serde can report a
+  failure. The producer and the consumer close both serdes and return the
+  first failure as the cause of `Failed to close kafka producer` /
+  `Failed to close kafka consumer`, as Java's `closeQuietly`. Return `Ok(())`
+  from your implementations.
 - The minimum rustls version is now 0.23.46, which fixes
   [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
   `Debug` output of rustls's client session values exposed TLS session secrets.
@@ -89,6 +95,12 @@ breaking changes.
   group is unknown.
 - **Breaking:** a C deserializer's `*_with_headers*` methods receive the record's headers
   as a mutable `kafka_common_header_internals_RecordHeaders_t *`.
+- **Breaking:** `kafka_common_serialization_{Serializer,Deserializer}_configure`
+  and `_close` take a trailing `kafka_common_Error_t **out_err`, and their
+  `_configure_cb_t` / `_close_cb_t` completions receive a
+  `kafka_common_Error_t *` (`NULL` on success) before `opaque`. An error a C
+  serde reports through `__set_callback_result` reaches the caller instead of
+  being logged.
 
 ## [0.3.0-beta.1] - 2026-10-23
 

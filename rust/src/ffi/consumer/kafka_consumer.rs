@@ -100,12 +100,12 @@ impl Deserializer<GenericValue> for ArcDeserializer {
         Deserializer::deserialize_with_headers_bytes(&*self.0.imp().lock().await, topic, headers, data).await
     }
 
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Deserializer::configure(&mut *self.0.imp().lock().await, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Deserializer::configure(&mut *self.0.imp().lock().await, configs, is_key).await
     }
 
-    async fn close(&mut self) {
-        Deserializer::close(&mut *self.0.imp().lock().await).await;
+    async fn close(&mut self) -> Result<(), Error> {
+        Deserializer::close(&mut *self.0.imp().lock().await).await
     }
 }
 

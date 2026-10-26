@@ -78,12 +78,12 @@ impl Deserializer<GenericValue> for GenericByteArrayDeserializer {
         self.0.deserialize_with_headers_bytes(topic, headers, data).map(bytes_value)
     }
 
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.configure(configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        self.0.configure(configs, is_key).await
     }
 
-    async fn close(&mut self) {
-        self.0.close().await;
+    async fn close(&mut self) -> Result<(), Error> {
+        self.0.close().await
     }
 }
 

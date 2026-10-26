@@ -222,6 +222,7 @@ typedef struct {
     int configured_entries;
     int8_t configured_is_key;
     int close_calls;
+    int fail_lifecycle;
 } async_upper_serializer_t;
 
 static void async_serializer_report(async_upper_serializer_t *imp, int64_t id, const char *topic, const char *data) {
@@ -274,16 +275,22 @@ static void async_upper_serializer_configure(void *self, const kafka_Map_t *conf
     async_upper_serializer_t *imp = self;
     imp->configured_entries = kafka_Map_size(configs);
     imp->configured_is_key = is_key;
-    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+    kafka_common_serialization_Serializer__set_callback_result(
+        imp->handle, callback_id, NULL, imp->fail_lifecycle ? kafka_common_Error_serialization("configure failed") : NULL);
 }
 
 static void async_upper_serializer_close(void *self, int64_t callback_id) {
     async_upper_serializer_t *imp = self;
     imp->close_calls++;
-    kafka_common_serialization_Serializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+    kafka_common_serialization_Serializer__set_callback_result(
+        imp->handle, callback_id, NULL, imp->fail_lifecycle ? kafka_common_Error_serialization("close failed") : NULL);
 }
 
-static void on_serializer_done(void *opaque) { record_completion_thread(opaque); }
+static void on_serializer_done(kafka_common_Error_t *error, void *opaque) {
+    completion_t *c = opaque;
+    c->error = error;
+    record_completion_thread(c);
+}
 
 // Waits for the pending call and reports it from this thread.
 static void *async_serializer_reporter(void *arg) {
@@ -362,18 +369,22 @@ static void test_async_c_serializer_reporting_inside_the_call(void) {
     kafka_Map_t *configs = kafka_Map_new();
     char key_a[] = "alpha", value_a[] = "1";
     kafka_Map_put(configs, key_a, value_a);
-    kafka_common_serialization_Serializer_configure(serializer, configs, 1);
+    kafka_common_serialization_Serializer_configure(serializer, configs, 1, &error);
+    TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_INT(1, imp.configured_entries);
     TEST_ASSERT_EQUAL_INT8(1, imp.configured_is_key);
     completion_t configured = {0};
     kafka_common_serialization_Serializer_configure_cb(serializer, configs, 0, on_serializer_done, &configured);
     TEST_ASSERT_TRUE(completion_fired(&configured));
+    TEST_ASSERT_NULL(configured.error);
     TEST_ASSERT_EQUAL_INT8(0, imp.configured_is_key);
     kafka_Map_destroy(configs);
-    kafka_common_serialization_Serializer_close(serializer);
+    kafka_common_serialization_Serializer_close(serializer, &error);
+    TEST_ASSERT_NULL(error);
     completion_t closed = {0};
     kafka_common_serialization_Serializer_close_cb(serializer, on_serializer_done, &closed);
     TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_NULL(closed.error);
     TEST_ASSERT_EQUAL_INT(2, imp.close_calls);
 
     // A report for an id that is not pending (here, already reported) is
@@ -393,20 +404,24 @@ static void test_async_c_serializer_reporting_later_from_another_thread(void) {
 
     // `configure` and `close` left NULL are the Java defaults: nothing is
     // called, and each `_cb` completion fires before it returns.
-    kafka_common_serialization_Serializer_configure(serializer, NULL, 1);
+    kafka_common_Error_t *error = NULL;
+    kafka_common_serialization_Serializer_configure(serializer, NULL, 1, &error);
+    TEST_ASSERT_NULL(error);
     completion_t configured = {0};
     kafka_common_serialization_Serializer_configure_cb(serializer, NULL, 1, on_serializer_done, &configured);
     TEST_ASSERT_TRUE(completion_fired(&configured));
-    kafka_common_serialization_Serializer_close(serializer);
+    TEST_ASSERT_NULL(configured.error);
+    kafka_common_serialization_Serializer_close(serializer, &error);
+    TEST_ASSERT_NULL(error);
     completion_t closed = {0};
     kafka_common_serialization_Serializer_close_cb(serializer, on_serializer_done, &closed);
     TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_NULL(closed.error);
     TEST_ASSERT_EQUAL_INT(0, imp.serialize_calls);
 
     // The blocking invoker parks the calling thread until the report.
     pthread_t reporter;
     TEST_ASSERT_EQUAL_INT(0, pthread_create(&reporter, NULL, async_serializer_reporter, &imp));
-    kafka_common_Error_t *error = NULL;
     kafka_Bytes_t out = kafka_common_serialization_Serializer_serialize(serializer, "t", "later", &error);
     TEST_ASSERT_EQUAL_INT(0, pthread_join(reporter, NULL));
     TEST_ASSERT_NULL(error);
@@ -457,6 +472,7 @@ typedef struct {
     int configured_entries;
     int8_t configured_is_key;
     int close_calls;
+    int fail_lifecycle;
 } async_upper_deserializer_t;
 
 static void async_deserializer_report(async_upper_deserializer_t *imp, int64_t id, const char *topic,
@@ -503,13 +519,15 @@ static void async_upper_configure(void *self, const kafka_Map_t *configs, int8_t
     async_upper_deserializer_t *imp = self;
     imp->configured_entries = kafka_Map_size(configs);
     imp->configured_is_key = is_key;
-    kafka_common_serialization_Deserializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+    kafka_common_serialization_Deserializer__set_callback_result(
+        imp->handle, callback_id, NULL, imp->fail_lifecycle ? kafka_common_Error_serialization("configure failed") : NULL);
 }
 
 static void async_upper_close(void *self, int64_t callback_id) {
     async_upper_deserializer_t *imp = self;
     imp->close_calls++;
-    kafka_common_serialization_Deserializer__set_callback_result(imp->handle, callback_id, NULL, NULL);
+    kafka_common_serialization_Deserializer__set_callback_result(
+        imp->handle, callback_id, NULL, imp->fail_lifecycle ? kafka_common_Error_serialization("close failed") : NULL);
 }
 
 static void *async_deserializer_reporter(void *arg) {
@@ -530,7 +548,11 @@ static void on_deserialized(void *value, kafka_common_Error_t *error, void *opaq
     record_completion_thread(c);
 }
 
-static void on_done(void *opaque) { record_completion_thread(opaque); }
+static void on_done(kafka_common_Error_t *error, void *opaque) {
+    completion_t *c = opaque;
+    c->error = error;
+    record_completion_thread(c);
+}
 
 static void test_async_c_deserializer_reporting_inside_the_call(void) {
     async_upper_deserializer_t imp = {0};
@@ -596,18 +618,22 @@ static void test_async_c_deserializer_reporting_inside_the_call(void) {
     kafka_Map_t *configs = kafka_Map_new();
     char key_a[] = "alpha", value_a[] = "1";
     kafka_Map_put(configs, key_a, value_a);
-    kafka_common_serialization_Deserializer_configure(deserializer, configs, 1);
+    kafka_common_serialization_Deserializer_configure(deserializer, configs, 1, &error);
+    TEST_ASSERT_NULL(error);
     TEST_ASSERT_EQUAL_INT(1, imp.configured_entries);
     TEST_ASSERT_EQUAL_INT8(1, imp.configured_is_key);
     completion_t configured = {0};
     kafka_common_serialization_Deserializer_configure_cb(deserializer, configs, 0, on_done, &configured);
     TEST_ASSERT_TRUE(completion_fired(&configured));
+    TEST_ASSERT_NULL(configured.error);
     TEST_ASSERT_EQUAL_INT8(0, imp.configured_is_key);
     kafka_Map_destroy(configs);
-    kafka_common_serialization_Deserializer_close(deserializer);
+    kafka_common_serialization_Deserializer_close(deserializer, &error);
+    TEST_ASSERT_NULL(error);
     completion_t closed = {0};
     kafka_common_serialization_Deserializer_close_cb(deserializer, on_done, &closed);
     TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_NULL(closed.error);
     TEST_ASSERT_EQUAL_INT(2, imp.close_calls);
 
     kafka_common_header_internals_RecordHeaders_destroy(headers);
@@ -654,6 +680,74 @@ static void test_async_c_deserializer_reporting_later_from_another_thread(void) 
     completion_t closed = {0};
     kafka_common_serialization_Deserializer_close_cb(deserializer, on_done, &closed);
     TEST_ASSERT_TRUE(completion_fired(&closed));
+    TEST_ASSERT_NULL(closed.error);
+
+    kafka_common_serialization_Deserializer_destroy(deserializer);
+}
+
+// An error a C implementation reports from `configure` or `close` reaches the
+// caller: in `out_err` from the blocking form, in the completion from `_cb`.
+static void assert_lifecycle_error(const char *message, kafka_common_Error_t *error) {
+    TEST_ASSERT_NOT_NULL(error);
+    TEST_ASSERT_TRUE(kafka_common_Error_is_serialization_error(error));
+    TEST_ASSERT_EQUAL_STRING(message, kafka_common_Error_message(error));
+    kafka_common_Error_destroy(error);
+}
+
+static void test_configure_or_close_error_a_c_serializer_reports_reaches_the_caller(void) {
+    async_upper_serializer_t imp = {0};
+    kafka_common_serialization_Serializer_t *serializer = kafka_common_serialization_Serializer_new_async(
+        &imp, async_upper_serialize, NULL, async_upper_serializer_configure, async_upper_serializer_close);
+    imp.handle = serializer;
+    imp.fail_lifecycle = 1;
+
+    kafka_Map_t *configs = kafka_Map_new();
+    kafka_common_Error_t *error = NULL;
+    kafka_common_serialization_Serializer_configure(serializer, configs, 1, &error);
+    assert_lifecycle_error("configure failed", error);
+    error = NULL;
+    completion_t configured = {0};
+    kafka_common_serialization_Serializer_configure_cb(serializer, configs, 0, on_serializer_done, &configured);
+    TEST_ASSERT_TRUE(completion_fired(&configured));
+    assert_lifecycle_error("configure failed", configured.error);
+    kafka_Map_destroy(configs);
+
+    kafka_common_serialization_Serializer_close(serializer, &error);
+    assert_lifecycle_error("close failed", error);
+    completion_t closed = {0};
+    kafka_common_serialization_Serializer_close_cb(serializer, on_serializer_done, &closed);
+    TEST_ASSERT_TRUE(completion_fired(&closed));
+    assert_lifecycle_error("close failed", closed.error);
+    TEST_ASSERT_EQUAL_INT(2, imp.close_calls);
+
+    kafka_common_serialization_Serializer_destroy(serializer);
+}
+
+static void test_configure_or_close_error_a_c_deserializer_reports_reaches_the_caller(void) {
+    async_upper_deserializer_t imp = {0};
+    kafka_common_serialization_Deserializer_t *deserializer = kafka_common_serialization_Deserializer_new_async(
+        &imp, async_upper_deserialize, NULL, NULL, async_upper_configure, async_upper_close);
+    imp.handle = deserializer;
+    imp.fail_lifecycle = 1;
+
+    kafka_Map_t *configs = kafka_Map_new();
+    kafka_common_Error_t *error = NULL;
+    kafka_common_serialization_Deserializer_configure(deserializer, configs, 1, &error);
+    assert_lifecycle_error("configure failed", error);
+    error = NULL;
+    completion_t configured = {0};
+    kafka_common_serialization_Deserializer_configure_cb(deserializer, configs, 0, on_done, &configured);
+    TEST_ASSERT_TRUE(completion_fired(&configured));
+    assert_lifecycle_error("configure failed", configured.error);
+    kafka_Map_destroy(configs);
+
+    kafka_common_serialization_Deserializer_close(deserializer, &error);
+    assert_lifecycle_error("close failed", error);
+    completion_t closed = {0};
+    kafka_common_serialization_Deserializer_close_cb(deserializer, on_done, &closed);
+    TEST_ASSERT_TRUE(completion_fired(&closed));
+    assert_lifecycle_error("close failed", closed.error);
+    TEST_ASSERT_EQUAL_INT(2, imp.close_calls);
 
     kafka_common_serialization_Deserializer_destroy(deserializer);
 }
@@ -680,6 +774,8 @@ int main(void) {
     RUN_TEST(test_async_c_serializer_reporting_later_from_another_thread);
     RUN_TEST(test_async_c_deserializer_reporting_inside_the_call);
     RUN_TEST(test_async_c_deserializer_reporting_later_from_another_thread);
+    RUN_TEST(test_configure_or_close_error_a_c_serializer_reports_reaches_the_caller);
+    RUN_TEST(test_configure_or_close_error_a_c_deserializer_reports_reaches_the_caller);
     RUN_TEST(test_is_async_is_zero_for_built_in_serdes);
     return UNITY_END();
 }

@@ -145,6 +145,10 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     ///
     /// - `configs` - configs in key/value pairs
     /// - `is_key` - whether the serializer is used for the key or the value
+    ///
+    /// # Errors
+    ///
+    /// Whatever error the serializer reports.
     // Declared after the `serialize` methods, as on `Deserializer`, so the C
     // constructor takes the methods in the same order for both.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#configure")]
@@ -152,30 +156,31 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
         &'a mut self,
         configs: &'a HashMap<String, String>,
         is_key: bool,
-    ) -> impl Future<Output = ()> + Send + 'a {
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'a {
         // intentionally left blank — Java default
         let _ = (configs, is_key);
-        async {}
+        async { Ok(()) }
     }
 
     /// Close this serializer.
     ///
     /// This method must be idempotent as it may be called multiple times.
     ///
-    /// # Translation notes
+    /// # Errors
     ///
-    /// A failure is reported by panicking.
+    /// Whatever error the serializer reports; the producer still closes the
+    /// other serializer, then returns it as the source of its own.
     // The producer calls it once: from its `close`, after its I/O task has
     // stopped, or from a constructor that fails, as Java's catch does. It closes
-    // its serializers as Java's `Utils.closeQuietly` does: it catches the panic,
-    // logs it and closes the other serializer; then the producer's `close` returns
-    // `Failed to close kafka producer`, with the panic's message as its source,
-    // while a failed constructor only logs it. It takes `&self`, unlike
+    // its serializers as Java's `Utils.closeQuietly` does: it logs an error (or a
+    // caught panic), keeps the first one and closes the other serializer; then the
+    // producer's `close` returns `Failed to close kafka producer`, with the first
+    // error as its source, while a failed constructor only logs it. It takes `&self`, unlike
     // `Deserializer::close`: the producer shares its serializers with every
     // concurrent `send`, so an exclusive borrow would need a lock on every send.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#close")]
-    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn close(&self) -> impl Future<Output = Result<(), Error>> + Send + '_ {
         // intentionally left blank — Java default
-        async {}
+        async { Ok(()) }
     }
 }

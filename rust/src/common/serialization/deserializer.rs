@@ -158,33 +158,38 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// - `configs` - configs in key/value pairs
     /// - `is_key` - whether the deserializer is used for the key or the value
+    ///
+    /// # Errors
+    ///
+    /// Whatever error the deserializer reports.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#configure")]
     fn configure<'a>(
         &'a mut self,
         configs: &'a HashMap<String, String>,
         is_key: bool,
-    ) -> impl Future<Output = ()> + Send + 'a {
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'a {
         // intentionally left blank — Java default
         let _ = (configs, is_key);
-        async {}
+        async { Ok(()) }
     }
 
     /// Close this deserializer.
     ///
     /// This method must be idempotent as it may be called multiple times.
     ///
-    /// # Translation notes
+    /// # Errors
     ///
-    /// A failure is reported by panicking.
+    /// Whatever error the deserializer reports; the consumer still closes the
+    /// other deserializer, then returns it as the source of its own.
     // The consumer closes its deserializers as Java's `Utils.closeQuietly` does:
-    // it catches the panic, logs it and closes the other deserializer; then the
-    // consumer's `close` returns `Failed to close kafka consumer`, caused by
-    // `Failed to close deserializers` with the panic's message as its source,
-    // while a failed constructor only logs it.
+    // it logs an error (or a caught panic), keeps the first one and closes the
+    // other deserializer; then the consumer's `close` returns `Failed to close
+    // kafka consumer`, caused by `Failed to close deserializers` with the first
+    // error as its source, while a failed constructor only logs it.
     #[doc(alias = "org.apache.kafka.common.serialization.Deserializer#close")]
-    fn close(&mut self) -> impl Future<Output = ()> + Send {
+    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send {
         // intentionally left blank — Java default
-        async {}
+        async { Ok(()) }
     }
 }
 

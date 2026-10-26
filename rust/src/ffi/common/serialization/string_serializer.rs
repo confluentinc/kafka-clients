@@ -100,12 +100,12 @@ impl Serializer<GenericValue> for GenericStringSerializer {
         let data: Option<&'a str> = unsafe { string(data) }?;
         Serializer::<str>::serialize_with_headers(&self.0, topic, headers, data).await
     }
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Serializer::<str>::configure(&mut self.0, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Serializer::<str>::configure(&mut self.0, configs, is_key).await
     }
 
-    async fn close(&self) {
-        Serializer::<str>::close(&self.0).await;
+    async fn close(&self) -> Result<(), Error> {
+        Serializer::<str>::close(&self.0).await
     }
 }
 

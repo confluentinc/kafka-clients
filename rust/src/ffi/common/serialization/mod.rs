@@ -79,6 +79,7 @@ use crate::ffi::common::serialization::deserializer::{
 use crate::ffi::common::serialization::serializer::{
     FfiSerializer, SerializerInner, kafka_common_serialization_Serializer_t,
 };
+use crate::ffi::common::{ErrorCompletion, box_error};
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_destroy, kafka_Map_t,
     map_entries,
@@ -439,26 +440,20 @@ pub(crate) unsafe fn read_configs(configs: *const kafka_Map_t) -> HashMap<String
         .collect()
 }
 
-/// Logs the failure of a `void` method (`configure` or `close`) of the
-/// `serde` (`"serializer"` or `"deserializer"`), which has nowhere to report
-/// it.
-pub(crate) fn log_failure(what: &str, serde: &str, result: Result<(), Error>) {
-    if let Err(error) = result {
-        log::warn!("Failed to {what} the {serde}: {error}");
-    }
-}
-
-/// Completion of the `void` `_cb` twins.
-pub(crate) type OpaqueCb = unsafe extern "C" fn(opaque: *mut c_void);
-
-/// Fires a `void` completion, logging a failure.
-pub(crate) fn opaque_sink(what: &'static str, serde: &'static str, cb: OpaqueCb, opaque: *mut c_void) -> ResultSink {
+/// Fires the completion of a `void` `_cb` twin (`configure` or `close`)
+/// with the outcome of the call: `NULL` on success, else an owned error
+/// whose ownership passes to `cb`.
+pub(crate) fn error_sink(cb: ErrorCompletion, opaque: *mut c_void) -> ResultSink {
     let opaque = SendPtr(opaque);
     Box::new(move |result| {
-        log_failure(what, serde, result.map(|_| ()));
+        let error = match result {
+            Ok(_) => std::ptr::null_mut(),
+            Err(error) => box_error(error),
+        };
         // SAFETY: `cb` and `opaque` are the pair the C caller passed to the `_cb` twin, a valid
-        // completion until it fires; this `FnOnce` fires it once.
-        unsafe { cb(opaque.get()) }
+        // completion until it fires; this `FnOnce` fires it once. `error` is null or a fresh
+        // `box_error` handle whose ownership passes to `cb`.
+        unsafe { cb(error, opaque.get()) }
     })
 }
 

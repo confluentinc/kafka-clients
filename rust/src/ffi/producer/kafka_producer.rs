@@ -145,12 +145,12 @@ impl Serializer<GenericValue> for ArcSerializer {
 
     /// The handle is shared, so `configure` goes through the shared form,
     /// which reaches a C implementation as `&mut` would.
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.get().configure_shared(configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        self.0.get().configure_shared(configs, is_key).await
     }
 
-    async fn close(&self) {
-        Serializer::close(self.0.get()).await;
+    async fn close(&self) -> Result<(), Error> {
+        Serializer::close(self.0.get()).await
     }
 }
 

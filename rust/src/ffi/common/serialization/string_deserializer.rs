@@ -80,12 +80,12 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
         self.0.deserialize_with_headers_bytes(topic, headers, data).map(string_value)
     }
 
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.configure(configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        self.0.configure(configs, is_key).await
     }
 
-    async fn close(&mut self) {
-        self.0.close().await;
+    async fn close(&mut self) -> Result<(), Error> {
+        self.0.close().await
     }
 }
 
@@ -243,8 +243,10 @@ mod tests {
             assert_eq!(take_string(out), "a\u{FFFD}b");
 
             // The Java defaults: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1);
-            kafka_common_serialization_Deserializer_close(view);
+            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1, &raw mut err);
+            assert!(err.is_null());
+            kafka_common_serialization_Deserializer_close(view, &raw mut err);
+            assert!(err.is_null());
 
             kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_StringDeserializer_destroy(handle);
