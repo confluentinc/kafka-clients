@@ -184,22 +184,27 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
 }
 
 /// `CreateDelegationTokenOptions.owner(KafkaPrincipal owner)`: `owner` is
-/// borrowed and copied during the call.
+/// borrowed and copied during the call; `NULL` is Java's `null`, which clears
+/// an owner set earlier, so the request principal owns the token.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `owner` must be a live principal handle.
+/// `owner` must be `NULL` or a live principal handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
     self_: *mut kafka_admin_CreateDelegationTokenOptions_t,
     owner: *const kafka_common_security_auth_KafkaPrincipal_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `owner` is a valid principal handle, alive for this
-    // call, which is as long as the reference is used: it is cloned at once. That is what
-    // `kafka_principal_ref` requires.
-    let owner = unsafe { kafka_principal_ref(owner) }.clone();
+    let owner = if owner.is_null() {
+        None
+    } else {
+        // SAFETY: `owner` is non-null (checked above) and, per this function's `# Safety`, a valid
+        // principal handle, alive for this call, which is as long as the reference is used: it is
+        // cloned at once. That is what `kafka_principal_ref` requires.
+        Some(unsafe { kafka_principal_ref(owner) }.clone())
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.

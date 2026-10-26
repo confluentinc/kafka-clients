@@ -2855,7 +2855,7 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 .set_is_sensitive(config.is_sensitive)
                 .set_is_read_only(config.read_only)
                 .set_synonyms(synonyms)
-                .set_config_type(ConfigType::for_id(config.config_type))
+                .set_config_type(Some(ConfigType::for_id(config.config_type)))
                 .set_documentation(config.documentation.clone())
                 .build()
                 .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
@@ -3342,6 +3342,9 @@ fn get_create_topics_call(
                                     .set_source(ConfigSource::for_id(c.config_source))
                                     .set_is_sensitive(c.is_sensitive)
                                     .set_is_read_only(c.read_only)
+                                    // Java passes `null` for the type and the
+                                    // documentation (`KafkaAdminClient.java:1992-2002`).
+                                    .set_config_type(None)
                                     .build()
                                     .expect("ConfigEntryOptionsBuilder::build: every mandatory parameter is set above"),
                             )
@@ -3811,7 +3814,11 @@ impl Admin for KafkaAdminClient {
         CreateTopicsResult::new(public)
     }
 
-    fn delete_topics_with_options(&self, topics: TopicCollection, options: DeleteTopicsOptions) -> DeleteTopicsResult {
+    fn delete_topics_with_topic_collection_options(
+        &self,
+        topics: TopicCollection,
+        options: DeleteTopicsOptions,
+    ) -> DeleteTopicsResult {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
         match topics {
@@ -7589,7 +7596,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7603,7 +7610,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_by_name_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["ghost".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7620,8 +7627,10 @@ mod tests {
     async fn test_delete_topics_by_id_success() {
         let (admin, mut runnable, _time, _nodes) = env();
         let id = Uuid::new(1, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id]),
+            DeleteTopicsOptions::new(),
+        );
         let mut r = DeletableTopicResult::new();
         r.set_topic_id(id);
         r.set_error_code(Errors::None.code());
@@ -7636,7 +7645,7 @@ mod tests {
         // By name: the response omits "myOtherTopic", so its future is
         // completed by the unrealized-futures sanity check.
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["myTopic".to_string(), "myOtherTopic".to_string()]),
             DeleteTopicsOptions::new(),
         );
@@ -7656,8 +7665,10 @@ mod tests {
         let (admin, mut runnable, _time, _nodes) = env();
         let id1 = Uuid::new(1, 1);
         let id2 = Uuid::new(2, 2);
-        let result =
-            admin.delete_topics_with_options(TopicCollection::of_topic_ids(vec![id1, id2]), DeleteTopicsOptions::new());
+        let result = admin.delete_topics_with_topic_collection_options(
+            TopicCollection::of_topic_ids(vec![id1, id2]),
+            DeleteTopicsOptions::new(),
+        );
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(1000, vec![delete_result_with_id(id1, Errors::None)]));
@@ -7692,7 +7703,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7722,7 +7733,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7748,7 +7759,7 @@ mod tests {
                 delete_result_named("topic3", Errors::TopicAlreadyExists),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7773,7 +7784,7 @@ mod tests {
                 delete_result_with_id(id3, Errors::UnknownTopicId),
             ],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
@@ -7804,7 +7815,7 @@ mod tests {
             1000,
             vec![delete_result_named("topic2", Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -7839,7 +7850,7 @@ mod tests {
             1000,
             vec![delete_result_with_id(id2, Errors::ThrottlingQuotaExceeded)],
         ));
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
             DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
@@ -9582,6 +9593,16 @@ mod tests {
         assert!(entry.is_read_only());
         assert!(!entry.is_sensitive());
         assert_eq!(entry.source(), ConfigSource::DynamicTopicConfig);
+        // Java builds the entry with a `null` type and documentation
+        // (`KafkaAdminClient.java:1992-2002`), and prints them as `null`.
+        assert_eq!(entry.r#type(), None);
+        assert_eq!(entry.documentation(), None);
+        assert!(entry.synonyms().is_empty());
+        assert_eq!(
+            entry.to_string(),
+            "ConfigEntry(name=cleanup.policy, value=compact, source=DYNAMIC_TOPIC_CONFIG, \
+             isSensitive=false, isReadOnly=true, synonyms=[], type=null, documentation=null)"
+        );
     }
 
     #[tokio::test]
@@ -9599,7 +9620,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.delete_topics_with_options(
+        let result = admin.delete_topics_with_topic_collection_options(
             TopicCollection::of_topic_names(vec![String::new()]),
             DeleteTopicsOptions::new(),
         );
@@ -10790,6 +10811,27 @@ mod tests {
         let mut data = DescribeConfigsResponseData::new();
         data.set_results(results);
         ConcreteResponse::DescribeConfigs(DescribeConfigsResponse::new(data))
+    }
+
+    /// New test, no Java original: unlike a `createTopics` entry, every entry
+    /// `describeConfigs` builds has a type. Java's `describeConfigResult`
+    /// passes `ConfigType.forId(id).type()`, which is `UNKNOWN` for an id it
+    /// does not know, never `null`.
+    #[test]
+    fn describe_config_result_gives_every_entry_a_type() {
+        use crate::describe_configs_response_data::DescribeConfigsResourceResult;
+        let mut result = describe_configs_result("t", config_resource::Type::Topic.id(), Errors::None);
+        let mut long = DescribeConfigsResourceResult::new();
+        long.set_name("retention.ms".to_string());
+        long.set_config_type(5);
+        let mut unknown = DescribeConfigsResourceResult::new();
+        unknown.set_name("future.config".to_string());
+        unknown.set_config_type(42);
+        result.set_configs(vec![long, unknown]);
+
+        let config = describe_config_result(&result);
+        assert_eq!(config.get("retention.ms").unwrap().r#type(), Some(ConfigType::Long));
+        assert_eq!(config.get("future.config").unwrap().r#type(), Some(ConfigType::Unknown));
     }
 
     #[tokio::test]
@@ -15690,9 +15732,9 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
 
         let mut options = members_to_remove(&["instance-1", "instance-2"]);
-        if let Some(reason) = reason {
-            options.set_reason(reason);
-        }
+        // Java calls `options.reason(reason)` with the given value, `null`
+        // included.
+        options.set_reason(reason.map(str::to_string));
         let _result = admin.remove_members_from_consumer_group_with_options(GROUP_ID, options);
 
         pump_until(&mut runnable, 40, |r| {
