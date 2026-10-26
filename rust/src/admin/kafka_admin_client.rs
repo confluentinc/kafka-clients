@@ -6947,6 +6947,174 @@ mod tests {
         future.get().await.expect("createTopics succeeds");
     }
 
+    /// Steps the runnable until `future` completes and returns its error, failing
+    /// with `api` if it does not complete or succeeds.
+    async fn await_failure<T: Send + 'static>(
+        runnable: &mut AdminClientRunnable<MockClient>,
+        future: KafkaFuture<T>,
+        api: &str,
+    ) -> Error {
+        pump_until(runnable, 40, |_| future.is_done()).await;
+        assert!(future.is_done(), "{api}: the future did not complete");
+        match future.get().await {
+            Ok(_) => panic!("{api}: expected an authentication error, but the call succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    /// Asserts `error` is the error `MockClient.authenticationFailed` records,
+    /// `Errors.SASL_AUTHENTICATION_FAILED.exception()` — a
+    /// `SaslAuthenticationException`, and so an `AuthenticationException`.
+    fn assert_sasl_authentication_error(error: &Error, api: &str) {
+        assert!(
+            error.is_authentication_error(),
+            "{api}: Expected an authentication error, but got {error:?}"
+        );
+        assert!(
+            matches!(error, Error::SaslAuthentication(_)),
+            "{api}: expected a SaslAuthenticationException, but got {error:?}"
+        );
+        assert_eq!(error.message(), "SASL Authentication failed.", "{api}");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testPropagatedMetadataFetchException`:
+    /// a pending authentication error on the controller fails `createTopics` with
+    /// the `SaslAuthenticationException` the client reports for that node, rather
+    /// than the call timing out.
+    ///
+    /// The request to node 0 is answered as disconnected, and the admin loop
+    /// fails the call with `client.authenticationException(node)`
+    /// (`KafkaAdminClient.java:1462-1465`), which is not retriable.
+    ///
+    /// Java runs on `Time.SYSTEM`; here the mock clock stays still, so neither
+    /// `request.timeout.ms=10` nor the 1 s call timeout can expire, and the call
+    /// can only fail through the authentication error.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testPropagatedMetadataFetchException")]
+    async fn test_propagated_metadata_fetch_error() {
+        let time = mock_time(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let mut client = MockClient::with_static_nodes(nodes.clone(), Arc::clone(&time) as Arc<dyn Time>);
+        client.create_pending_authentication_error(&nodes[0], Duration::from_secs(24 * 60 * 60).as_millis() as i64);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:8121".to_string());
+        props.insert("request.timeout.ms".to_string(), "10".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+        runnable
+            .client_mut()
+            .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
+
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_replicas_assignments(
+                "myTopic",
+                std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+            )],
+            CreateTopicsOptions::new().set_timeout_ms(Some(1000)),
+        );
+        let error = await_failure(&mut runnable, result.all(), "createTopics").await;
+        assert_sasl_authentication_error(&error, "createTopics");
+    }
+
+    /// Translated from `KafkaAdminClientTest.testAdminClientApisAuthenticationFailure`,
+    /// with its helpers `callAdminClientApisAndExpectAnAuthenticationError` and
+    /// `callClientQuotasApisAndExpectAnAuthenticationError`: once the bootstrap
+    /// metadata call fails authentication, every API fails with that
+    /// authentication error.
+    ///
+    /// The metadata call's failure reaches `AdminMetadataManager.updateFailed`,
+    /// which keeps a fatal exception (`RequestUtils.isFatalException`) that
+    /// `isReady()` rethrows to every call choosing a node from then on. As in
+    /// Java, `metadata.recovery.strategy` is `none`: a rebootstrap updates the
+    /// manager with the bootstrap cluster, which clears that exception
+    /// (`AdminMetadataManager.update`).
+    ///
+    /// Java runs on `Time.SYSTEM` and blocks on each future. Here the mock clock
+    /// starts at a wall-clock-sized value, so that, as under `Time.SYSTEM`, the
+    /// metadata seeded from the bootstrap cluster (which leaves
+    /// `lastMetadataUpdateMs` at 0) counts as expired; and it advances by
+    /// `retry.backoff.ms` after each API, the case Java's comment below guards
+    /// against: the backoff has passed, so the admin loop makes a new metadata
+    /// call, whose `MetadataUpdateNodeIdProvider` finds the bootstrap node backing
+    /// off and, under `rebootstrap`, would rebootstrap and clear the error. Each
+    /// future is awaited after stepping the loop until it completes. The calls and
+    /// their order are Java's: createTopics, createPartitions, createAcls,
+    /// describeAcls, deleteAcls, describeConfigs, describeClientQuotas,
+    /// alterClientQuotas.
+    #[tokio::test]
+    #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testAdminClientApisAuthenticationFailure")]
+    async fn test_admin_client_apis_authentication_failure() {
+        const RETRY_BACKOFF_MS: i64 = 100;
+        let time = mock_time(1_700_000_000_000);
+        // Java's `mockBootstrapCluster()`.
+        let cluster = Cluster::bootstrap(&[("localhost".to_string(), "127.0.0.1:8121".parse().unwrap())]);
+        let bootstrap_node = cluster.nodes()[0].clone();
+        let mut client =
+            MockClient::with_static_nodes(vec![bootstrap_node.clone()], Arc::clone(&time) as Arc<dyn Time>);
+        client
+            .create_pending_authentication_error(&bootstrap_node, Duration::from_secs(24 * 60 * 60).as_millis() as i64);
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:8121".to_string());
+        props.insert("request.timeout.ms".to_string(), "1000".to_string());
+        // Default "metadata.recovery.strategy" is rebootstrap. If it meets "retry.backoff.ms" (default is 100L),
+        // following assertion will fail. Set it to none to avoid authentication error cleanup.
+        props.insert("metadata.recovery.strategy".to_string(), "none".to_string());
+        let config = AdminClientConfig::new(&props).unwrap();
+        let (admin, mut runnable) =
+            KafkaAdminClient::create_for_test(client, cluster, &config, Arc::clone(&time) as Arc<dyn Time>);
+
+        // callAdminClientApisAndExpectAnAuthenticationError
+        let result = admin.create_topics_with_options(
+            &[NewTopic::with_replicas_assignments(
+                "myTopic",
+                std::collections::BTreeMap::from([(0, vec![0, 1, 2])]),
+            )],
+            CreateTopicsOptions::new().set_timeout_ms(Some(10_000)),
+        );
+        let error = await_failure(&mut runnable, result.all(), "createTopics").await;
+        assert_sasl_authentication_error(&error, "createTopics");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.create_partitions(&new_partitions_counts());
+        let error = await_failure(&mut runnable, result.all(), "createPartitions").await;
+        assert_sasl_authentication_error(&error, "createPartitions");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.create_acls(&[acl1(), acl2()]);
+        let error = await_failure(&mut runnable, result.all(), "createAcls").await;
+        assert_sasl_authentication_error(&error, "createAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.describe_acls(&filter1());
+        let error = await_failure(&mut runnable, result.values().clone(), "describeAcls").await;
+        assert_sasl_authentication_error(&error, "describeAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.delete_acls(&[filter1(), filter2()]);
+        let error = await_failure(&mut runnable, result.all(), "deleteAcls").await;
+        assert_sasl_authentication_error(&error, "deleteAcls");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let result = admin.describe_configs(&[ConfigResource::new(config_resource::Type::Broker, "0".to_string())]);
+        let error = await_failure(&mut runnable, result.all(), "describeConfigs").await;
+        assert_sasl_authentication_error(&error, "describeConfigs");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        // callClientQuotasApisAndExpectAnAuthenticationError
+        let result = admin.describe_client_quotas(&ClientQuotaFilter::all());
+        let error = await_failure(&mut runnable, result.entities().clone(), "describeClientQuotas").await;
+        assert_sasl_authentication_error(&error, "describeClientQuotas");
+        time.sleep(RETRY_BACKOFF_MS);
+
+        let entity =
+            ClientQuotaEntity::new(HashMap::from([(ClientQuotaEntity::USER.to_string(), Some("user".to_string()))]));
+        let alteration = ClientQuotaAlteration::new(entity, vec![Op::new("consumer_byte_rate", Some(1000.0))]);
+        let result = admin.alter_client_quotas(&[alteration]);
+        let error = await_failure(&mut runnable, result.all(), "alterClientQuotas").await;
+        assert_sasl_authentication_error(&error, "alterClientQuotas");
+    }
+
     #[tokio::test]
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();
