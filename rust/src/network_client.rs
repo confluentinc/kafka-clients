@@ -1952,6 +1952,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         if let Some(metadata) = &self.metadata {
             let metadata = metadata.clone();
 
+            Self::log_metadata_response_issues(&self.log_context, request_header, response);
+
             if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
                 && response.top_level_error() == Errors::RebootstrapRequired
             {
@@ -1972,6 +1974,65 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_progress = None;
         } else if let Some(ref mut updater) = self.external_metadata_updater {
             updater.handle_successful_response(request_header, now, response);
+        }
+    }
+
+    /// The two WARN lines at the top of Java's
+    /// `DefaultMetadataUpdater.handleSuccessfulResponse` (`NetworkClient.java:1520-1537`):
+    /// partitions whose leader has no listener for this client's listener name
+    /// (up to ten of them), and the topics the response reports an error for.
+    /// They are the usual first sign of a misconfigured `advertised.listeners`
+    /// or of a topic that does not exist yet, so operators alert on them.
+    ///
+    /// The topic errors are read from `topic_metadata()` rather than
+    /// `MetadataResponse::errors()`: the latter panics on a topic without a
+    /// name, where Java throws, and this runs on the client's I/O task. The
+    /// metadata requests this updater sends are by topic name, so every topic
+    /// in the response has one and the two give the same map.
+    fn log_metadata_response_issues(
+        log_context: &LogContext,
+        request_header: &RequestHeader,
+        response: &MetadataResponse,
+    ) {
+        // If any partition has leader with missing listeners, log up to ten of these partitions
+        // for diagnosing broker configuration issues.
+        // This could be a transient issue if listeners were added dynamically to brokers.
+        let missing_listener_partitions: Vec<&crate::common::TopicPartition> = response
+            .topic_metadata()
+            .iter()
+            .flat_map(|topic_metadata| topic_metadata.partition_metadata())
+            .filter(|partition_metadata| partition_metadata.error() == Errors::ListenerNotFound)
+            .map(|partition_metadata| partition_metadata.topic_partition())
+            .collect();
+        if !missing_listener_partitions.is_empty() {
+            let count = missing_listener_partitions.len();
+            let shown: Vec<String> = missing_listener_partitions.iter().take(10).map(|tp| tp.to_string()).collect();
+            kafka_warn!(
+                log_context,
+                "{} partitions have leader brokers without a matching listener, including [{}]",
+                count,
+                shown.join(", ")
+            );
+        }
+
+        // Check if any topic's metadata failed to get updated. Java prints a
+        // `HashMap`, whose order is unspecified; sorting by topic keeps the
+        // line stable.
+        let mut errors: Vec<(&str, Errors)> = response
+            .topic_metadata()
+            .iter()
+            .filter(|topic_metadata| topic_metadata.error() != Errors::None)
+            .map(|topic_metadata| (topic_metadata.topic(), topic_metadata.error()))
+            .collect();
+        if !errors.is_empty() {
+            errors.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            let errors: Vec<String> = errors.iter().map(|(topic, error)| format!("{topic}={error}")).collect();
+            kafka_warn!(
+                log_context,
+                "The metadata response from the cluster reported a recoverable issue with correlation id {} : {{{}}}",
+                request_header.correlation_id(),
+                errors.join(", ")
+            );
         }
     }
 
@@ -5932,6 +5993,112 @@ mod tests {
     #[tokio::test]
     async fn test_rebootstrap_required_after_a_receive_from_another_node() {
         rebootstrap_required_with_a_concurrent_receive(true).await;
+    }
+
+    /// A metadata response with one broker and the given topics, each topic a
+    /// `(name, topic error, partition errors)` triple.
+    fn metadata_response_with_errors(topics: &[(&str, Errors, &[Errors])]) -> MetadataResponse {
+        use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic};
+
+        let mut broker = MetadataResponseBroker::new();
+        broker.set_node_id(0);
+        broker.set_host("localhost".to_string());
+        broker.set_port(1969);
+        let mut data = MetadataResponseData::new();
+        data.set_brokers(vec![broker]);
+        data.set_topics(
+            topics
+                .iter()
+                .map(|(name, topic_error, partition_errors)| {
+                    let mut topic = MetadataResponseTopic::new();
+                    topic.set_name(Some(name.to_string()));
+                    topic.set_error_code(topic_error.code());
+                    topic.set_partitions(
+                        partition_errors
+                            .iter()
+                            .enumerate()
+                            .map(|(index, error)| {
+                                let mut partition = MetadataResponsePartition::new();
+                                partition.set_partition_index(index as i32);
+                                partition.set_leader_id(0);
+                                partition.set_error_code(error.code());
+                                partition
+                            })
+                            .collect(),
+                    );
+                    topic
+                })
+                .collect(),
+        );
+        MetadataResponse::with_has_reliable_leader_epochs(data, true)
+    }
+
+    fn warn_lines(lines: Vec<(log::Level, String)>) -> Vec<String> {
+        lines
+            .into_iter()
+            .filter(|(level, _)| *level == log::Level::Warn)
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    /// Java's `DefaultMetadataUpdater.handleSuccessfulResponse` logs two WARN
+    /// lines before it applies a response (`NetworkClient.java:1520-1537`): one
+    /// for partitions whose leader has no listener for the client's listener
+    /// name, listing at most ten of them, and one for the topics the response
+    /// reports an error for. A first send to a topic that does not exist yet
+    /// produces the second one.
+    #[tokio::test]
+    async fn test_metadata_response_issues_are_logged_at_warn_like_java() {
+        let metadata = Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        let mut client = create_network_client_with_real_metadata(metadata);
+        let listener_not_found = [Errors::ListenerNotFound; 12];
+        let response = metadata_response_with_errors(&[
+            ("healthy", Errors::None, &[Errors::None, Errors::None]),
+            ("no-listener", Errors::None, &listener_not_found),
+            ("missing", Errors::UnknownTopicOrPartition, &[]),
+            ("electing", Errors::LeaderNotAvailable, &[]),
+        ]);
+
+        let ((), lines) = crate::test_log_capture::capture_logs(|| {
+            client.handle_successful_metadata_response(&metadata_request_header(7), 0, &response);
+        });
+
+        assert_eq!(
+            warn_lines(lines),
+            vec![
+                "12 partitions have leader brokers without a matching listener, including \
+                 [no-listener-0, no-listener-1, no-listener-2, no-listener-3, no-listener-4, \
+                 no-listener-5, no-listener-6, no-listener-7, no-listener-8, no-listener-9]"
+                    .to_string(),
+                "The metadata response from the cluster reported a recoverable issue with correlation id 7 : \
+                 {electing=LEADER_NOT_AVAILABLE, missing=UNKNOWN_TOPIC_OR_PARTITION}"
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// A response without errors logs neither line.
+    #[tokio::test]
+    async fn test_metadata_response_without_issues_logs_no_warning() {
+        let metadata = Arc::new(Metadata::new(
+            50,
+            50,
+            5000,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        let mut client = create_network_client_with_real_metadata(metadata);
+        let response = metadata_response_with_errors(&[("healthy", Errors::None, &[Errors::None])]);
+
+        let ((), lines) = crate::test_log_capture::capture_logs(|| {
+            client.handle_successful_metadata_response(&metadata_request_header(1), 0, &response);
+        });
+
+        assert_eq!(warn_lines(lines), Vec::<String>::new());
     }
 
     /// Builds a `RequestHeader` for METADATA v12 with the given correlation id.
