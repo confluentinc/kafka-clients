@@ -923,7 +923,7 @@ Verified against `Cargo.toml`.
 | futures-util | 0.3 | Future combinators |
 | tokio-rustls | 0.26 | Async TLS |
 | rustls | 0.23 | TLS implementation (TLS 1.2 + 1.3); PEM cert/key parsing via its re-exported `pki_types::pem::PemObject` |
-| webpki-roots | 0.26 | Root CA certificates |
+| webpki-roots | 1 | Root CA certificates |
 | aws-lc-rs | 1 | rustls crypto provider, and PBKDF2-HMAC for `ScramFormatter::hi` (already a transitive dependency through rustls, so no extra compiled crate) |
 | bytes | 1 | Buffer handling on the receive path |
 | flate2 / snap / lz4_flex / zstd | 1 / 1 / 0.11 / 0.13 | Record-batch compression codecs |

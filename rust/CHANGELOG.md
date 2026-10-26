@@ -33,13 +33,12 @@ breaking changes.
   `Debug` output of rustls's client session values exposed TLS session secrets.
   The client never formats those values, but the C and Python bindings were
   built with the affected 0.23.45.
-- rustls-webpki 0.103.16 and webpki-roots 1.0.11 stop trusting the emSign
-  (eMudhra) intermediate CAs whose private keys leaked
-  ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382),
-  [RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381)): a
-  certificate signed with one of those keys could impersonate a broker. The C
-  and Python bindings are built with the fixed versions; a Rust application
-  picks them up by updating its lockfile.
+- The minimum webpki-roots version is now 1.0.10, which stops trusting the
+  emSign (eMudhra) intermediate CAs whose private keys leaked
+  ([RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381)).
+  A Rust application should also update rustls-webpki to 0.103.16
+  ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382)) in
+  its lockfile.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
