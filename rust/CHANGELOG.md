@@ -13,6 +13,13 @@ breaking changes.
   fails the call at once: until the deadline the call is retried, as Java's
   `close` does, and `close` returns once it completes. New calls are still
   rejected as soon as `close` is called.
+- **Breaking:** an explicit `default.api.timeout.ms` below
+  `request.timeout.ms` fails client creation with Java's `The specified value
+  of default.api.timeout.ms must be no smaller than the value of
+  request.timeout.ms.`, wrapped in `Failed to create new KafkaAdminClient`.
+  When `default.api.timeout.ms` is not set and `request.timeout.ms` is above
+  the API timeout's 60000 ms default, the API timeout is raised to the request
+  timeout, with a WARN, as Java's `configureDefaultApiTimeoutMs` does.
 - A negative per-call `timeout_ms` is treated as `0`, as Java's
   `calcDeadlineMs` does: the call is sent once instead of timing out before it
   was sent.
