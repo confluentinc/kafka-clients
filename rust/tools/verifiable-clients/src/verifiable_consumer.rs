@@ -56,8 +56,8 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::StringDeserializer;
 use confluent_kafka::consumer::{
-    ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords, DynConsumer,
-    GroupProtocol, KafkaConsumer, OffsetAndMetadata, OffsetCommitCallback,
+    CloseOptions, ConsumerConfig, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
+    DynConsumer, GroupProtocol, KafkaConsumer, OffsetAndMetadata, OffsetCommitCallback,
 };
 
 /// Wall-clock milliseconds since the Unix epoch. The Rust analog of Java's
@@ -417,6 +417,7 @@ pub struct VerifiableConsumer {
     verbose: bool,
     max_messages: i32,
     consumed_messages: i32,
+    close_timeout_ms: i32,
     reporter: Arc<EventReporter>,
 }
 
@@ -430,6 +431,7 @@ impl VerifiableConsumer {
         use_auto_commit: bool,
         use_async_commit: bool,
         verbose: bool,
+        close_timeout_ms: i32,
     ) -> Self {
         Self {
             consumer,
@@ -439,6 +441,7 @@ impl VerifiableConsumer {
             verbose,
             max_messages,
             consumed_messages: 0,
+            close_timeout_ms,
             reporter: Arc::new(EventReporter),
         }
     }
@@ -595,7 +598,11 @@ impl VerifiableConsumer {
         }
 
         // finally: close the consumer and announce shutdown.
-        if let Err(e) = self.consumer.close().await {
+        let closed = match close_options(self.close_timeout_ms) {
+            Ok(options) => self.consumer.close_with_options(options).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = closed {
             eprintln!("Error closing consumer: {e}");
         }
 
@@ -661,6 +668,16 @@ impl VerifiableConsumer {
     }
 }
 
+/// Java's `CloseOptions.timeout(Duration.ofMillis(closeTimeoutMs))`, which
+/// `run` closes the consumer with. A Rust `Duration` cannot be negative, so a
+/// negative timeout is the error Java's `close` raises for it, and the
+/// consumer is left unclosed, as in Java.
+fn close_options(close_timeout_ms: i32) -> Result<CloseOptions, Error> {
+    let millis = u64::try_from(close_timeout_ms)
+        .map_err(|_| Error::local_illegal_argument("The timeout cannot be negative."))?;
+    Ok(CloseOptions::new_with_timeout(Duration::from_millis(millis)))
+}
+
 /// The parsed command-line arguments, separated from consumer construction so
 /// the parsing/validation logic is unit-testable without a live broker.
 #[derive(Debug, PartialEq)]
@@ -676,6 +693,7 @@ struct ParsedArgs {
     session_timeout: Option<i32>,
     verbose: bool,
     use_auto_commit: bool,
+    close_timeout: i32,
     reset_policy: String,
     assignment_strategy: String,
     config_file: Option<String>,
@@ -727,6 +745,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, Error> {
     let mut session_timeout: Option<i32> = None;
     let mut verbose = false;
     let mut use_auto_commit = false;
+    let mut close_timeout: i32 = 30000;
     let mut reset_policy: String = "earliest".to_string();
     let mut assignment_strategy: String = DEFAULT_ASSIGNMENT_STRATEGY.to_string();
     let mut config_file: Option<String> = None;
@@ -747,6 +766,9 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, Error> {
             },
             "--verbose" => verbose = true,
             "--enable-autocommit" => use_auto_commit = true,
+            "--close-timeout" => {
+                close_timeout = parse_int(&next_value(&mut it, "--close-timeout")?, "--close-timeout")?
+            },
             "--reset-policy" => reset_policy = next_value(&mut it, "--reset-policy")?,
             "--assignment-strategy" => assignment_strategy = next_value(&mut it, "--assignment-strategy")?,
             "--consumer.config" => config_file = Some(next_value(&mut it, "--consumer.config")?),
@@ -780,6 +802,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, Error> {
         session_timeout,
         verbose,
         use_auto_commit,
+        close_timeout,
         reset_policy,
         assignment_strategy,
         config_file,
@@ -915,6 +938,7 @@ pub fn create_from_args(args: &[String]) -> Result<VerifiableConsumer, Error> {
         parsed.use_auto_commit,
         false,
         parsed.verbose,
+        parsed.close_timeout,
     ))
 }
 
@@ -926,7 +950,7 @@ HOST1:PORT1[,HOST2:PORT2[...]] --topic TOPIC --group-id GROUP-ID\n\
                            [--group-protocol GROUP-PROTOCOL] [--group-remote-assignor GROUP-REMOTE-ASSIGNOR]\n\
                            [--group-instance-id GROUP-INSTANCE-ID] [--max-messages MAX-MESSAGES]\n\
                            [--session-timeout TIMEOUT-MS] [--verbose] [--enable-autocommit]\n\
-                           [--reset-policy RESET-POLICY] [--assignment-strategy ASSIGNMENT-STRATEGY]\n\
+                           [--close-timeout CLOSE-TIMEOUT-MS] [--reset-policy RESET-POLICY] [--assignment-strategy ASSIGNMENT-STRATEGY]\n\
                            [--consumer.config CONFIG-FILE] [--command-config CONFIG-FILE]\n\n\
 This tool consumes messages from a specific topic and emits consumer events\n\
 (e.g. group rebalances, received messages, and offsets committed) as JSON\n\
@@ -945,6 +969,7 @@ optional arguments:\n\
   --session-timeout TIMEOUT-MS  The consumer's session timeout; not supported when group protocol is CONSUMER.\n\
   --verbose                     Enable to log individual consumed records.\n\
   --enable-autocommit           Enable offset auto-commit on consumer.\n\
+  --close-timeout CLOSE-TIMEOUT-MS  Timeout in milliseconds for closing the consumer. (default: 30000)\n\
   --reset-policy RESET-POLICY   Set reset policy (earliest, latest, or none). (default: earliest)\n\
   --assignment-strategy ASSIGNMENT-STRATEGY  Set assignment strategy (e.g. {example_strategy}); only used if the group protocol is CLASSIC. (default: {default_strategy})\n\
   --consumer.config CONFIG-FILE (DEPRECATED) Consumer config properties file. Use --command-config instead.\n\
@@ -958,7 +983,7 @@ optional arguments:\n\
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confluent_kafka::consumer::MockConsumer;
+    use confluent_kafka::consumer::{GroupMembershipOperation, MockConsumer};
     use indexmap::IndexMap;
 
     // ---- construction helpers ----------------------------------------------
@@ -968,7 +993,15 @@ mod tests {
     }
 
     fn verifiable_with(max_messages: i32, verbose: bool) -> VerifiableConsumer {
-        VerifiableConsumer::new(mock_consumer(), "test-topic".to_string(), max_messages, false, false, verbose)
+        VerifiableConsumer::new(
+            mock_consumer(),
+            "test-topic".to_string(),
+            max_messages,
+            false,
+            false,
+            verbose,
+            30000,
+        )
     }
 
     fn record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord<String, String> {
@@ -1252,6 +1285,7 @@ mod tests {
         assert_eq!(parsed.session_timeout, None);
         assert!(!parsed.verbose);
         assert!(!parsed.use_auto_commit);
+        assert_eq!(parsed.close_timeout, 30000);
         assert_eq!(parsed.reset_policy, "earliest");
         assert_eq!(parsed.assignment_strategy, DEFAULT_ASSIGNMENT_STRATEGY);
     }
@@ -1290,6 +1324,8 @@ mod tests {
             "30000",
             "--verbose",
             "--enable-autocommit",
+            "--close-timeout",
+            "15000",
             "--reset-policy",
             "latest",
         ]));
@@ -1301,7 +1337,31 @@ mod tests {
         assert_eq!(parsed.session_timeout, Some(30000));
         assert!(parsed.verbose);
         assert!(parsed.use_auto_commit);
+        assert_eq!(parsed.close_timeout, 15000);
         assert_eq!(parsed.reset_policy, "latest");
+    }
+
+    #[test]
+    fn parse_args_close_timeout_not_an_integer_errors() {
+        let mut a = minimal();
+        a.extend(args(&["--close-timeout", "15s"]));
+        let error = parse_args(&a).unwrap_err();
+        assert_eq!(error.message(), "argument --close-timeout: could not convert '15s' to integer");
+    }
+
+    #[test]
+    fn close_options_carry_the_close_timeout() {
+        let options = close_options(15000).unwrap();
+        assert_eq!(options.timeout(), Some(Duration::from_millis(15000)));
+        assert_eq!(options.group_membership_operation(), GroupMembershipOperation::Default);
+        assert_eq!(close_options(0).unwrap().timeout(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn close_options_reject_a_negative_timeout() {
+        let error = close_options(-1).unwrap_err();
+        assert!(error.is_local_illegal_argument_error());
+        assert_eq!(error.message(), "The timeout cannot be negative.");
     }
 
     #[test]
@@ -1341,7 +1401,11 @@ mod tests {
             Ok(_) => panic!("expected classic group protocol to be unsupported"),
             Err(e) => e,
         };
-        assert!(matches!(error, Error::UnsupportedVersion(_)), "unexpected error: {error:?}");
+        assert!(error.is_local_unsupported_operation_error(), "unexpected error: {error:?}");
+        assert_eq!(
+            error.message(),
+            "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848)."
+        );
     }
 
     // ---- properties parsing -------------------------------------------------
