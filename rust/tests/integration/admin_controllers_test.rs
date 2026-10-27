@@ -45,6 +45,15 @@
 //! an unknown id gives `CONTROLLER_ID_NOT_REGISTERED`, and the active
 //! controller's own id gives `INVALID_REQUEST`.
 //!
+//! Java runs that test both through the brokers and through
+//! `bootstrap.controllers` (`@ValueSource(booleans = {true, false})` over
+//! `usingBootstrapControllers`). The broker arm is the two multilanguage
+//! scenarios below; the controller arm,
+//! [`test_unregister_controller_errors_through_bootstrap_controllers`], runs on
+//! the native client only, because the gRPC backends run in containers, which
+//! cannot reach the host-advertised controller listener
+//! (`KafkaCluster::bootstrap_controllers`).
+//!
 //! The **success** arm is not reachable on a pooled cluster: Java's
 //! `KRaftClusterTest.testUnregisterController` first shuts a controller down in a
 //! three-controller quorum, and the Rust harness can stop neither a pooled node
@@ -53,13 +62,17 @@
 //! with its Raft-controller option in the unit, C and Python suites; across the
 //! four backends here only the mock's default, unsupported answer can be seeded.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::admin::{DescribeClusterOptions, DescribeFeaturesOptions, UnregisterControllerOptions};
+use confluent_kafka::admin::{
+    AdminClientConfig, DescribeClusterOptions, DescribeFeaturesOptions, UnregisterControllerOptions,
+};
 use confluent_kafka::common::Error;
 
 use crate::common::admin_backend::{AdminBackend, admin_for};
-use crate::common::backend_factory::AdminBackendFactory;
+use crate::common::backend_factory::{AdminBackendFactory, RustNativeFactory};
+use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
@@ -123,7 +136,18 @@ fn assert_unsupported(error: &Error, backend: &str, regime: &Regime) {
 async fn unregister_controller_rejects_an_unregistered_id<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
-    let regime = regime(&admin, backend).await;
+    assert_unregistered_id_rejected(&admin, backend).await;
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// The assertions of (a), for an admin connected either way.
+async fn assert_unregistered_id_rejected<A: AdminBackend>(admin: &A, backend: &str) {
+    let regime = regime(admin, backend).await;
 
     let error = admin
         .unregister_controller(
@@ -154,12 +178,6 @@ async fn unregister_controller_rejects_an_unregistered_id<F: AdminBackendFactory
             );
         },
     }
-
-    admin
-        .close(Some(Duration::from_secs(5)))
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
-    ctx.cleanup().await;
 }
 
 /// (b) The active controller's own id: `INVALID_REQUEST` on any 4.4 broker —
@@ -171,7 +189,20 @@ async fn unregister_controller_rejects_the_active_controller<F: AdminBackendFact
 ) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
-    let regime = regime(&admin, backend).await;
+    assert_active_controller_rejected(&admin, backend).await;
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+    ctx.cleanup().await;
+}
+
+/// The assertions of (b), for an admin connected either way. `describeCluster`
+/// lists the brokers through the brokers and the controllers through
+/// `bootstrap.controllers`; on the pooled fixture both are its one node.
+async fn assert_active_controller_rejected<A: AdminBackend>(admin: &A, backend: &str) {
+    let regime = regime(admin, backend).await;
 
     // The pooled fixture is a single combined node, so the one node is the
     // active controller.
@@ -200,11 +231,40 @@ async fn unregister_controller_rejects_the_active_controller<F: AdminBackendFact
             );
         },
     }
+}
+
+/// The `usingBootstrapControllers = true` arm of
+/// `KRaftClusterTest.testUnregisterControllerError` (`KRaftClusterTest.java:716-746`):
+/// (a) and (b) through `bootstrap.controllers`. `unregisterController` uses
+/// `LeastLoadedBrokerOrActiveKController`, so the request goes to the active
+/// controller itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_unregister_controller_errors_through_bootstrap_controllers() {
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let bootstrap_controllers = ctx
+        .cluster()
+        .bootstrap_controllers()
+        .expect("a combined node publishes its controller listener")
+        .to_string();
+    // The controller listener is PLAINTEXT, whatever protocol the run selects.
+    let config = HashMap::from([(
+        AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+        bootstrap_controllers,
+    )]);
+    let factory = RustNativeFactory;
+    let admin = factory
+        .create(config)
+        .await
+        .unwrap_or_else(|e| panic!("rust backend: create a bootstrap.controllers admin client: {e}"));
+    let backend = "rust (bootstrap.controllers)";
+
+    assert_unregistered_id_rejected(&admin, backend).await;
+    assert_active_controller_rejected(&admin, backend).await;
 
     admin
         .close(Some(Duration::from_secs(5)))
         .await
-        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
+        .unwrap_or_else(|e| panic!("{backend}: close: {e}"));
     ctx.cleanup().await;
 }
 
