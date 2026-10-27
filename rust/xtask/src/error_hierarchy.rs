@@ -838,6 +838,7 @@ fn jdk_class(fqn: &str, parent: &str, ctors: &[JdkCtor]) -> JavaClass {
         factories: Vec::new(),
         enums: Vec::new(),
         singletons: Vec::new(),
+        to_string: None,
     }
 }
 
@@ -1060,6 +1061,99 @@ fn compatible(arg: &Option<String>, param_ty: &str) -> bool {
         || (matches!(p, "Collection" | "Iterable") && matches!(a, "Set" | "List" | "Collection"))
         || (p == "long" && a == "int")
         || (p == "double" && matches!(a, "int" | "long"))
+}
+
+/// A `toString()` override's `return` expression, a `+` chain of
+/// `getClass().getName()` (first), string literals, the class's own declared
+/// instance `fields` and no-argument calls on one of them, as Python: the whole
+/// text (the class as its Python path), the text after the class name and its
+/// `": "`, which `str()` gives (CLAUDE.md, Python Binding Conventions, Errors),
+/// and the fields read. Any other part (`super.toString()`, `this.method()`, a
+/// static call, a constant, a number) stops generation.
+fn translate_to_string(fqn: &str, expr: &str, fields: &[String]) -> anyhow::Result<(String, String, Vec<String>)> {
+    let parts = split_plus(expr);
+    let bad = |what: &str| anyhow::anyhow!("{fqn}.toString(): unsupported {what} in `{expr}`");
+    let field_of = |s: &str| -> Option<String> {
+        let name = s.strip_prefix("this.").unwrap_or(s);
+        fields.iter().any(|f| f == name).then(|| name.to_string())
+    };
+    let mut py = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let part = part.trim();
+        let code = if part == "getClass().getName()" {
+            if i != 0 {
+                return Err(bad("class name not first"));
+            }
+            "type(self).__module__ + \".\" + type(self).__qualname__".to_string()
+        } else if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
+            // A Java escape would need translating: not a translated form.
+            if part.contains('\\') {
+                return Err(bad(&format!("escaped literal `{part}`")));
+            }
+            py_str_literal(&part[1..part.len() - 1])
+        } else if let Some(call) = part.strip_suffix("()") {
+            let (target, method) = call.rsplit_once('.').ok_or_else(|| bad(&format!("call `{part}`")))?;
+            let field = field_of(target).ok_or_else(|| bad(&format!("call `{part}` (not on a field)")))?;
+            if method.is_empty() || !method.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Err(bad(&format!("call `{part}`")));
+            }
+            read.push(attr_name(&field));
+            // Java dereferences the field: a `None` is the Types row's `TypeError`.
+            format!(
+                "java_str(_throwable.non_null(self.{}, \"{}\").{}())",
+                attr_name(&field),
+                snake(&field),
+                snake(method)
+            )
+        } else if let Some(field) = field_of(part) {
+            read.push(attr_name(&field));
+            format!("java_str(self.{})", attr_name(&field))
+        } else {
+            return Err(bad(&format!("part `{part}`")));
+        };
+        py.push(code);
+    }
+    let whole = py.join(" + ");
+    // `str()`: what follows `getClass().getName() + ": ..."`.
+    let second = parts.get(1).map(|p| p.trim()).unwrap_or_default();
+    if parts.first().map(|p| p.trim()) != Some("getClass().getName()") || !second.starts_with("\": ") {
+        return Err(bad("form (not `getClass().getName() + \": ...\"`)"));
+    }
+    let mut after = vec![py_str_literal(&second[3..second.len() - 1])];
+    after.extend(py[2..].iter().cloned());
+    read.dedup();
+    Ok((whole, after.join(" + "), read))
+}
+
+/// Split `s` at its top-level `+` signs, outside literals and parentheses.
+fn split_plus(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let (mut out, mut depth, mut start, mut i) = (Vec::new(), 0i32, 0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            },
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'+' if depth == 0 => {
+                out.push(s[start..i].to_string());
+                start = i + 1;
+            },
+            _ => {},
+        }
+        i += 1;
+    }
+    out.push(s[start..].to_string());
+    out
 }
 
 fn py_str_literal(s: &str) -> String {
@@ -2076,6 +2170,15 @@ fn branch_code(g: &Graph, info: &ClassInfo, form: &PyForm, indent: &str) -> Vec<
             .get(&attr)
             .map(|v| v.expr.clone())
             .unwrap_or_else(|| java_default_value(&ty).to_string());
+        // A Java `double` / `float` field holds a floating value whatever number
+        // it was given, so `str()` prints `9.0` as Java does (as
+        // `ClientQuotaAlteration.Op` keeps a float).
+        let ident = !value.is_empty() && value.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let value = match ty.as_str() {
+            "double" | "float" if ident && value != "None" => format!("float({value})"),
+            "Double" | "Float" if ident && value != "None" => format!("None if {value} is None else float({value})"),
+            _ => value,
+        };
         lines.push(format!("{indent}self.{attr} = {value}"));
     }
     lines
@@ -2473,6 +2576,40 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         getter_sigs.push(format!("    def {name}(self) -> {ret}: ..."));
     }
     emit_factories(info.java.getters.len(), &mut body, &mut getter_sigs);
+    if let Some(expr) = &info.java.to_string {
+        let fields: Vec<String> = info
+            .java
+            .fields
+            .iter()
+            .filter(|f| !f.is_static)
+            .map(|f| f.name.clone())
+            .collect();
+        let (whole, after, read) = translate_to_string(&info.java_fqn, expr, &fields)?;
+        // An error built without its payload (`_throwable.new`'s message-only
+        // fallback) prints as before the override: its message.
+        let has = read
+            .iter()
+            .map(|a| format!("hasattr(self, \"{a}\")"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let guard = if read.is_empty() { "True".to_string() } else { has };
+        body.push(String::new());
+        body.push("    def _java_to_string(self) -> str | None:".into());
+        body.push(
+            "        \"\"\"Java's ``toString()`` override, with the Python class path\n        \
+             (``_throwable.to_string`` prefers it); ``None`` without the payload.\"\"\""
+                .into(),
+        );
+        body.push(format!("        if not ({guard}):\n            return None"));
+        body.push(format!("        return ({whole})"));
+        body.push(String::new());
+        body.push("    def __str__(self) -> str:".into());
+        body.push("        \"\"\"Java's ``toString()`` override's text after the class name (Errors).\"\"\"".into());
+        body.push(format!(
+            "        if not ({guard}):\n            return _throwable.message_text(self)"
+        ));
+        body.push(format!("        return ({after})"));
+    }
     if is_root_class(info) {
         body.push(String::new());
         body.push("    def __str__(self) -> str:".into());
@@ -3239,6 +3376,40 @@ fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_translates_a_to_string_override() {
+        let fields = vec!["metric".to_string(), "value".to_string(), "bound".to_string()];
+        let expr = "getClass().getName() + \": '\" + metric.metricName() + \"' violated quota. Actual: \" + value + \", Threshold: \" + bound";
+        let (whole, after, read) = translate_to_string("x.QuotaViolationException", expr, &fields).unwrap();
+        assert_eq!(
+            whole,
+            "type(self).__module__ + \".\" + type(self).__qualname__ + \": '\" + java_str(_throwable.non_null(self._metric, \"metric\").metric_name()) + \"' violated quota. Actual: \" + java_str(self._value) + \", Threshold: \" + java_str(self._bound)"
+        );
+        assert_eq!(
+            after,
+            "\"'\" + java_str(_throwable.non_null(self._metric, \"metric\").metric_name()) + \"' violated quota. Actual: \" + java_str(self._value) + \", Threshold: \" + java_str(self._bound)"
+        );
+        assert_eq!(read, vec!["_metric", "_value", "_bound"]);
+        // Every form outside the translated ones stops generation.
+        for part in [
+            "super.toString()",
+            "this.describe()",
+            "Utils.name()",
+            "MAX_SIZE",
+            "42",
+            "name",
+            "format(a)",
+            r#""a\"b""#,
+            r#""a\nb""#,
+            r#""a\\b""#,
+        ] {
+            let expr = format!("getClass().getName() + \": \" + {part}");
+            let err = translate_to_string("x.E", &expr, &fields).unwrap_err().to_string();
+            assert!(err.contains("unsupported"), "{part}: {err}");
+        }
+        assert!(translate_to_string("x.E", "metric + \": x\"", &fields).is_err());
+    }
 
     fn repo_root() -> PathBuf {
         // rust/xtask/ is a workspace member; the repo root is two levels up.
