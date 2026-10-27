@@ -319,12 +319,18 @@ def test_calls_after_close_raise_illegal_state() -> None:
 def test_delete_and_describe_topics_args() -> None:
     by_ids, keys = _conversions.topic_collection_target(["a", "b"], "deleteTopics")
     assert (by_ids, keys) == (False, ["a", "b"])
-    assert _conversions.delete_topics_args(False, keys) == (["a", "b"], False)
+    assert _conversions.delete_topics_args(["a", "b"], False, keys) == (
+        _conversions.DELETE_TOPIC_NAMES, ["a", "b"])
+    assert _conversions.delete_topics_args(
+        TopicCollection.of_topic_names(topics=["a", "b"]), False, keys) == (
+        _conversions.DELETE_TOPIC_NAME_COLLECTION, ["a", "b"])
     topic_id = Uuid.random_uuid()
     by_ids, keys = _conversions.topic_collection_target(
         TopicCollection.of_topic_ids(topics=[topic_id]), "deleteTopics")
     assert (by_ids, keys) == (True, [topic_id])
-    assert _conversions.delete_topics_args(True, keys) == ([str(topic_id)], True)
+    assert _conversions.delete_topics_args(
+        TopicCollection.of_topic_ids(topics=[topic_id]), True, keys) == (
+        _conversions.DELETE_TOPIC_ID_COLLECTION, [str(topic_id)])
     names = TopicCollection.of_topic_names(topics=["x"])
     assert _conversions.topic_collection_target(names, "describeTopics") == (False, ["x"])
     assert _conversions.describe_topics_args(_conversions.DESCRIBE_TOPIC_ID_COLLECTION,
@@ -530,6 +536,23 @@ def test_config_from_core_data() -> None:
         type=ConfigResource.Type.BROKER, name="1")
     assert _conversions.config_resource_from_tuple((99, "x")).type() is (
         ConfigResource.Type.UNKNOWN)
+
+
+def test_config_from_core_data_keeps_a_null_type() -> None:
+    """A ``createTopics`` entry has Java's null type (``KafkaAdminClient.java:1992-2002``):
+    the extension hands it over as ``None`` and the entry keeps it, printing ``type=None``."""
+    config = _conversions.config_from_rows([
+        ("cleanup.policy", "compact", 0, 0, 1, "DYNAMIC_TOPIC_CONFIG", None, None, [])])
+    entry = config.get(name="cleanup.policy")
+    assert entry is not None
+    assert entry.type() is None
+    assert entry != ConfigEntry(name="cleanup.policy", value="compact",
+                                source=ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG,
+                                is_sensitive=False, is_read_only=True, synonyms=[],
+                                type=ConfigEntry.ConfigType.UNKNOWN, documentation=None)
+    assert str(entry) == (
+        "ConfigEntry(name=cleanup.policy, value=compact, source=DYNAMIC_TOPIC_CONFIG, "
+        "isSensitive=False, isReadOnly=True, synonyms=[], type=None, documentation=None)")
 
 
 #: ``new ConfigEntry(name, value)`` rows of a core ``Config`` (Admin__config_future).

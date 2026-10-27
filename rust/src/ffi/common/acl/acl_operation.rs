@@ -18,11 +18,11 @@
 
 #![expect(non_camel_case_types)]
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 
 use crate::common::acl::AclOperation;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string};
+use crate::ffi::util::{box_list, c_str_to_string, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`AclOperation`] singleton.
 #[repr(C)]
@@ -277,6 +277,19 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_
     unsafe { value_of(self_) }.code()
 }
 
+/// `AclOperation.values()`: an owned list of the borrowed singletons in
+/// declaration order, freed with `kafka_List_destroy` (the elements are
+/// never freed).
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_common_acl_AclOperation_values() -> *mut kafka_List_t {
+    let elements = AclOperation::values()
+        .iter()
+        .map(|&value| singleton(value) as *mut c_void)
+        .collect();
+    box_list(elements, None)
+}
+
 /// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
 /// for one this client does not know.
 #[ffi_guard]
@@ -336,7 +349,24 @@ mod tests {
     use super::*;
     use std::ffi::CStr;
 
-    use crate::ffi::util::kafka_string_destroy;
+    use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size, kafka_string_destroy};
+
+    #[test]
+    fn values_lists_the_singletons_in_declaration_order() {
+        // SAFETY: Test code: the owned list from `values` is destroyed once, after its elements,
+        // borrowed singletons, are read.
+        unsafe {
+            let values = kafka_common_acl_AclOperation_values();
+            assert_eq!(kafka_List_size(values), 16);
+            for (index, &value) in AclOperation::values().iter().enumerate() {
+                assert_eq!(
+                    kafka_List_get(values, index as i32) as *const kafka_common_acl_AclOperation_t,
+                    singleton(value)
+                );
+            }
+            kafka_List_destroy(values);
+        }
+    }
 
     #[test]
     fn singletons_round_trip_and_match_their_enumerator() {

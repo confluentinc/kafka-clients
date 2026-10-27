@@ -1005,7 +1005,7 @@ async fn test_async_poll_after_topic_deleted() {
 
     // Delete the topic and wait for deletion to propagate to metadata
     admin
-        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
         .all()
         .get()
         .await
