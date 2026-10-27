@@ -1042,6 +1042,7 @@ where
 
         // Java: FetchResponse.isPreferredReplica(partitionData).
         if preferred_read_replica != crate::common::requests::FetchResponse::INVALID_PREFERRED_REPLICA_ID {
+            // `metadata_expire_ms()` is lock-free like Java's, so it is safe under the subscriptions guard.
             let expire_time_ms = self.time.milliseconds() + self.metadata.metadata_arc().metadata_expire_ms();
             debug!(
                 "Updating preferred read replica for partition {tp} to {preferred_read_replica}, set to expire at {expire_time_ms}"
@@ -3219,6 +3220,90 @@ mod tests {
         // Replica updated; the lease window expires at the time we
         // configured (42 + metadata_expire_ms).
         assert_eq!(Some(99), guard.preferred_read_replica(&partition, 42));
+    }
+
+    /// `update_partition_state` reads `metadata.max.age.ms` while it holds the
+    /// `SubscriptionState` guard, and `Metadata::update` runs the consumer's
+    /// retain callbacks (which lock `SubscriptionState`) while it holds the
+    /// metadata lock. If the getter took the metadata lock, a fetch response
+    /// carrying a preferred read replica that raced a metadata update would
+    /// freeze both tasks for good (subscriptions -> metadata on the app task,
+    /// metadata -> subscriptions on the background task). Java's
+    /// `Metadata.metadataExpireMs()` returns a `final` field without
+    /// synchronizing, so `FetchCollector.updatePartitionState` never takes the
+    /// metadata monitor; the Rust translation must not either.
+    ///
+    /// The test parks a `Metadata::update` inside a cluster-resource listener,
+    /// which runs while the metadata lock is held, and then requires
+    /// `update_partition_state` with a preferred read replica to complete on
+    /// another thread before the update is released.
+    #[test]
+    fn preferred_read_replica_update_does_not_take_the_metadata_lock() {
+        use crate::common::ClusterResource;
+        use crate::common::ClusterResourceListener;
+        use crate::common::requests::RequestTestUtils;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct ParkingListener {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl ClusterResourceListener for ParkingListener {
+            fn on_update(&self, _cluster_resource: &ClusterResource) {
+                let _ = self.entered.send(());
+                // Returns when the test releases it or drops the sender.
+                let _ = self.release.recv();
+            }
+        }
+
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        h.metadata
+            .add_cluster_update_listener(Box::new(ParkingListener { entered: entered_tx, release: release_rx }));
+
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(0);
+        partition_data.set_high_watermark(1000);
+        partition_data.set_preferred_read_replica(99);
+
+        let metadata = h.metadata.metadata_arc();
+        let collector = &h.collector;
+        let (done_tx, done_rx) = mpsc::channel();
+        let outcome = std::thread::scope(|s| {
+            // Owned by this closure so that a panic below drops it, which
+            // unparks the listener and lets the scope join every thread.
+            let release_tx = release_tx;
+            s.spawn(move || {
+                let response = RequestTestUtils::metadata_response(&[], None, -1, Vec::new());
+                metadata.update(0, &response, false, 0);
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Metadata::update never reached the cluster-resource listener");
+            // The metadata lock is now held by the parked update.
+            s.spawn(|| {
+                let updated = collector.update_partition_state(&partition_data, &partition);
+                let _ = done_tx.send(updated);
+            });
+            let outcome = done_rx.recv_timeout(Duration::from_secs(5));
+            drop(release_tx);
+            outcome
+        });
+
+        assert_eq!(
+            Ok(true),
+            outcome,
+            "update_partition_state blocked on the metadata lock while holding the SubscriptionState guard; \
+             Java's Metadata.metadataExpireMs() is unsynchronized, so a preferred-read-replica update must not \
+             wait on a concurrent Metadata.update"
+        );
+        let mut guard = h.subs.lock().expect("lock");
+        assert_eq!(Some(99), guard.preferred_read_replica(&partition, 0));
     }
 
     /// Use Node here to silence the dead-import warning while preserving
