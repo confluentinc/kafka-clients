@@ -3073,6 +3073,87 @@ static PyObject* str_or_none(const char* s) {
     return PyUnicode_FromString(s);
 }
 
+// A RecordDeserializationException's payload: `origin` its name ("KEY" /
+// "VALUE"), `topic_partition` (topic, partition), `offset`, `timestamp`,
+// `timestamp_type` Java's TimestampType.id, `key_buffer` / `value_buffer` bytes
+// copies (the views live only as long as the error handle) or None for Java's
+// null, and `headers` a list of (key, bytes | None) in insertion order, or None
+// for Java's null. 0 on success, -1 with a Python exception set.
+static int record_deserialization_payload(PyObject* d, const kafka_common_RecordDeserializationError_t* rd) {
+    kafka_common_Error_t *ffi_err = NULL;
+    const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* origin = NULL;
+    kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e origin_e =
+        kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY;
+    const kafka_common_TopicPartition_t* tp = NULL;
+    int64_t offset = 0;
+    int64_t timestamp = 0;
+    const kafka_common_record_TimestampType_t* tt = NULL;
+    int32_t tt_id = -1;
+    kafka_Bytes_t key = {0};
+    kafka_Bytes_t value = {0};
+    const kafka_common_header_internals_RecordHeaders_t* rh = NULL;
+    if (ffi_raise((origin = kafka_common_RecordDeserializationError_origin_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || (origin != NULL && ffi_raise((origin_e = kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum_err(origin, &ffi_err), ffi_take(&ffi_err))))
+        || ffi_raise((tp = kafka_common_RecordDeserializationError_topic_partition_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((offset = kafka_common_RecordDeserializationError_offset_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((timestamp = kafka_common_RecordDeserializationError_timestamp_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((tt = kafka_common_RecordDeserializationError_timestamp_type_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || (tt != NULL && ffi_raise((tt_id = kafka_common_record_TimestampType_id_err(tt, &ffi_err), ffi_take(&ffi_err))))
+        || ffi_raise((key = kafka_common_RecordDeserializationError_key_buffer_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((value = kafka_common_RecordDeserializationError_value_buffer_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((rh = kafka_common_RecordDeserializationError_headers_err(rd, &ffi_err), ffi_take(&ffi_err)))) return -1;
+    PyObject* headers = NULL;
+    if (rh == NULL) {
+        Py_INCREF(Py_None);
+        headers = Py_None;
+    } else {
+        // The interface view is borrowed from the class handle; only the reading
+        // `to_array` is called on it, as the poll path reads a record's headers.
+        kafka_common_header_Headers_t* view = NULL;
+        kafka_List_t* arr = NULL;  // owned list of borrowed headers
+        int32_t n = 0;
+        if (ffi_raise((view = kafka_common_header_internals_RecordHeaders__as_Headers_err(rh, &ffi_err), ffi_take(&ffi_err)))
+            || ffi_raise((arr = kafka_common_header_Headers_to_array_err(view, &ffi_err), ffi_take(&ffi_err)))) return -1;
+        if (arr != NULL && ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) n = -1;
+        headers = n >= 0 ? PyList_New(n) : NULL;
+        for (int32_t i = 0; headers != NULL && i < n; i++) {
+            void* rec_header = NULL;
+            const kafka_common_header_Header_t* h = NULL;
+            const char* hkey = NULL;
+            kafka_Bytes_t hval = {0};
+            PyObject* pair = NULL;
+            if (!ffi_raise((rec_header = kafka_List_get_err(arr, i, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((h = kafka_common_header_internals_RecordHeader__as_Header_err(
+                       (const kafka_common_header_internals_RecordHeader_t*)rec_header, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((hkey = kafka_common_header_Header_key_err(h, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((hval = kafka_common_header_Header_value_err(h, &ffi_err), ffi_take(&ffi_err)))) {
+                PyObject* pykey = PyUnicode_FromString(hkey ? hkey : "");
+                PyObject* pyval = bytes_to_py(&hval);
+                if (pykey != NULL && pyval != NULL) pair = PyTuple_Pack(2, pykey, pyval);
+                Py_XDECREF(pykey);
+                Py_XDECREF(pyval);
+            }
+            if (pair == NULL) { Py_CLEAR(headers); break; }
+            PyList_SET_ITEM(headers, i, pair);  // steals ref
+        }
+        if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        if (headers == NULL) return -1;
+    }
+    // `headers` is set first, so payload_set takes its reference on every path.
+    int rc = (payload_set(d, "headers", headers) == 0
+              && payload_set(d, "origin", PyUnicode_FromString(
+                  origin_e == kafka_common_RecordDeserializationError_DeserializationErrorOrigin_VALUE
+                      ? "VALUE" : "KEY")) == 0
+              && payload_set(d, "topic_partition",
+                             tp != NULL ? tp_to_py(tp) : (Py_INCREF(Py_None), Py_None)) == 0
+              && payload_set(d, "offset", PyLong_FromLongLong(offset)) == 0
+              && payload_set(d, "timestamp", PyLong_FromLongLong(timestamp)) == 0
+              && payload_set(d, "timestamp_type", PyLong_FromLong(tt_id)) == 0
+              && payload_set(d, "key_buffer", bytes_to_py(&key)) == 0
+              && payload_set(d, "value_buffer", bytes_to_py(&value)) == 0) ? 0 : -1;
+    return rc;
+}
+
 // KafkaError_payload(err) -> dict | None. The handle is not consumed: owned or
 // borrowed, its owner still frees it.
 static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
@@ -3202,6 +3283,13 @@ static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
         ok = payload_set(d, "resource",
                          ffi_raise((resource = kafka_common_ResourceNotFoundError_resource_err(rnf, &ffi_err), ffi_take(&ffi_err)))
                              ? NULL : str_or_none(resource)) == 0;
+        goto done;
+    }
+
+    const kafka_common_RecordDeserializationError_t* rd = NULL;
+    if (ffi_raise((rd = kafka_common_Error_record_deserialization_err(e, &ffi_err), ffi_take(&ffi_err)))) goto done;
+    if (rd != NULL) {
+        ok = record_deserialization_payload(d, rd) == 0;
         goto done;
     }
 

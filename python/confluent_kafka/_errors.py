@@ -122,6 +122,26 @@ def _long_map(raw: dict[tuple[str, int], int] | None) -> dict[Any, int] | None:
     return None if raw is None else {_tp(k): v for k, v in raw.items()}
 
 
+def _record_deserialization(message: str | None, payload: dict[str, Any]) -> dict[str, Any]:
+    from .common.errors.record_deserialization_error import RecordDeserializationError
+    from .common.record.timestamp_type import TimestampType
+
+    origin = RecordDeserializationError.DeserializationExceptionOrigin
+    raw_tp = payload["topic_partition"]
+    return {
+        "origin": origin(payload["origin"]),
+        "partition": None if raw_tp is None else _tp(raw_tp),
+        "offset": payload["offset"],
+        "timestamp": payload["timestamp"],
+        "timestamp_type": TimestampType(payload["timestamp_type"]),
+        "key_buffer": payload["key_buffer"],
+        "value_buffer": payload["value_buffer"],
+        "headers": payload["headers"],
+        "message": message,
+        "cause": None,
+    }
+
+
 def _metric(payload: dict[str, Any]) -> Any:
     from .common.metrics.kafka_metric import KafkaMetric
 
@@ -159,6 +179,8 @@ _CORE_KWARGS: dict[str, Callable[[str | None, dict[str, Any]], dict[str, Any]]] 
     },
     "DuplicateResourceError": lambda m, p: {"resource": p.get("resource"), "message": m},
     "ResourceNotFoundError": lambda m, p: {"resource": p.get("resource"), "message": m},
+    # The cause is the core's source, set after construction (``_build``).
+    "RecordDeserializationError": lambda m, p: _record_deserialization(m, p),
 }
 
 # Constructor arguments the core cannot report, filled with a stand-in so the
