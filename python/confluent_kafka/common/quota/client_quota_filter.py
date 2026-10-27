@@ -56,7 +56,8 @@ class ClientQuotaFilter:
         be applied to matching client quotas; ``strict`` is whether the filter
         only includes specified components."""
         quota_filter = cls.__new__(cls)
-        quota_filter._components = tuple(components)
+        # A None is stored, as Java's constructor stores it (Class family).
+        quota_filter._components = None if components is None else tuple(components)
         quota_filter._strict = strict
         return quota_filter
 
@@ -82,7 +83,7 @@ class ClientQuotaFilter:
 
     def components(self) -> list[ClientQuotaFilterComponent]:
         """The filter's components."""
-        return list(self._components)
+        return None if self._components is None else list(self._components)
 
     def strict(self) -> bool:
         """Whether the filter is strict, i.e. only includes specified
@@ -101,5 +102,6 @@ class ClientQuotaFilter:
         return hash((self._components, self._strict))
 
     def __str__(self) -> str:
-        return ("ClientQuotaFilter(components=" + java_str(list(self._components)) + ", strict="
+        components = None if self._components is None else list(self._components)
+        return ("ClientQuotaFilter(components=" + java_str(components) + ", strict="
                 + java_str(self._strict) + ")")

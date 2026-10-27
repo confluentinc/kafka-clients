@@ -82,7 +82,8 @@ class ClientQuotaAlteration:
         """``entity`` the entity whose config will be modified; ``ops`` the
         alteration to perform."""
         self._entity = entity
-        self._ops = tuple(ops)
+        # A None is stored, as Java's constructor stores it (Class family).
+        self._ops: tuple[ClientQuotaAlteration.Op, ...] | None = None if ops is None else tuple(ops)
 
     def entity(self) -> ClientQuotaEntity:
         """The entity whose config will be modified."""
@@ -90,8 +91,8 @@ class ClientQuotaAlteration:
 
     def ops(self) -> list[ClientQuotaAlteration.Op]:
         """The alteration to perform."""
-        return list(self._ops)
+        return None if self._ops is None else list(self._ops)  # type: ignore[return-value]  # a None given, as Java returns it
 
     def __str__(self) -> str:
         return ("ClientQuotaAlteration(entity=" + java_str(self._entity) + ", ops="
-                + java_str(list(self._ops)) + ")")
+                + java_str(None if self._ops is None else list(self._ops)) + ")")

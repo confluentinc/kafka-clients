@@ -56,7 +56,7 @@ class AlterReplicaLogDirsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> AlterReplicaLogDirsResult[Any]:
         """Java's package-private ``AlterReplicaLogDirsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

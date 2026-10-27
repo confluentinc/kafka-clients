@@ -41,15 +41,19 @@ class DelegationToken:
 
     def __init__(self, *, token_information: TokenInformation, hmac: bytes) -> None:
         self._token_information = token_information
-        self._hmac = bytes(hmac)
+        # A None is stored, as Java's constructor stores it (Class family).
+        self._hmac: bytes | None = None if hmac is None else bytes(hmac)
 
     def token_info(self) -> TokenInformation:
         return self._token_information
 
     def hmac(self) -> bytes:
-        return self._hmac
+        return self._hmac  # type: ignore[return-value]  # a None given, as Java returns it
 
     def hmac_as_base64_string(self) -> str:
+        if self._hmac is None:
+            # Java's ``Base64.getEncoder().encodeToString(hmac)`` dereferences it (Types).
+            raise TypeError("hmac must not be None")
         return base64.b64encode(self._hmac).decode("ascii")
 
     def __eq__(self, other: object) -> bool:
@@ -58,8 +62,12 @@ class DelegationToken:
         if type(other) is not type(self):
             return NotImplemented
         assert isinstance(other, DelegationToken)
-        return (self._token_information == other._token_information
-                and _hmac.compare_digest(self._hmac, other._hmac))
+        # Java's MessageDigest.isEqual is null-safe: two nulls are equal.
+        if self._hmac is None or other._hmac is None:
+            same_hmac = self._hmac is other._hmac
+        else:
+            same_hmac = _hmac.compare_digest(self._hmac, other._hmac)
+        return self._token_information == other._token_information and same_hmac
 
     def __hash__(self) -> int:
         return hash((self._token_information, self._hmac))

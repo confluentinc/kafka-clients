@@ -90,6 +90,9 @@ class KafkaMetric:
     def metric_value(self) -> Any:
         """The metric value, via the provider's ``value(config, now)`` (for a
         ``Measurable``, Java's default ``value`` is ``measure(config, now)``)."""
+        if self._time is None:
+            # Java's time.milliseconds() dereferences it (Types).
+            raise TypeError("time must not be None")
         now = self._time.milliseconds()  # type: ignore[attr-defined]
         provider: Any = self._metric_value_provider
         with self._locked():

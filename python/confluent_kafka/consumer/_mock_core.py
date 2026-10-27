@@ -319,6 +319,10 @@ class MockConsumerCore(Generic[K, V]):
         """Java's private ``subscribe(SubscriptionPattern, Optional)``, after the
         listener's null check."""
         listener = _mock_listener(callback)
+        if pattern is not None and pattern.pattern() is None:
+            # Java's pattern.toString().isEmpty(): toString() returns the null
+            # pattern, which isEmpty() dereferences (Types).
+            raise TypeError("SubscriptionPattern.pattern must not be None")
         if pattern is None or str(pattern) == "":
             raise IllegalArgumentError(
                 message="Topic pattern cannot be " + ("None" if pattern is None else "empty"))

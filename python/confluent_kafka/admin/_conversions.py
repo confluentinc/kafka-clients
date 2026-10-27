@@ -500,6 +500,10 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
             raise TypeError("new_topics must not contain a NewTopic with a None name")
         configs = topic.configs()
         assignments = topic.replicas_assignments()
+        if assignments is not None and any(v is None for v in assignments.values()):
+            # Java's convertToCreatableTopic stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_topics must not contain a NewTopic with a None replica assignment")
         spec.append((
             topic.name(), topic.num_partitions(), topic.replication_factor(),
             None if configs is None else list(configs.items()),
@@ -1095,9 +1099,16 @@ def create_partitions_args(new_partitions: Mapping[str, NewPartitions]) -> tuple
     """``Admin_create_partitions(h, rows, options)``'s arguments: each entry as
     ``(topic, totalCount(), assignments() or None)`` (``None`` is Java's
     ``increaseTo(int)``, an empty list ``increaseTo(int, List.of())``)."""
-    return ([(topic, element(partitions, "new_partitions").total_count(),
-              partitions.assignments())
-             for topic, partitions in new_partitions.items()],)
+    rows = []
+    for topic, partitions in new_partitions.items():
+        total = element(partitions, "new_partitions").total_count()
+        assignments = partitions.assignments()
+        if assignments is not None and any(a is None for a in assignments):
+            # Java's CreatePartitionsRequest stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_partitions must not contain a NewPartitions with a None assignment")
+        rows.append((topic, total, assignments))
+    return (rows,)
 
 
 def create_partitions_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
@@ -1738,8 +1749,14 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
     private ``_match_is_null``, decision log 25) specified, an empty one default,
     else exact."""
     components: list[tuple[str, int, str | None]] = []
-    for component in quota_filter.components():
-        match = component.match()
+    # Java's DescribeClientQuotasRequest.Builder dereferences the components and
+    # each component: a None the FFI cannot carry is reported here (Types;
+    # exception 4).
+    filter_components = quota_filter.components()
+    if filter_components is None:
+        raise TypeError("ClientQuotaFilter.components must not be None")
+    for component in filter_components:
+        match = element(component, "ClientQuotaFilter.components").match()
         if component._match_is_null:
             components.append((component.entity_type(), _MATCH_TYPE_SPECIFIED, None))
         elif match is None:
@@ -1777,8 +1794,22 @@ def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration]) -> tuple[
     """``Admin_alter_client_quotas(h, entries, options)``'s plain arguments: each
     alteration as ``(entity, ops)``, the entity's ``(type, name or None)`` pairs and
     the ops' ``(key, value or None)``, ``None`` removing the quota."""
-    rows = [(list(element(entry, "entries").entity().entries().items()),
-             [(op.key(), op.value()) for op in entry.ops()]) for entry in entries]
+    rows = []
+    for entry in entries:
+        # Java's AlterClientQuotasRequest.Builder dereferences, in this order, the
+        # entry, its entity, the entity's entries, its ops and each op: a None the
+        # FFI cannot carry is reported here (Types; exception 4).
+        entity = element(entry, "entries").entity()
+        if entity is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None entity")
+        entity_entries = entity.entries()
+        if entity_entries is None:
+            raise TypeError("entries must not contain a ClientQuotaEntity with a None entries")
+        ops = entry.ops()
+        if ops is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None ops")
+        rows.append((list(entity_entries.items()),
+                     [(element(op, "ClientQuotaAlteration.ops").key(), op.value()) for op in ops]))
     return (rows,)
 
 

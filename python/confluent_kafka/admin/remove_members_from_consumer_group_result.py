@@ -82,7 +82,7 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         memberInfos)``."""
         result = cls.__new__(cls)
         result._future = future
-        result._member_infos = set(member_infos)
+        result._member_infos = None if member_infos is None else set(member_infos)
         result._kind = kind
         result._client_member_result = None
         result._client_all = None
@@ -97,7 +97,7 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         core's ``memberResult(member)`` and ``all()`` futures."""
         result = cls.__new__(cls)
         result._future = None
-        result._member_infos = set(member_infos)
+        result._member_infos = None if member_infos is None else set(member_infos)
         result._kind = kind
         result._client_member_result = member_result
         result._client_all = all

@@ -52,6 +52,8 @@ class DescribeClientQuotasResult(Generic[KindT]):
 
         :param entities: future for the collection of entities that matched the filter
         """
+        if entities is None:
+            raise TypeError("entities must not be None")
         self._entities = entities
         self._kind: type[Sync] | type[Async] = _kind_of((self._entities,))
 
