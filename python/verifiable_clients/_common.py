@@ -234,7 +234,17 @@ def _unescape(text: str) -> str:
             i += 4
         else:
             out.append({"t": "\t", "r": "\r", "n": "\n", "f": "\f"}.get(c, c))
-    return "".join(out)
+    return _join_surrogates("".join(out))
+
+
+def _join_surrogates(text: str) -> str:
+    """Java's ``\\uXXXX`` escapes are UTF-16 code units, so a pair such as
+    ``\\uD83D\\uDE80`` is one character in a Java ``String``. Python keeps the
+    two halves as separate characters, which cannot be encoded to UTF-8:
+    combine each valid pair, and keep a lone half as it is."""
+    if not any("\ud800" <= c <= "\udfff" for c in text):
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
 class ShutdownHook:
@@ -258,6 +268,12 @@ class ShutdownHook:
         signal.signal(signal.SIGTERM, self._on_signal)
 
     def _on_signal(self, signum: int, frame: FrameType | None) -> None:
+        # Ignore later signals first, as the JVM does once shutdown has begun.
+        # A second signal could otherwise run this handler again in the middle
+        # of `set()`, which holds the event's non-reentrant lock, and the
+        # nested `set()` would deadlock the main thread.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         self._requested.set()
 
     def _run(self, hook: Callable[[], None]) -> None:

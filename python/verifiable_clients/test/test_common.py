@@ -14,18 +14,25 @@
 
 """Tests of ``_common``: the properties reader, translated from the Rust
 tool's ``parse_properties_handles_common_forms`` and extended with the
-``java.util.Properties`` forms Kafka's system tests write, and ``print_json``
-on a stdout that fails."""
+``java.util.Properties`` forms Kafka's system tests write, ``print_json``
+on a stdout that fails, and the shutdown hook's signal handling."""
 
 from __future__ import annotations
 
 import io
+import os
+import signal
+import subprocess
+import sys
+import threading
 from typing import Any
 
 import pytest
 
 import _common
-from _common import parse_properties, print_json
+from _common import ShutdownHook, parse_properties, print_json
+
+TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_parse_properties_handles_common_forms() -> None:
@@ -97,6 +104,65 @@ def test_parse_properties_malformed_unicode_escape() -> None:
 
 def test_parse_properties_handles_crlf() -> None:
     assert parse_properties("a=1\r\nb=2\rc=3") == {"a": "1", "b": "2", "c": "3"}
+
+
+def test_parse_properties_joins_surrogate_pairs() -> None:
+    # Java's escapes are UTF-16 code units: the pair is one character.
+    props = parse_properties("client.id=\\uD83D\\uDE80\n")
+    assert props == {"client.id": "\U0001F680"}
+    assert props["client.id"].encode("utf-8") == b"\xf0\x9f\x9a\x80"
+
+
+def test_parse_properties_keeps_a_lone_surrogate() -> None:
+    assert parse_properties("a=x\\uD83Dy\n") == {"a": "x\ud83dy"}
+
+
+_REENTRANT_SIGNAL = r"""
+import os, signal, threading, time
+from _common import ShutdownHook
+
+ran = threading.Event()
+
+class ReentrantEvent(threading.Event):
+    # Once armed, a second SIGTERM arrives while set() holds the event's lock.
+    armed = False
+
+    def set(self):
+        with self._cond:
+            if ReentrantEvent.armed:
+                ReentrantEvent.armed = False
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(0.2)  # the interpreter runs pending handlers here
+            self._flag = True
+            self._cond.notify_all()
+
+threading.Event = ReentrantEvent  # the hook's own event
+hook = ShutdownHook(ran.set, "hook")
+ReentrantEvent.armed = True  # after the hook thread has started
+os.kill(os.getpid(), signal.SIGTERM)
+time.sleep(0.2)
+hook.finish()
+print("ran" if ran.is_set() else "not run")
+"""
+
+
+def test_shutdown_hook_survives_a_second_signal_during_the_first() -> None:
+    # Before the fix the nested handler's set() deadlocked the main thread.
+    result = subprocess.run([sys.executable, "-c", _REENTRANT_SIGNAL], cwd=TOOLS_DIR,
+                            capture_output=True, text=True, timeout=20)
+    assert (result.returncode, result.stdout, result.stderr) == (0, "ran\n", "")
+
+
+def test_shutdown_hook_ignores_signals_after_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    installed: dict[int, Any] = {}
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
+    ran = threading.Event()
+    hook = ShutdownHook(ran.set, "hook")
+    assert installed == {signal.SIGINT: hook._on_signal, signal.SIGTERM: hook._on_signal}
+    hook._on_signal(signal.SIGTERM, None)
+    assert installed == {signal.SIGINT: signal.SIG_IGN, signal.SIGTERM: signal.SIG_IGN}
+    assert ran.wait(5)
+    hook.finish()
 
 
 class _BrokenStdout(io.StringIO):
