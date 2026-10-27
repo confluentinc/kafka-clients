@@ -405,6 +405,8 @@ impl<T: Send + 'static> KafkaFuture<T> {
     /// conversion that has no reason to run, nor to allocate the C value, for
     /// a future nobody reads (a producer record's, one per record). No Java
     /// counterpart (DoD #7): Java hands out its futures as they are.
+    /// Crate-internal, and only the `ffi` feature names it.
+    #[cfg(feature = "ffi")]
     pub(crate) fn map_lazily<R, F>(&self, map: F) -> KafkaFuture<R>
     where
         T: Clone,
@@ -416,11 +418,13 @@ impl<T: Send + 'static> KafkaFuture<T> {
 }
 
 /// Internal `KafkaFutureOps` impl backing [`KafkaFuture::map_lazily`].
+#[cfg(feature = "ffi")]
 struct LazyMapFuture<T: Send + 'static, R> {
     source: KafkaFuture<T>,
     map: Arc<dyn Fn(T) -> R + Send + Sync>,
 }
 
+#[cfg(feature = "ffi")]
 impl<T: Clone + Send + 'static, R: Send + 'static> KafkaFutureOps<R> for LazyMapFuture<T, R> {
     fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
         Box::pin(async move { self.source.get().await.map(&*self.map) })
