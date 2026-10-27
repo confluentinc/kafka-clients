@@ -670,6 +670,20 @@ def test_group_metadata_and_metrics() -> None:
     assert consumer.metrics() == {}
 
 
+def test_group_metadata_refuses_copy_and_pickle() -> None:
+    # Java's ConsumerGroupMetadata is neither Cloneable nor Serializable.
+    import copy
+    import pickle
+
+    metadata = earliest().group_metadata()
+    message = ("ConsumerGroupMetadata cannot be copied or pickled; use the consumer's "
+               "group_metadata()")
+    for attempt in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError) as e:
+            attempt(metadata)
+        assert str(e.value) == message
+
+
 def test_paused_keeps_the_mocks_own_set() -> None:
     consumer = earliest()
     partition = tp("t", 0)
