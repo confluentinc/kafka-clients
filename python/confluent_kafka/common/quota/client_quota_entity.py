@@ -51,11 +51,12 @@ class ClientQuotaEntity:
         """Constructs a quota entity for the given types and names. If a name is
         ``None``, then it is mapped to the built-in default entity name.
         ``entries`` maps entity type to its name."""
-        self._entries = dict(entries)
+        # A None is stored, as Java's constructor stores it (Class family).
+        self._entries: dict[str, str | None] | None = None if entries is None else dict(entries)
 
     def entries(self) -> dict[str, str | None]:
         """Map of entity type to its name."""
-        return dict(self._entries)
+        return None if self._entries is None else dict(self._entries)  # type: ignore[return-value]  # a None given, as Java returns it
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -66,7 +67,8 @@ class ClientQuotaEntity:
         return self._entries == other._entries
 
     def __hash__(self) -> int:
-        return hash(frozenset(self._entries.items()))
+        # Java's Objects.hash is null-safe.
+        return hash(None if self._entries is None else frozenset(self._entries.items()))
 
     def __str__(self) -> str:
         return "ClientQuotaEntity(entries=" + java_str(self._entries) + ")"
