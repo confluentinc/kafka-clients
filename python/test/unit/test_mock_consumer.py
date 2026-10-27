@@ -46,6 +46,18 @@ from confluent_kafka.consumer import (
     NoOffsetForPartitionError, OffsetAndMetadata, OffsetOutOfRangeError, SubscriptionPattern,
 )
 
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
 WAIT = 5.0
 # KafkaConsumer's message for a concurrent call (Java's AsyncKafkaConsumer.acquire()).
 CONCURRENT = "KafkaConsumer is not safe for multi-threaded access."
@@ -238,6 +250,9 @@ def test_lose_partitions_calls_on_partitions_lost() -> None:
         def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:
             lost.extend(partitions)
 
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["test"], callback=Listener())
     consumer.rebalance(new_assignment=[tp0, tp1])
     consumer.lose_partitions(partitions_lost=[tp0])
@@ -302,6 +317,9 @@ def test_lose_partitions_then_rebalance() -> None:
     class Listener(ConsumerRebalanceListener):
         def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
             assigned.extend(partitions)
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer.subscribe(topics=["test"], callback=Listener())
     consumer.rebalance(new_assignment=[tp0, tp1])
@@ -751,7 +769,7 @@ def test_close_releases_the_listener() -> None:
     import weakref
 
     consumer = earliest()
-    listener = ConsumerRebalanceListener()
+    listener = _NoOpListener()
     ref = weakref.ref(listener)
     consumer.subscribe(topics=["t"], callback=listener)
     del listener
@@ -815,6 +833,9 @@ def test_listener_may_call_back_into_the_mock() -> None:
             consumer.commit(offsets={tp("t", 0): OffsetAndMetadata(offset=4)})
             seen["position"] = consumer.position(partition=tp("t", 0))
 
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["t"], callback=Listener())
     consumer.rebalance(new_assignment=[tp("t", 0)])
     assert seen == {"assignment": {tp("t", 0)}, "position": 4}
@@ -827,6 +848,9 @@ def test_listener_exception_propagates_from_rebalance() -> None:
     class Boom(ConsumerRebalanceListener):
         def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
             raise ValueError("boom in assigned")
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer.subscribe(topics=["t"], callback=Boom())
     with pytest.raises(ValueError, match="boom in assigned"):
@@ -843,6 +867,9 @@ def test_lose_partitions_default_on_partitions_lost_calls_revoked() -> None:
         def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
             revoked.append(partitions)
 
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["t"], callback=Revokes())
     consumer.rebalance(new_assignment=[tp("t", 0)])
     consumer.lose_partitions(partitions_lost=[tp("t", 0)])
@@ -858,6 +885,12 @@ def test_lose_partitions_listener_exception_propagates() -> None:
     class Boom(ConsumerRebalanceListener):
         def on_partitions_lost(self, partitions: set[TopicPartition]) -> None:
             raise ValueError("boom in lost")
+
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer.subscribe(topics=["t"], callback=Boom())
     consumer.rebalance(new_assignment=[tp("t", 0)])
@@ -887,6 +920,12 @@ def test_async_lose_partitions_awaits_a_coroutine_listener() -> None:
                 lost.append(partitions)
                 assert consumer.assignment() == {tp("t", 0), tp("t", 1)}
 
+            def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
+
         await consumer.subscribe(topics=["t"], callback=Listener())
         await consumer.rebalance(new_assignment=[tp("t", 0), tp("t", 1)])
         await consumer.lose_partitions(partitions_lost=[tp("t", 0)])
@@ -906,6 +945,9 @@ def test_a_coroutine_listener_needs_the_async_mock() -> None:
         async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:  # type: ignore[override]
             pass
 
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["t"], callback=Coroutine())
     with pytest.raises(TypeError) as e:
         consumer.rebalance(new_assignment=[tp("t", 0)])
@@ -923,6 +965,9 @@ def test_commit_inside_on_partitions_revoked_succeeds() -> None:
         def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
             consumer.commit(offsets={partition: OffsetAndMetadata(offset=7)})
 
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["t"], callback=CommitOnRevoke())
     consumer.rebalance(new_assignment=[partition])
     consumer.rebalance(new_assignment=[])
@@ -938,6 +983,9 @@ def test_rebalance_does_not_advance_until_the_listener_returns() -> None:
         def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
             entered.set()
             assert release.wait(WAIT)
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer.subscribe(topics=["t"], callback=Blocking())
 
@@ -968,6 +1016,9 @@ def test_async_commit_inside_an_async_on_partitions_revoked_succeeds() -> None:
                 await asyncio.sleep(0)
                 await consumer.commit(offsets={partition: OffsetAndMetadata(offset=7)})
 
+            def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
         await consumer.subscribe(topics=["t"], callback=CommitOnRevoke())
         await consumer.rebalance(new_assignment=[partition])
         await consumer.rebalance(new_assignment=[])
@@ -988,6 +1039,9 @@ def test_async_rebalance_does_not_advance_until_the_listener_returns() -> None:
             async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:  # type: ignore[override]
                 entered.set()
                 await release.wait()
+
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
 
         await consumer.subscribe(topics=["t"], callback=Blocking())
         task = asyncio.ensure_future(consumer.rebalance(new_assignment=[tp("t", 0)]))
@@ -1019,6 +1073,9 @@ def test_async_rebalance_refuses_other_tasks_while_the_listener_runs() -> None:
                 await release.wait()
                 await consumer.commit(offsets={partition: OffsetAndMetadata(offset=3)})
                 inside["assignment"] = consumer.assignment()
+
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
 
         await consumer.subscribe(topics=["t"], callback=Waiting())
         rebalance = asyncio.ensure_future(consumer.rebalance(new_assignment=[partition]))
@@ -1103,6 +1160,9 @@ def test_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> None:
             consumer.commit(offsets={tp("t", 0): OffsetAndMetadata(offset=3)}, timeout=1.0)
             seen["committed"] = consumer.committed(partitions=[tp("t", 0)], timeout=1.0)
 
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     consumer.subscribe(topics=["t"], callback=Listener())
     consumer.rebalance(new_assignment=[tp("t", 0)])
     assert seen == {"partitions_for": [info], "list_topics": {"t": [info]},
@@ -1127,6 +1187,9 @@ def test_async_listener_may_make_the_metadata_and_timed_calls_on_the_mock() -> N
                 seen["group_id"] = consumer.group_metadata().group_id()
                 seen["end_offsets"] = await consumer.end_offsets(partitions=[tp("t", 0)],
                                                                  timeout=1.0)
+
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
 
         await consumer.subscribe(topics=["t"], callback=Listener())
         await consumer.rebalance(new_assignment=[tp("t", 0)])

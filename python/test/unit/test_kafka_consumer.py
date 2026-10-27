@@ -174,6 +174,18 @@ from confluent_kafka.consumer import _base as consumer_base
 from confluent_kafka.consumer._base import poll_timeout_ms
 
 
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
+
 def _caller(deserializer: Any) -> Any:
     """The positional caller the consumer calls ``deserializer`` through
     (``_kwargs.serde_caller``), as ``deserialize_batch`` expects."""
@@ -1556,7 +1568,7 @@ def test_two_threads_closing_at_once_tear_down_once() -> None:
 
 def test_close_releases_the_listener() -> None:
     consumer = new_consumer()
-    listener = ConsumerRebalanceListener()
+    listener = _NoOpListener()
     ref = weakref.ref(listener)
     consumer.subscribe(topics=[TOPIC], callback=listener)
     del listener
@@ -1569,7 +1581,7 @@ def test_close_releases_the_listener() -> None:
 
 def test_a_listenerless_subscribe_releases_the_listener() -> None:
     with new_consumer() as consumer:
-        listener = ConsumerRebalanceListener()
+        listener = _NoOpListener()
         ref = weakref.ref(listener)
         consumer.subscribe(topics=[TOPIC], callback=listener)
         del listener
@@ -1654,7 +1666,7 @@ def _listener_consumer() -> KafkaConsumer[bytes, bytes]:
     callbacks the branch C API does run go through the waiting call's drain on
     its caller's thread, so there is no helper thread."""
     consumer = new_consumer()
-    consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+    consumer.subscribe(topics=[TOPIC], callback=_NoOpListener())
     return consumer
 
 
@@ -1969,6 +1981,9 @@ class AssignedRecorder(ConsumerRebalanceListener):
         self.assigned.append(set(partitions))
         if self.failure is not None:
             raise self.failure
+
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
 
 
 def test_ctrl_c_before_the_listener_runs_is_raised_to_the_trampoline() -> None:
@@ -3090,7 +3105,7 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
     committed: list[Any] = []
     consumer = new_consumer(**{"default.api.timeout.ms": 200})
     try:
-        consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+        consumer.subscribe(topics=[TOPIC], callback=_NoOpListener())
         assert consumer.subscription() == {TOPIC}
         consumer.unsubscribe()
         consumer.subscribe(pattern=SubscriptionPattern(pattern="te.*"))
