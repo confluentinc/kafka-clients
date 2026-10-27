@@ -25,7 +25,9 @@ point it calls has a ``_cb`` completion form in the FFI header:
 (``assignment()``, ``subscription()``, ``metrics()``, ``paused()``,
 ``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
-there and may be ``async def``.
+there and may be ``async def``. ``AsyncMockConsumer`` supplies the private hooks
+the methods call, doing what Java's mock does; a note that holds only for
+``AsyncKafkaConsumer`` says so.
 
 By rule 3 ``AsyncKafkaConsumer`` is bound to one event loop
 (``_async.LoopBinding``), as ``AsyncKafkaProducer`` and ``AsyncKafkaAdminClient``
@@ -136,11 +138,13 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                         pattern: SubscriptionPattern = MISSING,
                         callback: ConsumerRebalanceListener = MISSING) -> None:
         """See :meth:`Consumer.subscribe`. The listener's methods may be
-        ``async def``; they are awaited on the event loop. A call a listener
-        makes back into the consumer (``await consumer.commit()``, ``seek()``,
-        ``position()``, …) runs synchronously through the core's
-        ``ConsumerHandle``'s plain entry points, inside the call delivering the
-        listener, so it blocks the event loop for its duration."""
+        ``async def``; they are awaited on the event loop. On
+        ``AsyncKafkaConsumer`` a call a listener makes back into the consumer
+        (``await consumer.commit()``, ``seek()``, ``position()``, …) runs
+        synchronously through the core's ``ConsumerHandle``'s plain entry
+        points, inside the call delivering the listener, so it blocks the event
+        loop for its duration; on ``AsyncMockConsumer`` it runs as any other
+        call."""
         if topics is not MISSING:
             await self._a_subscribe_topics(topics, callback)
         else:
@@ -193,14 +197,14 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``kafka_consumer_Consumer_commit_async``, completes through its ``_cb``
         form: like Java's ``commitAsync``, which first runs the queued commit
         callbacks and then waits for the background thread to take the offsets
-        to commit (``offsetsReady``), the call waits until the commit is sent,
-        not for its result, which goes to the callback inside a later call on
-        this consumer. A failure of the call itself (``InvalidGroupIdError``, a
-        timeout waiting for the offsets, the exception of a queued commit
-        callback it runs) is raised from it, as Java's ``commitAsync`` throws
-        it. As in Java, it delivers no rebalance listener callback and raises
-        no background error: those are delivered only by ``poll()`` and
-        ``unsubscribe()``.
+        to commit (``offsetsReady``), on ``AsyncKafkaConsumer`` the call waits
+        until the commit is sent, not for its result, which goes to the callback
+        inside a later call on this consumer. A failure of the call itself
+        (``InvalidGroupIdError``, a timeout waiting for the offsets, the
+        exception of a queued commit callback it runs) is raised from it, as
+        Java's ``commitAsync`` throws it. As in Java, it delivers no rebalance
+        listener callback and raises no background error: those are delivered
+        only by ``poll()`` and ``unsubscribe()``.
 
         The callback may be ``async def``: it is awaited on the event loop,
         inside the call that delivers it (``poll()``, ``commit()``,
@@ -214,17 +218,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``TypeError``. ``AsyncMockConsumer`` awaits it inside this call, as
         Java's mock runs the callback inside ``commitAsync``.
 
-        Called from inside a callback this consumer delivers, it commits through
-        the core's ``ConsumerHandle`` and first runs the commit callbacks queued
-        behind the running one, inside this call, as Java's ``commitAsync``
-        does; it blocks the event loop meanwhile, so an ``async def`` callback
-        among them is scheduled there and awaited after this call returns, by
-        the call delivering the outer callback, and the callbacks after it may
-        start before it ends (*deviation*: Java runs it to its end inside this
-        call): the delivering call raises its exception once it ended, wrapped
-        as that call wraps a callback's; a ``poll()`` returns its records first,
-        and its next awaited call raises it. ``await commit()`` from inside a
-        callback does the same."""
+        On ``AsyncKafkaConsumer``, called from inside a callback this consumer
+        delivers, it commits through the core's ``ConsumerHandle`` and first
+        runs the commit callbacks queued behind the running one, inside this
+        call, as Java's ``commitAsync`` does; it blocks the event loop
+        meanwhile, so an ``async def`` callback among them is scheduled there
+        and awaited after this call returns, by the call delivering the outer
+        callback, and the callbacks after it may start before it ends
+        (*deviation*: Java runs it to its end inside this call): the delivering
+        call raises its exception once it ended, wrapped as that call wraps a
+        callback's; a ``poll()`` returns its records first, and its next awaited
+        call raises it. ``await commit()`` from inside a callback does the
+        same."""
         await self._a_commit_nowait(offsets, callback)
 
     @overload

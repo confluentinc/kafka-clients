@@ -19,8 +19,9 @@ in Java's declaration order (CLAUDE.md, Python Binding Conventions, Class
 family): ``KafkaConsumer`` adds only Java's constructors, ``MockConsumer`` its
 constructors and the Java mock's methods. The methods here call the C FFI
 (Implementation over the FFI); ``MockConsumer`` supplies the private hooks
-they call instead. The Javadoc of each is ``KafkaConsumer``'s, which the
-interface's points to.
+they call instead, doing what Java's mock does. The Javadoc of each is
+``KafkaConsumer``'s, which the interface's points to; a note that holds only for
+``KafkaConsumer`` says so.
 
 Each overload set is one method (Signatures): ``subscribe(topics[, callback])``
 / ``subscribe(pattern[, callback])`` (the client-side ``java.util.regex.Pattern``
@@ -36,13 +37,14 @@ Timeouts): left out calls the overload without it, a given one the
 ``kafka_consumer_Consumer_*_with_timeout`` entry point; a ``None`` is Java's null
 ``Duration``, ``TypeError("timeout must not be None")``. Every parameter some
 overload omits defaults to the private ``MISSING``; an explicit ``None`` is
-Java's ``null`` (Signatures). Inside a callback this
+Java's ``null`` (Signatures). On ``KafkaConsumer``, inside a callback this
 consumer delivers, every one of them, ``partitions_for``, ``list_topics`` and
 ``group_metadata`` go through the core's ``ConsumerHandle``, its
 ``_with_timeout`` forms taking the ``timeout``; ``assign``, ``subscribe``,
 ``subscription``, ``unsubscribe``, ``poll`` and ``close``, which the handle has
 no form of, raise ``ConcurrentModificationError`` there *(deviation: Java's
-listener may call them; goes when the handle has them)*.
+listener may call them; goes when the handle has them)*; ``MockConsumer``
+allows every call there, as Java's re-entrant mock does.
 
 Not generated, their FFI entry point being missing (the name looked for, after
 the ``kafka_consumer_Consumer_`` prefix, in parentheses):
@@ -152,10 +154,11 @@ class Consumer(Generic[K, V], _ConsumerState):
         ``unsubscribe()``.
 
         The ``callback`` is a ``ConsumerRebalanceListener`` invoked when the
-        partitions assigned to the consumer change, on the caller's thread,
-        inside ``poll()`` or ``unsubscribe()`` (and ``close()`` revokes or
-        loses the group assignment through it), as in Java; subscribing
-        without one releases the previous listener.
+        partitions assigned to the consumer change, on the caller's thread: on
+        ``KafkaConsumer`` inside ``poll()`` or ``unsubscribe()`` (and ``close()``
+        revokes or loses the group assignment through it), as in Java; on
+        ``MockConsumer`` inside ``rebalance()`` and ``lose_partitions()``, as in
+        Java's mock. Subscribing without one releases the previous listener.
 
         Raises ``IllegalArgumentError`` if ``callback`` is ``None``
         ("RebalanceListener cannot be None"), if ``topics`` or ``pattern`` is
@@ -185,8 +188,9 @@ class Consumer(Generic[K, V], _ConsumerState):
     def unsubscribe(self) -> None:
         """Unsubscribe from topics currently subscribed with ``subscribe()`` or
         ``assign()``. This also clears any partitions directly assigned through
-        ``assign()``. The listener's ``on_partitions_revoked`` (or
-        ``on_partitions_lost``) runs on this thread before it returns."""
+        ``assign()``. On ``KafkaConsumer`` the listener's ``on_partitions_revoked``
+        (or ``on_partitions_lost``) runs on this thread before it returns;
+        ``MockConsumer`` runs no listener here, as Java's mock."""
         self._c_unsubscribe()
 
     def poll(self, *, timeout: Duration) -> ConsumerRecords[K, V]:
@@ -199,9 +203,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         immediately if there are records available or if the position
         advances past control records or aborted transactions when
         ``isolation.level=read_committed``; otherwise it waits up to
-        ``timeout`` for records. The deserializers run on this thread; a
-        failing one raises ``RecordDeserializationError`` and leaves the
-        position at the record.
+        ``timeout`` for records. On ``KafkaConsumer`` the deserializers run on
+        this thread; a failing one raises ``RecordDeserializationError`` and
+        leaves the position at the record. ``MockConsumer`` returns the records
+        as they were added, as Java's mock.
 
         Raises ``InvalidOffsetError`` if the offset for a partition is undefined
         or out of range and no offset reset policy has been configured,
@@ -264,14 +269,17 @@ class Consumer(Generic[K, V], _ConsumerState):
         This is an asynchronous call and will not block. Any errors encountered
         are either passed to the ``callback`` (if provided) or discarded.
         Offsets committed through multiple calls to this API are guaranteed to
-        be sent in the same order as the invocations. The ``callback`` runs on
-        the caller's thread, inside a later call on this consumer (``poll()``,
-        ``commit()``, ``commit_nowait()``, ``close()``, …).
+        be sent in the same order as the invocations. On ``KafkaConsumer`` the
+        ``callback`` runs on the caller's thread, inside a later call on this
+        consumer (``poll()``, ``commit()``, ``commit_nowait()``, ``close()``, …);
+        ``MockConsumer`` runs it inside this call, as Java's mock runs it inside
+        ``commitAsync``, and an exception it raises propagates out of this call.
 
-        Called from inside a callback this consumer delivers (a listener method
-        or another commit's ``callback``), it first runs the commit callbacks
-        queued behind the running one, inside this call, as Java's
-        ``commitAsync`` does; its own ``callback`` runs inside a later call.
+        On ``KafkaConsumer``, called from inside a callback this consumer
+        delivers (a listener method or another commit's ``callback``), it first
+        runs the commit callbacks queued behind the running one, inside this
+        call, as Java's ``commitAsync`` does; its own ``callback`` runs inside a
+        later call.
 
         An exception the ``callback`` raises propagates out of the call that
         delivers it, as Java's ``onComplete`` is called without a ``try``:
@@ -478,7 +486,9 @@ class Consumer(Generic[K, V], _ConsumerState):
         the consumer has not yet fetched the partition (Java's
         ``OptionalLong.empty()``). When the end offset is not known yet, the
         call also asks the broker for it, so a later call can answer; it waits
-        for the consumer's background task, as Java's ``currentLag`` does.
+        for the consumer's background task, as Java's ``currentLag`` does (on
+        ``KafkaConsumer``; ``MockConsumer`` answers from the end offsets it was
+        given, as Java's mock).
 
         Raises ``IllegalStateError`` if the partition is not assigned to this
         consumer."""
@@ -499,13 +509,22 @@ class Consumer(Generic[K, V], _ConsumerState):
         the ``option`` also sets the group membership operation. If auto-commit
         is enabled, this commits the current offsets if possible within the
         timeout. The listener's ``on_partitions_revoked`` and the pending commit
-        callbacks run on this thread. ``close()`` twice is harmless; any other
-        call after it raises ``IllegalStateError``. Note that ``wakeup()`` cannot
-        be used to interrupt close.
+        callbacks run on this thread. ``close()`` twice is harmless. On
+        ``KafkaConsumer`` any other call after it raises ``IllegalStateError``,
+        except ``wakeup()``, which then does nothing, as Java's, and including
+        ``metrics()`` *(deviation: Java's ``metrics()`` makes no closed check, since
+        its object outlives ``close()``; here the native handle does not)*; a
+        ``MockConsumer`` answers after ``close()`` as Java's mock does (``poll()``
+        and ``commit()`` raise, ``assignment()`` and ``pause()`` answer). Note that
+        ``wakeup()`` cannot be used to interrupt close.
 
         Raises ``IllegalArgumentError`` if the timeout is negative,
         ``TypeError`` if ``option`` is ``None`` (Java's ``option.timeout()`` on a
         null), and ``KafkaError`` for any other error during close.
+
+        On ``MockConsumer`` ``close()`` only marks the mock closed, as Java's
+        mock: it commits nothing, runs no callback, reads no ``option`` and
+        keeps the listener and the poll tasks.
         """
         self._c_close(option)
 
