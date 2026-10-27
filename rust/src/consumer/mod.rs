@@ -552,6 +552,10 @@ where
     /// the meantime, so a later commit of the consumed offsets covers none of
     /// the records it decoded, and a later `poll()` returns them, unless the
     /// partition was sought, reset, paused or reassigned in between.
+    ///
+    /// WARNING: a `timeout` greater than `i64::MAX` milliseconds counts as
+    /// `i64::MAX` milliseconds, where Java throws `ArithmeticException`, so
+    /// `Duration::MAX` waits without limit.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#poll")]
     fn poll(&mut self, timeout: Duration) -> impl Future<Output = Result<ConsumerRecords<K, V>, Error>> + Send;
 

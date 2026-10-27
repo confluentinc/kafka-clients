@@ -3,6 +3,3 @@
 # A line matching no finding any more is itself a finding: delete it. Rewrite with
 # `cargo xtask doc-baseline`; see everything with
 # `cargo xtask lint-custom check-api-docs --no-baseline`.
-errors crate::consumer::Consumer::poll
-errors kafka_consumer_Consumer_poll
-errors kafka_consumer_Consumer_poll_cb

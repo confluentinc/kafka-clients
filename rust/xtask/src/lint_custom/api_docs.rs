@@ -832,6 +832,26 @@ fn names_error(text: &str, name: &str) -> bool {
 
 /// Whether parameter `name` is listed in a parameter section `text`, as
 /// `` `name` ``, with or without a leading `_`.
+/// The `WARNING:` paragraphs of `notes`: each from its `WARNING:` line to the
+/// next blank line, joined.
+fn warning_paragraphs(notes: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in notes.lines() {
+        let line = line.trim();
+        if line.starts_with("WARNING:") {
+            inside = true;
+        } else if line.is_empty() {
+            inside = false;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn lists_param(text: &str, name: &str) -> bool {
     let bare = name.trim_start_matches('_');
     text.contains(&format!("`{bare}`")) || text.contains(&format!("`_{bare}`")) || text.contains(&format!("`{name}`"))
@@ -1653,7 +1673,14 @@ impl ApiDocs {
             out.push(self.finding("layout", item, layout.join("; ")));
         }
 
-        if let Some(gaps) = Gaps::of(item, &parts.original, &javadocs, predicates, origin) {
+        if let Some(mut gaps) = Gaps::of(item, &parts.original, &javadocs, predicates, origin) {
+            // An accepted contract change whose `WARNING:` names a Java
+            // `@throws` accounts for it: the item does not keep that throw
+            // (documentation.md §4, §6).
+            if accepted.contains(item.key.as_str()) {
+                let warned = warning_paragraphs(parts.notes.as_deref().unwrap_or_default());
+                gaps.throws.retain(|g| !warned.contains(&format!("`{}`", g.throw.java)));
+            }
             if !gaps.params.is_empty() {
                 let missing: Vec<String> = gaps
                     .params
@@ -2524,6 +2551,30 @@ mod tests {
         let outside = format!("{TOPIC_DOC}\n\nWARNING: Rust differs.");
         let findings = run("warning-outside", &lib_with(CLASS_DOC, CTOR_DOC, &outside), &accepted, None);
         assert_eq!(keys(&findings), ["layout crate::ProducerRecord::topic"]);
+    }
+
+    #[test]
+    fn test_accepted_warning_accounts_for_a_throw() {
+        // `Error` has no predicate for the throw, so `# Errors` cannot name it.
+        let lib_for = |ctor: &str| {
+            lib_with(CLASS_DOC, ctor, TOPIC_DOC).replace("fn is_local_illegal_argument_error", "fn is_other_error")
+        };
+        let key = "crate::ProducerRecord::with_topic_partition";
+        let names =
+            format!("{CTOR_DOC}\n\n# Translation notes\n\nWARNING: never fails with `IllegalArgumentException`.");
+        let accepted = entry(key, "2026-10-22 Name");
+        assert!(run("throw-warned", &lib_for(&names), &accepted, None).is_empty());
+        // Only while accepted: a proposed entry leaves both findings.
+        assert_eq!(
+            keys(&run("throw-proposed", &lib_for(&names), &entry(key, ""), None)),
+            [format!("errors {key}"), format!("warning {key}")]
+        );
+        // The WARNING must name the throw.
+        let other = format!("{CTOR_DOC}\n\n# Translation notes\n\nWARNING: Rust differs.");
+        assert_eq!(
+            keys(&run("throw-unnamed", &lib_for(&other), &accepted, None)),
+            [format!("errors {key}")]
+        );
     }
 
     #[test]

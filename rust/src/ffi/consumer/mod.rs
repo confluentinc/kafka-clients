@@ -1517,6 +1517,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
 /// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer instance gets fenced by
 ///   broker.
 ///
+/// # Translation notes
+///
+/// WARNING: no `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot
+/// exceed `Long.MAX_VALUE` milliseconds.
+///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
@@ -1590,6 +1595,11 @@ pub type kafka_consumer_Consumer_poll_cb_t = unsafe extern "C" fn(
 ///   support this feature.
 /// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer instance gets fenced by
 ///   broker.
+///
+/// # Translation notes
+///
+/// WARNING: no `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot
+/// exceed `Long.MAX_VALUE` milliseconds.
 ///
 /// # Safety
 ///
