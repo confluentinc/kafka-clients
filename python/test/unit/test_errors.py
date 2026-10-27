@@ -885,6 +885,23 @@ def test_from_ffi_error_keeps_the_message_when_java_needs_more(
     assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
 
 
+# ----------------------------------------------------------------------------
+# Notes travel with copy and pickle, as on Python's own exceptions
+# ----------------------------------------------------------------------------
+
+
+def test_copy_and_pickle_keep_the_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    built = TopicAuthorizationError(unauthorized_topics={"t"})
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(LogTruncationError._ffi_id, "truncated"))
+    core = from_ffi_error(0)
+    for error in (built, core):
+        error.add_note("first")
+        error.add_note("second")
+        for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
+            assert type(clone) is type(error) and str(clone) == str(error)
+            assert clone.__notes__ == ["first", "second"]
+
+
 def test_a_core_correlation_id_mismatch_reads_unknown_ids(
         monkeypatch: pytest.MonkeyPatch) -> None:
     # The core reports no payload for it (no C accessor, CLAUDE.md §4): the
