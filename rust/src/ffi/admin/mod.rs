@@ -147,6 +147,7 @@ pub(crate) mod describe_topics_result;
 pub(crate) mod describe_transactions_result;
 pub(crate) mod describe_user_scram_credentials_result;
 pub(crate) mod elect_leaders_result;
+pub(crate) mod endpoint_type;
 pub(crate) mod expire_delegation_token_result;
 pub(crate) mod feature_metadata;
 pub(crate) mod feature_update;

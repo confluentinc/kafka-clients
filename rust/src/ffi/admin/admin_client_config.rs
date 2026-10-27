@@ -18,8 +18,9 @@
 //! Built from a `kafka_Map_t` of C strings, the way Rust's
 //! `AdminClientConfig::new` takes a `HashMap<String, String>`. Each value is
 //! parsed and validated here; the checks Java's `KafkaAdminClient`
-//! constructor makes across keys (no resolvable `bootstrap.servers`, or an
-//! explicit `default.api.timeout.ms` below `request.timeout.ms`) fail in
+//! constructor makes across keys (neither or both of `bootstrap.servers` and
+//! `bootstrap.controllers`, no resolvable bootstrap address, or an explicit
+//! `default.api.timeout.ms` below `request.timeout.ms`) fail in
 //! `kafka_admin_AdminClient_create` instead.
 //!
 //! `AdminClient::create` takes an `AdminClientConfig` by value, which is not
@@ -676,8 +677,7 @@ mod tests {
         };
         assert_eq!(names, expected);
         assert!(names.iter().any(|n| n == "bootstrap.servers"));
-        // Not defined until KIP-919 controller bootstrap is implemented.
-        assert!(!names.iter().any(|n| n == "bootstrap.controllers"));
+        assert!(names.iter().any(|n| n == "bootstrap.controllers"));
     }
 
     /// The handle logs the configuration's warnings once, when it is built;

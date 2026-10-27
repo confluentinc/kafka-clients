@@ -524,6 +524,26 @@ static void test_kafka_admin_alter_config_op_type_for_id_rejects_unknown_code(vo
     TEST_ASSERT_TRUE(kafka_admin_AlterConfigOp_OpType_for_id(0) == kafka_admin_AlterConfigOp_OpType_set());
 }
 
+/* `EndpointType` (KIP-919): the three singletons round-trip through their
+ * ids, and `fromId` answers UNKNOWN for any other id, as Java's does. */
+static void test_kafka_admin_endpoint_type_round_trips(void) {
+    const kafka_admin_EndpointType_t *broker = kafka_admin_EndpointType_broker();
+    const kafka_admin_EndpointType_t *controller = kafka_admin_EndpointType_controller();
+    TEST_ASSERT_EQUAL_INT(kafka_admin_EndpointType_BROKER, kafka_admin_EndpointType__enum(broker));
+    TEST_ASSERT_EQUAL_INT(kafka_admin_EndpointType_CONTROLLER, kafka_admin_EndpointType__enum(controller));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_admin_EndpointType_id(broker));
+    TEST_ASSERT_EQUAL_INT8(2, kafka_admin_EndpointType_id(controller));
+    TEST_ASSERT_TRUE(kafka_admin_EndpointType_from_id(1) == broker);
+    TEST_ASSERT_TRUE(kafka_admin_EndpointType_from_id(2) == controller);
+    TEST_ASSERT_TRUE(kafka_admin_EndpointType_from_id(0) == kafka_admin_EndpointType_unknown());
+    TEST_ASSERT_TRUE(kafka_admin_EndpointType_from_id(3) == kafka_admin_EndpointType_unknown());
+    TEST_ASSERT_EQUAL_INT(kafka_admin_EndpointType_UNKNOWN,
+                          kafka_admin_EndpointType__enum(kafka_admin_EndpointType_unknown()));
+    char *text = kafka_admin_EndpointType_to_string(controller);
+    TEST_ASSERT_EQUAL_STRING("CONTROLLER", text);
+    kafka_string_destroy(text);
+}
+
 /* Empty config and log-dir batches never reach the network either. */
 static void test_kafka_admin_config_empty_batches_need_no_broker(void) {
     kafka_admin_Admin_t *admin = create_admin();
@@ -893,6 +913,7 @@ int main(void) {
     RUN_TEST(test_kafka_admin_describe_cluster_async_fires_once);
     RUN_TEST(test_kafka_admin_list_config_resources_returns_without_hanging);
     RUN_TEST(test_kafka_admin_alter_config_op_type_for_id_rejects_unknown_code);
+    RUN_TEST(test_kafka_admin_endpoint_type_round_trips);
     RUN_TEST(test_kafka_admin_config_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_reassignment_empty_batches_need_no_broker);
     RUN_TEST(test_kafka_admin_reassignment_constructors_reject_bad_arguments);

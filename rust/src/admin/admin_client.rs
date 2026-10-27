@@ -45,11 +45,13 @@ impl AdminClient {
     /// # Errors
     ///
     /// - `Error::is_kafka_error` (`Failed to create new KafkaAdminClient`, the
-    ///   cause as its source) if the bootstrap addresses cannot be resolved, the
-    ///   channel builder cannot be created, or `default.api.timeout.ms` is set
-    ///   explicitly below `request.timeout.ms` (the source answering
-    ///   `Error::is_config_error`, as Java's
-    ///   `KafkaAdminClient.configureDefaultApiTimeoutMs` throws).
+    ///   cause as its source) if neither or both of `bootstrap.servers` and
+    ///   `bootstrap.controllers` are set, the bootstrap addresses cannot be
+    ///   resolved, the channel builder cannot be created, or
+    ///   `default.api.timeout.ms` is set explicitly below `request.timeout.ms`.
+    ///   For the first and the last the source answers `Error::is_config_error`,
+    ///   as Java's `KafkaAdminClient.determineBootstrapType` and
+    ///   `KafkaAdminClient.configureDefaultApiTimeoutMs` throw.
     ///
     /// # Panics
     ///

@@ -516,6 +516,7 @@ fn admin_types_are_send_and_sync() {
         is_send!(ElectLeadersResult) && is_sync!(ElectLeadersResult),
         "ElectLeadersResult"
     );
+    assert!(is_send!(EndpointType) && is_sync!(EndpointType), "EndpointType");
     assert!(
         is_send!(ExpireDelegationTokenOptions) && is_sync!(ExpireDelegationTokenOptions),
         "ExpireDelegationTokenOptions"
