@@ -23,6 +23,12 @@ breaking changes.
   `deserialize_with_headers_bytes` take the record's headers as
   `&mut RecordHeaders`, so a deserializer can change them, as Java's can.
   Update the parameter type in your implementations.
+- `ConsumerHandle` refuses a closed consumer as the consumer does: once
+  `close()` has returned, its async operations return `IllegalStateError`
+  ("This consumer has already been closed.") instead of
+  `ConcurrentModificationError`, and `assignment`, `paused` and
+  `group_metadata` panic with that message instead of returning stale data.
+  A listener that `close()` runs still calls back in; `wakeup` stays callable.
 
 ### Admin client
 

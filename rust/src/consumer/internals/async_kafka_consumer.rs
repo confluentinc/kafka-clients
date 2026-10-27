@@ -241,6 +241,15 @@ enum BgJoin {
 /// `wakeup()` is callable from any thread by contract, and the reads take
 /// the same short locks the owning consumer's getters do.
 ///
+/// # Closed consumer
+///
+/// Once the consumer's `close()` has returned, the handle refuses it as the
+/// consumer does: the async operations return its `IllegalStateError`
+/// (predicate `is_local_illegal_state_error`) ahead of the callback check,
+/// and the sync reads panic with the same message. `close()` marks the
+/// consumer closed only when it returns, so a listener it runs still calls
+/// back in, as Java's listener does from `close()`. `wakeup` stays callable.
+///
 /// A handle from a `MockConsumer` is not gated either: Java's `MockConsumer`
 /// has no `acquire()`, and the mock handle's commits commit into the mock
 /// from any thread as the mock's own methods do.
@@ -307,6 +316,9 @@ pub(crate) struct AsyncConsumerHandleState {
     /// async handle operation is admitted only while it is non-zero: see
     /// [`ConsumerHandle`]'s `Threads` section.
     callbacks_in_progress: Arc<AtomicUsize>,
+    /// The consumer's closed flag, so the handle refuses a closed consumer as
+    /// the consumer's own methods do.
+    closed: Arc<AtomicBool>,
 }
 
 /// The message of the `ConcurrentModificationError` a [`ConsumerHandle`]
@@ -377,9 +389,17 @@ impl ConsumerHandle {
     /// # Returns
     ///
     /// As [`Consumer::assignment`](crate::consumer::Consumer::assignment).
+    ///
+    /// # Panics
+    ///
+    /// After the consumer's `close()` has returned, with Java's
+    /// `IllegalStateException` message, as the consumer's own `assignment`.
     pub fn assignment(&self) -> HashSet<TopicPartition> {
         match &self.inner {
-            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().assigned_partitions(),
+            ConsumerHandleInner::Async(state) => {
+                state.panic_if_closed();
+                state.subscriptions.lock().unwrap().assigned_partitions()
+            },
             ConsumerHandleInner::Mock { subscriptions, .. } => lock_mock(subscriptions).assigned_partitions(),
         }
     }
@@ -392,9 +412,17 @@ impl ConsumerHandle {
     /// # Returns
     ///
     /// As [`Consumer::paused`](crate::consumer::Consumer::paused).
+    ///
+    /// # Panics
+    ///
+    /// After the consumer's `close()` has returned, with Java's
+    /// `IllegalStateException` message, as the consumer's own `paused`.
     pub fn paused(&self) -> HashSet<TopicPartition> {
         match &self.inner {
-            ConsumerHandleInner::Async(state) => state.subscriptions.lock().unwrap().paused_partitions(),
+            ConsumerHandleInner::Async(state) => {
+                state.panic_if_closed();
+                state.subscriptions.lock().unwrap().paused_partitions()
+            },
             // Java's `MockConsumer.paused()` returns its own `paused` set.
             ConsumerHandleInner::Mock { paused, .. } => lock_mock(paused).clone(),
         }
@@ -411,14 +439,15 @@ impl ConsumerHandle {
     ///
     /// # Panics
     ///
-    /// On a consumer without `group.id`, with Java's `InvalidGroupIdException`
-    /// message, as the consumer's own `group_metadata` does
+    /// As the consumer's own `group_metadata`: after its `close()` has
+    /// returned, with Java's `IllegalStateException` message, and on a
+    /// consumer without `group.id`, with Java's `InvalidGroupIdException`
+    /// message
     /// (`org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#throwIfGroupIdNotDefined`).
-    /// The handle does not check for a closed consumer: the consumer's closed
-    /// flag is its own, not shared with the handle.
     pub fn group_metadata(&self) -> Arc<dyn crate::consumer::ConsumerGroupMetadata> {
         match &self.inner {
             ConsumerHandleInner::Async(state) => {
+                state.panic_if_closed();
                 panic_if_group_id_not_defined(state.group_id.as_deref());
                 group_metadata_from(&state.group_metadata)
             },
@@ -1282,6 +1311,14 @@ fn lock_mock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl AsyncConsumerHandleState {
+    /// The closed half of Java's `acquireAndEnsureOpen()` for the handle's
+    /// sync reads, as [`AsyncKafkaConsumer`]'s own `panic_if_closed`.
+    fn panic_if_closed(&self) {
+        if self.closed.load(Ordering::Acquire) {
+            panic!("{CONSUMER_CLOSED_MSG}");
+        }
+    }
+
     /// The handle's translation of the thread check in Java's
     /// `KafkaConsumer.acquire()`: `Ok` while the consumer is running a user
     /// callback on the caller's task (a rebalance-listener method or a
@@ -1290,7 +1327,16 @@ impl AsyncConsumerHandleState {
     /// the consumer: [`ConsumerHandle::async_state`] for the event-routed
     /// ones, [`Self::commit_sync`] and [`Self::commit_async`] for the
     /// commits.
+    ///
+    /// A closed consumer is reported first, with the consumer's own
+    /// `IllegalStateError`: Java's `acquireAndEnsureOpen()` passes `acquire()`
+    /// when no thread is inside the consumer, as after `close()`, and then
+    /// throws from `ensureOpen()`. The flag is set only when `close()`
+    /// returns, so a listener `close()` runs still calls back in.
     fn ensure_in_callback(&self) -> Result<(), Error> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::local_illegal_state(CONSUMER_CLOSED_MSG));
+        }
         if self.callbacks_in_progress.load(Ordering::Acquire) == 0 {
             return Err(Error::local_concurrent_modification(HANDLE_OUTSIDE_CALLBACK_MSG));
         }
@@ -2234,8 +2280,9 @@ where
     /// the same source.
     isolation_level: IsolationLevel,
     /// `true` after [`Self::close`] has run. Subsequent calls return
-    /// `Error::local_illegal_state`.
-    closed: AtomicBool,
+    /// `Error::local_illegal_state`. Shared with every [`ConsumerHandle`],
+    /// whose calls check it as the consumer's own do.
+    closed: Arc<AtomicBool>,
     /// Listener registered via `subscribe_with_topics_listener` /
     /// `subscribe_with_pattern_listener`. Wrapped in `Mutex<Option<…>>`
     /// so it can be swapped without invalidating
@@ -4458,7 +4505,7 @@ where
             default_api_timeout_ms,
             retry_backoff_ms,
             isolation_level: components.isolation_level,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             rebalance_listener: Mutex::new(None),
             inflight_poll: None,
             config: components.config,
@@ -4680,6 +4727,7 @@ where
             group_id: self.group_id.clone(),
             kafka_consumer_metrics: Arc::clone(&self.kafka_consumer_metrics),
             callbacks_in_progress: Arc::clone(self.offset_commit_callback_invoker.callbacks_in_progress()),
+            closed: Arc::clone(&self.closed),
         })
     }
 
@@ -10251,19 +10299,12 @@ mod tests {
     //     FindCoordinator + Heartbeat to be wired (deferred to Phase 12.5
     //     per `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
 
-    /// Java: `testFailOnClosedConsumer` — asserts
-    /// the EXACT message `"This consumer has already been closed."` is
-    /// surfaced from a post-close API call. Mirrors Java's
-    /// `assertThrows(IllegalStateException, consumer::assignment)`.
-    /// Issue 5 / DoD §3: exact-message assertion.
-    ///
-    /// Rust divergence: Rust's `assignment()` is a sync `&self` method
-    /// that does NOT call `ensure_open()` — so the close check fires
-    /// only from the async APIs. The equivalent assertion here is
-    /// against `commit_sync` (which Java's testFailOnClosedConsumer
-    /// covers via `assignment` only, but Rust's `assignment()` is
-    /// documented to "return the empty set silently when the consumer
-    /// is closed" — see `paused()` doc).
+    /// The closed flag alone, without running `close()`, makes an async
+    /// method return the EXACT message `"This consumer has already been
+    /// closed."`. Java's `testFailOnClosedConsumer` asserts it on
+    /// `assignment()`, which in Rust panics instead (CLAUDE.md §12.5): that
+    /// test is translated by `assignment_panics_after_close`, and every
+    /// guarded method by `every_guarded_method_returns_illegal_state_after_close`.
     #[tokio::test]
     async fn fail_on_closed_consumer_exact_message() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
@@ -10497,7 +10538,14 @@ mod tests {
 
     /// Builds a consumer and closes it, answering the close-path events.
     async fn closed_test_consumer() -> AsyncKafkaConsumer<Vec<u8>, Vec<u8>> {
+        closed_test_consumer_and_handle().await.0
+    }
+
+    /// As [`closed_test_consumer`], also returning a handle taken before
+    /// `close()`, as a listener captures one.
+    async fn closed_test_consumer_and_handle() -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerHandle) {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let handle = consumer.handle();
         tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 match env.event {
@@ -10514,7 +10562,335 @@ mod tests {
             }
         });
         crate::consumer::Consumer::close(&mut consumer).await.expect("close");
-        consumer
+        (consumer, handle)
+    }
+
+    /// Asserts that `result` is the closed consumer's `IllegalStateError`,
+    /// with Java's message.
+    fn assert_closed_error<T: std::fmt::Debug>(method: &str, result: Result<T, Error>) {
+        match result {
+            Err(Error::LocalIllegalState(error)) => {
+                assert_eq!(error.message(), CONSUMER_CLOSED_MSG, "{method}");
+            },
+            other => panic!("{method}: expected the closed consumer's IllegalStateError, got {other:?}"),
+        }
+    }
+
+    /// A rebalance listener that does nothing.
+    struct NoopRebalanceListener;
+    #[async_trait::async_trait]
+    impl ConsumerRebalanceListener for NoopRebalanceListener {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Ok(())
+        }
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    /// Java: `testFailOnClosedConsumer`, over every method Java guards with
+    /// `acquireAndEnsureOpen()`: once `close()` has returned, each returns the
+    /// closed consumer's `IllegalStateError`. The arguments are valid, so no
+    /// check Java makes ahead of the guard (`seek`'s negative offset) answers
+    /// first. The guarded sync getters panic instead
+    /// (`assignment_panics_after_close` and its siblings). The unguarded
+    /// `metrics`, `wakeup` and `enforce_rebalance` keep working, and a second
+    /// `close()` returns without error, as Java's.
+    #[tokio::test]
+    async fn every_guarded_method_returns_illegal_state_after_close() {
+        use crate::consumer::Consumer as C;
+        let mut consumer = closed_test_consumer().await;
+        let tp = TopicPartition::new("t", 0);
+        let tps = [tp.clone()];
+        let offsets = || HashMap::from([(tp.clone(), OffsetAndMetadata::new(1).unwrap())]);
+        let timestamps = || HashMap::from([(tp.clone(), 0_i64)]);
+        let timeout = Duration::from_secs(1);
+        let listener = || Arc::new(NoopRebalanceListener) as Arc<dyn ConsumerRebalanceListener>;
+        let callback = || Arc::new(NoopCallback) as Arc<dyn crate::consumer::OffsetCommitCallback>;
+        let topics = || vec!["t".to_string()];
+        let pattern = || SubscriptionPattern::new("t.*");
+        let c = &mut consumer;
+
+        assert_closed_error("subscribe_with_topics", C::subscribe_with_topics(c, topics()).await);
+        assert_closed_error(
+            "subscribe_with_topics_listener",
+            C::subscribe_with_topics_listener(c, topics(), listener()).await,
+        );
+        assert_closed_error("subscribe_with_pattern", C::subscribe_with_pattern(c, pattern()).await);
+        assert_closed_error(
+            "subscribe_with_pattern_listener",
+            C::subscribe_with_pattern_listener(c, pattern(), listener()).await,
+        );
+        assert_closed_error("assign", C::assign(c, vec![tp.clone()]).await);
+        assert_closed_error("unsubscribe", C::unsubscribe(c).await);
+        assert_closed_error("poll", C::poll(c, timeout).await);
+        assert_closed_error("commit_sync", C::commit_sync(c).await);
+        assert_closed_error("commit_sync_with_timeout", C::commit_sync_with_timeout(c, timeout).await);
+        assert_closed_error("commit_sync_with_offsets", C::commit_sync_with_offsets(c, offsets()).await);
+        assert_closed_error(
+            "commit_sync_with_offsets_timeout",
+            C::commit_sync_with_offsets_timeout(c, offsets(), timeout).await,
+        );
+        assert_closed_error("commit_async", C::commit_async(c).await);
+        assert_closed_error("commit_async_with_callback", C::commit_async_with_callback(c, callback()).await);
+        assert_closed_error(
+            "commit_async_with_offsets_callback",
+            C::commit_async_with_offsets_callback(c, offsets(), callback()).await,
+        );
+        assert_closed_error("seek_with_offset", C::seek_with_offset(c, tp.clone(), 1).await);
+        assert_closed_error(
+            "seek_with_offset_and_metadata",
+            C::seek_with_offset_and_metadata(c, tp.clone(), OffsetAndMetadata::new(1).unwrap()).await,
+        );
+        assert_closed_error("seek_to_beginning", C::seek_to_beginning(c, &tps).await);
+        assert_closed_error("seek_to_end", C::seek_to_end(c, &tps).await);
+        assert_closed_error("position", C::position(c, &tp).await);
+        assert_closed_error("position_with_timeout", C::position_with_timeout(c, &tp, timeout).await);
+        assert_closed_error("committed", C::committed(c, &tps).await);
+        assert_closed_error("committed_with_timeout", C::committed_with_timeout(c, &tps, timeout).await);
+        assert_closed_error("current_lag", C::current_lag(c, &tp).await);
+        assert_closed_error("partitions_for", C::partitions_for(c, "t").await);
+        assert_closed_error(
+            "partitions_for_with_timeout",
+            C::partitions_for_with_timeout(c, "t", timeout).await,
+        );
+        assert_closed_error("list_topics", C::list_topics(c).await);
+        assert_closed_error("list_topics_with_timeout", C::list_topics_with_timeout(c, timeout).await);
+        assert_closed_error("offsets_for_times", C::offsets_for_times(c, timestamps()).await);
+        assert_closed_error(
+            "offsets_for_times_with_timeout",
+            C::offsets_for_times_with_timeout(c, timestamps(), timeout).await,
+        );
+        assert_closed_error("beginning_offsets", C::beginning_offsets(c, &tps).await);
+        assert_closed_error(
+            "beginning_offsets_with_timeout",
+            C::beginning_offsets_with_timeout(c, &tps, timeout).await,
+        );
+        assert_closed_error("end_offsets", C::end_offsets(c, &tps).await);
+        assert_closed_error("end_offsets_with_timeout", C::end_offsets_with_timeout(c, &tps, timeout).await);
+        assert_closed_error("pause", C::pause(c, &tps).await);
+        assert_closed_error("resume", C::resume(c, &tps).await);
+
+        // Java leaves these outside `acquireAndEnsureOpen()`.
+        let _ = C::metrics(c);
+        C::wakeup(c);
+        C::enforce_rebalance(c).await.expect("enforce_rebalance only logs, as Java's");
+        C::close(c).await.expect("a second close() is a no-op, as Java's");
+    }
+
+    /// A [`ConsumerHandle`] taken before `close()` refuses the closed
+    /// consumer as the consumer does: called outside a callback, where an
+    /// open consumer's handle returns `ConcurrentModificationError`
+    /// (`handle_async_ops_outside_a_callback_fail_with_concurrent_modification`),
+    /// each async operation
+    /// returns the closed consumer's `IllegalStateError` instead, as Java's
+    /// `acquire()` passes when no thread is inside the consumer and
+    /// `ensureOpen()` then throws. `wakeup` stays callable.
+    #[tokio::test]
+    async fn handle_async_methods_return_illegal_state_after_close() {
+        let (_consumer, handle) = closed_test_consumer_and_handle().await;
+        let ConsumerHandleInner::Async(state) = &handle.inner else {
+            unreachable!("an AsyncKafkaConsumer hands out an Async handle")
+        };
+        assert_eq!(
+            state.callbacks_in_progress.load(Ordering::Acquire),
+            0,
+            "the calls below are made outside a callback"
+        );
+        let tp = TopicPartition::new("t", 0);
+        let tps = [tp.clone()];
+        let offsets = || HashMap::from([(tp.clone(), OffsetAndMetadata::new(1).unwrap())]);
+        let timestamps = || HashMap::from([(tp.clone(), 0_i64)]);
+        let timeout = Duration::from_secs(1);
+        let callback = || Arc::new(NoopCallback) as Arc<dyn crate::consumer::OffsetCommitCallback>;
+        let h = &handle;
+
+        assert_closed_error("current_lag", h.current_lag(&tp).await);
+        assert_closed_error("seek_with_offset", h.seek_with_offset(tp.clone(), 1).await);
+        assert_closed_error(
+            "seek_with_offset_and_metadata",
+            h.seek_with_offset_and_metadata(tp.clone(), OffsetAndMetadata::new(1).unwrap())
+                .await,
+        );
+        assert_closed_error("seek_to_beginning", h.seek_to_beginning(&tps).await);
+        assert_closed_error("seek_to_end", h.seek_to_end(&tps).await);
+        assert_closed_error("pause", h.pause(&tps).await);
+        assert_closed_error("resume", h.resume(&tps).await);
+        assert_closed_error("position", h.position(&tp).await);
+        assert_closed_error("position_with_timeout", h.position_with_timeout(&tp, timeout).await);
+        assert_closed_error("committed", h.committed(&tps).await);
+        assert_closed_error("committed_with_timeout", h.committed_with_timeout(&tps, timeout).await);
+        assert_closed_error("partitions_for", h.partitions_for("t").await);
+        assert_closed_error("partitions_for_with_timeout", h.partitions_for_with_timeout("t", timeout).await);
+        assert_closed_error("list_topics", h.list_topics().await);
+        assert_closed_error("list_topics_with_timeout", h.list_topics_with_timeout(timeout).await);
+        assert_closed_error("beginning_offsets", h.beginning_offsets(&tps).await);
+        assert_closed_error(
+            "beginning_offsets_with_timeout",
+            h.beginning_offsets_with_timeout(&tps, timeout).await,
+        );
+        assert_closed_error("end_offsets", h.end_offsets(&tps).await);
+        assert_closed_error("end_offsets_with_timeout", h.end_offsets_with_timeout(&tps, timeout).await);
+        assert_closed_error("offsets_for_times", h.offsets_for_times(timestamps()).await);
+        assert_closed_error(
+            "offsets_for_times_with_timeout",
+            h.offsets_for_times_with_timeout(timestamps(), timeout).await,
+        );
+        assert_closed_error("commit_sync", h.commit_sync().await);
+        assert_closed_error("commit_sync_with_timeout", h.commit_sync_with_timeout(timeout).await);
+        assert_closed_error("commit_sync_with_offsets", h.commit_sync_with_offsets(offsets()).await);
+        assert_closed_error(
+            "commit_sync_with_offsets_timeout",
+            h.commit_sync_with_offsets_timeout(offsets(), timeout).await,
+        );
+        assert_closed_error("commit_async", h.commit_async().await);
+        assert_closed_error("commit_async_with_callback", h.commit_async_with_callback(callback()).await);
+        assert_closed_error(
+            "commit_async_with_offsets_callback",
+            h.commit_async_with_offsets_callback(offsets(), callback()).await,
+        );
+
+        h.wakeup();
+    }
+
+    /// The handle's `assignment()` panics on a closed consumer, as the
+    /// consumer's own does.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn handle_assignment_panics_after_close() {
+        let (_consumer, handle) = closed_test_consumer_and_handle().await;
+        let _ = handle.assignment();
+    }
+
+    /// The handle's `paused()` panics on a closed consumer.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn handle_paused_panics_after_close() {
+        let (_consumer, handle) = closed_test_consumer_and_handle().await;
+        let _ = handle.paused();
+    }
+
+    /// The handle's `group_metadata()` panics on a closed consumer.
+    #[tokio::test]
+    #[should_panic(expected = "This consumer has already been closed.")]
+    async fn handle_group_metadata_panics_after_close() {
+        let (_consumer, handle) = closed_test_consumer_and_handle().await;
+        let _ = handle.group_metadata();
+    }
+
+    /// A listener that `close()` runs calls back into the consumer through
+    /// its handle. Java's `close(CloseOptions)` sets `closed` only in its
+    /// `finally`, "since the close function itself may trigger rebalance
+    /// callback that needs the consumer to be open still". The listener's
+    /// `commit_sync_with_offsets` succeeds and its async commit is sent, both
+    /// before the leave (`runRebalanceCallbacksOnClose` precedes
+    /// `leaveGroupOnClose`), and the async commit's callback runs before
+    /// `close()` returns (`awaitPendingAsyncCommitsAndExecuteCommitCallbacks`).
+    #[tokio::test]
+    async fn listener_commits_through_handle_during_close() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingCallback(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for CountingCallback {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                error: Option<&Error>,
+            ) -> Result<(), Error> {
+                assert!(error.is_none(), "the async commit failed: {error:?}");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct CommittingListener {
+            handle: ConsumerHandle,
+            tp: TopicPartition,
+            callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
+            results: Mutex<Vec<Result<(), Error>>>,
+        }
+        #[async_trait::async_trait]
+        impl ConsumerRebalanceListener for CommittingListener {
+            async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+                let at = |offset| HashMap::from([(self.tp.clone(), OffsetAndMetadata::new(offset).unwrap())]);
+                let sync = self.handle.commit_sync_with_offsets(at(7)).await;
+                let async_ = self
+                    .handle
+                    .commit_async_with_offsets_callback(at(8), Arc::clone(&self.callback))
+                    .await;
+                self.results.lock().unwrap().extend([sync, async_]);
+                Ok(())
+            }
+        }
+
+        let tp = TopicPartition::new("t", 0);
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&events);
+        let seen_tp = tp.clone();
+        let drainer = tokio::spawn(async move {
+            let offset_of = |offsets: &Option<HashMap<TopicPartition, OffsetAndMetadata>>| {
+                offsets.as_ref().and_then(|o| o.get(&seen_tp)).map(OffsetAndMetadata::offset)
+            };
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        seen.lock().unwrap().push("leave".to_string());
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, offsets } => {
+                        if let Some(offset) = offset_of(&offsets) {
+                            seen.lock().unwrap().push(format!("commit_sync {offset}"));
+                        }
+                        offsets_ready.complete(());
+                        handle.complete(offsets.unwrap_or_default());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, offsets } => {
+                        if let Some(offset) = offset_of(&offsets) {
+                            seen.lock().unwrap().push(format!("commit_async {offset}"));
+                        }
+                        offsets_ready.complete(());
+                        handle.complete(offsets.unwrap_or_default());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let listener = Arc::new(CommittingListener {
+            handle: consumer.handle(),
+            tp: tp.clone(),
+            callback: Arc::new(CountingCallback(Arc::clone(&invoked))),
+            results: Mutex::new(Vec::new()),
+        });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+        // An assigned member with a live epoch, so `close()` runs
+        // `on_partitions_revoked` (see
+        // `run_rebalance_callbacks_on_close_invokes_revoked_on_live_epoch`).
+        let notifier = consumer.state_notifier();
+        notifier.on_group_assignment_updated(&HashSet::from([tp.clone()]));
+        notifier.on_member_epoch_updated(Some(5), "member-1");
+
+        crate::consumer::Consumer::close(&mut consumer).await.expect("close");
+
+        let results = std::mem::take(&mut *listener.results.lock().unwrap());
+        assert_eq!(results.len(), 2, "on_partitions_revoked ran once and committed twice");
+        for result in results {
+            result.expect("a commit through the handle during close() succeeds");
+        }
+        assert_eq!(invoked.load(Ordering::SeqCst), 1, "close() ran the async commit's callback");
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["commit_sync 7", "commit_async 8", "leave"],
+            "the listener's commits precede the leave"
+        );
+        drop(drainer);
     }
 
     /// Java's `assignment()` runs `acquireAndEnsureOpen()`, which throws
