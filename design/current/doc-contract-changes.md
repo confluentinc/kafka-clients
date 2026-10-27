@@ -105,3 +105,18 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: combining a deserializer with `ClusterResourceListener` or `Monitorable` has no effect: the client never calls `on_update` on it and `Monitorable` is not translated.
    - Why: see `crate::common::ClusterResourceListener`; Java finds both interfaces with `instanceof`, which a Rust trait object cannot do.
    - Accepted: 2026-10-26 Emanuele Sabellico
+1. `crate::consumer::Consumer::poll`
+   - Java member: `org.apache.kafka.clients.consumer.Consumer#poll(Duration)`
+   - Contract change: a `timeout` greater than `i64::MAX` milliseconds counts as `i64::MAX` milliseconds, where Java's `Duration.toMillis()` throws `ArithmeticException`; `poll(Duration::MAX)` waits without limit.
+   - Why: `Duration::MAX` is Rust's usual way to wait without limit, and Rust's `Duration` reaches about 5.8 × 10¹¹ years, past `i64::MAX` milliseconds; only timeouts over about 292 million years differ.
+   - Accepted: 2026-10-27 Emanuele Sabellico
+1. `kafka_consumer_Consumer_poll`
+   - Java member: `org.apache.kafka.clients.consumer.Consumer#poll(Duration)`
+   - Contract change: never fails with `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot exceed `Long.MAX_VALUE` milliseconds.
+   - Why: the C timeout is the millisecond count Java's `Duration.toMillis()` produces, so the overflow cannot be expressed.
+   - Accepted: 2026-10-27 Emanuele Sabellico
+1. `kafka_consumer_Consumer_poll_cb`
+   - Java member: `org.apache.kafka.clients.consumer.Consumer#poll(Duration)`
+   - Contract change: never fails with `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot exceed `Long.MAX_VALUE` milliseconds.
+   - Why: as `kafka_consumer_Consumer_poll`.
+   - Accepted: 2026-10-27 Emanuele Sabellico
