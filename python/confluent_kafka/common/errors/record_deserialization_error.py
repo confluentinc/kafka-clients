@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Iterable
-from typing import ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
 from confluent_kafka.common.errors.serialization_error import SerializationError
@@ -112,3 +112,19 @@ class RecordDeserializationError(SerializationError):
     def headers(self) -> Headers:
         """Java's ``headers()``."""
         return self._headers
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        """Refused, as Java's serialization of
+        ``RecordDeserializationException`` throws
+        ``NotSerializableException``: ``keyBuffer`` (``ByteBuffer``),
+        ``valueBuffer`` (``ByteBuffer``) and ``headers`` (``Headers``) are
+        not ``Serializable`` (CLAUDE.md, Python Binding Conventions,
+        Errors)."""
+        raise TypeError(
+            "RecordDeserializationError cannot be pickled or deep-copied, as Java's "
+            "RecordDeserializationException cannot be serialized")
+
+    def __copy__(self) -> RecordDeserializationError:
+        """``copy.copy``: a rebuild from the same constructor arguments, which it
+        shares, with the cause, the notes and the attributes a caller added."""
+        return _throwable.shallow_copy(self)
