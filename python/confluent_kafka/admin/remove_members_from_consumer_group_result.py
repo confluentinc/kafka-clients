@@ -137,7 +137,9 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
 
     def member_result(self, *, member: MemberToRemove) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns the selected member future."""
-        if self._client_member_result is not None:
+        # A ``None`` member cannot cross the FFI; it takes Java's own checks below,
+        # which ``null`` fails as it is never a requested member (exception 4).
+        if self._client_member_result is not None and member is not None:
             return self._client_member_result(member)  # type: ignore[no-any-return]
         if self._remove_all():
             raise IllegalArgumentError(
