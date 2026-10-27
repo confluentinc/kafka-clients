@@ -56,23 +56,16 @@ from confluent_kafka.admin import (
     ScramMechanism,
     UserScramCredentialDeletion,
 )
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
-    ClientQuotaAlteration,
-    ClientQuotaEntity,
-    ClientQuotaFilter,
-    ElectionType,
-    Node,
-    PatternType,
-    ResourcePattern,
-    ResourceType,
-    TopicPartition,
-    TopicPartitionReplica,
 )
+from confluent_kafka.common.quota import ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter
+from confluent_kafka.common import ElectionType, Node, TopicPartition, TopicPartitionReplica
+from confluent_kafka.common.resource import PatternType, ResourcePattern, ResourceType
 from confluent_kafka.common.config.config_resource import ConfigResource
 from confluent_kafka.consumer import OffsetAndMetadata
 
@@ -642,12 +635,9 @@ def _empty_input_rows() -> list[tuple[str, dict[str, Any], str | None]]:
     result)``: the empty input and the null element of each RPC whose Java body reads
     ``options`` only after its loop over the arguments, and only for a non-empty
     input; the element's NPE comes first."""
-    from confluent_kafka.common import (
-        AccessControlEntryFilter,
-        ResourcePatternFilter,
-        TopicCollection,
-        Uuid,
-    )
+    from confluent_kafka.common.acl import AccessControlEntryFilter
+    from confluent_kafka.common.resource import ResourcePatternFilter
+    from confluent_kafka.common import TopicCollection, Uuid
 
     unknown = AclBindingFilter(
         pattern_filter=ResourcePatternFilter(resource_type=ResourceType.UNKNOWN, name=None,

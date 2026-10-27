@@ -34,15 +34,9 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import assert_type
 
-from confluent_kafka.common import (
-    Header,
-    Headers,
-    Node,
-    TimestampType,
-    TopicIdPartition,
-    TopicPartition,
-    Uuid,
-)
+from confluent_kafka.common.header import Header, Headers
+from confluent_kafka.common import Node, TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka.common.serialization import (
     Deserializer,
     Serializer,
@@ -623,8 +617,8 @@ def _admin_topic_rpc_types(c: object = None) -> None:
         RecordsToDelete,
         TopicDescription,
     )
+    from confluent_kafka.common.acl import AclOperation
     from confluent_kafka.common import (
-        AclOperation,
         AsyncKafkaFuture,
         ElectionType,
         KafkaFuture,
@@ -880,16 +874,14 @@ def _admin_security_rpc_types(c: object = None) -> None:
         UserScramCredentialDeletion,
         UserScramCredentialsDescription,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
-        AsyncKafkaFuture,
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.common.quota import (
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
-        DelegationToken,
-        KafkaFuture,
     )
+    from confluent_kafka.common.security.token.delegation import DelegationToken
 
     admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
     tp = TopicPartition(topic="t", partition=0)
@@ -1084,8 +1076,9 @@ def _one_stub_per_java_overload(c: object = None) -> None:
         return
     from typing import Any
 
-    from confluent_kafka.common import KafkaPrincipal, PartitionInfo
-    from confluent_kafka.common.token_information import TokenInformation
+    from confluent_kafka.common.security.auth import KafkaPrincipal
+    from confluent_kafka.common import PartitionInfo
+    from confluent_kafka.common.security.token.delegation.token_information import TokenInformation
     from confluent_kafka.consumer import (
         AsyncKafkaConsumer, CloseOptions, KafkaConsumer, OffsetAndTimestamp,
     )

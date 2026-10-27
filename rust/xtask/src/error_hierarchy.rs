@@ -706,6 +706,7 @@ const MIXED_PACKAGES: &[&str] = &[
     "confluent_kafka",
     "confluent_kafka.common",
     "confluent_kafka.common.config",
+    "confluent_kafka.common.metrics",
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ];
@@ -1836,10 +1837,10 @@ fn import_source(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
         "TopicPartition" => ("confluent_kafka.common.topic_partition", "TopicPartition"),
         "OffsetAndMetadata" => ("confluent_kafka.consumer.offset_and_metadata", "OffsetAndMetadata"),
-        "KafkaMetric" => ("confluent_kafka.common.kafka_metric", "KafkaMetric"),
-        "TimestampType" => ("confluent_kafka.common.timestamp_type", "TimestampType"),
-        "Header" => ("confluent_kafka.common.header", "Header"),
-        "Headers" => ("confluent_kafka.common.headers", "Headers"),
+        "KafkaMetric" => ("confluent_kafka.common.metrics.kafka_metric", "KafkaMetric"),
+        "TimestampType" => ("confluent_kafka.common.record.timestamp_type", "TimestampType"),
+        "Header" => ("confluent_kafka.common.header.header", "Header"),
+        "Headers" => ("confluent_kafka.common.header.headers", "Headers"),
         "Iterable" => ("collections.abc", "Iterable"),
         "Mapping" => ("collections.abc", "Mapping"),
         "Sequence" => ("collections.abc", "Sequence"),
@@ -2590,7 +2591,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         l.contains("TimestampType.") && !l.starts_with("def ") && !l.contains("-> ")
     });
     if runtime_timestamp {
-        pkg_block.push("from confluent_kafka.common.timestamp_type import TimestampType".into());
+        pkg_block.push("from confluent_kafka.common.record.timestamp_type import TimestampType".into());
     }
     if !is_root_class(info) {
         let parent = &g.classes[&info.parent_fqn];

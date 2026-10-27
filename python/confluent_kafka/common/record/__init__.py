@@ -1,4 +1,4 @@
-# Copyright 2025 Confluent Inc.
+# Copyright 2026 Confluent Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# GENERATED, DO NOT EDIT (stub for the confluent_kafka.common.metrics package).
+"""``confluent_kafka.common.record``: Java's ``org.apache.kafka.common.record``.
 
-from .quota_violation_error import QuotaViolationError as QuotaViolationError
+One file per class; import the classes from this module, never from the files
+(CLAUDE.md, Python Binding Conventions, Modules).
+"""
+
+from __future__ import annotations
+
+from .timestamp_type import TimestampType as TimestampType
 
 __all__ = [
-    "QuotaViolationError",
+    "TimestampType",
 ]

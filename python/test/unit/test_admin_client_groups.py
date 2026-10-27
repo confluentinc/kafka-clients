@@ -80,8 +80,8 @@ from confluent_kafka.admin import (
     _conversions,
 )
 from confluent_kafka.admin._futures import Async, Sync
+from confluent_kafka.common.acl import AclOperation
 from confluent_kafka.common import (
-    AclOperation,
     AsyncKafkaFuture,
     ClassicGroupState,
     GroupState,

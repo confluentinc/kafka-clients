@@ -53,15 +53,10 @@ from confluent_kafka._errors import (
     from_ffi_error,
     to_ffi_id,
 )
-from confluent_kafka.common import (
-    Headers,
-    InvalidRecordError,
-    KafkaError,
-    KafkaMetric,
-    MetricName,
-    TimestampType,
-    TopicPartition,
-)
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common import InvalidRecordError, KafkaError, MetricName, TopicPartition
+from confluent_kafka.common.metrics import KafkaMetric
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import (
     AuthenticationError,

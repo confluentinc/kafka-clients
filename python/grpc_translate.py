@@ -60,30 +60,36 @@ from confluent_kafka import ExecutionError  # noqa: E402
 from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture  # noqa: E402
 import types as _types  # noqa: E402
 from confluent_kafka import admin as ka  # noqa: E402  (NewTopic / NewPartitions / ...)
-from confluent_kafka.common import (  # noqa: E402
+from confluent_kafka.common.acl import (  # noqa: E402
     AccessControlEntry,
     AccessControlEntryFilter,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
+)
+from confluent_kafka.common.quota import (  # noqa: E402
     ClientQuotaAlteration,
     ClientQuotaEntity,
     ClientQuotaFilter,
     ClientQuotaFilterComponent,
+)
+from confluent_kafka.common import (  # noqa: E402
     ElectionType,
     GroupState,
     GroupType,
     IsolationLevel,
-    KafkaPrincipal,
     Node,
+    TopicCollection,
+    TopicPartitionReplica,
+    Uuid,
+)
+from confluent_kafka.common.security.auth import KafkaPrincipal  # noqa: E402
+from confluent_kafka.common.resource import (  # noqa: E402
     PatternType,
     ResourcePattern,
     ResourcePatternFilter,
     ResourceType,
-    TopicCollection,
-    TopicPartitionReplica,
-    Uuid,
 )
 from confluent_kafka.common.config import ConfigResource  # noqa: E402
 import producer_service_pb2 as pb  # noqa: E402  (generated)

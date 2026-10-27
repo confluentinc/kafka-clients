@@ -111,7 +111,8 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import Header, KafkaError, KafkaFuture, TopicPartition
+from confluent_kafka.common.header import Header
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError

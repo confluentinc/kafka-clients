@@ -33,7 +33,7 @@ from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding, AclBindingFilter
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
     from confluent_kafka.common.errors import ApiError
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 

@@ -14,8 +14,7 @@
 
 """``KafkaPrincipal``: Java's ``org.apache.kafka.common.security.auth.KafkaPrincipal``.
 
-In ``confluent_kafka.common``, the nearest module above
-``common.security.auth``. Java's ``java.security.Principal`` is dropped; the
+In ``confluent_kafka.common.security.auth``, the module of its Java package. Java's ``java.security.Principal`` is dropped; the
 class keeps the methods it declares, and ``Principal.implies(Subject)`` is not
 generated (CLAUDE.md, Python Binding Conventions, Types, JDK interfaces).
 

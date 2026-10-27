@@ -17,7 +17,7 @@
 from typing import ClassVar
 
 from confluent_kafka.common.kafka_error import KafkaError
-from confluent_kafka.common.kafka_metric import KafkaMetric
+from confluent_kafka.common.metrics.kafka_metric import KafkaMetric
 
 __all__ = ["QuotaViolationError"]
 

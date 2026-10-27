@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from confluent_kafka._args import MISSING
 from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_serializer
 from confluent_kafka.common.topic_partition import TopicPartition

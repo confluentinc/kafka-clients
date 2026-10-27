@@ -37,7 +37,8 @@ from typing import Any
 import pytest
 
 from confluent_kafka import ConcurrentModificationError, IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import KafkaError, Node, PartitionInfo, TimestampType, TopicPartition
+from confluent_kafka.common import KafkaError, Node, PartitionInfo, TopicPartition
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka import UnsupportedOperationError
 from confluent_kafka.common.errors import WakeupError
 from confluent_kafka.consumer import (

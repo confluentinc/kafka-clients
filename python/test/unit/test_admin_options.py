@@ -49,7 +49,8 @@ from confluent_kafka.admin import (
     TerminateTransactionOptions,
     TransactionState,
 )
-from confluent_kafka.common import GroupState, GroupType, IsolationLevel, KafkaPrincipal
+from confluent_kafka.common import GroupState, GroupType, IsolationLevel
+from confluent_kafka.common.security.auth import KafkaPrincipal
 
 OPTIONS = [
     "AbortTransactionOptions", "AlterClientQuotasOptions", "AlterConfigsOptions",

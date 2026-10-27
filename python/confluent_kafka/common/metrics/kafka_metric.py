@@ -15,8 +15,7 @@
 """``KafkaMetric``: Java's ``org.apache.kafka.common.metrics.KafkaMetric``.
 
 A class (CLAUDE.md, Python Binding Conventions, Types), in
-``confluent_kafka.common``, the nearest module above Java's
-``common.metrics`` package. It reaches the surface through
+``confluent_kafka.common.metrics``, the module of its Java package. It reaches the surface through
 ``QuotaViolationError.metric()``.
 
 Java's constructor takes a ``MetricValueProvider`` and a ``Time``, types the
@@ -40,7 +39,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from .measurable import Measurable
     from .metric_config import MetricConfig
-    from .metric_name import MetricName
+    from confluent_kafka.common.metric_name import MetricName
 
 __all__ = ["KafkaMetric"]
 
@@ -142,7 +141,7 @@ class KafkaMetric:
     def _snapshot(cls, *, name: str, group: str, value: Any) -> KafkaMetric:
         """A metric the core reported by name and value (the metric of a
         ``QuotaViolationError``): a constant provider, no configuration."""
-        from .metric_name import MetricName
+        from confluent_kafka.common.metric_name import MetricName
 
         return cls(lock=threading.Lock(),
                    metric_name=MetricName(name=name, group=group, description="", tags={}),
