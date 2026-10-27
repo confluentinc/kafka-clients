@@ -90,9 +90,14 @@ impl ResourcePatternFilter {
     ///
     /// # Panics
     ///
-    /// Panics with `Unsupported PatternType: <type>` when this filter's type is
-    /// [`PatternType::Match`], its name is set and `pattern`'s type is neither
-    /// literal nor prefixed.
+    /// Panics with `Unsupported PatternType: UNKNOWN` if this filter's pattern
+    /// type is [`PatternType::Match`], it has a name, and `pattern`'s pattern
+    /// type is [`PatternType::Unknown`], where Java throws
+    /// `IllegalArgumentException`; a [`ResourcePattern`] cannot hold the other
+    /// two filter-only types, `Any` and `Match`. A pattern with a pattern type a
+    /// newer broker added reports `Unknown`, so check
+    /// [`ResourcePattern::pattern_type`] before matching it against a `Match`
+    /// filter.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matches")]
     pub fn matches(&self, pattern: &ResourcePattern) -> bool {
         if self.resource_type != ResourceType::Any && self.resource_type != pattern.resource_type() {
@@ -117,9 +122,9 @@ impl ResourcePatternFilter {
         match pattern.pattern_type() {
             PatternType::Literal => name == pattern.name() || pattern.name() == ResourcePattern::WILDCARD_RESOURCE,
             PatternType::Prefixed => name.starts_with(pattern.name()),
-            // Java throws IllegalArgumentException here; this branch is only
-            // reachable for MATCH/ANY/UNKNOWN pattern types on the *pattern*
-            // (not the filter), which are not valid concrete patterns.
+            // Java throws IllegalArgumentException here. Only UNKNOWN on the
+            // *pattern* reaches this branch: `ResourcePattern::new` rejects
+            // MATCH and ANY, which are not valid concrete patterns.
             other => panic!("Unsupported PatternType: {other}"),
         }
     }
@@ -176,6 +181,19 @@ mod tests {
 
     fn filter(rt: ResourceType, name: Option<&str>, pt: PatternType) -> ResourcePatternFilter {
         ResourcePatternFilter::new(rt, name.map(str::to_string), pt)
+    }
+
+    /// New test, no Java original: the documented panic (`# Panics` on
+    /// `matches`), where Java throws `IllegalArgumentException("Unsupported
+    /// PatternType: UNKNOWN")` (`ResourcePatternFilter#matches`).
+    #[test]
+    #[should_panic(expected = "Unsupported PatternType: UNKNOWN")]
+    fn match_filter_with_a_name_panics_on_an_unknown_pattern_type() {
+        filter(ResourceType::Topic, Some("Name"), PatternType::Match).matches(&pattern(
+            ResourceType::Topic,
+            "Name",
+            PatternType::Unknown,
+        ));
     }
 
     #[test]

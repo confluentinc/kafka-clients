@@ -32,7 +32,7 @@ use crate::ffi::admin::member_to_remove::{
 use crate::ffi::common::deliver_value;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{box_list, c_str_to_option, kafka_List_t, list_elements, owned_c_string};
 
 /// Opaque handle to a [`RemoveMembersFromConsumerGroupOptions`], owned by
 /// the caller and freed with
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
 ///
 /// # Parameters
 ///
-/// - `reason` - the reason; `NULL` reads as an empty reason.
+/// - `reason` - the reason, copied during the call; `NULL` clears a reason set earlier.
 ///
 /// # Safety
 ///
@@ -190,8 +190,8 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_r
     reason: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `reason` is null or a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let reason = unsafe { c_str_to_string(reason) };
+    // `c_str_to_option` requires; it is copied.
+    let reason = unsafe { c_str_to_option(reason) };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while the options are replaced, as
     // `inner_mut` requires.

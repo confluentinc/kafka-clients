@@ -145,7 +145,7 @@ async fn delegation_token_rpcs_are_rejected_on_a_plaintext_connection<F: AdminBa
         .create_delegation_token(
             CreateDelegationTokenOptions::new()
                 .set_renewers(vec![KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "renewer")])
-                .set_owner(KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner"))
+                .set_owner(Some(KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "owner")))
                 .set_max_lifetime_ms(3_600_000),
         )
         .await

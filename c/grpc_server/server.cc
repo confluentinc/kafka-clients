@@ -2682,6 +2682,24 @@ std::string transaction_state_name(const kafka_admin_TransactionState_t* s) {
   return cstr(name.get());
 }
 
+// The group enums cross as Java's toString() text ("PreparingRebalance",
+// "Consumer"), which each binding's parse() reads back; their _name() is
+// Java's Enum.name() ("PREPARING_REBALANCE"), which parse() does not read.
+std::string group_type_text(const kafka_common_GroupType_t* t) {
+  OwnedCString text(kafka_common_GroupType_to_string(t));
+  return cstr(text.get());
+}
+
+std::string group_state_text(const kafka_common_GroupState_t* s) {
+  OwnedCString text(kafka_common_GroupState_to_string(s));
+  return cstr(text.get());
+}
+
+std::string classic_group_state_text(const kafka_common_ClassicGroupState_t* s) {
+  OwnedCString text(kafka_common_ClassicGroupState_to_string(s));
+  return cstr(text.get());
+}
+
 // ---- Data-class converters -------------------------------------------------
 
 void config_entry_to_proto(const kafka_admin_ConfigEntry_t* e, ConfigEntry* dst) {
@@ -2692,7 +2710,9 @@ void config_entry_to_proto(const kafka_admin_ConfigEntry_t* e, ConfigEntry* dst)
   dst->set_is_sensitive(kafka_admin_ConfigEntry_is_sensitive(e) != 0);
   dst->set_is_read_only(kafka_admin_ConfigEntry_is_read_only(e) != 0);
   dst->set_source(config_source_name(kafka_admin_ConfigEntry_source(e)));
-  dst->set_config_type(config_type_name(kafka_admin_ConfigEntry_type(e)));
+  // NULL is Java's null type, which a createTopics entry carries: left unset.
+  const kafka_admin_ConfigEntry_ConfigType_t* type = kafka_admin_ConfigEntry_type(e);
+  if (type != nullptr) dst->set_config_type(config_type_name(type));
   const char* doc = kafka_admin_ConfigEntry_documentation(e);
   if (doc != nullptr) dst->set_documentation(doc);
   OwnedList synonyms(kafka_admin_ConfigEntry_synonyms(e));
@@ -2828,9 +2848,8 @@ void consumer_group_description_to_proto(const kafka_admin_ConsumerGroupDescript
   member_list_to_proto(kafka_admin_ConsumerGroupDescription_members(d),
                        [dst] { return dst->add_members(); });
   dst->set_partition_assignor(cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(d)));
-  dst->set_group_type(cstr(kafka_common_GroupType_name(kafka_admin_ConsumerGroupDescription_type(d))));
-  dst->set_group_state(
-      cstr(kafka_common_GroupState_name(kafka_admin_ConsumerGroupDescription_group_state(d))));
+  dst->set_group_type(group_type_text(kafka_admin_ConsumerGroupDescription_type(d)));
+  dst->set_group_state(group_state_text(kafka_admin_ConsumerGroupDescription_group_state(d)));
   const kafka_common_Node_t* coordinator = kafka_admin_ConsumerGroupDescription_coordinator(d);
   if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
   OwnedList ops(kafka_admin_ConsumerGroupDescription_authorized_operations(d));
@@ -2849,8 +2868,7 @@ void classic_group_description_to_proto(const kafka_admin_ClassicGroupDescriptio
   dst->set_is_simple_consumer_group(kafka_admin_ClassicGroupDescription_is_simple_consumer_group(d) != 0);
   member_list_to_proto(kafka_admin_ClassicGroupDescription_members(d),
                        [dst] { return dst->add_members(); });
-  dst->set_state(
-      cstr(kafka_common_ClassicGroupState_name(kafka_admin_ClassicGroupDescription_state(d))));
+  dst->set_state(classic_group_state_text(kafka_admin_ClassicGroupDescription_state(d)));
   const kafka_common_Node_t* coordinator = kafka_admin_ClassicGroupDescription_coordinator(d);
   if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
   OwnedList ops(kafka_admin_ClassicGroupDescription_authorized_operations(d));
@@ -3089,7 +3107,7 @@ class AdminServiceImpl final : public AdminService::Service {
     kafka_admin_DeleteTopicsOptions_set_retry_on_quota_violation(opts.get(),
                                                                  retry_on_quota(*req) ? 1 : 0);
     Owned<kafka_admin_DeleteTopicsResult_t, kafka_admin_DeleteTopicsResult_destroy> result(
-        kafka_admin_Admin_delete_topics_with_options(admin, topics.collection.get(), opts.get()));
+        kafka_admin_Admin_delete_topics_with_topic_collection_options(admin, topics.collection.get(), opts.get()));
     if (topics.by_ids) {
       OwnedMap values(kafka_admin_DeleteTopicsResult_topic_id_values(result.get()));
       void_futures_to_proto<kafka_common_Uuid_t>(
@@ -3789,9 +3807,9 @@ class AdminServiceImpl final : public AdminService::Service {
         // type / groupState are Java Optionals: NULL is an empty one and
         // must stay absent rather than becoming "".
         const kafka_common_GroupType_t* type = kafka_admin_GroupListing_type(l);
-        if (type != nullptr) dst->set_group_type(cstr(kafka_common_GroupType_name(type)));
+        if (type != nullptr) dst->set_group_type(group_type_text(type));
         const kafka_common_GroupState_t* state = kafka_admin_GroupListing_group_state(l);
-        if (state != nullptr) dst->set_group_state(cstr(kafka_common_GroupState_name(state)));
+        if (state != nullptr) dst->set_group_state(group_state_text(state));
       });
     }
     {

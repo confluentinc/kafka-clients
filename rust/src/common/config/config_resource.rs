@@ -132,8 +132,10 @@ impl std::fmt::Display for ConfigResource {
 mod tests {
     use super::*;
 
+    /// Translated from `ConfigResourceTest.shouldRoundTripEveryType`.
     #[test]
-    fn type_id_round_trip() {
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResourceTest#shouldRoundTripEveryType")]
+    fn should_round_trip_every_type() {
         for t in [
             Type::Group,
             Type::ClientMetrics,
@@ -159,6 +161,25 @@ mod tests {
     #[test]
     fn for_id_unknown_falls_back() {
         assert_eq!(Type::for_id(99), Type::Unknown);
+    }
+
+    /// Translated from `ConfigResourceTest.shouldGetTypeFromId`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResourceTest#shouldGetTypeFromId")]
+    fn should_get_type_from_id() {
+        assert_eq!(Type::Topic, Type::for_id(2));
+        assert_eq!(Type::Broker, Type::for_id(4));
+        assert_eq!(Type::ClientMetrics, Type::for_id(16));
+        assert_eq!(Type::Group, Type::for_id(32));
+    }
+
+    /// Translated from `ConfigResourceTest.shouldReturnUnknownForUnknownCode`.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.config.ConfigResourceTest#shouldReturnUnknownForUnknownCode")]
+    fn should_return_unknown_for_unknown_code() {
+        assert_eq!(Type::Unknown, Type::for_id(-1));
+        assert_eq!(Type::Unknown, Type::for_id(0));
+        assert_eq!(Type::Unknown, Type::for_id(1));
     }
 
     #[test]

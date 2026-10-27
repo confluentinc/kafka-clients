@@ -945,7 +945,7 @@ static void test_mock_admin_describe_consumer_groups_result_new(void) {
 /* `new DescribeClassicGroupsResult(futures)`, keyed by group id. */
 static void test_mock_admin_describe_classic_groups_result_new(void) {
     kafka_admin_ClassicGroupDescription_t *description = kafka_admin_ClassicGroupDescription_new(
-        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
+        "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL);
     TEST_ASSERT_NOT_NULL(description);
     kafka_common_KafkaFuture_t *future = kafka_common_KafkaFuture_completed_future(description, NULL);
     kafka_Map_t *futures = kafka_Map_new();
@@ -1358,7 +1358,25 @@ static void test_mock_admin_new_topic_configs(void) {
     TEST_ASSERT_EQUAL_STRING("60000", (const char *)kafka_Map_get(copy, (void *)"retention.ms"));
     kafka_Map_destroy(copy);
     char *text = kafka_admin_NewTopic_to_string(topic);
-    TEST_ASSERT_NOT_NULL(strstr(text, "configured"));
+    TEST_ASSERT_EQUAL_STRING("(name=configured, numPartitions=1, replicationFactor=1, replicasAssignments=null, "
+                             "configs={cleanup.policy=compact, retention.ms=60000})",
+                             text);
+    kafka_string_destroy(text);
+
+    /* Java's `configs(Map)` stores the map as given: a NULL value is Java's
+     * null config value, read back as NULL and printed as `null`. */
+    configs = kafka_Map_new();
+    kafka_Map_put(configs, (void *)"retention.ms", (void *)"60000");
+    kafka_Map_put(configs, (void *)"cleanup.policy", NULL);
+    kafka_admin_NewTopic_set_configs(topic, configs);
+    kafka_Map_destroy(configs);
+    copy = kafka_admin_NewTopic_configs(topic);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(copy));
+    TEST_ASSERT_EQUAL_STRING("cleanup.policy", (const char *)kafka_Map_key(copy, 0));
+    TEST_ASSERT_NULL(kafka_Map_value(copy, 0));
+    kafka_Map_destroy(copy);
+    text = kafka_admin_NewTopic_to_string(topic);
+    TEST_ASSERT_NOT_NULL(strstr(text, "configs={cleanup.policy=null, retention.ms=60000}"));
     kafka_string_destroy(text);
 
     kafka_List_t *topics = kafka_List_new();
@@ -1370,6 +1388,11 @@ static void test_mock_admin_new_topic_configs(void) {
     const kafka_admin_ConfigEntry_t *entry = kafka_admin_Config_get(cfg, "retention.ms");
     TEST_ASSERT_NOT_NULL(entry);
     TEST_ASSERT_EQUAL_STRING("60000", kafka_admin_ConfigEntry_value(entry));
+    /* The mock builds the result's entries with `new ConfigEntry(key, value)`,
+     * so the null value stays null. */
+    entry = kafka_admin_Config_get(cfg, "cleanup.policy");
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(entry));
     TEST_ASSERT_NULL(kafka_admin_Config_get(cfg, "no.such.config"));
     kafka_common_KafkaFuture_destroy(config);
     kafka_admin_CreateTopicsResult_destroy(result);
@@ -1689,7 +1712,7 @@ static void test_mock_admin_delete_topics_by_names(void) {
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
     kafka_admin_DeleteTopicsOptions_t *options = kafka_admin_DeleteTopicsOptions_new();
     kafka_admin_DeleteTopicsOptions_set_timeout_ms(options, 5000);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_options(f.admin, collection, options);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection_options(f.admin, collection, options);
     kafka_admin_DeleteTopicsOptions_destroy(options);
     TEST_ASSERT_NOT_NULL(result);
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
@@ -1732,7 +1755,7 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     kafka_List_t *ids = kafka_List_new();
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_name_values(result));
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_id_values(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
@@ -1752,13 +1775,49 @@ static void test_mock_admin_delete_topics_by_ids(void) {
     fixture_destroy(&f);
 }
 
+/* Java's `deleteTopics(Collection<String>)` and `(Collection<String>,
+ * DeleteTopicsOptions)` wrap the names in `TopicCollection.ofTopicNames`
+ * (`Admin#deleteTopics(Collection)` and `Admin#deleteTopics(Collection,DeleteTopicsOptions)`): each `_with_string_slice` form deletes the named
+ * topic and returns a result keyed by name. */
+static void test_mock_admin_delete_topics_with_string_slice(void) {
+    for (int with_options = 0; with_options <= 1; with_options++) {
+        fixture_t f;
+        fixture_init(&f, 1);
+        create_one(&f, "del-slice", 1, 1);
+        kafka_List_t *names = string_list("del-slice", NULL);
+        kafka_admin_DeleteTopicsResult_t *result;
+        if (with_options) {
+            kafka_admin_DeleteTopicsOptions_t *options = kafka_admin_DeleteTopicsOptions_new();
+            result = kafka_admin_Admin_delete_topics_with_string_slice_options(f.admin, names, options);
+            kafka_admin_DeleteTopicsOptions_destroy(options);
+        } else {
+            result = kafka_admin_Admin_delete_topics_with_string_slice(f.admin, names);
+        }
+        kafka_List_destroy(names);
+        TEST_ASSERT_NULL(kafka_admin_DeleteTopicsResult_topic_id_values(result));
+        kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
+        TEST_ASSERT_EQUAL_INT32(1, kafka_Map_size(values));
+        TEST_ASSERT_NULL(get_ok(future_for(values, "del-slice")));
+        kafka_Map_destroy(values);
+        expect_void_ok(kafka_admin_DeleteTopicsResult_all(result));
+        kafka_admin_DeleteTopicsResult_destroy(result);
+
+        kafka_admin_ListTopicsResult_t *listed = kafka_admin_Admin_list_topics(f.admin);
+        kafka_common_KafkaFuture_t *listed_names = kafka_admin_ListTopicsResult_names(listed);
+        TEST_ASSERT_EQUAL_INT32(0, kafka_List_size((const kafka_List_t *)get_ok(listed_names)));
+        kafka_common_KafkaFuture_destroy(listed_names);
+        kafka_admin_ListTopicsResult_destroy(listed);
+        fixture_destroy(&f);
+    }
+}
+
 static void test_mock_admin_delete_topics_async(void) {
     fixture_t f;
     fixture_init(&f, 1);
     create_one(&f, "del-async", 1, 1);
     kafka_List_t *names = string_list("del-async", "del-missing", NULL);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     kafka_Map_t *values = kafka_admin_DeleteTopicsResult_topic_name_values(result);
     cb_result_t ok;
     get_cb_pumped(&f, future_for(values, "del-async"), &ok);
@@ -1788,7 +1847,7 @@ static void test_mock_admin_delete_topics_by_ids_async(void) {
     kafka_List_t *ids = kafka_List_new();
     kafka_List_add(ids, id);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_ids(ids);
-    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *result = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     kafka_common_KafkaFuture_t *all = kafka_admin_DeleteTopicsResult_all(result);
     cb_result_t r;
     get_cb_pumped(&f, all, &r);
@@ -2973,7 +3032,7 @@ static void test_mock_admin_list_partition_reassignments_after_delete_returns_er
     reassign_one(&f, "lr-gone", 0);
     kafka_List_t *names = string_list("lr-gone", NULL);
     kafka_common_TopicCollection_t *collection = kafka_common_TopicCollection_of_topic_names(names);
-    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics(f.admin, collection);
+    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics_with_topic_collection(f.admin, collection);
     expect_void_ok(kafka_admin_DeleteTopicsResult_all(deleted));
     kafka_admin_DeleteTopicsResult_destroy(deleted);
     kafka_common_TopicCollection_destroy(collection);
@@ -3804,6 +3863,10 @@ static void test_mock_admin_remove_members_reports_unsupported_per_member(void) 
     assert_ok(err, "RemoveMembersFromConsumerGroupOptions_with_members");
     kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, "rolling restart");
     TEST_ASSERT_EQUAL_STRING("rolling restart", kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(options));
+    /* Java's `reason(null)` clears the reason set earlier. */
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, NULL);
+    TEST_ASSERT_NULL(kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(options));
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(options, "rolling restart");
     TEST_ASSERT_FALSE(kafka_admin_RemoveMembersFromConsumerGroupOptions_remove_all(options));
     kafka_List_t *copy = kafka_admin_RemoveMembersFromConsumerGroupOptions_members(options);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(copy));
@@ -4512,6 +4575,12 @@ static void test_mock_admin_delegation_token_lifecycle(void) {
     kafka_admin_CreateDelegationTokenOptions_set_max_lifetime_ms(options, 86400000);
     TEST_ASSERT_EQUAL_INT64(86400000, kafka_admin_CreateDelegationTokenOptions_max_lifetime_ms(options));
     TEST_ASSERT_NULL(kafka_admin_CreateDelegationTokenOptions_owner(options));
+    /* Java's `owner(null)` clears an owner set earlier. */
+    kafka_admin_CreateDelegationTokenOptions_set_owner(options, second);
+    TEST_ASSERT_EQUAL_STRING("second-renewer",
+                             kafka_common_security_auth_KafkaPrincipal_name(kafka_admin_CreateDelegationTokenOptions_owner(options)));
+    kafka_admin_CreateDelegationTokenOptions_set_owner(options, NULL);
+    TEST_ASSERT_NULL(kafka_admin_CreateDelegationTokenOptions_owner(options));
     kafka_List_t *copy = kafka_admin_CreateDelegationTokenOptions_renewers(options);
     TEST_ASSERT_EQUAL_INT32(2, kafka_List_size(copy));
     kafka_List_destroy(copy);
@@ -5185,10 +5254,17 @@ static void test_admin_descriptions_and_options_to_string_follow_java(void) {
                         kafka_admin_ConsumerGroupDescription_to_string(consumer));
     kafka_admin_ConsumerGroupDescription_destroy(consumer);
 
-    kafka_admin_ClassicGroupDescription_t *classic = kafka_admin_ClassicGroupDescription_new(
+    kafka_admin_ClassicGroupDescription_t *classic = kafka_admin_ClassicGroupDescription_with_authorized_operations(
         "classic", "consumer", "range", NULL, kafka_common_ClassicGroupState_stable(), NULL, NULL);
     assert_owned_string("(groupId=classic, protocol='consumer', protocolData=range, members=, state=Stable, "
                         "coordinator=null, authorizedOperations=null)",
+                        kafka_admin_ClassicGroupDescription_to_string(classic));
+    kafka_admin_ClassicGroupDescription_destroy(classic);
+    /* Java's six-argument constructor passes `Set.of()`, an empty set, not null. */
+    classic = kafka_admin_ClassicGroupDescription_new("classic", "consumer", "range", NULL,
+                                                      kafka_common_ClassicGroupState_stable(), NULL);
+    assert_owned_string("(groupId=classic, protocol='consumer', protocolData=range, members=, state=Stable, "
+                        "coordinator=null, authorizedOperations=[])",
                         kafka_admin_ClassicGroupDescription_to_string(classic));
     kafka_admin_ClassicGroupDescription_destroy(classic);
 
@@ -5282,6 +5358,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_uuid_from_string_rejects_bad_id);
     RUN_TEST(test_mock_admin_delete_topics_by_names);
     RUN_TEST(test_mock_admin_delete_topics_by_ids);
+    RUN_TEST(test_mock_admin_delete_topics_with_string_slice);
     RUN_TEST(test_mock_admin_delete_topics_async);
     RUN_TEST(test_mock_admin_delete_topics_by_ids_async);
     RUN_TEST(test_mock_admin_create_partitions_reports_unsupported_per_topic);

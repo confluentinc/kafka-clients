@@ -36,6 +36,41 @@ pub struct ClassicGroupDescription {
 }
 
 impl ClassicGroupDescription {
+    /// Creates a classic group description with no authorized operations.
+    ///
+    /// Java's six-argument constructor passes `Set.of()`, an empty set rather than `None`, as
+    /// the authorized operations.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - the id of the classic group.
+    /// - `protocol` - the group protocol type.
+    /// - `protocol_data` - the group protocol data.
+    /// - `members` - the members of the group.
+    /// - `state` - the group state.
+    /// - `coordinator` - the group coordinator, or `None` if not known.
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription(String,String,String,Collection,ClassicGroupState,Node)"
+    )]
+    pub fn new(
+        group_id: impl Into<String>,
+        protocol: impl Into<String>,
+        protocol_data: impl Into<String>,
+        members: Vec<MemberDescription>,
+        state: ClassicGroupState,
+        coordinator: Option<Node>,
+    ) -> Self {
+        Self::with_authorized_operations(
+            group_id,
+            protocol,
+            protocol_data,
+            members,
+            state,
+            coordinator,
+            Some(BTreeSet::new()),
+        )
+    }
+
     /// Creates a classic group description with all fields.
     ///
     /// # Arguments
@@ -48,8 +83,10 @@ impl ClassicGroupDescription {
     /// - `coordinator` - the group coordinator, or `None` if not known.
     /// - `authorized_operations` - the authorized operations for this group, or `None` if not
     ///   known.
-    #[doc(alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription")]
-    pub fn new(
+    #[doc(
+        alias = "org.apache.kafka.clients.admin.ClassicGroupDescription#ClassicGroupDescription(String,String,String,Collection,ClassicGroupState,Node,Set)"
+    )]
+    pub fn with_authorized_operations(
         group_id: impl Into<String>,
         protocol: impl Into<String>,
         protocol_data: impl Into<String>,
@@ -154,8 +191,15 @@ mod tests {
 
     #[test]
     fn to_string_follows_java() {
-        let d =
-            ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None, None);
+        let d = ClassicGroupDescription::with_authorized_operations(
+            "g",
+            "consumer",
+            "range",
+            Vec::new(),
+            ClassicGroupState::Stable,
+            None,
+            None,
+        );
         assert_eq!(
             d.to_string(),
             "(groupId=g, protocol='consumer', protocolData=range, members=, state=Stable, coordinator=null, \
@@ -165,26 +209,52 @@ mod tests {
 
     #[test]
     fn is_simple_consumer_group_when_protocol_empty() {
-        let d = ClassicGroupDescription::new(
-            "g",
-            "",
-            "",
-            Vec::new(),
-            ClassicGroupState::Empty,
-            None,
-            Some(BTreeSet::new()),
-        );
+        let d = ClassicGroupDescription::new("g", "", "", Vec::new(), ClassicGroupState::Empty, None);
         assert!(d.is_simple_consumer_group());
 
-        let d = ClassicGroupDescription::new(
+        let d = ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None);
+        assert!(!d.is_simple_consumer_group());
+    }
+
+    /// New test, no Java original (Java has no `ClassicGroupDescriptionTest`):
+    /// the six-argument constructor is the seven-argument one with Java's
+    /// `Set.of()`, an empty set of authorized operations, not `null`
+    /// (the six-argument `ClassicGroupDescription` constructor).
+    #[test]
+    fn new_passes_an_empty_set_of_authorized_operations() {
+        let coordinator = Node::new(1, "localhost".to_string(), 9092);
+        let short = ClassicGroupDescription::new(
             "g",
             "consumer",
             "range",
             Vec::new(),
             ClassicGroupState::Stable,
-            None,
-            Some(BTreeSet::new()),
+            Some(coordinator.clone()),
         );
-        assert!(!d.is_simple_consumer_group());
+        assert_eq!(short.authorized_operations(), Some(&BTreeSet::new()));
+        assert_eq!(
+            short,
+            ClassicGroupDescription::with_authorized_operations(
+                "g",
+                "consumer",
+                "range",
+                Vec::new(),
+                ClassicGroupState::Stable,
+                Some(coordinator.clone()),
+                Some(BTreeSet::new()),
+            )
+        );
+        assert_ne!(
+            short,
+            ClassicGroupDescription::with_authorized_operations(
+                "g",
+                "consumer",
+                "range",
+                Vec::new(),
+                ClassicGroupState::Stable,
+                Some(coordinator),
+                None,
+            )
+        );
     }
 }

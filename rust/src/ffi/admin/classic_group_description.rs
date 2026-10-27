@@ -131,6 +131,58 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescr
         .collect()
 }
 
+/// Creates the description of a classic group with no authorized operations: an empty set, as
+/// Java's six-argument constructor passes `Set.of()`.
+///
+/// # Parameters
+///
+/// - `group_id` - the id of the classic group.
+/// - `protocol` - the group protocol type.
+/// - `protocol_data` - the group protocol data, such as the partition assignor name.
+/// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
+///   copied; `NULL` reads as empty.
+/// - `state` - the classic group state, a singleton.
+/// - `coordinator` - the group coordinator, copied; `NULL` if not known.
+///
+/// # Safety
+///
+/// The strings must be valid NUL-terminated strings, `members` `NULL` or a valid list of the
+/// documented handles, `state` a classic-group-state singleton and `coordinator` `NULL` or a
+/// valid node handle. The returned handle is owned, freed with
+/// [`kafka_admin_ClassicGroupDescription_destroy`].
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
+    group_id: *const c_char,
+    protocol: *const c_char,
+    protocol_data: *const c_char,
+    members: *const kafka_List_t,
+    state: *const kafka_common_ClassicGroupState_t,
+    coordinator: *const kafka_common_Node_t,
+) -> *mut kafka_admin_ClassicGroupDescription_t {
+    box_classic_group_description(ClassicGroupDescription::new(
+        // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
+        unsafe { c_str_to_string(group_id) },
+        // SAFETY: Per this function's `# Safety`, `protocol` is a valid NUL-terminated string, as
+        // `c_str_to_string` requires.
+        unsafe { c_str_to_string(protocol) },
+        // SAFETY: Per this function's `# Safety`, `protocol_data` is a valid NUL-terminated string,
+        // as `c_str_to_string` requires.
+        unsafe { c_str_to_string(protocol_data) },
+        // SAFETY: Per this function's `# Safety`, `members` is null or a valid list of the
+        // documented `const kafka_admin_MemberDescription_t *` handles, alive and not mutated for
+        // this call, as `list_member_descriptions` requires.
+        unsafe { list_member_descriptions(members) },
+        // SAFETY: Per this function's `# Safety`, `state` is a `kafka_common_ClassicGroupState_t`
+        // singleton, as `classic_group_state::value_of` requires.
+        unsafe { classic_group_state::value_of(state) },
+        // SAFETY: Per this function's `# Safety`, `coordinator` is null or a valid node handle, as
+        // `optional_node` requires.
+        unsafe { optional_node(coordinator) },
+    ))
+}
+
 /// Creates the description of a classic group.
 ///
 /// # Parameters
@@ -153,7 +205,7 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescr
 /// [`kafka_admin_ClassicGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_with_authorized_operations(
     group_id: *const c_char,
     protocol: *const c_char,
     protocol_data: *const c_char,
@@ -162,7 +214,7 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
     coordinator: *const kafka_common_Node_t,
     authorized_operations: *const kafka_List_t,
 ) -> *mut kafka_admin_ClassicGroupDescription_t {
-    box_classic_group_description(ClassicGroupDescription::new(
+    box_classic_group_description(ClassicGroupDescription::with_authorized_operations(
         // SAFETY: Per this function's `# Safety`, `group_id` is a valid NUL-terminated string, as
         // `c_str_to_string` requires.
         unsafe { c_str_to_string(group_id) },

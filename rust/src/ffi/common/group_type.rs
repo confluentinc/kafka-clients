@@ -135,7 +135,8 @@ pub unsafe extern "C" fn kafka_common_GroupType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// Returns the type's name.
+/// Returns the name of this enum constant, exactly as declared in Java (`CONSUMER`), Java's
+/// `Enum.name()`. The text `kafka_common_GroupType_parse` reads (`Consumer`) is `kafka_common_GroupType_to_string`'s.
 ///
 /// # Safety
 ///
@@ -172,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *c
     singleton(GroupType::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// Returns the type's name.
+/// Returns the type's name, the text the broker sends and `kafka_common_GroupType_parse` reads (`Consumer`).
 ///
 /// # Safety
 ///
@@ -231,6 +232,33 @@ mod tests {
             let s = kafka_common_GroupType_to_string(kafka_common_GroupType_share());
             assert_eq!(CStr::from_ptr(s).to_str().unwrap(), GroupType::Share.to_string());
             kafka_string_destroy(s);
+        }
+    }
+
+    /// New test, no Java original: `_name` is Java's `Enum.name()` and
+    /// `_to_string` Java's `toString()`, the text `_parse` reads back. No
+    /// `GroupType` constant has an underscore, so Java's case-insensitive
+    /// `parse` reads the constant names too.
+    #[test]
+    fn name_is_the_constant_and_to_string_the_java_text() {
+        // SAFETY: Test code: the singletons are never freed, the names `_name` returns are owned
+        // by the static `NAMES`, each string `_to_string` returns is destroyed once, after it is
+        // read and parsed back, and the `CStr` literals outlive the calls reading them.
+        unsafe {
+            for (handle, name, text) in [
+                (kafka_common_GroupType_consumer(), "CONSUMER", "Consumer"),
+                (kafka_common_GroupType_streams(), "STREAMS", "Streams"),
+            ] {
+                assert_eq!(CStr::from_ptr(kafka_common_GroupType_name(handle)).to_str().unwrap(), name);
+                let s = kafka_common_GroupType_to_string(handle);
+                assert_eq!(CStr::from_ptr(s).to_str().unwrap(), text);
+                assert_eq!(kafka_common_GroupType_parse(s), handle);
+                kafka_string_destroy(s);
+            }
+            assert_eq!(
+                kafka_common_GroupType_parse(c"STREAMS".as_ptr()),
+                kafka_common_GroupType_streams()
+            );
         }
     }
 }

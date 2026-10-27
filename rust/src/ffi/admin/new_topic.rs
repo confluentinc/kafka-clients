@@ -26,8 +26,8 @@ use std::ffi::{CString, c_char, c_void};
 use crate::admin::NewTopic;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
-    box_list, box_map, box_string_map, c_str_to_string, destroy_boxed, into_c_string, kafka_List_destroy, kafka_List_t,
-    kafka_Map_t, list_elements, map_entries, map_strings, owned_c_string,
+    box_list, box_map, box_string_keyed_map, c_str_to_option, c_str_to_string, destroy_boxed, destroy_string_element,
+    into_c_string, kafka_List_destroy, kafka_List_t, kafka_Map_t, list_elements, map_entries, owned_c_string,
 };
 
 /// Opaque handle to a [`NewTopic`].
@@ -313,28 +313,43 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
     }
 }
 
-/// `configs(Map<String, String> configs)`, the setter, applied in place: a
-/// borrowed map of `const char *` to `const char *`, copied (`NULL` reads as
-/// empty).
+/// Set the configuration to use on the new topic.
 ///
 /// # Parameters
 ///
-/// - `configs` - The configuration map.
+/// - `configs` - The configuration map of `const char *` names to `const char *` values,
+///   copied; `NULL` clears it.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle that no other call uses at the
-/// same time, and `configs` `NULL` or a valid map whose keys and values are
-/// NUL-terminated strings.
+/// same time, and `configs` `NULL` or a valid map whose keys are NUL-terminated
+/// strings and whose values are `NULL` or NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     self_: *mut kafka_admin_NewTopic_t,
     configs: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `configs` is null or a valid map whose keys and
-    // values are NUL-terminated strings, as `map_strings` requires.
-    let configs: BTreeMap<String, String> = unsafe { map_strings(configs) }.into_iter().collect();
+    let configs: Option<BTreeMap<String, Option<String>>> = if configs.is_null() {
+        None
+    } else {
+        // SAFETY: `configs` is non-null (checked above) and, per this function's `# Safety`, a
+        // valid map, kept alive by the caller for this call, which is as long as the borrow of its
+        // entries lasts, as `map_entries` requires.
+        let entries = unsafe { map_entries(configs) };
+        Some(
+            entries
+                .iter()
+                .map(|&(name, value)| {
+                    // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string,
+                    // as `c_str_to_string` requires, and every value null or one, as
+                    // `c_str_to_option` requires; both are copied.
+                    unsafe { (c_str_to_string(name as *const c_char), c_str_to_option(value as *const c_char)) }
+                })
+                .collect(),
+        )
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid new-topic handle that no other
     // call uses at the same time; every handle is the `Box::into_raw` of a `Box<NewTopicInner>`
     // (`box_new_topic`), so the exclusive reference is to a live `NewTopicInner` that nothing else
@@ -347,7 +362,8 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
 ///
 /// # Returns
 ///
-/// A map of `char *` names to `char *` values, in ascending name order, or `NULL`.
+/// A map of `char *` names to `char *` values, in ascending name order, a value `NULL` where
+/// Java's map holds `null`; or `NULL`.
 ///
 /// # Safety
 ///
@@ -362,7 +378,19 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_configs(self_: *const kafka_admin_
     // requires.
     unsafe { new_topic_ref(self_) }
         .configs()
-        .map_or(std::ptr::null_mut(), box_string_map)
+        .map_or(std::ptr::null_mut(), |configs| {
+            box_string_keyed_map(
+                configs.iter().map(|(name, value)| {
+                    (
+                        name,
+                        value
+                            .as_deref()
+                            .map_or(std::ptr::null_mut(), |value| into_c_string(value) as *mut c_void),
+                    )
+                }),
+                Some(destroy_string_element),
+            )
+        })
 }
 
 /// Returns the text form of the topic.
@@ -453,6 +481,43 @@ mod tests {
             kafka_string_destroy(s);
             kafka_admin_NewTopic_destroy(topic);
             kafka_admin_NewTopic_destroy(ptr::null_mut());
+        }
+    }
+
+    /// New test, no Java original: Java's `configs(Map)` stores the map as
+    /// given (`NewTopic#configs(Map)`), so a `NULL` value crosses as Java's
+    /// `null` config value and comes back as `NULL`, and a `NULL` map clears
+    /// the configs, `configs()` returning `NULL` again.
+    #[test]
+    fn set_configs_keeps_a_null_value_and_a_null_map_clears() {
+        // SAFETY: Test code: `topic` is the owned handle the factory returned, used only on this
+        // thread and destroyed once, last. The first `configs` owns nothing and holds a
+        // NUL-terminated string literal key with a null value, alive until
+        // `kafka_admin_NewTopic_set_configs` copied it, then destroyed once; the second is the owned
+        // map `kafka_admin_NewTopic_configs` returned, read while alive and destroyed once.
+        unsafe {
+            let topic = kafka_admin_NewTopic_with_num_partitions_replication_factor(c"orders".as_ptr(), 1, 1);
+            let configs = kafka_Map_new();
+            kafka_Map_put(configs, c"cleanup.policy".as_ptr() as *mut c_void, ptr::null_mut());
+            kafka_admin_NewTopic_set_configs(topic, configs);
+            kafka_Map_destroy(configs);
+            assert_eq!(
+                new_topic_ref(topic).configs(),
+                Some(&BTreeMap::from([("cleanup.policy".to_string(), None)]))
+            );
+            let configs = kafka_admin_NewTopic_configs(topic);
+            assert_eq!(kafka_Map_size(configs), 1);
+            assert_eq!(
+                CStr::from_ptr(kafka_Map_key(configs, 0) as *const c_char).to_str().unwrap(),
+                "cleanup.policy"
+            );
+            assert!(kafka_Map_value(configs, 0).is_null());
+            kafka_Map_destroy(configs);
+
+            kafka_admin_NewTopic_set_configs(topic, ptr::null());
+            assert_eq!(new_topic_ref(topic).configs(), None);
+            assert!(kafka_admin_NewTopic_configs(topic).is_null());
+            kafka_admin_NewTopic_destroy(topic);
         }
     }
 

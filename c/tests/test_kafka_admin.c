@@ -433,7 +433,7 @@ static void test_kafka_admin_empty_batches_need_no_broker(void) {
     kafka_admin_CreateTopicsResult_destroy(created);
 
     kafka_common_TopicCollection_t *no_topics = kafka_common_TopicCollection_of_topic_names(none);
-    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics(admin, no_topics);
+    kafka_admin_DeleteTopicsResult_t *deleted = kafka_admin_Admin_delete_topics_with_topic_collection(admin, no_topics);
     TEST_ASSERT_NOT_NULL(deleted);
     values = kafka_admin_DeleteTopicsResult_topic_name_values(deleted);
     TEST_ASSERT_EQUAL_INT32(0, kafka_Map_size(values));

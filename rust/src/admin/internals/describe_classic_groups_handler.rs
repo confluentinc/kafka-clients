@@ -215,7 +215,7 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
                 continue;
             }
 
-            let description = ClassicGroupDescription::new(
+            let description = ClassicGroupDescription::with_authorized_operations(
                 group_id_key.id_value.clone(),
                 protocol_type.clone(),
                 described_group.protocol_data.clone(),

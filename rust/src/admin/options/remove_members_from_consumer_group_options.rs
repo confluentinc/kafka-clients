@@ -63,10 +63,11 @@ impl RemoveMembersFromConsumerGroupOptions {
     ///
     /// # Arguments
     ///
-    /// - `reason` - the reason sent with the request.
+    /// - `reason` - the reason sent with the request, or `None` to clear a
+    ///   reason set earlier.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason")]
-    pub fn set_reason(&mut self, reason: impl Into<String>) {
-        self.reason = Some(reason.into());
+    pub fn set_reason(&mut self, reason: Option<String>) {
+        self.reason = reason;
     }
 
     /// Set the timeout in milliseconds for this operation, or `None` if the default
@@ -141,9 +142,19 @@ mod tests {
     #[test]
     fn reason_and_timeout_setters() {
         let mut options = RemoveMembersFromConsumerGroupOptions::with_members([MemberToRemove::new("i")]).unwrap();
-        options.set_reason("because");
+        options.set_reason(Some("because".to_string()));
         let options = options.set_timeout_ms(Some(50));
         assert_eq!(options.reason(), Some("because"));
         assert_eq!(options.timeout_ms(), Some(50));
+    }
+
+    /// New test, no Java original: Java's `reason(null)` stores `null`, so it
+    /// clears a reason set earlier (`RemoveMembersFromConsumerGroupOptions#reason`).
+    #[test]
+    fn set_reason_none_clears_the_reason() {
+        let mut options = RemoveMembersFromConsumerGroupOptions::new();
+        options.set_reason(Some("because".to_string()));
+        options.set_reason(None);
+        assert_eq!(options.reason(), None);
     }
 }

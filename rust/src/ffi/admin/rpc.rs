@@ -426,8 +426,86 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
     box_create_topics_result(result, &client.future_ctx())
 }
 
-/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_options` with default
-/// options. See the overload for more details.
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topic names to delete, a `kafka_List_t` of `const char *`.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
+    self_: *const kafka_admin_Admin_t,
+    topics: *const kafka_List_t,
+) -> *mut kafka_admin_DeleteTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
+    // copied.
+    let topics_ = unsafe { list_strings(topics) };
+    let result = client.call(|admin| admin.delete_topics_with_string_slice(&topics_));
+    box_delete_topics_result(result, &client.future_ctx())
+}
+
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topic names to delete, a `kafka_List_t` of `const char *`.
+/// - `options` - The options to use when deleting the topics.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
+///
+/// # Safety
+///
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_options(
+    self_: *const kafka_admin_Admin_t,
+    topics: *const kafka_List_t,
+    options: *const kafka_admin_DeleteTopicsOptions_t,
+) -> *mut kafka_admin_DeleteTopicsResult_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, alive for this
+    // call, which is as long as `client` is used, as `client_ref` requires.
+    let client = unsafe { client_ref(self_) };
+    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // `const char *`, unmutated during this call, as `list_strings` requires; the strings are
+    // copied.
+    let topics_ = unsafe { list_strings(topics) };
+    // SAFETY: Per this function's `# Safety`, `options` is a live
+    // `kafka_admin_DeleteTopicsOptions_t` handle that no other call mutates during this one, so no
+    // setter runs on it while it is cloned, as `delete_topics_options_ref` requires.
+    let options_ = unsafe { delete_topics_options_ref(options) }.clone();
+    let result = client.call(|admin| admin.delete_topics_with_string_slice_options(&topics_, options_));
+    box_delete_topics_result(result, &client.future_ctx())
+}
+
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
 ///
 /// When using topic IDs, this operation is supported by brokers with inter-broker protocol 2.8 or
 /// higher. When using topic names, this operation is supported by brokers with version 0.10.1.0 or
@@ -449,7 +527,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
 /// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection(
     self_: *const kafka_admin_Admin_t,
     topics: *const kafka_common_TopicCollection_t,
 ) -> *mut kafka_admin_DeleteTopicsResult_t {
@@ -460,7 +538,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
     // handle, unmutated during this call, as `topic_collection_ref` requires; it is cloned before
     // the call returns.
     let topics_ = unsafe { topic_collection_ref(topics) }.clone();
-    let result = client.call(|admin| admin.delete_topics(topics_));
+    let result = client.call(|admin| admin.delete_topics_with_topic_collection(topics_));
     box_delete_topics_result(result, &client.future_ctx())
 }
 
@@ -497,7 +575,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics(
 /// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
+pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection_options(
     self_: *const kafka_admin_Admin_t,
     topics: *const kafka_common_TopicCollection_t,
     options: *const kafka_admin_DeleteTopicsOptions_t,
@@ -513,7 +591,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_options(
     // `kafka_admin_DeleteTopicsOptions_t` handle that no other call mutates during this one, so no
     // setter runs on it while it is cloned, as `delete_topics_options_ref` requires.
     let options_ = unsafe { delete_topics_options_ref(options) }.clone();
-    let result = client.call(|admin| admin.delete_topics_with_options(topics_, options_));
+    let result = client.call(|admin| admin.delete_topics_with_topic_collection_options(topics_, options_));
     box_delete_topics_result(result, &client.future_ctx())
 }
 

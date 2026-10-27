@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Options for `Admin::delete_topics`.
+//! Options for the `Admin::delete_topics_with_*` methods.
 
-/// Options for `Admin::delete_topics`.
+/// Options for `Admin::delete_topics_with_topic_collection_options`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteTopicsOptions")]
 pub struct DeleteTopicsOptions {

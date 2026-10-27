@@ -151,7 +151,8 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// Returns the state's name.
+/// Returns the name of this enum constant, exactly as declared in Java (`PREPARING_REBALANCE`), Java's
+/// `Enum.name()`. The text `kafka_common_ClassicGroupState_parse` reads (`PreparingRebalance`) is `kafka_common_ClassicGroupState_to_string`'s.
 ///
 /// # Safety
 ///
@@ -192,7 +193,7 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
     singleton(ClassicGroupState::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// Returns the state's name.
+/// Returns the state's name, the text the broker sends and `kafka_common_ClassicGroupState_parse` reads (`PreparingRebalance`).
 ///
 /// # Safety
 ///
@@ -263,6 +264,43 @@ mod tests {
             let s = kafka_common_ClassicGroupState_to_string(kafka_common_ClassicGroupState_dead());
             assert_eq!(CStr::from_ptr(s).to_str().unwrap(), ClassicGroupState::Dead.to_string());
             kafka_string_destroy(s);
+        }
+    }
+
+    /// New test, no Java original: `_name` is Java's `Enum.name()` and
+    /// `_to_string` Java's `toString()`, the text `_parse` reads back; the
+    /// constant name with an underscore does not parse.
+    #[test]
+    fn name_is_the_constant_and_to_string_the_java_text() {
+        // SAFETY: Test code: the singletons are never freed, the names `_name` returns are owned
+        // by the static `NAMES`, each string `_to_string` returns is destroyed once, after it is
+        // read and parsed back, and the `CStr` literals outlive the calls reading them.
+        unsafe {
+            for (handle, name, text) in [
+                (
+                    kafka_common_ClassicGroupState_preparing_rebalance(),
+                    "PREPARING_REBALANCE",
+                    "PreparingRebalance",
+                ),
+                (
+                    kafka_common_ClassicGroupState_completing_rebalance(),
+                    "COMPLETING_REBALANCE",
+                    "CompletingRebalance",
+                ),
+            ] {
+                assert_eq!(
+                    CStr::from_ptr(kafka_common_ClassicGroupState_name(handle)).to_str().unwrap(),
+                    name
+                );
+                let s = kafka_common_ClassicGroupState_to_string(handle);
+                assert_eq!(CStr::from_ptr(s).to_str().unwrap(), text);
+                assert_eq!(kafka_common_ClassicGroupState_parse(s), handle);
+                kafka_string_destroy(s);
+            }
+            assert_eq!(
+                kafka_common_ClassicGroupState_parse(c"COMPLETING_REBALANCE".as_ptr()),
+                kafka_common_ClassicGroupState_unknown()
+            );
         }
     }
 }
