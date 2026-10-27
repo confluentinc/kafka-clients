@@ -38,18 +38,20 @@ pub enum GroupType {
 }
 
 impl GroupType {
-    /// The display name of this group type (as used on the wire and in
-    /// `toString`).
+    /// The name of this enum constant, exactly as declared in Java
+    /// (`CONSUMER`).
     ///
-    /// Mirrors the private `name` field in Java.
+    /// Java's `Enum.name()`, which `GroupType` inherits. The text Java's
+    /// `toString()` returns (`Consumer`, the text the broker sends and
+    /// [`parse`](Self::parse) reads) is this type's [`Display`](fmt::Display).
     #[doc(alias = "org.apache.kafka.common.GroupType#name")]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Unknown => "Unknown",
-            Self::Consumer => "Consumer",
-            Self::Classic => "Classic",
-            Self::Share => "Share",
-            Self::Streams => "Streams",
+            Self::Unknown => "UNKNOWN",
+            Self::Consumer => "CONSUMER",
+            Self::Classic => "CLASSIC",
+            Self::Share => "SHARE",
+            Self::Streams => "STREAMS",
         }
     }
 
@@ -70,9 +72,18 @@ impl GroupType {
     }
 }
 
+/// Java's `toString()`, which returns the private `name` field: the text
+/// (`Consumer`) the broker sends and [`GroupType::parse`] reads, not
+/// the constant name [`GroupType::name`] returns (`GroupType.java:29-60`).
 impl fmt::Display for GroupType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(match self {
+            Self::Unknown => "Unknown",
+            Self::Consumer => "Consumer",
+            Self::Classic => "Classic",
+            Self::Share => "Share",
+            Self::Streams => "Streams",
+        })
     }
 }
 
@@ -95,10 +106,21 @@ mod tests {
         assert_eq!(GroupType::parse("not-a-type"), GroupType::Unknown);
     }
 
+    /// New test, no Java original (Java has no `GroupTypeTest`): every
+    /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
+    /// `toString()` (`GroupType.java:29-60`), and `parse` reads the `toString()` text back.
     #[test]
-    fn to_string_matches_name() {
-        assert_eq!(GroupType::Consumer.to_string(), "Consumer");
-        assert_eq!(GroupType::Classic.to_string(), "Classic");
-        assert_eq!(GroupType::Unknown.to_string(), "Unknown");
+    fn name_and_display_match_java_for_every_constant() {
+        for (group_type, name, display) in [
+            (GroupType::Unknown, "UNKNOWN", "Unknown"),
+            (GroupType::Consumer, "CONSUMER", "Consumer"),
+            (GroupType::Classic, "CLASSIC", "Classic"),
+            (GroupType::Share, "SHARE", "Share"),
+            (GroupType::Streams, "STREAMS", "Streams"),
+        ] {
+            assert_eq!(group_type.name(), name);
+            assert_eq!(group_type.to_string(), display);
+            assert_eq!(GroupType::parse(&group_type.to_string()), group_type);
+        }
     }
 }
