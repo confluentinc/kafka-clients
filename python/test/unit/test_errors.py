@@ -45,6 +45,9 @@ from confluent_kafka import (
 )
 from confluent_kafka import TimeoutError as RootTimeoutError
 from confluent_kafka import _errors as errmod
+from confluent_kafka import _throwable
+from confluent_kafka.common import KafkaFuture
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka._error_registry import ERRORS
 from confluent_kafka._errors import (
     class_for_ffi_id,
@@ -495,14 +498,61 @@ def test_payload_getters_return_javas_defaults() -> None:
     assert (c.request_correlation_id(), c.response_correlation_id()) == (1, 2)
 
 
-def test_quota_violation_has_no_message() -> None:
+_QUOTA_TEXT = ("'MetricName [name=rate, group=producer, description=, tags={}]' violated "
+               "quota. Actual: 9.5, Threshold: 5.0")
+_QUOTA_TO_STRING = "confluent_kafka.common.metrics.QuotaViolationError: " + _QUOTA_TEXT
+
+
+def _quota_violation() -> QuotaViolationError:
     metric = KafkaMetric._snapshot(name="rate", group="producer", value=9.5)
-    e = QuotaViolationError(metric=metric, value=9.5, bound=5.0)
-    assert e.metric() is metric
+    return QuotaViolationError(metric=metric, value=9.5, bound=5.0)
+
+
+def test_quota_violation_uses_java_to_string_override() -> None:
+    # QuotaViolationException.toString(): getClass().getName() + ": '" +
+    # metric.metricName() + "' violated quota. Actual: " + value + ", Threshold: " + bound.
+    # Its getMessage() stays null; str() is the override's text after the class name.
+    e = _quota_violation()
     assert (e.value(), e.bound()) == (9.5, 5.0)
-    assert str(e) == ""
-    assert metric.metric_name() == MetricName(name="rate", group="producer", description="",
-                                              tags={})
+    assert e.metric().metric_name() == MetricName(name="rate", group="producer",
+                                                  description="", tags={})
+    assert str(e) == _QUOTA_TEXT
+    assert _throwable.java_message(e) is None
+    assert _throwable.to_string(e) == _QUOTA_TO_STRING
+    # The override dereferences metric (Java's NPE): Types' TypeError.
+    with pytest.raises(TypeError) as none:
+        str(QuotaViolationError(metric=None, value=1.0, bound=2.0))  # type: ignore[arg-type]
+    assert str(none.value) == "metric must not be None"
+
+
+def test_quota_violation_stores_java_doubles() -> None:
+    # Java's value and bound are double: an int prints as 9.0 / 5.0.
+    metric = KafkaMetric._snapshot(name="rate", group="producer", value=9)
+    e = QuotaViolationError(metric=metric, value=9, bound=5)
+    assert (e.value(), e.bound()) == (9.0, 5.0)
+    assert type(e.value()) is float and type(e.bound()) is float
+    assert str(e).endswith("violated quota. Actual: 9.0, Threshold: 5.0")
+
+
+def test_quota_violation_without_its_payload_prints_its_message() -> None:
+    # _throwable.new's message-only fallback has no metric: str() and toString()
+    # print the message, as before the override.
+    e = _throwable.new(QuotaViolationError, "over")
+    assert str(e) == "over"
+    assert _throwable.to_string(e) == "confluent_kafka.common.metrics.QuotaViolationError: over"
+
+
+def test_quota_violation_to_string_where_java_uses_it() -> None:
+    # Throwable(Throwable cause) takes cause.toString() as its message, and so does
+    # ExecutionException.
+    q = _quota_violation()
+    wrapped = KafkaError(cause=q)
+    assert str(wrapped) == _QUOTA_TO_STRING and wrapped.__cause__ is q
+    impl: _KafkaFutureImpl[None] = _KafkaFutureImpl()
+    impl.complete_with_error(q)
+    with pytest.raises(ExecutionError) as info:
+        KafkaFuture._of_impl(impl).get()
+    assert str(info.value) == _QUOTA_TO_STRING and info.value.__cause__ is q
 
 
 def test_interrupt_error_has_no_interrupted_exception_cause() -> None:
