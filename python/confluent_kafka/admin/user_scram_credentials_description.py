@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from confluent_kafka._args import copy_of
 from confluent_kafka._java import java_str
 
 if TYPE_CHECKING:
@@ -48,7 +49,7 @@ class UserScramCredentialsDescription:
         if credential_infos is None:
             raise TypeError("credential_infos must not be None")
         self._name = name
-        self._credential_infos = tuple(credential_infos)
+        self._credential_infos = copy_of(credential_infos, "credential_infos")
 
     def __eq__(self, other: object) -> bool:
         if self is other:

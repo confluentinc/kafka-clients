@@ -40,8 +40,14 @@ class Config:
 
     def __init__(self, *, entries: Iterable[ConfigEntry]) -> None:
         """Create a configuration instance with the provided entries."""
+        # Java's ``for (ConfigEntry entry : entries)`` and ``entry.name()``
+        # dereference both (Types).
+        if entries is None:
+            raise TypeError("entries must not be None")
         self._entries: dict[str, ConfigEntry] = {}
         for entry in entries:
+            if entry is None:
+                raise TypeError("entries must not contain None")
             self._entries[entry.name()] = entry
 
     def entries(self) -> list[ConfigEntry]:

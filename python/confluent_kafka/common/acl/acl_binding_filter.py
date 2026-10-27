@@ -95,6 +95,9 @@ class AclBindingFilter:
     def matches(self, *, binding: AclBinding) -> bool:
         """Return true if the resource filter matches the binding's resource
         and the entry filter matches binding's entry."""
+        if binding is None:
+            # Java's ``binding.pattern()`` dereferences it (Types).
+            raise TypeError("binding must not be None")
         return (self._pattern_filter.matches(pattern=binding.pattern())
                 and self._entry_filter.matches(other=binding.entry()))
 

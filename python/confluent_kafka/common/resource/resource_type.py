@@ -55,6 +55,9 @@ class ResourceType(IntEnum):
     def from_string(*, str: str) -> ResourceType:  # noqa: A002 - Java's name
         """Parse the given string as an ACL resource type: the
         ``ResourceType``, or ``UNKNOWN`` if the string could not be matched."""
+        if str is None:
+            # Java's ``str.toUpperCase(Locale.ROOT)`` dereferences it (Types).
+            raise TypeError("str must not be None")
         member = ResourceType.__members__.get(str.upper())
         return ResourceType.UNKNOWN if member is None else member
 

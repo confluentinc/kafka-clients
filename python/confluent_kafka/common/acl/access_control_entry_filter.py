@@ -92,16 +92,18 @@ class AccessControlEntryFilter:
 
     def matches(self, *, other: AccessControlEntry) -> bool:
         """Returns true if this filter matches the given AccessControlEntry."""
+        # ``other`` is dereferenced only where Java's does (``ANY.matches(None)``
+        # is ``True``); there a ``None`` raises Java's NPE as ``TypeError`` (Types).
         principal = self.principal()
-        if principal is not None and principal != other.principal():
+        if principal is not None and principal != _given(other).principal():
             return False
         host = self.host()
-        if host is not None and host != other.host():
+        if host is not None and host != _given(other).host():
             return False
-        if self.operation() is not AclOperation.ANY and self.operation() != other.operation():
+        if self.operation() is not AclOperation.ANY and self.operation() != _given(other).operation():
             return False
         return (self.permission_type() is AclPermissionType.ANY
-                or self.permission_type() == other.permission_type())
+                or self.permission_type() == _given(other).permission_type())
 
     def matches_at_most_one(self) -> bool:
         """Returns true if this filter could only match one ACE -- in other
@@ -120,6 +122,13 @@ class AccessControlEntryFilter:
 
     def __hash__(self) -> int:
         return hash(self._data)
+
+
+def _given(other: AccessControlEntry | None) -> AccessControlEntry:
+    """``other``, which Java dereferences here."""
+    if other is None:
+        raise TypeError("other must not be None")
+    return other
 
 
 AccessControlEntryFilter.ANY = AccessControlEntryFilter(

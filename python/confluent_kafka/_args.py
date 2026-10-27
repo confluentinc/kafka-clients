@@ -62,12 +62,13 @@ import inspect
 import linecache
 import sys
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, TypeVar
 
-__all__ = ["MISSING", "Form", "is_given", "java_forms", "reject_str"]
+__all__ = ["MISSING", "Form", "copy_of", "is_given", "java_forms", "reject_str"]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+_E = TypeVar("_E")
 
 
 class _Missing:
@@ -156,6 +157,16 @@ def _is_not_given(value: object, marker: object) -> bool:
     default ``marker``. A value merely equal to a default, ``None`` included,
     is given."""
     return value is MISSING or value is marker
+
+
+def copy_of(values: Iterable[_E], name: str) -> tuple[_E, ...]:
+    """Java's ``List.copyOf`` / ``Set.copyOf`` of a collection: its elements, and
+    ``TypeError("<name> must not contain None")`` for a ``None`` element, which
+    Java's copy rejects (CLAUDE.md, Python Binding Conventions, Types)."""
+    copied = tuple(values)
+    if any(v is None for v in copied):
+        raise TypeError(f"{name} must not contain None")
+    return copied
 
 
 def reject_str(name: str, value: object, *, element: str = "str") -> None:

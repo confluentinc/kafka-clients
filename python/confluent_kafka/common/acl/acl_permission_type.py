@@ -48,6 +48,9 @@ class AclPermissionType(IntEnum):
         """Parse the given string as an ACL permission: the
         ``AclPermissionType``, or ``UNKNOWN`` if the string could not be
         matched."""
+        if str is None:
+            # Java's ``str.toUpperCase(Locale.ROOT)`` dereferences it (Types).
+            raise TypeError("str must not be None")
         member = AclPermissionType.__members__.get(str.upper())
         return AclPermissionType.UNKNOWN if member is None else member
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from confluent_kafka._args import copy_of
 from confluent_kafka._java import java_str
 
 if TYPE_CHECKING:
@@ -39,7 +40,8 @@ class MemberAssignment:
         """Creates an instance with the specified parameters: the topic
         partitions (``None`` is an empty set)."""
         self._topic_partitions: frozenset[TopicPartition] = (
-            frozenset() if topic_partitions is None else frozenset(topic_partitions))
+            frozenset() if topic_partitions is None
+            else frozenset(copy_of(topic_partitions, "topic_partitions")))
 
     def __eq__(self, other: object) -> bool:
         if self is other:
