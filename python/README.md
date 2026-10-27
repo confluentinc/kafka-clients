@@ -223,8 +223,9 @@ rewritten in this form.
   `KafkaError("User rebalance callback throws an error")` with it as the
   cause.
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
-  raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
-  thread, it makes the waiting call raise `WakeupError`.
+  raises `ConcurrentModificationError`, `wakeup()` and `metrics()` excepted, as
+  Java leaves both outside `acquire()`: from any thread, `wakeup()` makes the
+  waiting call raise `WakeupError`, and `metrics()` answers.
 - `close()` closes with Java's default timeout; `close(option=CloseOptions(timeout=…))`
   bounds it. Java's deprecated `close(Duration)` is not generated.
 - A deserializer defaults to the `key.deserializer` / `value.deserializer`
