@@ -262,6 +262,11 @@ class CompatibleProducer:
         self._producer = None
 
 
+# How often AsyncCompatibleProducer.send checks the pending records: AIOProducer
+# hands librdkafka its records 1000 at a time (its batch_size).
+CHECK_PENDING_EVERY = 1000
+
+
 class AsyncCompatibleProducer:
     """Async confluent-kafka-python (librdkafka) producer, for async-vs-async.
 
@@ -281,6 +286,19 @@ class AsyncCompatibleProducer:
             **configuration,
         }, buffer_timeout=0.01)
         self._closed = False
+        # At most about this many records pending (len(AIOProducer): queued in
+        # librdkafka or still in AIOProducer's buffer), so they hold at most
+        # librdkafka's default queue size in bytes (1 GiB, or BUFFER_MEMORY),
+        # as the sync CompatibleProducer's do: there produce() raises
+        # BufferError and the send waits. AIOProducer fails a record with
+        # QUEUE_FULL instead of waiting, and with the limits raised above an
+        # unbounded run had no bound at all: an unbounded 100 KB run reached
+        # 63 GB and was OOM-killed. Bytes only, not librdkafka's 100000
+        # messages, which would slow small records down; checked every
+        # CHECK_PENDING_EVERY sends, since a check per send costs throughput.
+        queue_kbytes = int(configuration.get('queue.buffering.max.kbytes', 1048576))
+        self._max_pending = max(CHECK_PENDING_EVERY, queue_kbytes * 1024 // max(1, message_size))
+        self._sends = 0
 
         async def poll_producer():
             while not self._closed:
@@ -296,6 +314,10 @@ class AsyncCompatibleProducer:
     async def send(self, *, record):
         # AIOProducer.produce is a coroutine that returns the delivery future;
         # async_main adds a done-callback to it that records latency at the ack.
+        self._sends += 1
+        if self._sends % CHECK_PENDING_EVERY == 0:
+            while len(self._producer) >= self._max_pending and not terminating:
+                await asyncio.sleep(0.001)
         return await self._producer.produce(
             topic=record.topic,
             key=record.key,
