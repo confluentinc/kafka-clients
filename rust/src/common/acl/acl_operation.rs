@@ -71,6 +71,31 @@ pub enum AclOperation {
 // used to describe ACL operations in MetadataResponse.
 
 impl AclOperation {
+    /// All operations, in declaration (code) order.
+    ///
+    /// Mirrors `AclOperation.values()`.
+    #[doc(alias = "org.apache.kafka.common.acl.AclOperation#values")]
+    pub fn values() -> &'static [Self] {
+        &[
+            AclOperation::Unknown,
+            AclOperation::Any,
+            AclOperation::All,
+            AclOperation::Read,
+            AclOperation::Write,
+            AclOperation::Create,
+            AclOperation::Delete,
+            AclOperation::Alter,
+            AclOperation::Describe,
+            AclOperation::ClusterAction,
+            AclOperation::DescribeConfigs,
+            AclOperation::AlterConfigs,
+            AclOperation::IdempotentWrite,
+            AclOperation::CreateTokens,
+            AclOperation::DescribeTokens,
+            AclOperation::TwoPhaseCommit,
+        ]
+    }
+
     /// Return the code of this operation.
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#code")]
     pub fn code(&self) -> i8 {
@@ -244,26 +269,6 @@ mod tests {
         },
     ];
 
-    // Test-local mirror of Java's `AclOperation.values()` (declaration order).
-    const VALUES: [AclOperation; 16] = [
-        AclOperation::Unknown,
-        AclOperation::Any,
-        AclOperation::All,
-        AclOperation::Read,
-        AclOperation::Write,
-        AclOperation::Create,
-        AclOperation::Delete,
-        AclOperation::Alter,
-        AclOperation::Describe,
-        AclOperation::ClusterAction,
-        AclOperation::DescribeConfigs,
-        AclOperation::AlterConfigs,
-        AclOperation::IdempotentWrite,
-        AclOperation::CreateTokens,
-        AclOperation::DescribeTokens,
-        AclOperation::TwoPhaseCommit,
-    ];
-
     /// Mirrors `AclOperationTest.testIsUnknown`.
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testIsUnknown")]
@@ -283,7 +288,7 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testCode")]
     fn test_code() {
-        assert_eq!(VALUES.len(), INFOS.len());
+        assert_eq!(AclOperation::values().len(), INFOS.len());
         for info in &INFOS {
             assert_eq!(
                 info.code,
@@ -323,9 +328,9 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.acl.AclOperationTest#testExhaustive")]
     fn test_exhaustive() {
-        assert_eq!(INFOS.len(), VALUES.len());
+        assert_eq!(INFOS.len(), AclOperation::values().len());
         for (i, info) in INFOS.iter().enumerate() {
-            assert_eq!(info.operation, VALUES[i]);
+            assert_eq!(info.operation, AclOperation::values()[i]);
         }
     }
 }

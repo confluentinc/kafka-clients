@@ -740,6 +740,23 @@ def test_describe_configs_other_resources() -> None:
     assert isinstance(error, UnsupportedOperationError) and str(error) == "Not implemented yet"
 
 
+def test_describe_configs_overlays_a_group_config_set_to_null_with_its_default() -> None:
+    """Java's ``incrementalAlterConfigs`` stores a ``SET`` value as given, ``null``
+    included (``MockAdminClient.java:1015``), and ``describeConfigs`` overlays the
+    default group configs with ``putIfAbsent`` (``:883``), which also replaces a
+    ``null`` value: a group config set to ``None`` that has a default reads back
+    as the default, and one without a default reads back as ``None``."""
+    client = MockAdminClient.Builder(default_group_configs={"g.k": "d"}).build()
+    group = ConfigResource(type=ConfigResource.Type.GROUP, name="g")
+    value_of(client.incremental_alter_configs(
+        configs={group: [set_op("g.k", None), set_op("other.k", None)]}).all())
+    config = value_of(client.describe_configs(resources=[group]).values()[group])
+    defaulted = config.get(name="g.k")
+    assert defaulted is not None and defaulted.value() == "d"
+    unset = config.get(name="other.k")
+    assert unset is not None and unset.value() is None
+
+
 def test_incremental_alter_configs_unsupported_op_and_type() -> None:
     client = admin()
     broker = ConfigResource(type=ConfigResource.Type.BROKER, name="0")

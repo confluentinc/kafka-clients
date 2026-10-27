@@ -354,6 +354,20 @@ def test_create_topics_refinement_follows_its_topics_cancellation() -> None:
         assert topic_id.is_cancelled()
 
 
+def test_create_topics_with_a_null_config_value() -> None:
+    """Java's ``NewTopic.configs(Map)`` stores a ``null`` value as given and
+    ``createTopics`` sends it as a null config value: a ``None`` value crosses to
+    the core as ``NULL`` (it used to raise ``TypeError`` in the extension), and
+    the call fails later, as any call to an unreachable broker does."""
+    topic = _topic("a").configs(configs={"cleanup.policy": None, "retention.ms": "1000"})
+    assert topic.configs() == {"cleanup.policy": None, "retention.ms": "1000"}
+    assert str(topic).endswith("configs={cleanup.policy=None, retention.ms=1000})")
+    with _admin() as admin:
+        result = admin.create_topics(new_topics=[topic],
+                                     options=CreateTopicsOptions(timeout_ms=SHORT))
+        assert str(assert_future_throws(result.all(), KafkaTimeoutError)) == CREATE_TIMED_OUT
+
+
 def test_create_topics_default_options_and_empty_batch() -> None:
     with _admin(**{"default.api.timeout.ms": str(SHORT), "request.timeout.ms": "100"}) as admin:
         result = admin.create_topics(new_topics=[])

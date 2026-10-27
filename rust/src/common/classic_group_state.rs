@@ -41,19 +41,21 @@ pub enum ClassicGroupState {
 }
 
 impl ClassicGroupState {
-    /// The display name of this classic group state (as used on the wire and in
-    /// `toString`).
+    /// The name of this enum constant, exactly as declared in Java
+    /// (`PREPARING_REBALANCE`).
     ///
-    /// Mirrors the private `name` field in Java.
+    /// Java's `Enum.name()`, which `ClassicGroupState` inherits. The text Java's
+    /// `toString()` returns (`PreparingRebalance`, the text the broker sends and
+    /// [`parse`](Self::parse) reads) is this type's [`Display`](fmt::Display).
     #[doc(alias = "org.apache.kafka.common.ClassicGroupState#name")]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Unknown => "Unknown",
-            Self::PreparingRebalance => "PreparingRebalance",
-            Self::CompletingRebalance => "CompletingRebalance",
-            Self::Stable => "Stable",
-            Self::Dead => "Dead",
-            Self::Empty => "Empty",
+            Self::Unknown => "UNKNOWN",
+            Self::PreparingRebalance => "PREPARING_REBALANCE",
+            Self::CompletingRebalance => "COMPLETING_REBALANCE",
+            Self::Stable => "STABLE",
+            Self::Dead => "DEAD",
+            Self::Empty => "EMPTY",
         }
     }
 
@@ -75,9 +77,19 @@ impl ClassicGroupState {
     }
 }
 
+/// Java's `toString()`, which returns the private `name` field: the text
+/// (`PreparingRebalance`) the broker sends and [`ClassicGroupState::parse`] reads, not
+/// the constant name [`ClassicGroupState::name`] returns (`ClassicGroupState.java:32-61`).
 impl fmt::Display for ClassicGroupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        f.write_str(match self {
+            Self::Unknown => "Unknown",
+            Self::PreparingRebalance => "PreparingRebalance",
+            Self::CompletingRebalance => "CompletingRebalance",
+            Self::Stable => "Stable",
+            Self::Dead => "Dead",
+            Self::Empty => "Empty",
+        })
     }
 }
 
@@ -98,8 +110,30 @@ mod tests {
         assert_eq!(ClassicGroupState::parse("bogus"), ClassicGroupState::Unknown);
     }
 
+    /// New test, no Java original (Java has no `ClassicGroupStateTest`): every
+    /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
+    /// `toString()` (`ClassicGroupState.java:32-61`), and `parse` reads the `toString()` text back.
     #[test]
-    fn to_string_matches_name() {
-        assert_eq!(ClassicGroupState::PreparingRebalance.to_string(), "PreparingRebalance");
+    fn name_and_display_match_java_for_every_constant() {
+        for (state, name, display) in [
+            (ClassicGroupState::Unknown, "UNKNOWN", "Unknown"),
+            (
+                ClassicGroupState::PreparingRebalance,
+                "PREPARING_REBALANCE",
+                "PreparingRebalance",
+            ),
+            (
+                ClassicGroupState::CompletingRebalance,
+                "COMPLETING_REBALANCE",
+                "CompletingRebalance",
+            ),
+            (ClassicGroupState::Stable, "STABLE", "Stable"),
+            (ClassicGroupState::Dead, "DEAD", "Dead"),
+            (ClassicGroupState::Empty, "EMPTY", "Empty"),
+        ] {
+            assert_eq!(state.name(), name);
+            assert_eq!(state.to_string(), display);
+            assert_eq!(ClassicGroupState::parse(&state.to_string()), state);
+        }
     }
 }

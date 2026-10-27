@@ -54,6 +54,51 @@ breaking changes.
   bootstrap.controllers`, where it was `ClientUtils`'s `No resolvable
   bootstrap urls given in bootstrap.servers`; setting both fails with `You
   cannot set both bootstrap.servers and bootstrap.controllers`.
+- **Breaking (Rust, Python):** a config entry can have no type, as Java's
+  `ConfigEntry.type()` can be `null`. `ConfigEntry::r#type()` returns
+  `Option<ConfigType>` and `ConfigEntryOptionsBuilder::set_config_type` takes
+  one. The entries of a `createTopics` result have no type
+  (`KafkaAdminClient.java:1992-2002`): they reported `ConfigType::Unknown` and
+  printed `type=UNKNOWN`, and now report `None`, print `type=null` and differ
+  from an entry whose type is `Unknown`. In Python `ConfigEntry.type()` returns
+  `None` for them.
+- **Breaking:** `GroupState::name()`, `ClassicGroupState::name()` and
+  `GroupType::name()` return Java's `Enum.name()`, the constant name
+  (`PREPARING_REBALANCE`, `CONSUMER`), instead of the `toString()` text
+  (`PreparingRebalance`, `Consumer`), which `Display` still prints and `parse`
+  still reads.
+- **Breaking:** `Admin::delete_topics` and `Admin::delete_topics_with_options`
+  are renamed `delete_topics_with_topic_collection` and
+  `delete_topics_with_topic_collection_options`, and Java's two overloads
+  taking topic names are added as `delete_topics_with_string_slice` and
+  `delete_topics_with_string_slice_options`. Java names the parameter of all
+  four `topics`, so each is named after its parameter's type (CLAUDE.md §2).
+- **Breaking:** `ClassicGroupDescription::new` is Java's six-argument
+  constructor, which gives the description an empty set of authorized
+  operations; the seven-argument constructor is now
+  `ClassicGroupDescription::with_authorized_operations`.
+- **Breaking:** `CreateDelegationTokenOptions::set_owner` and
+  `RemoveMembersFromConsumerGroupOptions::set_reason` take an `Option`, so
+  `None` clears a value set earlier, as Java's `owner(null)` and
+  `reason(null)` do.
+- **Breaking (Rust, Python):** a `NewTopic` config value can be null, as a
+  value of Java's `Map<String, String>` can. `NewTopic::set_configs` takes an
+  `Option<BTreeMap<String, Option<String>>>` and `configs()` returns the
+  `Option`-valued map: `None` for the map clears configs set earlier, as
+  Java's `configs(null)` does, and a `None` value is sent to the broker as a
+  null config value. In Python a `None` value is sent the same way instead of
+  raising `TypeError`, and `configs()` is typed `dict[str, str | None]`.
+- `NewTopic`'s `Display` prints Java's `toString()`, the maps as `{k=v}` and a
+  missing map or value as `null`, instead of Rust's debug syntax.
+- `AclOperation::values()` and `AclPermissionType::values()` return the
+  constants in declaration order, as Java's `values()` does.
+- `MockAdminClient` stores a config value of null as null, as Java's mock
+  does: a `NewTopic` config given to `createTopics` with a `None` value, or a
+  `SET` with a `None` value through `incrementalAlterConfigs`, reads back from
+  `describe_configs` as `None` instead of `Some("")`. A group config set to
+  null reads back as its default when it has one, as Java's `putIfAbsent`
+  overlay replaces a null value; the Python `MockAdminClient` now does the
+  same.
 
 ### Common
 
@@ -75,6 +120,39 @@ breaking changes.
   `kafka_admin_EndpointType_unknown`, `_broker` and `_controller`, the C enum
   `kafka_admin_EndpointType_e` read with `kafka_admin_EndpointType__enum`, and
   `_id`, `_from_id` and `_to_string`.
+- **Breaking (C API):** `kafka_admin_ConfigEntry_type` returns `NULL` for an
+  entry without a type, such as the entries of
+  `kafka_admin_CreateTopicsResult_config`, so a caller must check it before
+  `kafka_admin_ConfigEntry_ConfigType__enum`, and
+  `kafka_admin_ConfigEntryOptionsBuilder_set_config_type` takes `NULL` for
+  Java's `null` type.
+- **Breaking (C API):** `kafka_common_GroupState_name`,
+  `kafka_common_ClassicGroupState_name` and `kafka_common_GroupType_name`
+  return the constant name (`PREPARING_REBALANCE`), as Java's `Enum.name()`
+  does. The text `_parse` reads (`PreparingRebalance`) is what the
+  `_to_string` functions return.
+- **Breaking (C API):** `kafka_admin_Admin_delete_topics` and
+  `kafka_admin_Admin_delete_topics_with_options` are renamed
+  `kafka_admin_Admin_delete_topics_with_topic_collection` and
+  `kafka_admin_Admin_delete_topics_with_topic_collection_options`. The new
+  `kafka_admin_Admin_delete_topics_with_string_slice` and
+  `kafka_admin_Admin_delete_topics_with_string_slice_options` take the topic
+  names as a `kafka_List_t` of `const char *`.
+- **Breaking (C API):** `kafka_admin_ClassicGroupDescription_new` takes the
+  six arguments of Java's short constructor; the seven-argument form is
+  `kafka_admin_ClassicGroupDescription_with_authorized_operations`.
+- **Breaking (C API):** `kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason`
+  with `NULL` clears the reason instead of setting an empty one, and
+  `kafka_admin_CreateDelegationTokenOptions_set_owner` with `NULL` clears the
+  owner, as Java's `reason(null)` and `owner(null)` do.
+- **Breaking (C API):** `kafka_admin_NewTopic_set_configs` takes a `NULL`
+  value as Java's `null` config value, which it used to send as an empty
+  string, and a `NULL` map as Java's `null` map, which clears the configs
+  where it used to set an empty map. `kafka_admin_NewTopic_configs` returns a
+  `NULL` value for a null config value.
+- `kafka_common_acl_AclOperation_values` and
+  `kafka_common_acl_AclPermissionType_values` return an owned list of the
+  borrowed singletons in declaration order.
 
 ## [0.3.0-beta.1] - 2026-10-23
 
