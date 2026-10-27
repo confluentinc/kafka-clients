@@ -185,6 +185,51 @@ class TestResolveSerde:
             "confluent_kafka.common.serialization.Deserializer")
 
 
+class _AsyncCallSerde(_RecordingSerde):
+    """A serde whose ``__call__`` is an ``async def``."""
+
+    async def __call__(self, *, topic, data, headers=None, **kwargs):  # type: ignore[override]  # noqa: ANN001
+        return data
+
+
+async def _async_serde(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
+    return data
+
+
+class TestAsyncSerdeRejected:
+    """On every client a serde is a plain function: an ``async def`` one, or an
+    object whose ``__call__`` is one, is rejected with ``TypeError`` where it is
+    given."""
+
+    def test_argument_route(self) -> None:
+        for serde in (_async_serde, _AsyncCallSerde()):
+            with pytest.raises(TypeError) as exc:
+                resolve_serde(serde, {}, KEY, is_key=False, default=bytes_deserializer())
+            assert str(exc.value) == "value_deserializer: an async def deserializer is not supported"
+        with pytest.raises(TypeError) as exc:
+            resolve_serde(_async_serde, {}, "key.serializer", is_key=True,
+                          default=bytes_deserializer())
+        assert str(exc.value) == "key_serializer: an async def serializer is not supported"
+
+    def test_config_route_closes_the_instance(self) -> None:
+        closed: list[_AsyncCallSerde] = []
+
+        class Recorded(_AsyncCallSerde):
+            def close(self) -> None:
+                closed.append(self)
+
+        with pytest.raises(TypeError) as exc:
+            resolve_serde(None, {KEY: Recorded}, KEY, is_key=False, default=bytes_deserializer())
+        assert str(exc.value) == "value.deserializer: an async def deserializer is not supported"
+        assert len(closed) == 1 and closed[0].configured is None
+
+    def test_a_plain_function_is_accepted(self) -> None:
+        def plain(*, topic, data, headers=None, **kwargs):  # noqa: ANN001
+            return data
+
+        assert resolve_serde(plain, {}, KEY, is_key=False, default=bytes_deserializer()) is plain
+
+
 class TestLifecycleHelpers:
     def test_configure_if_defined_calls_configure(self) -> None:
         serde = _RecordingSerde()
@@ -214,3 +259,53 @@ class TestLifecycleHelpers:
 
     def test_close_if_defined_noop_on_bare_function(self) -> None:
         close_if_defined(lambda *a: None)  # must not raise
+
+
+_PRODUCER_CONFIGS = {"bootstrap.servers": "localhost:1"}
+_CONSUMER_CONFIGS = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer"}
+
+
+def _clients() -> list[tuple[str, object]]:
+    from confluent_kafka.consumer import AsyncKafkaConsumer, KafkaConsumer
+    from confluent_kafka.producer import (
+        AsyncKafkaProducer, AsyncMockProducer, KafkaProducer, MockProducer,
+    )
+
+    def mock(cls: type) -> object:
+        return lambda **serdes: cls(auto_complete=True, partitioner=None,
+                                    key_serializer=serdes.get("key_serializer"),
+                                    value_serializer=serdes.get("value_serializer"))
+
+    return [
+        ("serializer", lambda **serdes: KafkaProducer(configs=_PRODUCER_CONFIGS, **serdes)),
+        ("serializer", lambda **serdes: AsyncKafkaProducer(configs=_PRODUCER_CONFIGS, **serdes)),
+        ("serializer", mock(MockProducer)),
+        ("serializer", mock(AsyncMockProducer)),
+        ("deserializer", lambda **serdes: KafkaConsumer(configs=_CONSUMER_CONFIGS, **serdes)),
+        ("deserializer", lambda **serdes: AsyncKafkaConsumer(configs=_CONSUMER_CONFIGS, **serdes)),
+    ]
+
+
+@pytest.mark.parametrize("index", range(6))
+def test_every_client_rejects_an_async_def_serde_where_it_is_given(index: int) -> None:
+    kind, make = _clients()[index]
+    for slot in ("key", "value"):
+        name = f"{slot}_{kind}"
+        for serde in (_async_serde, _AsyncCallSerde()):
+            with pytest.raises(TypeError) as exc:
+                make(**{name: serde})  # type: ignore[operator]
+            assert str(exc.value) == f"{name}: an async def {kind} is not supported"
+
+
+@pytest.mark.parametrize("configs,key", [
+    (_PRODUCER_CONFIGS, "value.serializer"), (_CONSUMER_CONFIGS, "value.deserializer")])
+def test_the_config_route_rejects_an_async_def_serde(configs: dict[str, object], key: str) -> None:
+    from confluent_kafka.consumer import KafkaConsumer
+    from confluent_kafka.producer import KafkaProducer
+
+    client = KafkaProducer if key.endswith(".serializer") else KafkaConsumer
+    kind = key.split(".")[1]
+    # Checked as the keyword contract is, before configure, unwrapped.
+    with pytest.raises(TypeError) as exc:
+        client(configs={**configs, key: f"{__name__}._AsyncCallSerde"})  # type: ignore[call-overload]
+    assert str(exc.value) == f"{key}: an async def {kind} is not supported"
