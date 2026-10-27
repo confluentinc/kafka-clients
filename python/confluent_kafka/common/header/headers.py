@@ -37,7 +37,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any, Union, overload
 
 from confluent_kafka._args import MISSING, Form, java_forms
-from confluent_kafka.common.header import Header, _of as _header, _set_state, _state, _value_view
+from confluent_kafka.common.header.header import Header, _of as _header, _set_state, _state, _value_view
 
 __all__ = ["Headers"]
 

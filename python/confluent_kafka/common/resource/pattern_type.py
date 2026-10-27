@@ -14,7 +14,7 @@
 
 """``PatternType``: Java's ``org.apache.kafka.common.resource.PatternType``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.resource``. An
+In ``confluent_kafka.common.resource``, the module of its Java package. An
 ``enum.IntEnum`` valued by Java's ``code`` field (CLAUDE.md, Python Binding
 Conventions, Class family); ``__str__`` is Java's ``Enum.toString()``, the
 constant's name.

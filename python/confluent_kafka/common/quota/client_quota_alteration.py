@@ -16,7 +16,7 @@
 ``org.apache.kafka.common.quota.ClientQuotaAlteration``, with its nested
 ``ClientQuotaAlteration.Op``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.quota``.
+In ``confluent_kafka.common.quota``, the module of its Java package.
 ``ClientQuotaAlteration`` overrides only ``toString``, so it keeps identity
 equality, as in Java. ``Op``'s value is Java's ``Double``: an ``int`` given for
 it is kept as a ``float``, so ``str()`` prints it as Java does (``1.0``).
@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.client_quota_entity import ClientQuotaEntity
+from confluent_kafka.common.quota.client_quota_entity import ClientQuotaEntity
 
 __all__ = ["ClientQuotaAlteration"]
 

@@ -376,7 +376,8 @@ from confluent_kafka.admin import (
     FeatureUpdate,
     ListGroupsOptions,
 )
-from confluent_kafka.common import ClientQuotaEntity, ClientQuotaFilterComponent, KafkaError
+from confluent_kafka.common.quota import ClientQuotaEntity, ClientQuotaFilterComponent
+from confluent_kafka.common import KafkaError
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import BootstrapResolutionError, InvalidTopicError

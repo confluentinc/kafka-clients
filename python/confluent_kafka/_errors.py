@@ -123,7 +123,7 @@ def _long_map(raw: dict[tuple[str, int], int] | None) -> dict[Any, int] | None:
 
 
 def _metric(payload: dict[str, Any]) -> Any:
-    from .common.kafka_metric import KafkaMetric
+    from .common.metrics.kafka_metric import KafkaMetric
 
     return KafkaMetric._snapshot(
         name=payload.get("metric_name") or "",

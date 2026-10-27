@@ -161,17 +161,16 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credentials_description import (
         UserScramCredentialsDescription,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import (
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
-        DelegationToken,
-        KafkaPrincipal,
-        Uuid,
     )
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.security.token.delegation import DelegationToken
+    from confluent_kafka.common.security.auth import KafkaPrincipal
+    from confluent_kafka.common import Uuid
+    from confluent_kafka.common.acl.acl_operation import AclOperation
     from confluent_kafka.common.config.config_resource import ConfigResource
     from confluent_kafka.common.election_type import ElectionType
     from confluent_kafka.common.node import Node
@@ -468,7 +467,7 @@ def optional_node_from_tuple(raw: tuple[int, str, int, str | None] | None) -> No
 def acl_operations_from_codes(codes: list[int] | None) -> set[AclOperation] | None:
     """Java's ``AdminUtils.validAclOperations`` result: ``None`` when the broker did not
     report the operations (Java's ``null``), else the operations of the codes."""
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.acl.acl_operation import AclOperation
 
     return None if codes is None else {AclOperation.from_code(code=code) for code in codes}
 
@@ -790,15 +789,13 @@ def _acl_binding_filter_args(acl_filter: AclBindingFilter) -> tuple[Any, ...]:
 
 def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
     """``acl_binding_to_py``'s seven-tuple as an ``AclBinding``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntry,
         AclBinding,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePattern,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePattern, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBinding(
@@ -812,15 +809,13 @@ def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
 
 def _to_acl_binding_filter(raw: tuple[Any, ...]) -> AclBindingFilter:
     """``acl_binding_filter_to_py``'s seven-tuple as an ``AclBindingFilter``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntryFilter,
         AclBindingFilter,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePatternFilter,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePatternFilter, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBindingFilter(
@@ -1134,7 +1129,7 @@ def _principal_args(principal: KafkaPrincipal) -> tuple[str, str]:
 
 def _to_kafka_principal(raw: tuple[str, str, bool]) -> KafkaPrincipal:
     """``kafka_principal_to_py``'s ``(principal_type, name, token_authenticated)``."""
-    from confluent_kafka.common import KafkaPrincipal
+    from confluent_kafka.common.security.auth import KafkaPrincipal
 
     principal_type, name, token_authenticated = raw
     return KafkaPrincipal(principal_type=principal_type, name=name,
@@ -1147,7 +1142,7 @@ def _to_delegation_token(raw: tuple[Any, ...]) -> DelegationToken:
     ``KafkaAdminClient`` builds it (``new TokenInformation(tokenId, owner,
     tokenRequester, renewers, issue, max, expiry)``); the class computes the base64
     form itself."""
-    from confluent_kafka.common import DelegationToken, TokenInformation
+    from confluent_kafka.common.security.token.delegation import DelegationToken, TokenInformation
 
     (token_id, owner, requester, renewers, issue_timestamp, expiry_timestamp,
      max_timestamp, hmac, _hmac_base64) = raw
@@ -1744,7 +1739,7 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
 
 def _to_client_quota_entity(pairs: Iterable[tuple[str, str | None]]) -> ClientQuotaEntity:
     """``client_quota_entity_to_py``'s ``(entity_type, name or None)`` pairs."""
-    from confluent_kafka.common import ClientQuotaEntity
+    from confluent_kafka.common.quota import ClientQuotaEntity
 
     return ClientQuotaEntity(entries=dict(pairs))
 

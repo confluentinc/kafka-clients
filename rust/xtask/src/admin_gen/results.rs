@@ -322,7 +322,7 @@ impl Flavor {
 }
 
 /// The Python module a Java type lives in (CLAUDE.md, Python Binding
-/// Conventions, Modules): an admin type by its file, any other by its package.
+/// Conventions, Modules): an admin type by its file, any other by its Java package.
 fn py_module(fqcn: &str) -> Option<String> {
     let (pkg, simple) = fqcn.rsplit_once('.')?;
     if pkg == "org.apache.kafka.clients.admin" {
@@ -331,11 +331,10 @@ fn py_module(fqcn: &str) -> Option<String> {
     if pkg.contains(".internals") {
         return None;
     }
-    if pkg == "org.apache.kafka.common.config" || pkg.starts_with("org.apache.kafka.common.config.") {
-        return Some("confluent_kafka.common.config".into());
-    }
+    // Any other type: the module of its Java package (`common.acl.AclBinding` ->
+    // `confluent_kafka.common.acl`).
     if pkg == "org.apache.kafka.common" || pkg.starts_with("org.apache.kafka.common.") {
-        return Some("confluent_kafka.common".into());
+        return Some(format!("confluent_kafka.{}", &pkg["org.apache.kafka.".len()..]));
     }
     None
 }

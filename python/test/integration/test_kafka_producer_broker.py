@@ -38,7 +38,8 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
-from confluent_kafka.common import Header, KafkaError, KafkaFuture, TopicPartition
+from confluent_kafka.common.header import Header
+from confluent_kafka.common import KafkaError, KafkaFuture, TopicPartition
 from confluent_kafka.common.errors import RecordTooLargeError
 from confluent_kafka.common.serialization import string_deserializer, string_serializer
 from confluent_kafka.consumer import KafkaConsumer

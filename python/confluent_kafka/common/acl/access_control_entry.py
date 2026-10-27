@@ -14,17 +14,17 @@
 
 """``AccessControlEntry``: Java's ``org.apache.kafka.common.acl.AccessControlEntry``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.acl``. Java's
+In ``confluent_kafka.common.acl``, the module of its Java package. Java's
 ``equals`` uses ``instanceof``, so a subclass instance with the same data is
 equal, as in Java.
 """
 
 from __future__ import annotations
 
-from confluent_kafka.common._access_control_entry_data import _AccessControlEntryData
-from confluent_kafka.common.access_control_entry_filter import AccessControlEntryFilter
-from confluent_kafka.common.acl_operation import AclOperation
-from confluent_kafka.common.acl_permission_type import AclPermissionType
+from confluent_kafka.common.acl._access_control_entry_data import _AccessControlEntryData
+from confluent_kafka.common.acl.access_control_entry_filter import AccessControlEntryFilter
+from confluent_kafka.common.acl.acl_operation import AclOperation
+from confluent_kafka.common.acl.acl_permission_type import AclPermissionType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 __all__ = ["AccessControlEntry"]

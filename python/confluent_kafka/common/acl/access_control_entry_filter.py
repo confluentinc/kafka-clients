@@ -15,7 +15,7 @@
 """``AccessControlEntryFilter``: Java's
 ``org.apache.kafka.common.acl.AccessControlEntryFilter``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.acl``. Java's
+In ``confluent_kafka.common.acl``, the module of its Java package. Java's
 package-private ``AccessControlEntryFilter(AccessControlEntryData)``, used by
 ``AccessControlEntry.toFilter()``, is the private class method ``_new``
 (CLAUDE.md, Python Binding Conventions, Class family).
@@ -25,12 +25,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from confluent_kafka.common._access_control_entry_data import _AccessControlEntryData
-from confluent_kafka.common.acl_operation import AclOperation
-from confluent_kafka.common.acl_permission_type import AclPermissionType
+from confluent_kafka.common.acl._access_control_entry_data import _AccessControlEntryData
+from confluent_kafka.common.acl.acl_operation import AclOperation
+from confluent_kafka.common.acl.acl_permission_type import AclPermissionType
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.access_control_entry import AccessControlEntry
+    from confluent_kafka.common.acl.access_control_entry import AccessControlEntry
 
 __all__ = ["AccessControlEntryFilter"]
 

@@ -14,7 +14,7 @@
 
 """``AclBindingFilter``: Java's ``org.apache.kafka.common.acl.AclBindingFilter``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.acl``.
+In ``confluent_kafka.common.acl``, the module of its Java package.
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.access_control_entry_filter import AccessControlEntryFilter
-from confluent_kafka.common.resource_pattern_filter import ResourcePatternFilter
+from confluent_kafka.common.acl.access_control_entry_filter import AccessControlEntryFilter
+from confluent_kafka.common.resource.resource_pattern_filter import ResourcePatternFilter
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.acl_binding import AclBinding
+    from confluent_kafka.common.acl.acl_binding import AclBinding
 
 __all__ = ["AclBindingFilter"]
 

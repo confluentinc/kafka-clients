@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from ._args import MISSING
 
 if TYPE_CHECKING:
-    from .common.headers import Headers
+    from .common.header.headers import Headers
 
 __all__ = [
     "cause_message",
@@ -173,7 +173,7 @@ def materialize(value: _I) -> _I:
     generator) as a tuple of its elements, in order."""
     if value is None or value is MISSING or isinstance(value, Collection):
         return value
-    from .common.headers import Headers
+    from .common.header.headers import Headers
 
     if isinstance(value, Headers):
         # Kept as it is, as Java keeps a `Headers` argument.
@@ -200,6 +200,6 @@ def headers(value: Iterable[Any]) -> Headers:
     """A ``Headers`` field: a ``Headers`` argument as it is, as Java keeps the
     object it is given; any other iterable of ``Header`` s or ``(key, value)``
     pairs as a new ``Headers`` (header values viewed, never copied)."""
-    from .common.headers import _kept
+    from .common.header.headers import _kept
 
     return _kept(value)

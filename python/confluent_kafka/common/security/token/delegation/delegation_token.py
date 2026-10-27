@@ -15,8 +15,7 @@
 """``DelegationToken``: Java's
 ``org.apache.kafka.common.security.token.delegation.DelegationToken``.
 
-In ``confluent_kafka.common``, the nearest module above
-``common.security.token.delegation``. Java's ``byte[] hmac`` is ``bytes``, in
+In ``confluent_kafka.common.security.token.delegation``, the module of its Java package. Java's ``byte[] hmac`` is ``bytes``, in
 and out (CLAUDE.md, Python Binding Conventions, Types); ``__eq__`` compares it
 in constant time, as Java's ``MessageDigest.isEqual`` does.
 """
@@ -27,7 +26,7 @@ import base64
 import hmac as _hmac
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.token_information import TokenInformation
+from confluent_kafka.common.security.token.delegation.token_information import TokenInformation
 
 __all__ = ["DelegationToken"]
 

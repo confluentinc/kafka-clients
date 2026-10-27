@@ -19,8 +19,8 @@ helper of ``AccessControlEntry`` and ``AccessControlEntryFilter``."""
 from __future__ import annotations
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.acl_operation import AclOperation
-from confluent_kafka.common.acl_permission_type import AclPermissionType
+from confluent_kafka.common.acl.acl_operation import AclOperation
+from confluent_kafka.common.acl.acl_permission_type import AclPermissionType
 
 __all__: list[str] = []
 
