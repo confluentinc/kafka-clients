@@ -2573,8 +2573,8 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.sasl_config.mechanism, "PLAIN");
-        assert_eq!(config.sasl_config.resolve_username(), Some("alice"));
-        assert_eq!(config.sasl_config.resolve_password(), Some("secret"));
+        assert_eq!(config.sasl_config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.sasl_config.resolve_password().as_deref(), Some("secret"));
     }
 
     /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
@@ -3163,7 +3163,7 @@ mod tests {
         // The secrets did reach the config, typed and raw (so `originals` can
         // still be forwarded, e.g. to a `Partitioner`); they are only hidden
         // from `Debug`.
-        assert_eq!(config.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(config.sasl_config.resolve_password().as_deref(), Some("jaas-S3cr3t"));
         assert_eq!(
             config.ssl_config.keystore_key.as_ref().map(Password::value),
             Some("keystore-key-S3cr3t")

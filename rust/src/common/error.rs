@@ -290,10 +290,9 @@ pub(crate) trait ErrorHierarchy {
     /// [`SslAuthenticationError`], [`IllegalSaslStateError`] and
     /// [`UnsupportedSaslMechanismError`]. Only three of the five have an entry
     /// in `Errors`, so this is NOT "the broker-reported codes": a handshake
-    /// failure detected locally is carried as an [`AuthenticationError`] payload
-    /// inside an `io::Error` (`common::network::auth_io_error`) and the
-    /// producer's `Sender` converts it back into [`Error::Authentication`],
-    /// which answers `true` here.
+    /// failure detected locally is carried, as the class it was raised as,
+    /// inside an `io::Error` (`common::network::authentication_io_error`) and
+    /// reaches the application unchanged, answering `true` here.
     fn is_authentication_error(&self) -> bool {
         false
     }
@@ -3584,13 +3583,13 @@ impl Error {
     /// directions over every code by `errors.rs`'s
     /// `test_hierarchy_predicates_match_java`.
     ///
-    /// A handshake failure detected locally starts out as an
-    /// [`AuthenticationError`] payload inside an `io::Error`
-    /// (`common::network::auth_io_error`), and it DOES reach this enum: the
-    /// producer's `Sender` rebuilds it as [`Authentication`](Self::Authentication)
-    /// when failing the transaction manager's pending requests, because that is
-    /// the only spelling for which this predicate — and hence
-    /// `request_utils::RequestUtils::is_fatal_error` — answers `true`.
+    /// A handshake failure detected locally is carried inside an `io::Error`
+    /// (`common::network::authentication_io_error`) as the class it was raised
+    /// as — [`SaslAuthentication`](Self::SaslAuthentication) for rejected
+    /// credentials, [`SslAuthentication`](Self::SslAuthentication) for a rejected
+    /// certificate — and reaches the application, and the producer's transaction
+    /// manager, unchanged; each answers `true` here, and so to
+    /// `request_utils::RequestUtils::is_fatal_error`.
     ///
     /// Nested inside
     /// [`is_invalid_configuration_error`](Self::is_invalid_configuration_error).

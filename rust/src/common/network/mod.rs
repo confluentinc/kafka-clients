@@ -45,6 +45,7 @@ mod network_receive;
 mod network_send;
 mod plaintext_channel_builder;
 mod plaintext_transport_layer;
+mod reauthentication_context;
 mod receive;
 mod sasl_channel_builder;
 pub mod selectable;
@@ -58,7 +59,8 @@ mod transport_layer;
 // `org.apache.kafka.common.errors.AuthenticationException` lives at
 // `crate::common::errors::AuthenticationError`, and one type deserves one path.
 pub use authentication_error::{
-    auth_io_error, auth_io_error_with_source, authentication_error_message, is_authentication_error,
+    auth_io_error, auth_io_error_with_source, authentication_error, authentication_error_message,
+    authentication_io_error, is_authentication_error,
 };
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
@@ -77,6 +79,7 @@ pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
 pub use plaintext_channel_builder::PlaintextChannelBuilder;
 pub use plaintext_transport_layer::PlaintextTransportLayer;
+pub use reauthentication_context::ReauthenticationContext;
 pub use receive::Receive;
 pub use sasl_channel_builder::SaslChannelBuilder;
 pub use selectable::Selectable;

@@ -25,6 +25,15 @@
 //!   → ClientComplete (if using SaslAuthenticate header) → Complete
 //! ```
 //!
+//! and the KIP-368 re-authentication flow, which begins when the broker has
+//! given the session a lifetime and that lifetime is nearly over:
+//!
+//! ```text
+//! ReauthProcessOrigApiVersionsResponse → ReauthSendHandshakeRequest
+//!   → ReauthReceiveHandshakeOrOtherResponse → ReauthInitial
+//!   → Intermediate → ... → Complete
+//! ```
+//!
 //! Currently supports PLAIN mechanism only (RFC 4616); the client
 //! configurations reject any other `sasl.mechanism` when they are built
 //! (`CommonClientConfigs::post_validate_supported_sasl_mechanism`), so no other
@@ -42,13 +51,15 @@
 use crate::SaslAuthenticateRequestData;
 use crate::SaslHandshakeRequestData;
 use crate::common::Error;
+use crate::common::errors::{IllegalSaslStateError, UnsupportedSaslMechanismError};
 use crate::common::network;
 use crate::common::network::Authenticator;
 use crate::common::network::ByteBufferSend;
 use crate::common::network::NetworkReceive;
+use crate::common::network::ReauthenticationContext;
 use crate::common::network::Receive;
 use crate::common::network::{InterestOps, TransportLayer};
-use crate::common::network::{auth_io_error, auth_io_error_with_source};
+use crate::common::network::{auth_io_error, authentication_io_error};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::AbstractRequest;
 use crate::common::requests::ApiVersionsResponse;
@@ -60,17 +71,28 @@ use crate::common::requests::SaslHandshakeResponse;
 use crate::common::requests::api_versions_request;
 use crate::common::requests::{RequestHeader, RequestHeaderOptionsBuilder};
 
+use crate::common::utils::Time;
 use crate::common::utils::internals::LogContext;
 use crate::kafka_debug;
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// Internal state transitions for SASL client authentication.
 ///
-/// The states are declared in order, starting with `SendApiVersionsRequest` and
-/// ending in either `Complete` or `Failed`.
+/// The internal state transitions for initial authentication of a channel are
+/// declared in order, starting with `SendApiVersionsRequest` and ending in either
+/// `Complete` or `Failed`.
+///
+/// Re-authentication of a channel starts with the state
+/// `ReauthProcessOrigApiVersionsResponse` and then flows to
+/// `ReauthSendHandshakeRequest` followed by
+/// `ReauthReceiveHandshakeOrOtherResponse` and then `ReauthInitial`; after that
+/// the flow joins the authentication flow at the `Intermediate` state and ends at
+/// either `Complete` or `Failed`.
 ///
 /// Translated from `SaslClientAuthenticator.SaslState` in Java.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +116,19 @@ pub enum SaslState {
     Complete,
     /// Failed authentication due to an error at some stage.
     Failed,
+    /// Initial state for re-authentication: process ApiVersionsResponse from
+    /// original authentication.
+    ReauthProcessOrigApiVersionsResponse,
+    /// Processed original ApiVersionsResponse, send SaslHandshake request as part
+    /// of re-authentication.
+    ReauthSendHandshakeRequest,
+    /// Awaiting SaslHandshake response from server when re-authenticating, and may
+    /// receive other, in-flight responses sent prior to start of re-authentication
+    /// as well.
+    ReauthReceiveHandshakeOrOtherResponse,
+    /// Initial re-authentication state starting SASL token exchange for configured
+    /// mechanism, send first token.
+    ReauthInitial,
 }
 
 /// SASL client authenticator that implements the SASL PLAIN authentication flow.
@@ -107,8 +142,14 @@ pub enum SaslState {
 ///
 /// # Re-authentication
 ///
-/// Re-authentication states from the Java source are intentionally omitted since
-/// they are out of scope for the current milestone.
+/// When the broker gives the session a lifetime (`connections.max.reauth.ms`,
+/// KIP-368), the authenticator schedules re-authentication at a random point
+/// between 85% and 95% of it, and the channel re-authenticates on its first
+/// write after that point ([`KafkaChannel::maybe_begin_client_reauthentication`]).
+/// Java re-authenticates with a new authenticator; this one starts over itself
+/// ([`Authenticator::reauthenticate`]).
+///
+/// [`KafkaChannel::maybe_begin_client_reauthentication`]: crate::common::network::KafkaChannel::maybe_begin_client_reauthentication
 #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator")]
 pub struct SaslClientAuthenticator {
     /// Current SASL state.
@@ -143,6 +184,12 @@ pub struct SaslClientAuthenticator {
     net_in_buffer: Option<NetworkReceive>,
     /// Next SASL state to be set when outgoing writes complete.
     pending_sasl_state: Option<SaslState>,
+    /// Information related to re-authentication.
+    reauth_info: ReauthInfo,
+    /// The clock the session's re-authentication time is computed with: the
+    /// channel compares that time against the selector's clock, which is the
+    /// same one.
+    time: Arc<dyn Time>,
     /// Contextual log message prefix.
     log_context: LogContext,
 }
@@ -182,7 +229,9 @@ impl SaslClientAuthenticator {
     /// * `node` - Node identifier for this connection
     /// * `host` - Broker hostname
     /// * `client_id` - Kafka client ID for request headers
+    /// * `time` - The clock the session's re-authentication time is computed with
     #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#SaslClientAuthenticator")]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         mechanism: &str,
         username: &str,
@@ -190,6 +239,7 @@ impl SaslClientAuthenticator {
         node: &str,
         host: &str,
         client_id: &str,
+        time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Self {
         let mut authenticator = Self {
@@ -207,6 +257,8 @@ impl SaslClientAuthenticator {
             net_out_buffer: None,
             net_in_buffer: None,
             pending_sasl_state: None,
+            reauth_info: ReauthInfo::new(),
+            time,
             log_context,
         };
         authenticator.set_sasl_state(SaslState::SendApiVersionsRequest);
@@ -350,11 +402,30 @@ impl SaslClientAuthenticator {
     /// Writes pending data from the outbound buffer to the transport.
     ///
     /// Returns `true` if the buffer is completely written.
+    ///
+    /// Never waits for the socket: Java writes to a non-blocking channel, so a
+    /// full send buffer leaves the rest for a later call, made when the channel
+    /// is writable again (`flush_net_out_buffer_and_update_interest_ops` sets
+    /// `OP_WRITE` for it). `try_write_to` writes what the socket takes now; a
+    /// transport without a synchronous write answers it with `WouldBlock`, and
+    /// the async write is then given no time to wait, as `KafkaChannel::write`
+    /// does. Awaiting the write instead would park the selector, and every
+    /// other connection with it, for as long as the broker does not read.
     #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#flushNetOutBuffer")]
     async fn flush_net_out_buffer(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<bool> {
         if let Some(ref mut buf) = self.net_out_buffer {
             if !buf.completed() {
-                buf.write_to(transport).await?;
+                match buf.try_write_to(transport) {
+                    Ok(_) => {},
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        match tokio::time::timeout(std::time::Duration::ZERO, buf.write_to(transport)).await {
+                            Ok(Ok(_)) | Err(_) => {},
+                            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {},
+                            Ok(Err(e)) => return Err(e),
+                        }
+                    },
+                    Err(e) => return Err(e),
+                }
             }
             Ok(buf.completed())
         } else {
@@ -377,8 +448,13 @@ impl SaslClientAuthenticator {
         let net_in = self.net_in_buffer.as_mut().unwrap();
         net_in.read_from(transport).await?;
         if net_in.complete() {
-            let payload = net_in.payload().map(|p| p.to_vec());
-            self.net_in_buffer = None;
+            // Java copies the payload into a `byte[]` and keeps the receive,
+            // which it parks as is if the response turns out to answer an
+            // earlier request. The payload is moved out here instead, so a
+            // parked response (a Fetch response, possibly large) is handed on
+            // in the buffer it was read into rather than as a copy.
+            let receive = self.net_in_buffer.take().expect("checked just above");
+            let (_, payload) = receive.into_source_and_payload();
             Ok(payload)
         } else {
             Ok(None)
@@ -423,14 +499,21 @@ impl SaslClientAuthenticator {
         // failing authentication. Catching everything here — as this did before —
         // turned that case into a fatal authentication failure.
         //
-        // Java's re-authentication branch (`reauthInfo.reauthenticating()`, which
-        // parks an unrelated in-flight receive in `pendingAuthenticatedReceives`
-        // and returns null) has no counterpart: KIP-368 client-side
-        // re-authentication is not wired in this client, so `reauthenticating()`
-        // is always false and the branch is unreachable. See COMMENTS finding 25.
         let response = match crate::NetworkClientStatics::parse_response(&mut buffer, request_header) {
             Ok(response) => response,
             Err(error) if matches!(error, Error::Schema(_) | Error::LocalIllegalArgument(_)) => {
+                // Account for the fact that during re-authentication there may be
+                // responses arriving for requests that were sent in the past.
+                if self.reauth_info.reauthenticating() {
+                    // It didn't match the current request header, so it must be
+                    // unrelated to re-authentication. Save it so it can be
+                    // processed later. The whole frame is kept, as Java rewinds
+                    // the receive's payload.
+                    self.reauth_info
+                        .pending_authenticated_receives
+                        .push_back(NetworkReceive::with_source_buffer(&self.node, buffer.into_buffer()));
+                    return Ok(None);
+                }
                 kafka_debug!(
                     self.log_context,
                     "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
@@ -439,10 +522,12 @@ impl SaslClientAuthenticator {
                 // Java: `throw new IllegalSaslStateException(msg, e)` — the
                 // two-argument form, so the message is Java's literal text and the
                 // cause hangs off `getCause()` rather than being appended to it.
-                return Err(auth_io_error_with_source(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol",
-                    error,
-                ));
+                return Err(authentication_io_error(Error::IllegalSaslState(
+                    IllegalSaslStateError::with_source(
+                        "Invalid SASL mechanism response, server may be expecting a different protocol",
+                        error,
+                    ),
+                )));
             },
             Err(error) => {
                 // Outside Java's catch: propagate without touching the SASL state
@@ -469,11 +554,24 @@ impl SaslClientAuthenticator {
                     let error = response.error();
                     if error != Errors::None {
                         self.set_sasl_state(SaslState::Failed);
-                        let err_msg = response.error_message().unwrap_or(error.message());
-                        // The broker rejected the credentials. Java throws
-                        // SaslAuthenticationException (an AuthenticationException):
-                        // a fatal authentication failure, not a retriable disconnect.
-                        return Err(auth_io_error(err_msg.to_string()));
+                        // Java: `throw errMsg == null ? error.exception() :
+                        // error.exception(errMsg)` — the class the code names. A
+                        // rejected password is SASL_AUTHENTICATION_FAILED, so a
+                        // `SaslAuthenticationException` (code 58): a fatal
+                        // authentication failure, not a retriable disconnect.
+                        let error = error.error_with_optional_message(response.error_message());
+                        return Err(if error.is_authentication_error() {
+                            authentication_io_error(error)
+                        } else {
+                            // Not an `AuthenticationException`: Java's
+                            // `KafkaChannel.prepare` does not catch it, so the
+                            // selector closes the connection as a disconnect.
+                            io::Error::other(error)
+                        });
+                    }
+                    let session_lifetime_ms = response.session_lifetime_ms();
+                    if session_lifetime_ms > 0 {
+                        self.reauth_info.positive_session_lifetime_ms = Some(session_lifetime_ms);
                     }
                     Ok(Some(response.sasl_auth_bytes().to_vec()))
                 },
@@ -496,9 +594,13 @@ impl SaslClientAuthenticator {
         self.state = sasl_state;
         kafka_debug!(self.log_context, "Set SASL client state to {:?}", sasl_state);
         if sasl_state == SaslState::Complete {
-            // In the full Java implementation, this would set session
-            // re-authentication times and update interest ops. For the
-            // client-only PLAIN implementation, authentication is done.
+            self.reauth_info
+                .set_authentication_end_and_session_reauthentication_times(self.time.nanoseconds(), &self.log_context);
+            // Java also removes OP_WRITE after an authentication, and adds it
+            // after a re-authentication so the write that triggered it is sent.
+            // The selector here derives a channel's interest from its state
+            // instead (a ready channel with a queued send is armed for write),
+            // so there is no interest to update.
         }
     }
 
@@ -529,25 +631,30 @@ impl SaslClientAuthenticator {
         }
         // All non-None handshake errors are AuthenticationException subclasses
         // in Java (UnsupportedSaslMechanismException / IllegalSaslStateException):
-        // genuine authentication failures, fatal and not retried.
+        // genuine authentication failures, fatal and not retried. Java formats
+        // the mechanisms as a `List` (`[PLAIN, SCRAM-SHA-256]`) and the code by
+        // its constant name (`UNKNOWN_SERVER_ERROR`).
+        let enabled_mechanisms = format!("[{}]", response.enabled_mechanisms().join(", "));
         match error {
             Errors::None => Ok(()),
-            Errors::UnsupportedSaslMechanism => Err(auth_io_error(format!(
-                "Client SASL mechanism '{}' not enabled in the server, enabled mechanisms are {:?}",
-                self.mechanism,
-                response.enabled_mechanisms()
+            Errors::UnsupportedSaslMechanism => Err(authentication_io_error(Error::UnsupportedSaslMechanism(
+                UnsupportedSaslMechanismError::new(format!(
+                    "Client SASL mechanism '{}' not enabled in the server, enabled mechanisms are {}",
+                    self.mechanism, enabled_mechanisms
+                )),
             ))),
-            Errors::IllegalSaslState => Err(auth_io_error(format!(
-                "Unexpected handshake request with client mechanism {}, enabled mechanisms are {:?}",
-                self.mechanism,
-                response.enabled_mechanisms()
+            Errors::IllegalSaslState => Err(authentication_io_error(Error::IllegalSaslState(
+                IllegalSaslStateError::new(format!(
+                    "Unexpected handshake request with client mechanism {}, enabled mechanisms are {}",
+                    self.mechanism, enabled_mechanisms
+                )),
             ))),
-            _ => Err(auth_io_error(format!(
-                "Unknown error code {:?}, client mechanism is {}, enabled mechanisms are {:?}",
-                error,
-                self.mechanism,
-                response.enabled_mechanisms()
-            ))),
+            _ => Err(authentication_io_error(Error::IllegalSaslState(IllegalSaslStateError::new(
+                format!(
+                    "Unknown error code {}, client mechanism is {}, enabled mechanisms are {}",
+                    error, self.mechanism, enabled_mechanisms
+                ),
+            )))),
         }
     }
 
@@ -574,6 +681,7 @@ impl SaslClientAuthenticator {
                 let response = self.receive_kafka_response(transport).await?;
                 if let Some(ConcreteResponse::ApiVersions(api_versions_response)) = response {
                     self.set_sasl_authenticate_and_handshake_versions(&api_versions_response);
+                    self.reauth_info.api_versions_response_received_from_broker = Some(api_versions_response);
                     self.set_sasl_state(SaslState::SendHandshakeRequest);
                     // Fall through to send handshake request
                     self.send_handshake_request(transport).await?;
@@ -601,6 +709,39 @@ impl SaslClientAuthenticator {
                 // response is None -> I/O incomplete, return and try again
             },
             SaslState::Initial => {
+                self.send_initial_token(transport).await?;
+                self.set_sasl_state(SaslState::Intermediate);
+            },
+            SaslState::ReauthProcessOrigApiVersionsResponse => {
+                if let Some(original) = self.reauth_info.api_versions_response_from_original_authentication.take() {
+                    self.set_sasl_authenticate_and_handshake_versions(&original);
+                    self.reauth_info.api_versions_response_from_original_authentication = Some(original);
+                }
+                self.set_sasl_state(SaslState::ReauthSendHandshakeRequest); // Will set immediately
+                // Fall through to send handshake request with the latest supported version
+                self.send_handshake_request(transport).await?;
+                self.set_sasl_state(SaslState::ReauthReceiveHandshakeOrOtherResponse);
+            },
+            SaslState::ReauthSendHandshakeRequest => {
+                self.send_handshake_request(transport).await?;
+                self.set_sasl_state(SaslState::ReauthReceiveHandshakeOrOtherResponse);
+            },
+            SaslState::ReauthReceiveHandshakeOrOtherResponse => {
+                let response = self.receive_kafka_response(transport).await?;
+                if let Some(ConcreteResponse::SaslHandshake(handshake_response)) = response {
+                    self.handle_sasl_handshake_response(&handshake_response)?;
+                    self.set_sasl_state(SaslState::ReauthInitial); // Will set immediately
+                    // Fall through and start SASL authentication using the
+                    // configured client mechanism.
+                    self.send_initial_token(transport).await?;
+                    self.set_sasl_state(SaslState::Intermediate);
+                } else if response.is_some() {
+                    return Err(auth_io_error("Expected SaslHandshake response during SASL re-authentication"));
+                }
+                // response is None -> I/O incomplete, or a response to an earlier
+                // request that was set aside; return and try again
+            },
+            SaslState::ReauthInitial => {
                 self.send_initial_token(transport).await?;
                 self.set_sasl_state(SaslState::Intermediate);
             },
@@ -666,8 +807,189 @@ impl Authenticator for SaslClientAuthenticator {
         self.state == SaslState::Complete
     }
 
+    /// Begins re-authentication with the versions negotiated by the original
+    /// authentication, then sends the SASL handshake.
+    ///
+    /// Java builds a new authenticator for this, which reads the original
+    /// `ApiVersionsResponse` from the previous one (`reauthInfo.apiVersionsResponse()`)
+    /// and closes it. This authenticator is the previous one, so it keeps that
+    /// response and starts over: the session lifetime and the re-authentication
+    /// time of the previous session are cleared, as they are null on a new
+    /// authenticator, and the receive the channel had in progress becomes the
+    /// buffer the authenticator reads into first.
+    fn reauthenticate<'a>(
+        &'a mut self,
+        mut reauthentication_context: ReauthenticationContext,
+        transport: &'a mut (dyn TransportLayer + Send),
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let api_versions_response_from_original_authentication = self
+                .reauth_info
+                .api_versions_response_from_original_authentication
+                .take()
+                .or_else(|| self.reauth_info.api_versions_response_received_from_broker.take())
+                .ok_or_else(|| {
+                    // Java's `Objects.requireNonNull`: the channel re-authenticates
+                    // only once it is ready, so the original exchange happened.
+                    io::Error::other("Cannot re-authenticate before the original authentication completed")
+                })?;
+            self.reauth_info
+                .reauthenticating_with_api_versions_response_from_original_authentication_reauthentication_begin_nanos(
+                    api_versions_response_from_original_authentication,
+                    reauthentication_context.reauthentication_begin_nanos(),
+                );
+            self.reauth_info.positive_session_lifetime_ms = None;
+            self.reauth_info.client_session_reauthentication_time_nanos = None;
+            self.current_request_header = None;
+            self.net_out_buffer = None;
+            self.pending_sasl_state = None;
+            self.net_in_buffer = reauthentication_context.network_receive();
+            self.set_sasl_state(SaslState::ReauthProcessOrigApiVersionsResponse); // Will set immediately
+            self.authenticate_impl(transport).await
+        })
+    }
+
+    fn client_session_reauthentication_time_nanos(&self) -> Option<i64> {
+        self.reauth_info.client_session_reauthentication_time_nanos
+    }
+
+    fn reauthentication_latency_ms(&self) -> Option<u64> {
+        self.reauth_info.reauthentication_latency_ms()
+    }
+
+    fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
+        self.reauth_info.poll_response_received_during_reauthentication()
+    }
+
     fn close(&mut self) {
         // No resources to release for PLAIN mechanism.
+    }
+}
+
+/// Information related to re-authentication.
+///
+/// Translated from Java's private inner class `SaslClientAuthenticator.ReauthInfo`.
+#[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo")]
+struct ReauthInfo {
+    api_versions_response_from_original_authentication: Option<ApiVersionsResponse>,
+    reauthentication_begin_nanos: i64,
+    pending_authenticated_receives: VecDeque<NetworkReceive>,
+    api_versions_response_received_from_broker: Option<ApiVersionsResponse>,
+    positive_session_lifetime_ms: Option<i64>,
+    authentication_end_nanos: i64,
+    client_session_reauthentication_time_nanos: Option<i64>,
+}
+
+impl ReauthInfo {
+    fn new() -> Self {
+        Self {
+            api_versions_response_from_original_authentication: None,
+            reauthentication_begin_nanos: 0,
+            pending_authenticated_receives: VecDeque::new(),
+            api_versions_response_received_from_broker: None,
+            positive_session_lifetime_ms: None,
+            authentication_end_nanos: 0,
+            client_session_reauthentication_time_nanos: None,
+        }
+    }
+
+    /// Marks the start of a re-authentication, which uses the versions
+    /// negotiated by the original authentication.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#reauthenticating")]
+    fn reauthenticating_with_api_versions_response_from_original_authentication_reauthentication_begin_nanos(
+        &mut self,
+        api_versions_response_from_original_authentication: ApiVersionsResponse,
+        reauthentication_begin_nanos: i64,
+    ) {
+        self.api_versions_response_from_original_authentication =
+            Some(api_versions_response_from_original_authentication);
+        self.reauthentication_begin_nanos = reauthentication_begin_nanos;
+    }
+
+    /// Returns `true` if this authenticator is re-authenticating, or has
+    /// re-authenticated, the channel.
+    #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#reauthenticating")]
+    fn reauthenticating(&self) -> bool {
+        self.api_versions_response_from_original_authentication.is_some()
+    }
+
+    /// Return the (always non-null but possibly empty) NetworkReceive response that
+    /// arrived during re-authentication that is unrelated to re-authentication, if
+    /// any. This corresponds to a request sent prior to the beginning of
+    /// re-authentication; the request was made when the channel was successfully
+    /// authenticated, and the response arrived during the re-authentication
+    /// process.
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#pollResponseReceivedDuringReauthentication"
+    )]
+    fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
+        self.pending_authenticated_receives.pop_front()
+    }
+
+    /// Records the end of an authentication and, when the broker gave the
+    /// session a lifetime, the time on or after which the client re-authenticates.
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#setAuthenticationEndAndSessionReauthenticationTimes"
+    )]
+    fn set_authentication_end_and_session_reauthentication_times(&mut self, now_nanos: i64, log_context: &LogContext) {
+        self.authentication_end_nanos = now_nanos;
+        if let Some(positive_session_lifetime_ms) = self.positive_session_lifetime_ms {
+            // pick a random percentage between 85% and 95% for session re-authentication
+            let pct_window_factor_to_take_network_latency_and_clock_drift_into_account = 0.85;
+            let pct_window_jitter_to_avoid_reauthentication_storm_across_many_channels_simultaneously = 0.10;
+            let pct_to_use = pct_window_factor_to_take_network_latency_and_clock_drift_into_account
+                + rand::random::<f64>()
+                    * pct_window_jitter_to_avoid_reauthentication_storm_across_many_channels_simultaneously;
+            let session_lifetime_ms_to_use = (positive_session_lifetime_ms as f64 * pct_to_use) as i64;
+            // Java's `Utils.msToNs` / `Math.addExact` throw here when the time
+            // overflows (a lifetime of about 292 years or more, such as
+            // `connections.max.reauth.ms=Long.MAX_VALUE`). The throw escapes
+            // `authenticate()` as a non-authentication error, so Java's selector
+            // closes the connection, and every reconnect fails the same way
+            // (`SaslAuthenticatorTest.testReauthenticateWithLargeReauthValue`).
+            // Such a session never needs re-authenticating, so the time saturates
+            // instead and the connection is kept.
+            self.client_session_reauthentication_time_nanos = Some(
+                self.authentication_end_nanos
+                    .saturating_add(session_lifetime_ms_to_use.saturating_mul(1_000_000)),
+            );
+            kafka_debug!(
+                log_context,
+                "Finished {} with session expiration in {} ms and session re-authentication on or after {} ms",
+                self.authentication_or_reauthentication_text(),
+                positive_session_lifetime_ms,
+                session_lifetime_ms_to_use
+            );
+        } else {
+            kafka_debug!(
+                log_context,
+                "Finished {} with no session expiration and no session re-authentication",
+                self.authentication_or_reauthentication_text()
+            );
+        }
+    }
+
+    /// The milliseconds the re-authentication took, or `None` for the original
+    /// authentication.
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#reauthenticationLatencyMs"
+    )]
+    fn reauthentication_latency_ms(&self) -> Option<u64> {
+        self.reauthenticating().then(|| {
+            ((self.authentication_end_nanos - self.reauthentication_begin_nanos).max(0) as f64 / 1000.0 / 1000.0)
+                .round() as u64
+        })
+    }
+
+    #[doc(
+        alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator$ReauthInfo#authenticationOrReauthenticationText"
+    )]
+    fn authentication_or_reauthentication_text(&self) -> &'static str {
+        if self.reauthenticating() {
+            "re-authentication"
+        } else {
+            "authentication"
+        }
     }
 }
 
@@ -679,11 +1001,12 @@ mod tests {
     use crate::SaslHandshakeResponseData;
     use crate::api_versions_response_data::ApiVersion;
     use crate::common::network::InterestOps;
-    use crate::common::network::is_authentication_error;
+    use crate::common::network::{authentication_error, is_authentication_error};
     use crate::common::protocol::Message;
     use crate::common::protocol::ObjectSerializationCache;
     use crate::common::protocol::Writable;
     use crate::common::requests::ResponseHeader;
+    use crate::common::utils::{MockTime, SystemTime};
 
     use std::collections::VecDeque;
     use std::net::SocketAddr;
@@ -700,6 +1023,10 @@ mod tests {
         write_data: Vec<u8>,
         /// Interest operations currently set.
         interest_ops: InterestOps,
+        /// When set, the socket takes nothing: the synchronous write would
+        /// block and the asynchronous one never completes, as when the send
+        /// buffer is full and the broker has stopped reading.
+        blocked_writes: bool,
     }
 
     impl MockTransportLayer {
@@ -708,6 +1035,7 @@ mod tests {
                 read_data: VecDeque::new(),
                 write_data: Vec::new(),
                 interest_ops: InterestOps::NONE,
+                blocked_writes: false,
             }
         }
 
@@ -751,6 +1079,10 @@ mod tests {
 
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.interest_ops = self.interest_ops.remove(ops);
+        }
+
+        fn interest_ops(&self) -> InterestOps {
+            self.interest_ops
         }
 
         fn is_mute(&self) -> bool {
@@ -802,6 +1134,9 @@ mod tests {
         }
 
         fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.blocked_writes {
+                return Box::pin(std::future::pending());
+            }
             self.write_data.extend_from_slice(src);
             let len = src.len();
             Box::pin(async move { Ok(len) })
@@ -811,6 +1146,9 @@ mod tests {
             &'a mut self,
             srcs: &'a [io::IoSlice<'a>],
         ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.blocked_writes {
+                return Box::pin(std::future::pending());
+            }
             let mut total = 0;
             for slice in srcs {
                 self.write_data.extend_from_slice(slice);
@@ -898,10 +1236,31 @@ mod tests {
         auth_bytes: &[u8],
         version: i16,
     ) -> Vec<u8> {
+        build_sasl_authenticate_response_bytes_with_session_lifetime(
+            correlation_id,
+            error,
+            error_message,
+            auth_bytes,
+            version,
+            0,
+        )
+    }
+
+    /// Builds a size-prefixed SaslAuthenticateResponse granting the session
+    /// `session_lifetime_ms` (0: no lifetime).
+    fn build_sasl_authenticate_response_bytes_with_session_lifetime(
+        correlation_id: i32,
+        error: &Errors,
+        error_message: Option<&str>,
+        auth_bytes: &[u8],
+        version: i16,
+        session_lifetime_ms: i64,
+    ) -> Vec<u8> {
         let mut data = SaslAuthenticateResponseData::new();
         data.set_error_code(error.code());
         data.set_error_message(error_message.map(|s| s.to_string()));
         data.set_auth_bytes(auth_bytes.to_vec());
+        data.set_session_lifetime_ms(session_lifetime_ms);
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
@@ -934,6 +1293,7 @@ mod tests {
             "node-0",
             "broker1",
             "client-1",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let token = auth.create_sasl_token();
@@ -950,6 +1310,7 @@ mod tests {
             "node-0",
             "broker1",
             "client-1",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         assert_eq!(auth.sasl_state(), SaslState::SendApiVersionsRequest);
@@ -966,6 +1327,7 @@ mod tests {
             "node-0",
             "broker1",
             "client-1",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let id1 = auth.next_correlation_id();
@@ -999,6 +1361,7 @@ mod tests {
             "node-0",
             "broker1",
             "client-1",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         // Exhaust all 8 reserved IDs
@@ -1047,6 +1410,7 @@ mod tests {
             "node-0",
             "broker1",
             "client-1",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
 
@@ -1083,6 +1447,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1147,6 +1512,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1168,18 +1534,24 @@ mod tests {
         let handshake_bytes = build_sasl_handshake_response_bytes(
             SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::UnsupportedSaslMechanism,
-            vec!["SCRAM-SHA-256".to_string()],
+            vec!["SCRAM-SHA-256".to_string(), "SCRAM-SHA-512".to_string()],
             auth.sasl_handshake_version(),
         );
         transport.enqueue_read_data(&handshake_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("PLAIN"));
-        assert!(err.to_string().contains("SCRAM-SHA-256"));
         // An unsupported-mechanism failure is a genuine authentication failure
         // (Java: UnsupportedSaslMechanismException extends AuthenticationException)
         // and must be classified as fatal, not a retriable disconnect.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::UnsupportedSaslMechanism(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::UnsupportedSaslMechanism);
+        // Java's text, the mechanisms printed as a `List`.
+        assert_eq!(
+            error.message(),
+            "Client SASL mechanism 'PLAIN' not enabled in the server, enabled mechanisms are [SCRAM-SHA-256, SCRAM-SHA-512]"
+        );
         assert_eq!(auth.sasl_state(), SaslState::Failed);
     }
 
@@ -1193,6 +1565,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1232,12 +1605,79 @@ mod tests {
         transport.enqueue_read_data(&sasl_auth_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Authentication failed"));
         // A broker-side credential rejection is a genuine authentication failure
         // (Java: SaslAuthenticationException extends AuthenticationException);
         // it must be classified as fatal so it is not silently retried.
         assert!(is_authentication_error(&err));
+        // Java throws `error.exception(errMsg)`: the class the code names, with
+        // the broker's message.
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::SaslAuthenticationFailed);
+        assert_eq!(error.message(), "Authentication failed: Invalid credentials");
         assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// Drives a fresh authenticator to `Intermediate` and answers its token with
+    /// a SaslAuthenticate response carrying `error` and `error_message`.
+    async fn authenticate_response_error(error: &Errors, error_message: Option<&str>) -> io::Error {
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "wrong",
+            "node-0",
+            "broker1",
+            "test-client",
+            Arc::new(SystemTime),
+            LogContext::empty(),
+        );
+        let mut transport = MockTransportLayer::new();
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_api_versions_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            ApiKeys::SASL_HANDSHAKE.latest_version(),
+            ApiKeys::SASL_AUTHENTICATE.latest_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            &Errors::None,
+            vec!["PLAIN".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_authenticate_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
+            error,
+            error_message,
+            &[],
+            auth.sasl_authenticate_version(),
+        ));
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+        err
+    }
+
+    /// Without an error message, Java's `error.exception()` carries the code's
+    /// default text.
+    #[tokio::test]
+    async fn test_auth_failure_without_message_uses_the_default_text() {
+        let err = authenticate_response_error(&Errors::SaslAuthenticationFailed, None).await;
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.message(), Errors::SaslAuthenticationFailed.message());
+    }
+
+    /// A code whose class is not an `AuthenticationException` is thrown as that
+    /// class in Java, which `KafkaChannel.prepare` does not catch: the selector
+    /// closes the connection as a disconnect, to be retried.
+    #[tokio::test]
+    async fn test_non_authentication_error_code_is_not_an_authentication_failure() {
+        let err = authenticate_response_error(&Errors::UnknownServerError, Some("broker trouble")).await;
+        assert!(!is_authentication_error(&err));
+        let error = err.get_ref().and_then(|e| e.downcast_ref::<Error>()).expect("typed payload");
+        assert!(matches!(error, Error::UnknownServer(_)), "{error:?}");
+        assert_eq!(error.message(), "broker trouble");
     }
 
     /// Test 9: Legacy raw token mode (sasl_authenticate_version == -1).
@@ -1250,6 +1690,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1326,6 +1767,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1353,9 +1795,54 @@ mod tests {
         transport.enqueue_read_data(&handshake_bytes);
 
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Unexpected handshake request"));
         // Java: IllegalSaslStateException extends AuthenticationException — fatal.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(error.error(), Errors::IllegalSaslState);
+        assert_eq!(
+            error.message(),
+            "Unexpected handshake request with client mechanism PLAIN, enabled mechanisms are [PLAIN]"
+        );
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// A handshake error code other than the two Java names is reported as an
+    /// `IllegalSaslStateException` naming the code by its constant.
+    #[tokio::test]
+    async fn test_handle_sasl_handshake_unknown_error_code() {
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            Arc::new(SystemTime),
+            LogContext::empty(),
+        );
+        let mut transport = MockTransportLayer::new();
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_api_versions_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            ApiKeys::SASL_HANDSHAKE.latest_version(),
+            ApiKeys::SASL_AUTHENTICATE.latest_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            &Errors::UnknownServerError,
+            vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Unknown error code UNKNOWN_SERVER_ERROR, client mechanism is PLAIN, enabled mechanisms are [PLAIN, SCRAM-SHA-256]"
+        );
         assert_eq!(auth.sasl_state(), SaslState::Failed);
     }
 
@@ -1373,6 +1860,7 @@ mod tests {
             "node-0",
             "broker1",
             "test-client",
+            Arc::new(SystemTime),
             LogContext::empty(),
         );
         let mut transport = MockTransportLayer::new();
@@ -1400,5 +1888,422 @@ mod tests {
         // Java throws IllegalSaslStateException (an AuthenticationException) for
         // an unparseable SASL response — a fatal authentication failure.
         assert!(is_authentication_error(&err));
+        let error = authentication_error(&err).unwrap();
+        assert!(matches!(error, Error::IllegalSaslState(_)), "{error:?}");
+        assert_eq!(
+            error.message(),
+            "Invalid SASL mechanism response, server may be expecting a different protocol"
+        );
+        assert!(error.source().is_some(), "the parse error is the cause");
+    }
+
+    // -----------------------------------------------------------------------
+    // Re-authentication (KIP-368)
+    // -----------------------------------------------------------------------
+
+    fn authenticator_with_time(time: Arc<dyn Time>) -> SaslClientAuthenticator {
+        SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            time,
+            LogContext::empty(),
+        )
+    }
+
+    /// The request headers of the size-prefixed requests `written` holds.
+    fn written_request_headers(written: &[u8]) -> Vec<RequestHeader> {
+        let mut headers = Vec::new();
+        let mut offset = 0;
+        while offset + 4 <= written.len() {
+            let size = i32::from_be_bytes(written[offset..offset + 4].try_into().unwrap()) as usize;
+            let mut accessor = ByteBufferAccessor::new(written[offset + 4..offset + 4 + size].to_vec());
+            headers.push(RequestHeader::parse(&mut accessor).expect("request header"));
+            offset += 4 + size;
+        }
+        headers
+    }
+
+    /// Drives `auth` through the original authentication, the broker granting
+    /// the session `session_lifetime_ms`.
+    async fn complete_authentication(
+        auth: &mut SaslClientAuthenticator,
+        transport: &mut MockTransportLayer,
+        session_lifetime_ms: i64,
+    ) {
+        auth.authenticate_impl(transport).await.unwrap();
+        transport.enqueue_read_data(&build_api_versions_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
+            ApiKeys::SASL_HANDSHAKE.latest_version(),
+            ApiKeys::SASL_AUTHENTICATE.latest_version(),
+        ));
+        auth.authenticate_impl(transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
+            &Errors::None,
+            vec!["PLAIN".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+        auth.authenticate_impl(transport).await.unwrap();
+        transport.enqueue_read_data(&build_sasl_authenticate_response_bytes_with_session_lifetime(
+            SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
+            &Errors::None,
+            None,
+            &[],
+            auth.sasl_authenticate_version(),
+            session_lifetime_ms,
+        ));
+        auth.authenticate_impl(transport).await.unwrap();
+        assert!(auth.complete());
+        transport.write_data.clear();
+    }
+
+    /// Begins re-authentication and answers its SaslHandshake, leaving `auth`
+    /// waiting for the answer to its token. Returns that request's header.
+    async fn reauthenticate_through_handshake(
+        auth: &mut SaslClientAuthenticator,
+        transport: &mut MockTransportLayer,
+        reauthentication_context: ReauthenticationContext,
+    ) -> RequestHeader {
+        auth.reauthenticate(reauthentication_context, transport).await.unwrap();
+        let handshake = written_request_headers(transport.written_data())
+            .pop()
+            .expect("a SaslHandshake");
+        transport.write_data.clear();
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            handshake.correlation_id(),
+            &Errors::None,
+            vec!["PLAIN".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+        auth.authenticate_impl(transport).await.unwrap();
+        assert_eq!(auth.sasl_state(), SaslState::Intermediate);
+        let mut headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1, "one SaslAuthenticate");
+        transport.write_data.clear();
+        headers.pop().unwrap()
+    }
+
+    /// Java's `ReauthInfo.setAuthenticationEndAndSessionReauthenticationTimes`:
+    /// a session the broker gives a lifetime is re-authenticated on or after a
+    /// random point between 85% and 95% of it, from the end of the
+    /// authentication. Before this, the lifetime was parsed and dropped.
+    #[tokio::test]
+    async fn test_session_lifetime_schedules_reauthentication_between_85_and_95_percent() {
+        let mut earliest = i64::MAX;
+        let mut latest = i64::MIN;
+        for _ in 0..200 {
+            let time = Arc::new(MockTime::new());
+            let mut auth = authenticator_with_time(time.clone());
+            let mut transport = MockTransportLayer::new();
+            complete_authentication(&mut auth, &mut transport, 10_000).await;
+
+            let after = auth
+                .client_session_reauthentication_time_nanos()
+                .expect("a re-authentication time")
+                - time.nanoseconds();
+            assert!(
+                (8_500_000_000..=9_500_000_000).contains(&after),
+                "re-authentication {after} ns after the authentication, outside 85%..95% of 10 s"
+            );
+            earliest = earliest.min(after);
+            latest = latest.max(after);
+            // The original authentication has no re-authentication latency.
+            assert_eq!(auth.reauthentication_latency_ms(), None);
+        }
+        // The point is jittered, so a fleet of clients does not re-authenticate
+        // at once.
+        assert!(latest - earliest > 100_000_000, "{earliest}..{latest}");
+    }
+
+    /// A session without a lifetime is never re-authenticated.
+    #[tokio::test]
+    async fn test_session_without_lifetime_is_not_reauthenticated() {
+        let mut auth = authenticator_with_time(Arc::new(MockTime::new()));
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 0).await;
+        assert_eq!(auth.client_session_reauthentication_time_nanos(), None);
+    }
+
+    /// The re-authentication flow of Java's `SaslClientAuthenticator`: a
+    /// SaslHandshake at the version the original authentication negotiated, on
+    /// a reserved correlation id, then the PLAIN token, then a new session
+    /// lifetime. A response to a request sent before re-authentication began
+    /// arrives in between and is set aside whole, for the channel to hand to
+    /// the network client.
+    #[tokio::test]
+    async fn test_reauthentication_flow() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+
+        let begin = time.nanoseconds();
+        auth.reauthenticate(ReauthenticationContext::new(None, begin), &mut transport)
+            .await
+            .unwrap();
+        assert!(!auth.complete());
+        assert_eq!(auth.sasl_state(), SaslState::ReauthReceiveHandshakeOrOtherResponse);
+        // The previous session's re-authentication time is gone with it.
+        assert_eq!(auth.client_session_reauthentication_time_nanos(), None);
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1, "only the SaslHandshake is sent");
+        assert_eq!(*headers[0].api_key(), ApiKeys::SASL_HANDSHAKE);
+        assert_eq!(headers[0].api_version(), auth.sasl_handshake_version());
+        assert!(SaslClientAuthenticator::is_reserved(headers[0].correlation_id()));
+        let handshake_correlation_id = headers[0].correlation_id();
+        transport.write_data.clear();
+
+        // A response to an earlier request (correlation id 42) arrives first.
+        let earlier_response = build_api_versions_response_bytes(42, 1, 2);
+        transport.enqueue_read_data(&earlier_response);
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        assert_eq!(auth.sasl_state(), SaslState::ReauthReceiveHandshakeOrOtherResponse);
+        let set_aside = auth
+            .poll_response_received_during_reauthentication()
+            .expect("the earlier response is set aside");
+        assert_eq!(set_aside.source(), "node-0");
+        assert!(set_aside.complete());
+        assert_eq!(set_aside.payload(), Some(&earlier_response[4..]));
+        assert!(auth.poll_response_received_during_reauthentication().is_none());
+
+        // The SaslHandshake response: the PLAIN token is sent.
+        transport.enqueue_read_data(&build_sasl_handshake_response_bytes(
+            handshake_correlation_id,
+            &Errors::None,
+            vec!["PLAIN".to_string()],
+            auth.sasl_handshake_version(),
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        assert_eq!(auth.sasl_state(), SaslState::Intermediate);
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].api_key(), ApiKeys::SASL_AUTHENTICATE);
+        assert!(SaslClientAuthenticator::is_reserved(headers[0].correlation_id()));
+        let written = transport.written_data().to_vec();
+        assert!(
+            written.windows(b"\0alice\0secret".len()).any(|w| w == b"\0alice\0secret"),
+            "the PLAIN token is sent again"
+        );
+
+        // The broker accepts it and grants a new, longer session.
+        time.sleep(5);
+        transport.enqueue_read_data(&build_sasl_authenticate_response_bytes_with_session_lifetime(
+            headers[0].correlation_id(),
+            &Errors::None,
+            None,
+            &[],
+            auth.sasl_authenticate_version(),
+            20_000,
+        ));
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        assert!(auth.complete());
+        assert_eq!(auth.reauthentication_latency_ms(), Some(5));
+        let after = auth.client_session_reauthentication_time_nanos().expect("rescheduled") - time.nanoseconds();
+        assert!((17_000_000_000..=19_000_000_000).contains(&after), "{after}");
+    }
+
+    /// Java's `KafkaChannel` hands the receive it had in progress to the
+    /// authenticator, which reads the rest of it into the same buffer: the
+    /// response is set aside whole rather than lost, which would leave the rest
+    /// of the connection's bytes misframed.
+    #[tokio::test]
+    async fn test_reauthentication_continues_the_receive_in_progress() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+
+        // The channel had read the first 7 bytes of a response.
+        let earlier_response = build_api_versions_response_bytes(42, 1, 2);
+        let mut partial = NetworkReceive::with_source("node-0");
+        let mut first_bytes = MockTransportLayer::new();
+        first_bytes.enqueue_read_data(&earlier_response[..7]);
+        partial.read_from(&mut first_bytes).await.unwrap();
+        assert!(!partial.complete());
+
+        auth.reauthenticate(ReauthenticationContext::new(Some(partial), time.nanoseconds()), &mut transport)
+            .await
+            .unwrap();
+        transport.enqueue_read_data(&earlier_response[7..]);
+        auth.authenticate_impl(&mut transport).await.unwrap();
+
+        let set_aside = auth
+            .poll_response_received_during_reauthentication()
+            .expect("the response in progress is set aside");
+        assert_eq!(set_aside.payload(), Some(&earlier_response[4..]));
+        assert_eq!(auth.sasl_state(), SaslState::ReauthReceiveHandshakeOrOtherResponse);
+    }
+
+    /// A response set aside during re-authentication is handed on in the buffer
+    /// it was read into, as Java parks the `NetworkReceive` itself: a large
+    /// Fetch response arriving then is not copied.
+    #[tokio::test]
+    async fn test_a_response_set_aside_is_not_copied() {
+        const PAYLOAD: usize = 1 << 20;
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+
+        // A response to an earlier request (correlation id 42), the size of a
+        // large Fetch response. The channel had read its size header and a
+        // little more, so its buffer is already allocated.
+        let mut frame = ((4 + PAYLOAD) as i32).to_be_bytes().to_vec();
+        frame.extend_from_slice(&42_i32.to_be_bytes());
+        frame.resize(4 + 4 + PAYLOAD, 7);
+        let mut partial = NetworkReceive::with_source("node-0");
+        let mut first_bytes = MockTransportLayer::new();
+        first_bytes.enqueue_read_data(&frame[..16]);
+        partial.read_from(&mut first_bytes).await.unwrap();
+
+        auth.reauthenticate(ReauthenticationContext::new(Some(partial), time.nanoseconds()), &mut transport)
+            .await
+            .unwrap();
+        transport.enqueue_read_data(&frame[16..]);
+        let largest_allocation = {
+            let _tracking = crate::AllocTrackingGuard::new();
+            auth.authenticate_impl(&mut transport).await.unwrap();
+            crate::AllocTrackingGuard::max_allocation()
+        };
+
+        let set_aside = auth
+            .poll_response_received_during_reauthentication()
+            .expect("the response is set aside");
+        assert_eq!(set_aside.payload(), Some(&frame[4..]));
+        assert!(
+            largest_allocation < PAYLOAD,
+            "a {largest_allocation}-byte allocation while setting a {PAYLOAD}-byte response aside"
+        );
+    }
+
+    /// Java writes to a non-blocking channel: a request the socket does not
+    /// take now is left for a later call, with `OP_WRITE` set so the selector
+    /// calls back on write readiness. Awaiting the write instead parked the
+    /// selector, and every other connection with it, until the broker read
+    /// again.
+    #[tokio::test]
+    async fn test_a_write_the_socket_does_not_take_does_not_wait() {
+        let mut auth = authenticator_with_time(Arc::new(MockTime::new()));
+        let mut transport = MockTransportLayer::new();
+        transport.blocked_writes = true;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), auth.authenticate_impl(&mut transport))
+            .await
+            .expect("authenticate must not wait for the socket")
+            .unwrap();
+        assert!(transport.written_data().is_empty());
+        assert!(transport.interest_ops.contains(InterestOps::OP_WRITE));
+        // The state moves on once the request is written.
+        assert_eq!(auth.sasl_state(), SaslState::SendApiVersionsRequest);
+
+        // Writable again: the next call writes the request.
+        transport.blocked_writes = false;
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].api_key(), ApiKeys::API_VERSIONS);
+        assert!(!transport.interest_ops.contains(InterestOps::OP_WRITE));
+        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
+    }
+
+    /// The same for the SaslHandshake that starts a re-authentication, which
+    /// the selector sends from its write pass.
+    #[tokio::test]
+    async fn test_reauthentication_does_not_wait_for_the_socket() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+        transport.blocked_writes = true;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            auth.reauthenticate(ReauthenticationContext::new(None, time.nanoseconds()), &mut transport),
+        )
+        .await
+        .expect("re-authentication must not wait for the socket")
+        .unwrap();
+        assert!(transport.written_data().is_empty());
+        assert!(transport.interest_ops.contains(InterestOps::OP_WRITE));
+
+        transport.blocked_writes = false;
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].api_key(), ApiKeys::SASL_HANDSHAKE);
+        assert!(!transport.interest_ops.contains(InterestOps::OP_WRITE));
+        assert_eq!(auth.sasl_state(), SaslState::ReauthReceiveHandshakeOrOtherResponse);
+    }
+
+    /// A re-authentication the broker rejects fails like an authentication:
+    /// with the class the code names, as Java's `receiveToken` throws.
+    #[tokio::test]
+    async fn test_rejected_reauthentication_is_an_authentication_failure() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+
+        let token = reauthenticate_through_handshake(
+            &mut auth,
+            &mut transport,
+            ReauthenticationContext::new(None, time.nanoseconds()),
+        )
+        .await;
+        transport.enqueue_read_data(&build_sasl_authenticate_response_bytes(
+            token.correlation_id(),
+            &Errors::SaslAuthenticationFailed,
+            Some("Authentication failed: Invalid username or password"),
+            &[],
+            auth.sasl_authenticate_version(),
+        ));
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        let error = authentication_error(&err).expect("an authentication failure");
+        assert!(matches!(error, Error::SaslAuthentication(_)), "{error:?}");
+        assert_eq!(error.message(), "Authentication failed: Invalid username or password");
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// A second re-authentication still uses the versions of the original
+    /// authentication, as Java's new authenticator reads them from the previous
+    /// one each time.
+    #[tokio::test]
+    async fn test_second_reauthentication() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        let handshake_version = auth.sasl_handshake_version();
+
+        for round in 0..2 {
+            time.sleep(9_600);
+            let token = reauthenticate_through_handshake(
+                &mut auth,
+                &mut transport,
+                ReauthenticationContext::new(None, time.nanoseconds()),
+            )
+            .await;
+            transport.enqueue_read_data(&build_sasl_authenticate_response_bytes_with_session_lifetime(
+                token.correlation_id(),
+                &Errors::None,
+                None,
+                &[],
+                auth.sasl_authenticate_version(),
+                10_000,
+            ));
+            auth.authenticate_impl(&mut transport).await.unwrap();
+            assert!(auth.complete(), "round {round}");
+            assert_eq!(auth.sasl_handshake_version(), handshake_version, "round {round}");
+            assert!(auth.client_session_reauthentication_time_nanos().is_some(), "round {round}");
+        }
     }
 }

@@ -47,8 +47,12 @@
 //! Closed
 //! ```
 
-use super::auth_io_error;
+use super::authentication_io_error;
 use super::{InterestOps, TransportLayer};
+use crate::common::Error;
+use crate::common::KafkaError;
+use crate::common::errors::SslAuthenticationError;
+use crate::common::protocol::Errors;
 
 use std::future::Future;
 use std::io;
@@ -59,6 +63,27 @@ use std::pin::Pin;
 use rustls::pki_types::ServerName;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+
+/// A rejected TLS handshake, or a failure in the TLS 1.3 post-handshake window,
+/// raised as Java's `SslAuthenticationException` (`SslTransportLayer#read`,
+/// `SslTransportLayer#handshakeFailure`): an `AuthenticationException`, so the client stops instead of
+/// reconnecting, and its own class, so the application can tell a rejected
+/// certificate from rejected SASL credentials.
+///
+/// `message` is Java's, `"SSL handshake failed"` or `"Failed to process
+/// post-handshake messages"`, and the TLS library's error is its cause, as
+/// Java's `SSLException` is. The crate has no class for that, so the cause is
+/// a bare `KafkaError` carrying the rustls error's text. It is also logged at
+/// DEBUG, as Java's `SslTransportLayer#handshakeFailure` logs the
+/// `SSLException`, so the reason reaches the logs without the
+/// application walking the cause chain.
+fn ssl_authentication_io_error(message: &'static str, cause: rustls::Error) -> io::Error {
+    log::debug!("{message}: {cause}");
+    authentication_io_error(Error::SslAuthentication(SslAuthenticationError::with_source(
+        message,
+        Error::KafkaError(KafkaError::with_message(Errors::None, cause.to_string())),
+    )))
+}
 
 /// Maximum number of plaintext bytes coalesced into rustls per `write_vectored`/
 /// `write` call. Caps the amount of CPU work spent encrypting ahead of a TCP
@@ -187,7 +212,7 @@ impl SslTransportLayer {
         if c.post_handshake {
             // Java also moves to HANDSHAKE_FAILED here, so the window closes.
             c.post_handshake = false;
-            auth_io_error(format!("Failed to process post-handshake messages: {e}"))
+            ssl_authentication_io_error("Failed to process post-handshake messages", e)
         } else {
             io::Error::other(format!("TLS error: {e}"))
         }
@@ -367,7 +392,7 @@ impl TransportLayer for SslTransportLayer {
                     // connection is already dead, so a flush error changes nothing
                     // we report.
                     let _ = Self::flush_tls(&boxed.tcp, &mut boxed.conn);
-                    return Err(auth_io_error(format!("TLS handshake failed: {e}")));
+                    return Err(ssl_authentication_io_error("SSL handshake failed", e));
                 }
             }
         })
@@ -379,6 +404,10 @@ impl TransportLayer for SslTransportLayer {
 
     fn remove_interest_ops(&mut self, ops: InterestOps) {
         self.interest_ops = self.interest_ops.remove(ops);
+    }
+
+    fn interest_ops(&self) -> InterestOps {
+        self.interest_ops
     }
 
     fn is_mute(&self) -> bool {
@@ -1430,10 +1459,78 @@ pub(crate) mod tests {
             is_authentication_error(&err),
             "TLS cert validation failure must be a typed authentication error, got: {err:?}"
         );
+        // Java's class, `SslAuthenticationException`, and Java's message, with
+        // the TLS library's error as the cause.
+        let error = crate::common::network::authentication_error(&err).expect("typed payload");
         assert!(
-            err.to_string().contains("TLS handshake failed"),
-            "error message should carry the TLS handshake prefix, got: {err}"
+            matches!(error, crate::common::Error::SslAuthentication(_)),
+            "a rejected certificate is an SslAuthenticationError, got: {error:?}"
         );
+        assert_eq!(error.message(), "SSL handshake failed");
+        let cause = error.source().expect("the TLS library's error is the cause");
+        assert!(cause.message().contains("certificate"), "the cause says why: {cause}");
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
+    /// Under TLS 1.3 the client's handshake completes before the server has
+    /// checked the client's certificate, so a server that rejects it says so
+    /// with an alert on the client's first read. Java raises that as
+    /// `SslAuthenticationException("Failed to process post-handshake
+    /// messages")` (`SslTransportLayer#read`), not as an I/O error that
+    /// would be retried.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_tls13_client_certificate_rejected_after_the_handshake_is_an_ssl_authentication_error() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let (cert_der, key_der, cert_pem) = make_self_signed();
+        let client_factory = SslFactory::new(&SslConfigs {
+            truststore_certificates: Some(Password::new(cert_pem)),
+            ..SslConfigs::default()
+        })
+        .expect("client SslFactory");
+        // The server requires a client certificate, which the client does not have.
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots
+            .add(rustls::pki_types::CertificateDer::from(cert_der.clone()))
+            .expect("root");
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .expect("client verifier");
+        let server_config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(cert_der)],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der)),
+            )
+            .expect("server ServerConfig");
+
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let mut transport = SslTransportLayer::new(client_stream, make_client_conn(&client_factory), domain);
+        let server_task = tokio::spawn(drive_server(server_stream, Arc::new(server_config)));
+
+        complete_handshake(&mut transport)
+            .await
+            .expect("TLS 1.3: the client's side of the handshake completes");
+
+        let mut buf = [0u8; 64];
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match transport.read(&mut buf).await {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => transport.readable().await.unwrap(),
+                    Ok(n) => panic!("read {n} bytes from a server that rejected the client"),
+                    Err(e) => return e,
+                }
+            }
+        })
+        .await
+        .expect("the server's rejection arrives");
+        assert!(is_authentication_error(&err), "an authentication failure, got: {err:?}");
+        let error = crate::common::network::authentication_error(&err).expect("typed payload");
+        assert!(matches!(error, crate::common::Error::SslAuthentication(_)), "{error:?}");
+        assert_eq!(error.message(), "Failed to process post-handshake messages");
+        assert!(error.source().is_some(), "the TLS library's error is the cause");
 
         let _ = transport.close().await;
         let _ = server_task.await;
