@@ -43,6 +43,7 @@ __all__ = [
     "init",
     "kwargs",
     "message_text",
+    "non_null",
     "rebuild",
     "reduce",
     "singleton",
@@ -83,11 +84,26 @@ def message_text(t: BaseException) -> str:
 
 def to_string(t: BaseException) -> str:
     """Java's ``Throwable.toString()``: ``"<module>.<class>"``, plus
-    ``": <message>"`` when the throwable has a message."""
+    ``": <message>"`` when the throwable has a message; a class overriding
+    ``toString()`` (``QuotaViolationException``) uses its override, with the
+    Python class path (CLAUDE.md, Python Binding Conventions, Errors)."""
+    override = getattr(t, "_java_to_string", None)
+    text = None if override is None else override()
+    if text is not None:
+        return str(text)
     cls = type(t)
     name = f"{cls.__module__}.{cls.__qualname__}"
     message = java_message(t)
     return name if message is None else f"{name}: {message}"
+
+
+def non_null(value: _T, name: str) -> _T:
+    """``value``, which Java dereferences here (a ``toString()`` override's
+    ``field.method()``): ``TypeError("<name> must not be None")`` for a ``None``
+    (CLAUDE.md, Python Binding Conventions, Types)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    return value
 
 
 def cause_message(cause: BaseException | None) -> str | None:
@@ -164,6 +180,7 @@ def singleton(cls: type[BaseException], name: str, message: str | None,
     return error
 
 
+_T = TypeVar("_T")
 _I = TypeVar("_I", bound="Iterable[Any] | None")
 
 
