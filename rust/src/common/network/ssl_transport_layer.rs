@@ -405,6 +405,10 @@ impl TransportLayer for SslTransportLayer {
         self.interest_ops = self.interest_ops.remove(ops);
     }
 
+    fn interest_ops(&self) -> InterestOps {
+        self.interest_ops
+    }
+
     fn is_mute(&self) -> bool {
         !self.interest_ops.contains(InterestOps::OP_READ)
     }

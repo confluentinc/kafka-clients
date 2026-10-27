@@ -402,11 +402,30 @@ impl SaslClientAuthenticator {
     /// Writes pending data from the outbound buffer to the transport.
     ///
     /// Returns `true` if the buffer is completely written.
+    ///
+    /// Never waits for the socket: Java writes to a non-blocking channel, so a
+    /// full send buffer leaves the rest for a later call, made when the channel
+    /// is writable again (`flush_net_out_buffer_and_update_interest_ops` sets
+    /// `OP_WRITE` for it). `try_write_to` writes what the socket takes now; a
+    /// transport without a synchronous write answers it with `WouldBlock`, and
+    /// the async write is then given no time to wait, as `KafkaChannel::write`
+    /// does. Awaiting the write instead would park the selector, and every
+    /// other connection with it, for as long as the broker does not read.
     #[doc(alias = "org.apache.kafka.common.security.authenticator.SaslClientAuthenticator#flushNetOutBuffer")]
     async fn flush_net_out_buffer(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<bool> {
         if let Some(ref mut buf) = self.net_out_buffer {
             if !buf.completed() {
-                buf.write_to(transport).await?;
+                match buf.try_write_to(transport) {
+                    Ok(_) => {},
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        match tokio::time::timeout(std::time::Duration::ZERO, buf.write_to(transport)).await {
+                            Ok(Ok(_)) | Err(_) => {},
+                            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => {},
+                            Ok(Err(e)) => return Err(e),
+                        }
+                    },
+                    Err(e) => return Err(e),
+                }
             }
             Ok(buf.completed())
         } else {
@@ -1004,6 +1023,10 @@ mod tests {
         write_data: Vec<u8>,
         /// Interest operations currently set.
         interest_ops: InterestOps,
+        /// When set, the socket takes nothing: the synchronous write would
+        /// block and the asynchronous one never completes, as when the send
+        /// buffer is full and the broker has stopped reading.
+        blocked_writes: bool,
     }
 
     impl MockTransportLayer {
@@ -1012,6 +1035,7 @@ mod tests {
                 read_data: VecDeque::new(),
                 write_data: Vec::new(),
                 interest_ops: InterestOps::NONE,
+                blocked_writes: false,
             }
         }
 
@@ -1055,6 +1079,10 @@ mod tests {
 
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.interest_ops = self.interest_ops.remove(ops);
+        }
+
+        fn interest_ops(&self) -> InterestOps {
+            self.interest_ops
         }
 
         fn is_mute(&self) -> bool {
@@ -1106,6 +1134,9 @@ mod tests {
         }
 
         fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.blocked_writes {
+                return Box::pin(std::future::pending());
+            }
             self.write_data.extend_from_slice(src);
             let len = src.len();
             Box::pin(async move { Ok(len) })
@@ -1115,6 +1146,9 @@ mod tests {
             &'a mut self,
             srcs: &'a [io::IoSlice<'a>],
         ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.blocked_writes {
+                return Box::pin(std::future::pending());
+            }
             let mut total = 0;
             for slice in srcs {
                 self.write_data.extend_from_slice(slice);
@@ -2147,6 +2181,66 @@ mod tests {
             largest_allocation < PAYLOAD,
             "a {largest_allocation}-byte allocation while setting a {PAYLOAD}-byte response aside"
         );
+    }
+
+    /// Java writes to a non-blocking channel: a request the socket does not
+    /// take now is left for a later call, with `OP_WRITE` set so the selector
+    /// calls back on write readiness. Awaiting the write instead parked the
+    /// selector, and every other connection with it, until the broker read
+    /// again.
+    #[tokio::test]
+    async fn test_a_write_the_socket_does_not_take_does_not_wait() {
+        let mut auth = authenticator_with_time(Arc::new(MockTime::new()));
+        let mut transport = MockTransportLayer::new();
+        transport.blocked_writes = true;
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), auth.authenticate_impl(&mut transport))
+            .await
+            .expect("authenticate must not wait for the socket")
+            .unwrap();
+        assert!(transport.written_data().is_empty());
+        assert!(transport.interest_ops.contains(InterestOps::OP_WRITE));
+        // The state moves on once the request is written.
+        assert_eq!(auth.sasl_state(), SaslState::SendApiVersionsRequest);
+
+        // Writable again: the next call writes the request.
+        transport.blocked_writes = false;
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].api_key(), ApiKeys::API_VERSIONS);
+        assert!(!transport.interest_ops.contains(InterestOps::OP_WRITE));
+        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
+    }
+
+    /// The same for the SaslHandshake that starts a re-authentication, which
+    /// the selector sends from its write pass.
+    #[tokio::test]
+    async fn test_reauthentication_does_not_wait_for_the_socket() {
+        let time = Arc::new(MockTime::new());
+        let mut auth = authenticator_with_time(time.clone());
+        let mut transport = MockTransportLayer::new();
+        complete_authentication(&mut auth, &mut transport, 10_000).await;
+        time.sleep(9_600);
+        transport.blocked_writes = true;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            auth.reauthenticate(ReauthenticationContext::new(None, time.nanoseconds()), &mut transport),
+        )
+        .await
+        .expect("re-authentication must not wait for the socket")
+        .unwrap();
+        assert!(transport.written_data().is_empty());
+        assert!(transport.interest_ops.contains(InterestOps::OP_WRITE));
+
+        transport.blocked_writes = false;
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        let headers = written_request_headers(transport.written_data());
+        assert_eq!(headers.len(), 1);
+        assert_eq!(*headers[0].api_key(), ApiKeys::SASL_HANDSHAKE);
+        assert!(!transport.interest_ops.contains(InterestOps::OP_WRITE));
+        assert_eq!(auth.sasl_state(), SaslState::ReauthReceiveHandshakeOrOtherResponse);
     }
 
     /// A re-authentication the broker rejects fails like an authentication:

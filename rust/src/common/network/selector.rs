@@ -756,9 +756,11 @@ impl Selector {
             // (finish_connect transition, and/or the post-handshake ready
             // transition — order preserved relative to the original code).
             let mut push_connected: u8 = 0;
-            // Whether the channel finished re-authenticating, which flips its
-            // interest from read (handshaking) to write (its queued send).
-            let mut reauthenticated = false;
+            // Whether the channel's interest may have flipped: it finished
+            // re-authenticating (from the handshake's reads to its queued
+            // send), or an authentication step left output the socket did not
+            // take, which wants write readiness.
+            let mut interest_may_have_changed = false;
             // A channel takes at most one completed receive per poll, and a
             // re-authenticating channel's `prepare` may read a response to an
             // earlier request, which is handed out below. Java's single
@@ -783,6 +785,7 @@ impl Selector {
                 let reauthenticating = channel.successful_authentications() > 0;
                 if channel.is_connected() && !channel.ready() && !(reauthenticating && has_completed_receive) {
                     channel.prepare().await?;
+                    interest_may_have_changed |= !channel.ready();
                 }
 
                 if !was_ready && channel.ready() {
@@ -801,7 +804,7 @@ impl Selector {
                     // client fetch its API versions anew. Java reports a channel
                     // as connected once, when its socket connects.
                     if is_reauthentication {
-                        reauthenticated = true;
+                        interest_may_have_changed = true;
                     } else {
                         push_connected += 1;
                     }
@@ -813,7 +816,7 @@ impl Selector {
                     channel.poll_response_received_during_reauthentication()
                 };
             }
-            if reauthenticated {
+            if interest_may_have_changed {
                 let key = self.intern_id(channel_id);
                 self.mark_interest_dirty(&key);
             }
@@ -3598,6 +3601,9 @@ mod tests {
         }
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.inner.remove_interest_ops(ops)
+        }
+        fn interest_ops(&self) -> InterestOps {
+            self.inner.interest_ops()
         }
         fn is_mute(&self) -> bool {
             self.inner.is_mute()
