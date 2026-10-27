@@ -14,7 +14,7 @@
 
 """``ClientQuotaEntity``: Java's ``org.apache.kafka.common.quota.ClientQuotaEntity``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.quota``. The
+In ``confluent_kafka.common.quota``, the module of its Java package. The
 entries are copied on construction and handed out as a new ``dict``, so the
 object stays as Java's: its field is ``final`` and it has no setter.
 """

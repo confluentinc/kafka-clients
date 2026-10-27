@@ -39,7 +39,9 @@ import pytest
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 from confluent_kafka import IllegalArgumentError, IllegalStateError
-from confluent_kafka.common import Header, Headers, TimestampType, TopicPartition
+from confluent_kafka.common.header import Header, Headers
+from confluent_kafka.common.record import TimestampType
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import RecordDeserializationError
 from confluent_kafka.consumer import ConsumerRecord
 from confluent_kafka.consumer._poll import deserialize_batch

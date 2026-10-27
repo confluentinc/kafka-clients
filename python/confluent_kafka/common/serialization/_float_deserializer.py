@@ -32,7 +32,7 @@ from typing import Any
 import struct
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 _CLASS_NAME_BY_SIZE = {4: "Deserializer", 8: "DoubleDeserializer"}
 

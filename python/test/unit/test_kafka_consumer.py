@@ -159,7 +159,8 @@ from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError,
     UnsupportedOperationError,
 )
-from confluent_kafka.common import Headers, KafkaError, TopicPartition
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import InvalidGroupIdError, WakeupError

@@ -15,7 +15,7 @@
 """``ClientQuotaFilterComponent``: Java's
 ``org.apache.kafka.common.quota.ClientQuotaFilterComponent``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.quota``. Java's
+In ``confluent_kafka.common.quota``, the module of its Java package. Java's
 only constructor is private and the class has no setters, so ``__init__``
 raises ``TypeError`` naming the static factories, and the private constructor
 is the class method ``_new`` (CLAUDE.md, Python Binding Conventions, Class

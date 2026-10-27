@@ -15,8 +15,7 @@
 """``TokenInformation``: Java's
 ``org.apache.kafka.common.security.token.delegation.TokenInformation``.
 
-In ``confluent_kafka.common``, the nearest module above
-``common.security.token.delegation``. Java's two constructors are one
+In ``confluent_kafka.common.security.token.delegation``, the module of its Java package. Java's two constructors are one
 keyword-only constructor: ``(tokenId, owner, renewers, issueTimestamp,
 maxTimestamp, expiryTimestamp)`` passes ``owner`` as the token requester, so
 leaving ``token_requester`` out selects that form; a ``None`` is Java's null,
@@ -35,7 +34,7 @@ from typing import cast, overload
 
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
-from confluent_kafka.common.kafka_principal import KafkaPrincipal
+from confluent_kafka.common.security.auth.kafka_principal import KafkaPrincipal
 
 __all__ = ["TokenInformation"]
 

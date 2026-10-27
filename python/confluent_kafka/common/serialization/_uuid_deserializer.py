@@ -27,7 +27,7 @@ import uuid
 
 from confluent_kafka._java import uuid_from_string
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 from ._encoding import decode

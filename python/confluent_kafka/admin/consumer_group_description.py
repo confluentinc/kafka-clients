@@ -32,7 +32,8 @@ from confluent_kafka._java import java_str
 from ._values import frozen
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclOperation, GroupState, GroupType, Node
+    from confluent_kafka.common.acl import AclOperation
+    from confluent_kafka.common import GroupState, GroupType, Node
 
     from .member_description import MemberDescription
 

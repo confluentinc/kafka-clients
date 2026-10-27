@@ -54,15 +54,9 @@ from confluent_kafka.admin.remove_members_from_consumer_group_options import (
     RemoveMembersFromConsumerGroupOptions,
 )
 from confluent_kafka.admin.topic_listing import TopicListing
-from confluent_kafka.common import (
-    AclOperation,
-    GroupState,
-    GroupType,
-    KafkaPrincipal,
-    Node,
-    TopicPartition,
-    Uuid,
-)
+from confluent_kafka.common.acl import AclOperation
+from confluent_kafka.common import GroupState, GroupType, Node, TopicPartition, Uuid
+from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors import TopicAuthorizationError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError

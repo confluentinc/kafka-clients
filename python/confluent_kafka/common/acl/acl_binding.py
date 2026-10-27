@@ -14,15 +14,15 @@
 
 """``AclBinding``: Java's ``org.apache.kafka.common.acl.AclBinding``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.acl``.
+In ``confluent_kafka.common.acl``, the module of its Java package.
 """
 
 from __future__ import annotations
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.access_control_entry import AccessControlEntry
-from confluent_kafka.common.acl_binding_filter import AclBindingFilter
-from confluent_kafka.common.resource_pattern import ResourcePattern
+from confluent_kafka.common.acl.access_control_entry import AccessControlEntry
+from confluent_kafka.common.acl.acl_binding_filter import AclBindingFilter
+from confluent_kafka.common.resource.resource_pattern import ResourcePattern
 
 __all__ = ["AclBinding"]
 

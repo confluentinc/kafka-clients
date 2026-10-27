@@ -225,13 +225,9 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credential_alteration import (
         UserScramCredentialAlteration,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
-        ClientQuotaAlteration,
-        ClientQuotaFilter,
-        TopicPartition,
-    )
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import ClientQuotaAlteration, ClientQuotaFilter
+    from confluent_kafka.common import TopicPartition
     from confluent_kafka.common.config.config_resource import ConfigResource
     from confluent_kafka.common.election_type import ElectionType
     from confluent_kafka.common.topic_collection import TopicCollection

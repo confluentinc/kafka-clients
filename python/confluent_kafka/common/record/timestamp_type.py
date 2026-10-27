@@ -14,7 +14,7 @@
 
 """``TimestampType``: Java's ``org.apache.kafka.common.record.TimestampType``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.record``. An
+In ``confluent_kafka.common.record``, the module of its Java package. An
 ``enum.IntEnum`` valued by Java's ``id`` field; Java's other public field,
 ``name``, is reached through Java's own methods: ``__str__`` (``toString``) and
 ``for_name`` (``forName``) (CLAUDE.md, Python Binding Conventions, Class

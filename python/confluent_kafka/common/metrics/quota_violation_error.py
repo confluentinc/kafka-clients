@@ -27,7 +27,7 @@ from confluent_kafka import _throwable
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.kafka_metric import KafkaMetric
+    from confluent_kafka.common.metrics.kafka_metric import KafkaMetric
 
 __all__ = ["QuotaViolationError"]
 

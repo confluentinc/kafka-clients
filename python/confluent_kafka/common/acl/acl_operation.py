@@ -14,7 +14,7 @@
 
 """``AclOperation``: Java's ``org.apache.kafka.common.acl.AclOperation``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.acl``. An
+In ``confluent_kafka.common.acl``, the module of its Java package. An
 ``enum.IntEnum`` valued by Java's ``code`` field, the one integer field its
 constructor sets (CLAUDE.md, Python Binding Conventions, Class family).
 ``__str__`` is Java's inherited ``Enum.toString()``, the constant's name.

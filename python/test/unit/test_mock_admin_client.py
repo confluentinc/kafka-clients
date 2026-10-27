@@ -86,14 +86,13 @@ from confluent_kafka.admin import (
     SupportedVersionRange,
     UpdateFeaturesOptions,
 )
+from confluent_kafka.common.acl import AclBindingFilter
+from confluent_kafka.common.quota import ClientQuotaFilter
+from confluent_kafka.common.security.token.delegation import DelegationToken
 from confluent_kafka.common import (
-    AclBindingFilter,
-    ClientQuotaFilter,
-    DelegationToken,
     ElectionType,
     GroupState,
     GroupType,
-    KafkaPrincipal,
     Node,
     TopicCollection,
     TopicPartition,
@@ -101,6 +100,7 @@ from confluent_kafka.common import (
     TopicPartitionReplica,
     Uuid,
 )
+from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors.delegation_token_not_found_error import (
     DelegationTokenNotFoundError,

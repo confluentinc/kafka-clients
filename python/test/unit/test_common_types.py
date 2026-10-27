@@ -41,18 +41,16 @@ from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.common import (
     Cluster,
-    KafkaMetric,
-    Measurable,
     Metric,
-    MetricConfig,
     MetricName,
     Node,
     PartitionInfo,
-    TimestampType,
     TopicIdPartition,
     TopicPartition,
     Uuid,
 )
+from confluent_kafka.common.metrics import KafkaMetric, Measurable, MetricConfig
+from confluent_kafka.common.record import TimestampType
 
 # --------------------------------------------------------------------------- #
 # Uuid: UuidTest

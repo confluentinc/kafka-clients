@@ -14,15 +14,15 @@
 
 """``ResourcePattern``: Java's ``org.apache.kafka.common.resource.ResourcePattern``.
 
-In ``confluent_kafka.common``, the nearest module above ``common.resource``.
+In ``confluent_kafka.common.resource``, the module of its Java package.
 """
 
 from __future__ import annotations
 
 from confluent_kafka._java import java_str
-from confluent_kafka.common.pattern_type import PatternType
-from confluent_kafka.common.resource_pattern_filter import ResourcePatternFilter
-from confluent_kafka.common.resource_type import ResourceType
+from confluent_kafka.common.resource.pattern_type import PatternType
+from confluent_kafka.common.resource.resource_pattern_filter import ResourcePatternFilter
+from confluent_kafka.common.resource.resource_type import ResourceType
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 __all__ = ["ResourcePattern"]
