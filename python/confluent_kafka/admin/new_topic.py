@@ -82,7 +82,7 @@ class NewTopic:
         (Java's ``Collections.unmodifiableMap(null)``).
         """
         self._name = name
-        self._configs: dict[str, str] | None = None
+        self._configs: dict[str, str | None] | None = None
         if replicas_assignments is MISSING:
             self._num_partitions: int | None = num_partitions
             self._replication_factor: int | None = replication_factor
@@ -119,17 +119,19 @@ class NewTopic:
         return None if a is None else {k: list(v) for k, v in a.items()}
 
     @overload
-    def configs(self) -> dict[str, str] | None: ...
+    def configs(self) -> dict[str, str | None] | None: ...
     @overload
-    def configs(self, *, configs: Mapping[str, str] | None) -> NewTopic: ...
+    def configs(self, *, configs: Mapping[str, str | None] | None) -> NewTopic: ...
 
-    def configs(self, *, configs: Mapping[str, str] | None = MISSING
-                ) -> dict[str, str] | None | NewTopic:
+    def configs(self, *, configs: Mapping[str, str | None] | None = MISSING
+                ) -> dict[str, str | None] | None | NewTopic:
         """With no argument: the configuration for the new topic or ``None`` if
         no configs ever specified.
 
         With ``configs``: set the configuration to use on the new topic and
-        return this ``NewTopic``.
+        return this ``NewTopic``. Java stores the map as given, so a ``None``
+        value is Java's ``null`` config value, which ``createTopics`` sends to
+        the broker as a null value.
         """
         if configs is MISSING:
             c = self._configs
