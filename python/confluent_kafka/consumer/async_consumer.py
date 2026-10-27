@@ -99,7 +99,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     Construct an ``AsyncKafkaConsumer`` or ``AsyncMockConsumer``; an async
     context manager whose exit closes. The async classes follow the sync
     thread rule per event loop: a call while another task is inside the
-    consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted.
+    consumer raises ``ConcurrentModificationError``, ``wakeup()`` and
+    ``metrics()`` excepted, as Java leaves both outside ``acquire()``.
     """
 
     def __init__(self) -> None:

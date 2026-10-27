@@ -706,6 +706,22 @@ def test_invalid_group_metadata() -> None:
     assert str(e.value) == CLOSED
 
 
+def test_metrics_from_another_thread_while_polling() -> None:
+    # Java's metrics() takes no acquire() (AsyncKafkaConsumer.metrics()), so a
+    # metrics-reporter thread reads while the owner thread is inside poll().
+    consumer = new_consumer()
+    consumer.subscribe(topics=[TOPIC])
+    worker, outcome = _poll_in_background(consumer)
+    try:
+        names = {metric_name.name() for metric_name in consumer.metrics()}
+        assert "last-poll-seconds-ago" in names
+        consumer.wakeup()
+    finally:
+        worker.join(WAIT)
+    assert isinstance(outcome.get("error"), WakeupError)
+    consumer.close(option=CloseOptions.timeout(timeout=0))
+
+
 # Java's BootstrapResolutionException message (KIP-909), for a 3000 ms budget.
 BOOTSTRAP_RESOLUTION_FAILED = ("Failed to resolve bootstrap servers after 3000ms. Please check "
                                "your bootstrap.servers configuration and DNS settings.")
