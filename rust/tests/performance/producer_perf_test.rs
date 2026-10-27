@@ -836,10 +836,12 @@ async fn producer_perf_test() {
             let record: ProducerRecord<&[u8], &[u8]> =
                 ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
             if let Ok(produce_call) = producer.send(record, None).await {
-                let md = produce_call
-                    .get_with_timeout(Duration::from_secs(30))
-                    .await
-                    .expect("warmup send failed");
+                // No timeout of our own, as Java's `f.get()` and the C harness:
+                // the producer's delivery.timeout.ms bounds the wait. A shorter
+                // one (30 s, request.timeout.ms) failed the run whenever one
+                // request was lost to a broker dropping its connection, before
+                // the producer could retry it.
+                let md = produce_call.get().await.expect("warmup send failed");
                 assert!(
                     !config.do_verify || verify_record_metadata(&md, &topic),
                     "warmup failed due to message verification error"
