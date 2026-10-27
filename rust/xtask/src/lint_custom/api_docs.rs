@@ -454,13 +454,19 @@ pub(super) fn c_items(krate: &Crate, origins: &BTreeMap<String, COrigin>) -> Vec
 
 /// The parameter names `sig` must document: every plain-name parameter but
 /// `self`, and for a C export (`c_export`) also `self_` and a trailing
-/// `out_err` (documentation.md §1).
+/// `out_err` (documentation.md §1). A C export's names are the header's, which
+/// cbindgen writes without Rust's raw-identifier prefix (`r#type` -> `type`).
 pub(super) fn documented_params(sig: &syn::Signature, c_export: bool) -> Vec<String> {
+    use syn::ext::IdentExt;
     let mut names: Vec<String> = Vec::new();
     for input in &sig.inputs {
         let syn::FnArg::Typed(pt) = input else { continue };
         let syn::Pat::Ident(p) = &*pt.pat else { continue };
-        names.push(p.ident.to_string());
+        names.push(if c_export {
+            p.ident.unraw().to_string()
+        } else {
+            p.ident.to_string()
+        });
     }
     if c_export {
         names.retain(|n| n != "self_");
@@ -2101,6 +2107,20 @@ mod tests {
         // not last is not.
         assert_eq!(keys(&findings), ["param kafka_y"]);
         assert_eq!(findings[0].detail, "not listed under `# Parameters`: `out_err`, `n`");
+    }
+
+    #[test]
+    fn test_c_export_raw_identifier_param() {
+        // The header names the parameter `type`, as cbindgen drops the `r#`.
+        let c = "/// Plain.\n///\n/// # Parameters\n///\n/// - `type` - the type\n\
+                 #[unsafe(no_mangle)]\n\
+                 pub extern \"C\" fn kafka_x(r#type: i8) {}\n\
+                 /// Plain.\n///\n/// # Parameters\n///\n/// - `r#type` - the type\n\
+                 #[unsafe(no_mangle)]\n\
+                 pub extern \"C\" fn kafka_y(r#type: i8) {}\n";
+        let findings = run("c-export-raw", &format!("{}{c}", faithful()), "", None);
+        assert_eq!(keys(&findings), ["param kafka_y"]);
+        assert_eq!(findings[0].detail, "not listed under `# Parameters`: `type`");
     }
 
     #[test]
