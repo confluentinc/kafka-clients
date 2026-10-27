@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 
-use crate::common::metrics::KafkaMetric;
-use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::common::metrics::MetricsView;
+use crate::common::{Error, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::StrategyType;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
@@ -653,18 +653,18 @@ where
         mock_group_metadata()
     }
 
-    /// Returns an empty map: the mock keeps no metrics.
+    /// Returns an empty view: the mock keeps no metrics.
     ///
     /// # Panics
     ///
     /// Panics with `"This consumer has already been closed."` on a closed
     /// mock, where Java's `ensureNotClosed()` throws `IllegalStateException`:
     /// calling it after `close()` is a programming error.
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         if let Err(error) = self.ensure_not_closed() {
             panic!("{}", error.message());
         }
-        HashMap::new()
+        MetricsView::default()
     }
 
     /// Returns the end offset set by [`MockConsumer::update_end_offsets`] minus

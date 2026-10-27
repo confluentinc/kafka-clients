@@ -235,7 +235,7 @@ use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS, Mark};
 use crate::ffi::common::deliver_unit;
 use crate::ffi::common::fail_with;
-use crate::ffi::common::metrics::box_metrics_map;
+use crate::ffi::common::metrics::metrics_view::{box_metrics_view, kafka_common_metrics_MetricsView_t};
 use crate::ffi::common::partition_info::{box_partition_info, kafka_common_PartitionInfo_destroy};
 use crate::ffi::common::store_error;
 use crate::ffi::common::topic_partition::topic_partition_ref;
@@ -2414,29 +2414,30 @@ unsafe fn destroy_partition_info(element: *mut c_void) {
 
 /// Get the full set of internal metrics maintained by the producer.
 ///
+/// The returned map is an unmodifiable live view of the metrics. Changes to the
+/// underlying metrics will be reflected in the returned map.
+///
 /// # Returns
 ///
-/// The map of metrics currently maintained by the producer, from
-/// `kafka_common_MetricName_t *` to `kafka_common_metrics_KafkaMetric_t *`.
-///
-/// # Translation notes
-///
-/// WARNING: the map is a snapshot, not Java's live view: metrics registered or
-/// removed after the call are not reflected in it. `kafka_Map_get` compares names
-/// by value.
+/// An unmodifiable live view of the map of metrics currently maintained by the
+/// producer, from `kafka_common_MetricName_t *` to
+/// `kafka_common_metrics_KafkaMetric_t *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live view. The returned map, its keys and its values are
-/// owned by the caller.
+/// `self_` must be a live view. The returned view is owned by the caller, freed
+/// with `kafka_common_metrics_MetricsView_destroy`, and stays valid after the
+/// producer is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_producer_Producer_metrics(self_: *const kafka_producer_Producer_t) -> *mut kafka_Map_t {
+pub unsafe extern "C" fn kafka_producer_Producer_metrics(
+    self_: *const kafka_producer_Producer_t,
+) -> *mut kafka_common_metrics_MetricsView_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live view, as `client_ref` requires;
     // `client` is used only during the call.
     let client = unsafe { client_ref(self_) };
     // After `_destroy` began, the producer's metrics are gone with it.
-    box_metrics_map(client.producer().map(|producer| producer.metrics()).unwrap_or_default())
+    box_metrics_view(client.producer().map(|producer| producer.metrics()).unwrap_or_default())
 }
 
 /// `Producer.close()`, blocking: `close(Duration.ofMillis(Long.MAX_VALUE))`,

@@ -66,11 +66,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
+use crate::common::metrics::{MetricConfig, Metrics, MetricsView, RecordingLevel};
 use crate::common::utils::Time;
 use crate::common::utils::Utils;
 use crate::common::utils::internals::LogContext;
-use crate::common::{Error, IsolationLevel, MetricName, PartitionInfo, TopicPartition};
+use crate::common::{Error, IsolationLevel, PartitionInfo, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::ConsumerRecords;
@@ -470,15 +470,15 @@ impl ConsumerHandle {
     }
 
     /// [`Consumer::metrics`](crate::consumer::Consumer::metrics) via the shared metrics
-    /// registry; an empty map for a `MockConsumer`, whose `metrics()` is one.
+    /// registry; an empty view for a `MockConsumer`, whose `metrics()` is one.
     ///
     /// Crate-private: the C binding's `kafka_consumer_Consumer_metrics` reads
     /// through it so that, as Java's `AsyncKafkaConsumer.metrics()` (which takes
     /// no `acquire()`), it answers while another call holds the consumer.
-    pub(crate) fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    pub(crate) fn metrics(&self) -> MetricsView {
         match &self.inner {
             ConsumerHandleInner::Async(state) => state.metrics.metrics(),
-            ConsumerHandleInner::Mock { .. } => HashMap::new(),
+            ConsumerHandleInner::Mock { .. } => MetricsView::default(),
         }
     }
 
@@ -4593,17 +4593,13 @@ where
     /// (`AsyncKafkaConsumer#metrics`:
     /// `return Collections.unmodifiableMap(metrics.metrics());`).
     ///
-    /// Snapshots the consumer's owned `Arc<Metrics>` registry — the SAME
-    /// registry into which every metrics manager (fetch, kafka-consumer,
-    /// heartbeat, offset-commit, rebalance + rebalance-callback, async)
-    /// registers (M3–M6). The returned map is therefore the full Java metric
-    /// set. Cold path (monitoring frequency); the snapshot clones the
-    /// registry `HashMap` under its lock.
-    ///
-    /// Rust returns the owned `HashMap` (caller may not mutate the registry
-    /// through it — it is a clone of `Arc<KafkaMetric>` handles), the natural
-    /// analog of Java's `Collections.unmodifiableMap`.
-    pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    /// A live, read-only view of the consumer's owned `Arc<Metrics>` registry —
+    /// the SAME registry into which every metrics manager (fetch,
+    /// kafka-consumer, heartbeat, offset-commit, rebalance +
+    /// rebalance-callback, async) registers (M3–M6). The view therefore holds
+    /// the full Java metric set, and sees metrics registered later, as Java's
+    /// `Collections.unmodifiableMap` does. Taking it copies nothing.
+    pub fn metrics(&self) -> MetricsView {
         self.metrics.metrics()
     }
 
@@ -7667,7 +7663,7 @@ where
         AsyncKafkaConsumer::current_lag(self, topic_partition).await
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         AsyncKafkaConsumer::metrics(self)
     }
 
@@ -9242,9 +9238,10 @@ mod tests {
         let metrics: Weak<Metrics> = Arc::downgrade(&consumer.metrics);
         // Every registered `KafkaMetric` lives in the registry's shared map, so a
         // metric outliving the consumer means the registry itself leaked.
-        let registered: Vec<(MetricName, Weak<KafkaMetric>)> = consumer
+        let registered: Vec<(crate::common::MetricName, Weak<crate::common::metrics::KafkaMetric>)> = consumer
             .metrics
             .metrics()
+            .snapshot()
             .iter()
             .map(|(name, metric)| (name.clone(), Arc::downgrade(metric)))
             .collect();
@@ -11426,7 +11423,7 @@ mod tests {
 
         // The snapshot is keyed by MetricName and the values impl `Metric`:
         // every entry's `metric_name()` matches its key (sanity of the snapshot).
-        for (name, metric) in &snapshot {
+        for (name, metric) in snapshot.snapshot().iter() {
             assert_eq!(metric.metric_name(), name);
         }
     }
@@ -16536,7 +16533,8 @@ mod tests {
             consumer
                 .metrics
                 .metrics()
-                .into_iter()
+                .snapshot()
+                .iter()
                 .find(|(name, _)| name.name() == "commit-sync-time-ns-total")
                 .and_then(|(_, metric)| crate::common::Metric::metric_value(metric.as_ref()).as_double())
                 .expect("commit-sync-time-ns-total registered")

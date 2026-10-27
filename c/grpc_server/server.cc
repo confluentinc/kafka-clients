@@ -413,17 +413,19 @@ MetadataFields read_metadata(const kafka_producer_RecordMetadata_t* metadata) {
   return out;
 }
 
-// Copies an OWNED `metrics()` map of owned `kafka_common_MetricName_t *` ->
-// owned `kafka_common_metrics_KafkaMetric_t *` (the shape both the producer
-// and the consumer return) into the proto list, then destroys the map, which
-// frees both sides of every entry.
-void metrics_map_to_proto(kafka_Map_t* map, MetricList* out) {
-  const int32_t n = kafka_Map_size(map);
-  for (int32_t i = 0; i < n; i++) {
+// Copies an OWNED `metrics()` view (the shape both the producer and the
+// consumer return) into the proto list, iterating a snapshot of it: each
+// `kafka_Map_Entry_t` holds a `kafka_common_MetricName_t *` key and a
+// `kafka_common_metrics_KafkaMetric_t *` value, owned by the iterator. Then
+// destroys the iterator and the view.
+void metrics_map_to_proto(kafka_common_metrics_MetricsView_t* view, MetricList* out) {
+  kafka_Iterator_t* it = kafka_common_metrics_MetricsView_iterator(view);
+  while (kafka_Iterator_has_next(it)) {
     Metric* m = out->add_metrics();
-    const auto* name = static_cast<const kafka_common_MetricName_t*>(kafka_Map_key(map, i));
+    const auto* entry = static_cast<const kafka_Map_Entry_t*>(kafka_Iterator_next(it));
+    const auto* name = static_cast<const kafka_common_MetricName_t*>(kafka_Map_Entry_key(entry));
     const auto* metric =
-        static_cast<const kafka_common_metrics_KafkaMetric_t*>(kafka_Map_value(map, i));
+        static_cast<const kafka_common_metrics_KafkaMetric_t*>(kafka_Map_Entry_value(entry));
     const char* metric_name = kafka_common_MetricName_name(name);
     const char* group = kafka_common_MetricName_group(name);
     const char* desc = kafka_common_MetricName_description(name);
@@ -465,7 +467,8 @@ void metrics_map_to_proto(kafka_Map_t* map, MetricList* out) {
     }
     kafka_common_MetricValue_destroy(value);
   }
-  kafka_Map_destroy(map);
+  kafka_Iterator_destroy(it);
+  kafka_common_metrics_MetricsView_destroy(view);
 }
 
 // Defined in the consumer section below; reused by the producer PartitionsFor.
@@ -1217,14 +1220,13 @@ class ProducerServiceImpl final : public ProducerService::Service {
       *resp->mutable_error() = make_synthetic_error("unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    // An owned map of owned MetricName -> KafkaMetric handles; destroying the
-    // map frees both sides of every entry.
-    kafka_Map_t* map = kafka_producer_Producer_metrics(producer);
-    if (map == nullptr) {
+    // An owned live view of the producer's metrics.
+    kafka_common_metrics_MetricsView_t* view = kafka_producer_Producer_metrics(producer);
+    if (view == nullptr) {
       *resp->mutable_error() = make_synthetic_error("no metrics for producer " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    metrics_map_to_proto(map, resp->mutable_metrics());
+    metrics_map_to_proto(view, resp->mutable_metrics());
     return grpc::Status::OK;
   }
 
@@ -2034,16 +2036,16 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    // An owned map of owned MetricName -> KafkaMetric handles, the same shape
-    // the producer returns. Like Java's AsyncKafkaConsumer.metrics() it takes
-    // no single-owner flag, so it answers while another operation is in flight.
-    kafka_Map_t* map = kafka_consumer_Consumer_metrics(c);
-    if (map == nullptr) {
+    // An owned live view of the consumer's metrics, the same shape the producer
+    // returns. Like Java's AsyncKafkaConsumer.metrics() it takes no
+    // single-owner flag, so it answers while another operation is in flight.
+    kafka_common_metrics_MetricsView_t* view = kafka_consumer_Consumer_metrics(c);
+    if (view == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
           "no metrics for consumer " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    metrics_map_to_proto(map, resp->mutable_metrics());
+    metrics_map_to_proto(view, resp->mutable_metrics());
     return grpc::Status::OK;
   }
 

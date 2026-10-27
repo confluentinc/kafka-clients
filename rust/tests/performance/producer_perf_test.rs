@@ -936,7 +936,7 @@ async fn producer_perf_test() {
     // compression run's wire-bytes estimate (achieved MiB/s / compression-rate)
     // can be cross-checked against an out-of-band network-counter measurement.
     // Must run before close() — metrics are torn down with the producer.
-    for (name, metric) in producer.metrics() {
+    for (name, metric) in producer.metrics().snapshot().iter() {
         if name.name() == "compression-rate-avg" {
             println!("[METRIC] compression-rate-avg = {:?}", metric.metric_value());
         }

@@ -481,9 +481,11 @@ static void test_mock_consumer_concurrency_guard(void) {
     err = NULL;
     TEST_ASSERT_NULL(meta);
     /* metrics() takes no guard in Java (AsyncKafkaConsumer.metrics()): it answers. */
-    kafka_Map_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
+    kafka_common_metrics_MetricsView_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
     TEST_ASSERT_NOT_NULL(metrics);
-    kafka_Map_destroy(metrics);
+    /* Java's MockConsumer keeps no metrics: an empty view. */
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_metrics_MetricsView_is_empty(metrics));
+    kafka_common_metrics_MetricsView_destroy(metrics);
     /* Neither do the mock's own getters: Java's closed() waits on the
      * monitor, shouldRebalance() and lastPollTimeout() take no lock. */
     TEST_ASSERT_EQUAL_INT8(0, kafka_consumer_MockConsumer_closed(f.mock));
@@ -1324,7 +1326,7 @@ static void test_mock_consumer_destroy_runs_pending_completion_once(void) {
 }
 
 // ---------------------------------------------------------------------------
-// current_lag follows MockConsumer.currentLag; metrics is a map
+// current_lag follows MockConsumer.currentLag; metrics is an empty view
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_current_lag_and_metrics(void) {
@@ -1388,9 +1390,11 @@ static void test_mock_consumer_current_lag_and_metrics(void) {
     kafka_common_Error_destroy(done.error);
     kafka_common_TopicPartition_destroy(other);
 
-    kafka_Map_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
+    kafka_common_metrics_MetricsView_t *metrics = kafka_consumer_Consumer_metrics(f.consumer);
     TEST_ASSERT_NOT_NULL(metrics);
-    kafka_Map_destroy(metrics);
+    /* Java's MockConsumer keeps no metrics: an empty view. */
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_metrics_MetricsView_is_empty(metrics));
+    kafka_common_metrics_MetricsView_destroy(metrics);
     fixture_destroy(&f);
 }
 

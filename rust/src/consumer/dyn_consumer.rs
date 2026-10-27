@@ -29,8 +29,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::metrics::KafkaMetric;
-use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::common::metrics::MetricsView;
+use crate::common::{Error, PartitionInfo, TopicPartition};
 use crate::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecords,
     OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
@@ -134,7 +134,7 @@ where
     /// # Returns
     ///
     /// As [`Consumer::metrics`].
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
 
     /// See [`Consumer::subscribe_with_topics`].
     ///
@@ -704,7 +704,7 @@ where
         Box::pin(Consumer::current_lag(self, topic_partition))
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         Consumer::metrics(self)
     }
 
@@ -966,7 +966,7 @@ where
         DynConsumer::current_lag(self, topic_partition).await
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         DynConsumer::metrics(self)
     }
 

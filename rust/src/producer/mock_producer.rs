@@ -54,7 +54,8 @@ use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeaders;
-use crate::common::metrics::KafkaMetric;
+use crate::common::metrics::metrics_view::SharedMetricMap;
+use crate::common::metrics::{KafkaMetric, MetricsView};
 use crate::common::protocol::Errors;
 use crate::common::record::internal::RecordBatch;
 use crate::common::serialization::{DynSerializer, Serializer};
@@ -187,6 +188,11 @@ pub struct MockProducer<K, V> {
     /// Java `valueSerializer`, or `None`. Outside the
     /// mutex, as `key_serializer`.
     value_serializer: Option<Box<dyn DynSerializer<V>>>,
+    /// Java `mockMetrics`: the user-supplied metrics returned by
+    /// [`metrics()`](Producer::metrics), seeded via
+    /// [`set_mock_metrics`](MockProducer::set_mock_metrics). Outside the mutex:
+    /// a view returned by `metrics()` reads it, as Java returns the field.
+    mock_metrics: SharedMetricMap,
 }
 
 impl<K, V> std::fmt::Debug for MockProducer<K, V> {
@@ -259,11 +265,6 @@ struct MockProducerInner<K, V> {
     partitions_for_error: Option<Error>,
     /// Java `closeException`.
     close_error: Option<Error>,
-    /// User-supplied metrics returned by [`metrics()`](Producer::metrics).
-    ///
-    /// Mirrors Java's `MockProducer.mockMetrics` map, seeded via
-    /// [`set_mock_metrics`](MockProducer::set_mock_metrics).
-    mock_metrics: HashMap<MetricName, Arc<KafkaMetric>>,
 }
 
 impl<K, V> MockProducerInner<K, V> {
@@ -745,10 +746,10 @@ impl<K, V> MockProducer<K, V> {
                 flush_error: None,
                 partitions_for_error: None,
                 close_error: None,
-                mock_metrics: HashMap::new(),
             }),
             key_serializer,
             value_serializer,
+            mock_metrics: SharedMetricMap::default(),
         }
     }
 
@@ -1018,8 +1019,7 @@ impl<K, V> MockProducer<K, V> {
     // returned by `metrics()`.
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#setMockMetrics")]
     pub fn set_mock_metrics(&self, name: MetricName, metric: Arc<KafkaMetric>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.mock_metrics.insert(name, metric);
+        self.mock_metrics.insert(name, metric);
     }
 
     /// Error to return when [`init_transactions`](Producer::init_transactions)
@@ -1428,9 +1428,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
 
     // Return the mock metrics. Corresponds to Java's `MockProducer.metrics()`
     // returning the `mockMetrics` map.
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
-        let inner = self.inner.lock().unwrap();
-        inner.mock_metrics.clone()
+    fn metrics(&self) -> MetricsView {
+        MetricsView::of(self.mock_metrics.clone())
     }
 
     async fn close(&self) -> Result<(), Error> {
@@ -2971,11 +2970,15 @@ mod tests {
             .unwrap();
         let metric = registry.metric(&name).unwrap();
 
+        let view = producer.metrics();
         producer.set_mock_metrics(name.clone(), Arc::clone(&metric));
 
-        let snapshot = producer.metrics();
-        assert_eq!(snapshot.len(), 1);
-        assert!(snapshot.contains_key(&name));
+        // The view returned before `set_mock_metrics` sees the metric, as
+        // Java's `metrics()` returns the `mockMetrics` field itself.
+        assert_eq!(view.len(), 1);
+        assert!(view.contains_key(&name));
+        assert!(Arc::ptr_eq(&metric, &view.get(&name).unwrap()));
+        assert_eq!(producer.metrics().len(), 1);
     }
 
     /// Tests `uncommitted_records` and `uncommitted_offsets`, the two staging

@@ -39,7 +39,6 @@ use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::common::metric_name::{box_metric_name, kafka_common_MetricName_t, metric_name_ref};
 use crate::ffi::common::metric_name_template::{kafka_common_MetricNameTemplate_t, metric_name_template_ref};
-use crate::ffi::common::metrics::box_metrics_map;
 use crate::ffi::common::metrics::kafka_metric::{box_kafka_metric, kafka_common_metrics_KafkaMetric_t};
 use crate::ffi::common::metrics::measurable::{ArcMeasurable, kafka_common_metrics_Measurable_t, take_measurable};
 use crate::ffi::common::metrics::metric_config::{
@@ -49,6 +48,7 @@ use crate::ffi::common::metrics::metric_value_provider::{
     kafka_common_metrics_MetricValueProvider_t, take_metric_value_provider,
 };
 use crate::ffi::common::metrics::metrics_reporter::{kafka_common_metrics_MetricsReporter_t, take_metrics_reporter};
+use crate::ffi::common::metrics::metrics_view::{box_metrics_view, kafka_common_metrics_MetricsView_t};
 use crate::ffi::common::metrics::sensor::{
     box_sensor, kafka_common_metrics_Sensor_RecordingLevel_t, kafka_common_metrics_Sensor_t, list_sensors,
     recording_level_of,
@@ -1092,22 +1092,22 @@ pub unsafe extern "C" fn kafka_common_metrics_Metrics_add_reporter(
 ///
 /// # Returns
 ///
-/// A snapshot: a map of `kafka_common_MetricName_t *` keys to
-/// `kafka_common_metrics_KafkaMetric_t *` values.
+/// A live, read-only view of the metrics, from `kafka_common_MetricName_t *`
+/// to `kafka_common_metrics_KafkaMetric_t *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid registry handle. The returned map, its keys and its values are owned by
-/// the caller and freed together with `kafka_Map_destroy`.
+/// `self_` must be a valid registry handle. The returned view is owned by the caller, freed with
+/// `kafka_common_metrics_MetricsView_destroy`, and stays valid after the registry is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Metrics_metrics(
     self_: *const kafka_common_metrics_Metrics_t,
-) -> *mut kafka_Map_t {
+) -> *mut kafka_common_metrics_MetricsView_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid registry handle, as `metrics_ref`
-    // requires; the reference is used only within this call. The snapshot is collected into owned
-    // values.
-    box_metrics_map(unsafe { metrics_ref(self_) }.metrics())
+    // requires; the reference is used only within this call. The view holds its own reference to
+    // the registry's map.
+    box_metrics_view(unsafe { metrics_ref(self_) }.metrics())
 }
 
 /// Returns the metric registered under `metric_name`, or `NULL` when none is.
@@ -1563,6 +1563,10 @@ mod tests {
         kafka_common_metrics_MetricConfig_destroy, kafka_common_metrics_MetricConfig_new,
         kafka_common_metrics_MetricConfig_samples, kafka_common_metrics_MetricConfig_set_samples,
     };
+    use crate::ffi::common::metrics::metrics_view::{
+        kafka_common_metrics_MetricsView_contains_key, kafka_common_metrics_MetricsView_destroy,
+        kafka_common_metrics_MetricsView_get, kafka_common_metrics_MetricsView_len,
+    };
     use crate::ffi::common::metrics::sensor::{
         kafka_common_metrics_Sensor_RecordingLevel_debug, kafka_common_metrics_Sensor_destroy,
         kafka_common_metrics_Sensor_name, kafka_common_metrics_Sensor_should_record, sensor_ref,
@@ -1574,8 +1578,7 @@ mod tests {
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
     use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_argument_error;
     use crate::ffi::util::{
-        kafka_List_add, kafka_List_destroy, kafka_List_new, kafka_Map_destroy, kafka_Map_get, kafka_Map_new,
-        kafka_Map_put, kafka_Map_size,
+        kafka_List_add, kafka_List_destroy, kafka_List_new, kafka_Map_destroy, kafka_Map_new, kafka_Map_put,
     };
 
     fn c(s: &str) -> CString {
@@ -1774,13 +1777,21 @@ mod tests {
             kafka_common_Error_destroy(duplicate);
             let metric = kafka_common_metrics_Metrics_metric(registry, tagged);
             assert_eq!(kafka_common_metrics_KafkaMetric_is_measurable(metric), 1);
-            let snapshot = kafka_common_metrics_Metrics_metrics(registry);
-            assert_eq!(kafka_Map_size(snapshot), 2, "the registry's built-in `count` metric and ours");
-            let found = kafka_Map_get(snapshot, tagged as *mut c_void) as *const kafka_common_metrics_KafkaMetric_t;
+            let view = kafka_common_metrics_Metrics_metrics(registry);
+            assert_eq!(
+                kafka_common_metrics_MetricsView_len(view),
+                2,
+                "the registry's built-in `count` metric and ours"
+            );
+            let found = kafka_common_metrics_MetricsView_get(view, tagged);
             assert!(Arc::ptr_eq(kafka_metric_ref(found), kafka_metric_ref(metric)));
-            kafka_Map_destroy(snapshot);
+            kafka_common_metrics_KafkaMetric_destroy(found);
             let removed = kafka_common_metrics_Metrics_remove_metric(registry, tagged);
             assert!(Arc::ptr_eq(kafka_metric_ref(removed), kafka_metric_ref(metric)));
+            // The view is live: the removal shows in it.
+            assert_eq!(kafka_common_metrics_MetricsView_len(view), 1);
+            assert_eq!(kafka_common_metrics_MetricsView_contains_key(view, tagged), 0);
+            kafka_common_metrics_MetricsView_destroy(view);
             assert!(kafka_common_metrics_Metrics_remove_metric(registry, tagged).is_null());
             assert!(kafka_common_metrics_Metrics_metric(registry, tagged).is_null());
             kafka_common_metrics_KafkaMetric_destroy(removed);

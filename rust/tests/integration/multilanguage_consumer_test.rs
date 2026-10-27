@@ -477,7 +477,7 @@ async fn metrics_reports_backend_registry<F: ConsumerBackendFactory>(ctx: &mut T
     let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
     assert_eq!(got.len(), 2, "{} backend: setup consume failed", factory.name());
 
-    let snapshot = consumer.metrics();
+    let snapshot = consumer.metrics().snapshot();
     assert!(
         !snapshot.is_empty(),
         "{} backend: metrics() returned an empty map — the backend registry is not wired through",

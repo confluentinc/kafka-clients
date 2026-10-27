@@ -100,7 +100,7 @@ use crate::common::Error;
 use crate::consumer::{ConsumerHandle, KafkaConsumer, MockConsumer};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS};
-use crate::ffi::common::metrics::box_metrics_map;
+use crate::ffi::common::metrics::metrics_view::{box_metrics_view, kafka_common_metrics_MetricsView_t};
 use crate::ffi::common::partition_info::partition_info_list;
 use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, map_topic_partition_i64, sorted_topic_partition_list,
@@ -5574,30 +5574,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(
 
 /// Get the metrics kept by the consumer.
 ///
+/// The returned map is an unmodifiable live view of the metrics. Changes to the
+/// underlying metrics will be reflected in the returned map.
+///
 /// # Returns
 ///
-/// The map of metrics currently maintained by the consumer, from
-/// `kafka_common_MetricName_t *` to `kafka_common_metrics_KafkaMetric_t *`.
-///
-/// # Translation notes
-///
-/// WARNING: the map is a snapshot, not Java's live view: metrics registered or
-/// removed after the call are not reflected in it. `kafka_Map_get` compares names
-/// by value.
+/// An unmodifiable live view of the map of metrics currently maintained by the
+/// consumer, from `kafka_common_MetricName_t *` to
+/// `kafka_common_metrics_KafkaMetric_t *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle. The returned map, its keys and its values are
-/// owned by the caller.
+/// `self_` must be a live handle. The returned view is owned by the caller,
+/// freed with `kafka_common_metrics_MetricsView_destroy`, and stays valid after
+/// the consumer is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_Map_t {
+pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
+    self_: *const kafka_consumer_Consumer_t,
+) -> *mut kafka_common_metrics_MetricsView_t {
     // Read through the consumer's handle, not the single-owner flag, so it answers while another
     // call holds the consumer: Java's `AsyncKafkaConsumer.metrics()` takes no `acquire()`.
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // as `client_ref` requires; the handle it reads through is shared state, never the consumer an
     // operation may be borrowing.
-    box_metrics_map(unsafe { client_ref(self_) }.handle().metrics())
+    box_metrics_view(unsafe { client_ref(self_) }.handle().metrics())
 }
 
 /// Return the current group metadata associated with this consumer.

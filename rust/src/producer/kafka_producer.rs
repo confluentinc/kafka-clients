@@ -39,7 +39,6 @@ use crate::NetworkClient;
 use crate::common::Cluster;
 use crate::common::Error;
 use crate::common::KafkaFuture;
-use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
@@ -48,7 +47,7 @@ use crate::common::header::Headers;
 use crate::common::header::RecordHeader;
 use crate::common::header::RecordHeaders;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
+use crate::common::metrics::{MetricConfig, Metrics, MetricsView, RecordingLevel};
 use crate::common::network::ChannelBuilders;
 use crate::common::network::Selector;
 use crate::common::record::internal::AbstractRecords;
@@ -3105,8 +3104,8 @@ where
 
     // Get the full set of producer metrics maintained by this producer.
     //
-    // Translated from `KafkaProducer.metrics()` — a snapshot of the registry.
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    // Translated from `KafkaProducer.metrics()` — a live view of the registry.
+    fn metrics(&self) -> MetricsView {
         self.metrics.metrics()
     }
 

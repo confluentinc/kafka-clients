@@ -30,15 +30,13 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::Error;
 use crate::common::KafkaFuture;
-use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
-use crate::common::metrics::KafkaMetric;
+use crate::common::metrics::MetricsView;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 use crate::producer::Callback;
@@ -219,7 +217,7 @@ pub trait DynProducer<K, V>: private::Sealed<K, V> + Send + Sync {
     /// # Returns
     ///
     /// As [`Producer::metrics`].
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
 
     /// See [`Producer::close`].
     ///
@@ -323,7 +321,7 @@ impl<K, V, P: Producer<K, V>> DynProducer<K, V> for P {
         Box::pin(Producer::partitions_for(self, topic))
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         Producer::metrics(self)
     }
 
@@ -401,7 +399,7 @@ impl<K, V> Producer<K, V> for dyn DynProducer<K, V> + '_ {
         DynProducer::partitions_for(self, topic).await
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         DynProducer::metrics(self)
     }
 
@@ -505,6 +503,7 @@ where
 mod tests {
     use super::*;
     use crate::producer::MockProducer;
+    use std::sync::Arc;
 
     fn record(value: &str) -> ProducerRecord<String, String> {
         ProducerRecord::with_key("topic".to_string(), Some("key".to_string()), Some(value.to_string()))

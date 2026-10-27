@@ -158,6 +158,7 @@ fn common_types_are_send_and_sync() {
     );
     assert!(is_send!(MetricValue) && is_sync!(MetricValue), "MetricValue");
     assert!(is_send!(Metrics) && is_sync!(Metrics), "Metrics");
+    assert!(is_send!(MetricsView) && is_sync!(MetricsView), "MetricsView");
     assert!(is_send!(Min) && is_sync!(Min), "Min");
     assert!(is_send!(NamedMeasurable) && is_sync!(NamedMeasurable), "NamedMeasurable");
     assert!(is_send!(Node) && is_sync!(Node), "Node");

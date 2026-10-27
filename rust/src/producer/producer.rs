@@ -17,15 +17,13 @@
 //! Translated from `org.apache.kafka.clients.producer.Producer`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::Error;
 use crate::common::KafkaFuture;
-use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
-use crate::common::metrics::KafkaMetric;
+use crate::common::metrics::MetricsView;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 use crate::producer::Callback;
@@ -424,18 +422,15 @@ pub trait Producer<K, V>: Send + Sync {
 
     /// Get the full set of internal metrics maintained by the producer.
     ///
+    /// The returned map is an unmodifiable live view of the metrics. Changes to
+    /// the underlying metrics will be reflected in the returned map.
+    ///
     /// # Returns
     ///
-    /// The map of metrics currently maintained by the producer, which cannot be
-    /// modified.
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: the map is a snapshot, not Java's live view: metrics registered
-    /// or removed after the call are not reflected in it. Each [`KafkaMetric`]
-    /// is the registry's shared entry, so its value is current.
+    /// An unmodifiable live view of the map of metrics currently maintained by
+    /// the producer
     #[doc(alias = "org.apache.kafka.clients.producer.Producer#metrics")]
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
 
     /// Close this producer. This method blocks until all previously sent
     /// requests complete. This method is equivalent to

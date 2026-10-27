@@ -199,7 +199,7 @@ fn assert_metrics_map(
     metrics_should_be_present: bool,
 ) {
     // Copy the map because we're going to modify it.
-    let mut metrics = consumer.metrics();
+    let mut metrics = std::collections::HashMap::clone(&consumer.metrics().snapshot());
 
     // There's a meta-metric named "count" that is automatically added to the metrics map.
     let count_metric_name = metrics

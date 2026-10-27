@@ -5294,6 +5294,7 @@ mod tests {
         let all_metrics: std::collections::HashSet<TemplateKey> = ctx
             .metrics
             .metrics()
+            .snapshot()
             .keys()
             .filter(|n| n.group() != "kafka-metrics-count")
             .map(|n| (n.name().to_string(), n.group().to_string(), n.tags().keys().cloned().collect()))
@@ -5351,10 +5352,10 @@ mod tests {
         }
 
         // The per-topic byte-rate metric carries the `topic` tag.
-        let has_topic_tag = metrics
-            .metrics()
-            .keys()
-            .any(|n| n.group() == "producer-topic-metrics" && n.tags().get("topic") == Some(&"my-topic".to_string()));
+        let has_topic_tag =
+            metrics.metrics().snapshot().keys().any(|n| {
+                n.group() == "producer-topic-metrics" && n.tags().get("topic") == Some(&"my-topic".to_string())
+            });
         assert!(has_topic_tag, "per-topic metrics must carry the topic tag");
 
         // Idempotent: a second call does not error or duplicate.
@@ -5399,7 +5400,7 @@ mod tests {
         );
         // Global sensors got their metrics too.
         assert!(
-            metrics.metrics().keys().any(|n| n.name() == "batch-size-avg"),
+            metrics.metrics().snapshot().keys().any(|n| n.name() == "batch-size-avg"),
             "batch-size-avg metric should exist"
         );
     }

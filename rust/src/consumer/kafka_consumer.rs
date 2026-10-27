@@ -22,9 +22,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::metrics::KafkaMetric;
+use crate::common::metrics::MetricsView;
 use crate::common::serialization::{Deserializer, DynDeserializer};
-use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::common::{Error, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AsyncKafkaConsumer;
 use crate::consumer::{
     CloseOptions, Consumer, ConsumerConfig, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
@@ -232,7 +232,7 @@ where
         Consumer::current_lag(&mut self.delegate, topic_partition)
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         Consumer::metrics(&self.delegate)
     }
 

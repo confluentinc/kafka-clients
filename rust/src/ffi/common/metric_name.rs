@@ -241,18 +241,6 @@ pub(crate) unsafe fn destroy_metric_name_element(element: *mut c_void) {
     unsafe { kafka_common_MetricName_destroy(element as *mut kafka_common_MetricName_t) }
 }
 
-/// Key equality for `kafka_Map_t`s keyed by `kafka_common_MetricName_t`
-/// (the `metrics()` maps, see `ffi::common::metrics::box_metrics_map`).
-///
-/// # Safety
-///
-/// `a` and `b` must be valid metric-name handles.
-pub(crate) unsafe fn metric_name_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid metric-name handles, as
-    // `metric_name_ref` requires; both references are used only for the comparison.
-    unsafe { metric_name_ref(a as *const _) == metric_name_ref(b as *const _) }
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::{CStr, c_void};

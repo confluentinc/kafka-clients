@@ -31,6 +31,7 @@ pub mod metric_value_provider;
 #[expect(clippy::module_inception)]
 mod metrics;
 mod metrics_reporter;
+pub(crate) mod metrics_view;
 mod quota;
 mod quota_violation_error;
 pub mod sensor;
@@ -48,6 +49,7 @@ pub use metric_value_provider::MetricValueProvider;
 pub(crate) use metrics::MetricsShared;
 pub use metrics::{Metrics, SensorOptions, SensorOptionsBuilder};
 pub use metrics_reporter::MetricsReporter;
+pub use metrics_view::MetricsView;
 pub use quota::Quota;
 pub use quota_violation_error::QuotaViolationError;
 pub use sensor::{RecordingLevel, Sensor};

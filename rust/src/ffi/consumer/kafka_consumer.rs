@@ -561,6 +561,7 @@ mod tests {
             crate::ffi::consumer::client_ref(kafka_consumer_KafkaConsumer__as_Consumer(class))
                 .handle()
                 .metrics()
+                .snapshot()
                 .keys()
                 .filter_map(|name| name.tags().get("client-id").cloned())
                 .collect::<std::collections::HashSet<_>>()

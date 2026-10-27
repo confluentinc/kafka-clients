@@ -2437,7 +2437,7 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
             .unwrap_or_else(|e| panic!("Record {i} should succeed, got: {e:?}"));
     }
 
-    let snapshot = producer.metrics();
+    let snapshot = producer.metrics().snapshot();
     assert!(
         !snapshot.is_empty(),
         "{} backend: metrics() returned an empty map — the backend registry is not wired through",
@@ -3531,7 +3531,7 @@ async fn metrics_follow_configuration_and_traffic_inner<F: ProducerBackendFactor
             .expect("produce");
     }
 
-    let snapshot = producer.metrics();
+    let snapshot = producer.metrics().snapshot();
     let number = |group: &str, name: &str, topic_tag: Option<&str>| -> f64 {
         let (_, metric) = snapshot
             .iter()

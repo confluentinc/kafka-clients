@@ -75,6 +75,13 @@ breaking changes.
   completes once every future has, with the error of the first failed one in
   the list, as Java's `allOf`; it returned the first failure in list order
   without waiting for the others before.
+- **Breaking:** `Producer::metrics`, `Consumer::metrics` and `Metrics::metrics`
+  return a `MetricsView`, a live read-only view
+  of the registry, as Java's `Collections.unmodifiableMap(metrics.metrics())`:
+  a metric registered or removed after the call shows in it. It returned a
+  snapshot `HashMap` before. `MetricsView::snapshot` gives the whole map as it
+  is now, without copying it; `MetricsView::from(HashMap)` builds a standalone
+  view for a test double.
 - The minimum rustls version is now 0.23.46, which fixes
   [RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346): the
   `Debug` output of rustls's client session values exposed TLS session secrets.
@@ -113,6 +120,13 @@ breaking changes.
   `kafka_common_Error_t *` (`NULL` on success) before `opaque`. An error a C
   serde reports through `__set_callback_result` reaches the caller instead of
   being logged.
+- **Breaking:** `kafka_producer_Producer_metrics`, `kafka_consumer_Consumer_metrics`
+  and `kafka_common_metrics_Metrics_metrics` return a live
+  `kafka_common_metrics_MetricsView_t *` (`_len`, `_is_empty`, `_contains_key`,
+  `_get`, `_iterator`, `_destroy`) instead of a snapshot `kafka_Map_t *`.
+- New `kafka_Iterator_t` (`kafka_Iterator_has_next`, `_next`, `_destroy`), Java's
+  `java.util.Iterator`, and `kafka_Map_Entry_t` (`kafka_Map_Entry_key`,
+  `_value`), Java's `Map.Entry`, its elements when iterating a map.
 
 ## [0.3.0-beta.1] - 2026-10-23
 

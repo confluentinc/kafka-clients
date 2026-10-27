@@ -2567,6 +2567,67 @@ void test_send_with_callback_cb_future_completes_after_the_callback_reported(voi
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
 }
 
+// ---------------------------------------------------------------------------
+// metrics() is a live view (Java's unmodifiable live map)
+// ---------------------------------------------------------------------------
+
+/* The view returned by metrics() sees a metric set_mock_metrics registers after
+ * the call; an iterator taken before it does not. */
+static void test_metrics_is_a_live_view(void) {
+    fixture_t f;
+    fixture_init(&f, 1);
+    kafka_common_metrics_MetricsView_t *view = kafka_producer_Producer_metrics(f.producer);
+    TEST_ASSERT_NOT_NULL(view);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_metrics_MetricsView_len(view));
+
+    /* A registry's built-in `count` metric stands in for a producer metric. */
+    kafka_common_metrics_Metrics_t *registry = kafka_common_metrics_Metrics_new();
+    kafka_common_MetricName_t *count = kafka_common_metrics_Metrics_metric_name_with_description(
+        registry, "count", "kafka-metrics-count", "total number of registered metrics");
+    kafka_common_metrics_KafkaMetric_t *metric = kafka_common_metrics_Metrics_metric(registry, count);
+    TEST_ASSERT_NOT_NULL(metric);
+    kafka_producer_MockProducer_set_mock_metrics(f.mock, count, metric);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_common_metrics_MetricsView_len(view));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_metrics_MetricsView_contains_key(view, count));
+
+    kafka_Iterator_t *held = kafka_common_metrics_MetricsView_iterator(view);
+    kafka_common_MetricName_t *other = kafka_common_metrics_Metrics_metric_name(registry, "other", "g");
+    kafka_producer_MockProducer_set_mock_metrics(f.mock, other, metric);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_metrics_MetricsView_len(view));
+    kafka_common_metrics_KafkaMetric_t *found = kafka_common_metrics_MetricsView_get(view, other);
+    TEST_ASSERT_NOT_NULL(found);
+    kafka_common_metrics_KafkaMetric_destroy(found);
+
+    int held_count = 0;
+    while (kafka_Iterator_has_next(held)) {
+        const kafka_Map_Entry_t *entry = kafka_Iterator_next(held);
+        const kafka_common_MetricName_t *name = kafka_Map_Entry_key(entry);
+        TEST_ASSERT_EQUAL_STRING("count", kafka_common_MetricName_name(name));
+        TEST_ASSERT_NOT_NULL(kafka_Map_Entry_value(entry));
+        held_count++;
+    }
+    TEST_ASSERT_EQUAL_INT(1, held_count);
+    kafka_Iterator_destroy(held);
+
+    kafka_Iterator_t *it = kafka_common_metrics_MetricsView_iterator(view);
+    int count_now = 0;
+    while (kafka_Iterator_has_next(it)) {
+        kafka_Iterator_next(it);
+        count_now++;
+    }
+    TEST_ASSERT_EQUAL_INT(2, count_now);
+    kafka_Iterator_destroy(it);
+
+    kafka_common_MetricName_destroy(other);
+    kafka_common_metrics_KafkaMetric_destroy(metric);
+    kafka_common_MetricName_destroy(count);
+    kafka_common_metrics_Metrics_destroy(registry);
+    fixture_destroy(&f);
+    /* The view outlives the producer. */
+    TEST_ASSERT_EQUAL_INT32(2, kafka_common_metrics_MetricsView_len(view));
+    kafka_common_metrics_MetricsView_destroy(view);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -2666,6 +2727,9 @@ int main(void) {
     RUN_TEST(test_send_cb_fires_inline_for_a_record_taken_at_once);
     RUN_TEST(test_send_cb_on_closed_producer_fires_inline);
     RUN_TEST(test_send_with_callback_cb_future_completes_after_the_callback_reported);
+
+    /* metrics() */
+    RUN_TEST(test_metrics_is_a_live_view);
 
     return UNITY_END();
 }

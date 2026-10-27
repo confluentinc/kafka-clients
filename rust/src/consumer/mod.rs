@@ -63,8 +63,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::metrics::KafkaMetric;
-use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::common::metrics::MetricsView;
+use crate::common::{Error, PartitionInfo, TopicPartition};
 
 /// The consumer interface, implemented by [`KafkaConsumer`] and
 /// [`MockConsumer`].
@@ -269,22 +269,19 @@ where
         topic_partition: &TopicPartition,
     ) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
 
-    /// Get the metrics kept by the consumer.
+    /// Get the metrics kept by the consumer
+    ///
+    /// The returned map is an unmodifiable live view of the metrics. Changes to
+    /// the underlying metrics will be reflected in the returned map.
     ///
     /// # Returns
     ///
-    /// The map of metrics currently maintained by the consumer, which cannot be
-    /// modified.
-    ///
-    /// # Translation notes
-    ///
-    /// WARNING: the map is a snapshot, not Java's live view: metrics registered
-    /// or removed after the call are not reflected in it. Each [`KafkaMetric`]
-    /// is the registry's shared entry, so its value is current.
+    /// An unmodifiable live view of the map of metrics currently maintained by
+    /// the consumer
     // The trait method has no default: it is in Java's `Consumer` interface, so
     // every implementation provides it.
     #[doc(alias = "org.apache.kafka.clients.consumer.Consumer#metrics")]
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
 
     // ── Subscription / assignment (async per §1 — may interact with bg task) ──
 

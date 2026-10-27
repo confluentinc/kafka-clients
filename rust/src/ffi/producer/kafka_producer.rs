@@ -1067,6 +1067,7 @@ mod tests {
                 .producer()
                 .expect("not destroyed")
                 .metrics()
+                .snapshot()
                 .keys()
                 .filter_map(|name| name.tags().get("client-id").cloned())
                 .collect::<std::collections::HashSet<_>>()

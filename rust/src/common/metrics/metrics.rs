@@ -18,8 +18,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use crate::common::metrics::internals::MetricsUtils;
+use crate::common::metrics::metrics_view::SharedMetricMap;
 use crate::common::metrics::{
-    KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, RecordingLevel, Sensor, gauge,
+    KafkaMetric, Measurable, MetricConfig, MetricValueProvider, MetricsReporter, MetricsView, RecordingLevel, Sensor,
+    gauge,
 };
 use crate::common::utils::{SystemTime, Time};
 use crate::common::{Error, Metric, MetricName, MetricNameTemplate, MetricValue};
@@ -32,25 +34,21 @@ use crate::common::{Error, Metric, MetricName, MetricNameTemplate, MetricValue};
 /// portion into an `Arc<MetricsShared>` so the back-reference does not form an
 /// ownership cycle.
 pub(crate) struct MetricsShared {
-    metrics: Mutex<HashMap<MetricName, Arc<KafkaMetric>>>,
+    metrics: SharedMetricMap,
     reporters: Mutex<Vec<Arc<dyn MetricsReporter>>>,
 }
 
 impl MetricsShared {
     fn new(reporters: Vec<Arc<dyn MetricsReporter>>) -> Self {
-        Self { metrics: Mutex::new(HashMap::new()), reporters: Mutex::new(reporters) }
+        Self { metrics: SharedMetricMap::default(), reporters: Mutex::new(reporters) }
     }
 
     /// Register a metric if not present, or return the already-existing metric
     /// with the same name. When a metric is newly registered, returns `None`.
     pub(crate) fn register_metric(&self, metric: Arc<KafkaMetric>) -> Option<Arc<KafkaMetric>> {
         let metric_name = metric.metric_name().clone();
-        {
-            let mut metrics = self.metrics.lock().expect("metrics mutex poisoned");
-            if let Some(existing) = metrics.get(&metric_name) {
-                return Some(Arc::clone(existing));
-            }
-            metrics.insert(metric_name, Arc::clone(&metric));
+        if let Some(existing) = self.metrics.insert_if_absent(metric_name, Arc::clone(&metric)) {
+            return Some(existing);
         }
         // Newly added metric: notify reporters (outside the metrics lock,
         // mirroring Java which holds the Metrics monitor but reporters are
@@ -64,10 +62,7 @@ impl MetricsShared {
 
     /// Remove a metric if it exists and return it; notify reporters on removal.
     fn remove_metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
-        let removed = {
-            let mut metrics = self.metrics.lock().expect("metrics mutex poisoned");
-            metrics.remove(metric_name)
-        };
+        let removed = self.metrics.remove(metric_name);
         if let Some(metric) = &removed {
             let reporters = self.reporters.lock().expect("reporters mutex poisoned");
             for reporter in reporters.iter() {
@@ -280,7 +275,7 @@ impl std::fmt::Debug for Metrics {
     // How many sensors and metrics the registry holds, not their state.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sensors = self.sensors.lock().expect("sensors mutex poisoned").len();
-        let metrics = self.shared.metrics.lock().expect("metrics mutex poisoned").len();
+        let metrics = self.shared.metrics.len();
         f.debug_struct("Metrics")
             .field("sensors", &sensors)
             .field("metrics", &metrics)
@@ -364,9 +359,7 @@ impl Metrics {
         // the registry is gone, when no one can read the gauge any more.
         let shared = Arc::downgrade(&metrics.shared);
         let count_gauge = gauge::new(move |_config, _now| {
-            let n = shared
-                .upgrade()
-                .map_or(0, |shared| shared.metrics.lock().expect("metrics mutex poisoned").len());
+            let n = shared.upgrade().map_or(0, |shared| shared.metrics.len());
             MetricValue::Double(n as f64)
         });
         metrics
@@ -958,22 +951,20 @@ impl Metrics {
     /// - `reporter` - the reporter, initialized with every existing metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#addReporter")]
     pub fn add_reporter(&self, reporter: Arc<dyn MetricsReporter>) {
-        let existing: Vec<Arc<KafkaMetric>> = self
-            .shared
-            .metrics
-            .lock()
-            .expect("metrics mutex poisoned")
-            .values()
-            .cloned()
-            .collect();
+        let existing: Vec<Arc<KafkaMetric>> = self.shared.metrics.current().values().cloned().collect();
         reporter.init(&existing);
         self.shared.reporters.lock().expect("reporters mutex poisoned").push(reporter);
     }
 
-    /// Returns all the metrics currently maintained, indexed by metric name.
+    /// Get all the metrics currently maintained indexed by metricName
+    ///
+    /// # Returns
+    ///
+    /// a live, read-only view of the metrics: it sees every metric registered
+    /// or removed after the call
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metrics")]
-    pub fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
-        self.shared.metrics.lock().expect("metrics mutex poisoned").clone()
+    pub fn metrics(&self) -> MetricsView {
+        MetricsView::of(self.shared.metrics.clone())
     }
 
     /// Returns the metric with the given name, if registered.
@@ -983,12 +974,7 @@ impl Metrics {
     /// - `metric_name` - the name of the metric
     #[doc(alias = "org.apache.kafka.common.metrics.Metrics#metric")]
     pub fn metric(&self, metric_name: &MetricName) -> Option<Arc<KafkaMetric>> {
-        self.shared
-            .metrics
-            .lock()
-            .expect("metrics mutex poisoned")
-            .get(metric_name)
-            .cloned()
+        self.shared.metrics.get(metric_name)
     }
 
     /// The children of a parent sensor, keyed by the parent sensor.

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! The package-less C helpers standing for `java.util` types (CLAUDE.md §4,
-//! "Generic types"): [`kafka_List_t`], [`kafka_Map_t`], [`kafka_Bytes_t`] and
-//! [`kafka_string_destroy`].
+//! "Generic types"): [`kafka_List_t`], [`kafka_Map_t`], [`kafka_Iterator_t`],
+//! [`kafka_Map_Entry_t`], [`kafka_Bytes_t`] and [`kafka_string_destroy`].
 //!
 //! They carry no package segment because they translate no Kafka class: a
 //! Java `List<T>` / `Map<K, V>` / `byte[]` / `String` crossing the boundary
@@ -894,6 +894,274 @@ pub unsafe extern "C" fn kafka_Map_destroy(self_: *mut kafka_Map_t) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Iterators and map entries
+// ---------------------------------------------------------------------------
+
+/// What a `kafka_Iterator_t` handle points at: the elements still to come,
+/// built one at a time, and the element `kafka_Iterator_next` returned last,
+/// which the iterator owns until the next call.
+pub(crate) struct IteratorInner {
+    elements: Box<dyn Iterator<Item = *mut c_void> + Send>,
+    /// The element `kafka_Iterator_has_next` built ahead, not yet returned.
+    peeked: Option<*mut c_void>,
+    /// The element `kafka_Iterator_next` returned last.
+    current: *mut c_void,
+    /// Frees one element; `None` when the elements are borrowed.
+    destroy: Option<ElementDestroy>,
+}
+
+impl IteratorInner {
+    /// Frees `element` when the iterator owns its elements.
+    fn free(&self, element: *mut c_void) {
+        if let Some(destroy) = self.destroy
+            && !element.is_null()
+        {
+            // SAFETY: `destroy` is set only by `box_iterator`'s callers, each of which pairs it
+            // with the elements its iterator yields. `element` is non-null (checked above), one
+            // of them, and each yielded element reaches `free` once: as `current` when replaced
+            // or dropped, or as `peeked` when dropped unreturned.
+            unsafe { destroy(element) };
+        }
+    }
+
+    fn has_next(&mut self) -> bool {
+        if self.peeked.is_none() {
+            self.peeked = self.elements.next();
+        }
+        self.peeked.is_some()
+    }
+
+    fn next(&mut self) -> Option<*mut c_void> {
+        let next = self.peeked.take().or_else(|| self.elements.next())?;
+        self.free(self.current);
+        self.current = next;
+        Some(next)
+    }
+}
+
+impl Drop for IteratorInner {
+    fn drop(&mut self) {
+        self.free(self.current);
+        if let Some(peeked) = self.peeked.take() {
+            self.free(peeked);
+        }
+    }
+}
+
+/// A `java.util.Iterator` of `void *` elements.
+///
+/// The function returning an iterator documents the element type. An element
+/// stays valid until the next `kafka_Iterator_next` or `kafka_Iterator_destroy`,
+/// which frees it when the iterator owns its elements. An iterator is used by
+/// one thread at a time, as Java's.
+#[repr(C)]
+// a `void *` iterator standing for `java.util.Iterator` (CLAUDE.md §4 rule 6)
+#[doc(alias = "rust-only")]
+pub struct kafka_Iterator_t {
+    _private: [u8; 0],
+}
+
+/// Hands `elements` to C as an iterator; `destroy`, when set, frees each
+/// element once the caller moved past it.
+///
+/// When `destroy` is set, every non-null element must be one it frees: the
+/// iterator owns it from the moment it is built.
+pub(crate) fn box_iterator(
+    elements: Box<dyn Iterator<Item = *mut c_void> + Send>,
+    destroy: Option<ElementDestroy>,
+) -> *mut kafka_Iterator_t {
+    Box::into_raw(Box::new(IteratorInner {
+        elements,
+        peeked: None,
+        current: ptr::null_mut(),
+        destroy,
+    })) as *mut kafka_Iterator_t
+}
+
+/// The iterator behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, alive for `'a` and used by no
+/// other call meanwhile.
+unsafe fn iterator_mut<'a>(self_: *mut kafka_Iterator_t) -> &'a mut IteratorInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle, the
+    // `Box::into_raw` of `box_iterator`, alive for `'a` and used by no other call, so the `&mut`
+    // is unique.
+    unsafe { &mut *(self_ as *mut IteratorInner) }
+}
+
+/// Returns `1` if the iteration has more elements, else `0`.
+///
+/// # Returns
+///
+/// `1` if the iteration has more elements
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, used by no other call meanwhile.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_has_next(self_: *mut kafka_Iterator_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
+    // call, as `iterator_mut` requires; the borrow ends with this call.
+    i8::from(unsafe { iterator_mut(self_) }.has_next())
+}
+
+/// Returns the next element in the iteration.
+///
+/// # Returns
+///
+/// the next element in the iteration
+///
+/// # Panics
+///
+/// - if the iteration has no more elements (Java's `NoSuchElementException`);
+///   the `_err` twin reports it as an `IllegalStateError`
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, used by no other call meanwhile.
+///
+/// The element stays valid until the next `kafka_Iterator_next` or
+/// `kafka_Iterator_destroy` on `self_`; the iterator frees it when it owns its
+/// elements.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_next(self_: *mut kafka_Iterator_t) -> *mut c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
+    // call, as `iterator_mut` requires; the borrow ends with this call.
+    match unsafe { iterator_mut(self_) }.next() {
+        Some(element) => element,
+        // Java's `NoSuchElementException`: a precondition the caller checks with
+        // `kafka_Iterator_has_next` (CLAUDE.md §12.5).
+        None => panic!("the iteration has no more elements"),
+    }
+}
+
+/// Frees the iterator, and the element it returned last when it owns its
+/// elements.
+///
+/// # Safety
+///
+/// `self_` must be null or a valid iterator handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_destroy(self_: *mut kafka_Iterator_t) {
+    if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an
+        // iterator handle not yet destroyed, that is the `Box::into_raw` of `box_iterator`, so
+        // `from_raw` reclaims that allocation, once.
+        drop(unsafe { Box::from_raw(self_ as *mut IteratorInner) });
+    }
+}
+
+/// What a `kafka_Map_Entry_t` handle points at: an owned key and value and
+/// their destructors.
+pub(crate) struct MapEntryInner {
+    key: *mut c_void,
+    value: *mut c_void,
+    key_destroy: Option<ElementDestroy>,
+    value_destroy: Option<ElementDestroy>,
+}
+
+impl Drop for MapEntryInner {
+    fn drop(&mut self) {
+        if let Some(destroy) = self.key_destroy
+            && !self.key.is_null()
+        {
+            // SAFETY: `key_destroy` is set only by `box_map_entry`'s callers, paired with the key
+            // it frees; the key is non-null (checked above) and the entry is dropped once.
+            unsafe { destroy(self.key) };
+        }
+        if let Some(destroy) = self.value_destroy
+            && !self.value.is_null()
+        {
+            // SAFETY: as for the key, with `value_destroy` and the value.
+            unsafe { destroy(self.value) };
+        }
+    }
+}
+
+/// A `java.util.Map.Entry` of a `void *` key and value, as an iterator over a
+/// map hands them out.
+///
+/// The function returning the iterator documents the key and value types.
+#[repr(C)]
+// a `void *` entry standing for `java.util.Map.Entry` (CLAUDE.md §4 rule 6)
+#[doc(alias = "rust-only")]
+pub struct kafka_Map_Entry_t {
+    _private: [u8; 0],
+}
+
+/// Builds an entry owning `key` and `value`, freed with the destructors when
+/// set; [`destroy_map_entry_element`] frees it.
+pub(crate) fn box_map_entry(
+    key: *mut c_void,
+    value: *mut c_void,
+    key_destroy: Option<ElementDestroy>,
+    value_destroy: Option<ElementDestroy>,
+) -> *mut c_void {
+    Box::into_raw(Box::new(MapEntryInner { key, value, key_destroy, value_destroy })) as *mut c_void
+}
+
+/// [`ElementDestroy`] for an entry built by [`box_map_entry`].
+///
+/// # Safety
+///
+/// `element` must be an entry built by [`box_map_entry`] and not yet freed.
+pub(crate) unsafe fn destroy_map_entry_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is the `Box::into_raw` of
+    // `box_map_entry`, not yet freed, so `from_raw` reclaims it once.
+    drop(unsafe { Box::from_raw(element as *mut MapEntryInner) });
+}
+
+/// The entry behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle, alive for `'a`.
+unsafe fn map_entry_ref<'a>(self_: *const kafka_Map_Entry_t) -> &'a MapEntryInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle alive for `'a`, the
+    // `Box::into_raw` of `box_map_entry`; nothing mutates an entry, so the shared borrow is sound.
+    unsafe { &*(self_ as *const MapEntryInner) }
+}
+
+/// Returns the key corresponding to this entry.
+///
+/// # Returns
+///
+/// the key corresponding to this entry
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle. The key is borrowed from the entry
+/// and valid as long as it.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Map_Entry_key(self_: *const kafka_Map_Entry_t) -> *const c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
+    unsafe { map_entry_ref(self_) }.key
+}
+
+/// Returns the value corresponding to this entry.
+///
+/// # Returns
+///
+/// the value corresponding to this entry
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle. The value is borrowed from the entry
+/// and valid as long as it.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Map_Entry_value(self_: *const kafka_Map_Entry_t) -> *const c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
+    unsafe { map_entry_ref(self_) }.value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,5 +1395,76 @@ mod tests {
             2,
             "the remaining value is freed"
         );
+    }
+
+    /// An iterator hands out its elements in order, frees each one when the
+    /// caller moves past it, and frees the last one and the not-yet-returned
+    /// ones on destroy. `next` past the end panics, which the guard turns into
+    /// NULL here and the `_err` twin into an `IllegalStateError`.
+    #[test]
+    fn an_iterator_frees_each_element_once_passed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Counted(u32);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let elements: Vec<usize> = (1..=3).map(|i| Box::into_raw(Box::new(Counted(i))) as usize).collect();
+        let iterator = box_iterator(
+            Box::new(elements.into_iter().map(|e| e as *mut c_void)),
+            Some(destroy_boxed::<Counted>),
+        );
+        // SAFETY: Test code: `iterator` is the fresh handle above, used by this thread only and
+        // destroyed once at the end; each element read is the `Counted` it currently owns.
+        unsafe {
+            for expected in 1..=3 {
+                assert_eq!(kafka_Iterator_has_next(iterator), 1);
+                // `has_next` alone frees nothing.
+                assert_eq!(DROPS.load(Ordering::SeqCst), (expected as usize).saturating_sub(2));
+                let element = kafka_Iterator_next(iterator) as *const Counted;
+                assert_eq!((*element).0, expected);
+                assert_eq!(DROPS.load(Ordering::SeqCst), expected as usize - 1, "the previous one is freed");
+            }
+            assert_eq!(kafka_Iterator_has_next(iterator), 0);
+            assert!(kafka_Iterator_next(iterator).is_null(), "a panic past the end returns NULL");
+            kafka_Iterator_destroy(iterator);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 3, "destroy frees the last element");
+
+        // Elements built lazily, as the views' iterators build them: one never reached is never
+        // allocated.
+        DROPS.store(0, Ordering::SeqCst);
+        let iterator = box_iterator(
+            Box::new((1..=3).map(|i| Box::into_raw(Box::new(Counted(i))) as *mut c_void)),
+            Some(destroy_boxed::<Counted>),
+        );
+        // SAFETY: Test code: as above; the iterator is destroyed with a returned and a peeked
+        // element.
+        unsafe {
+            assert_eq!(kafka_Iterator_has_next(iterator), 1);
+            kafka_Iterator_next(iterator);
+            assert_eq!(kafka_Iterator_has_next(iterator), 1);
+            kafka_Iterator_destroy(iterator);
+            kafka_Iterator_destroy(ptr::null_mut());
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2, "every element built is freed once");
+    }
+
+    #[test]
+    fn a_map_entry_frees_its_key_and_value() {
+        let entry = box_map_entry(
+            Box::into_raw(Box::new(7_u32)) as *mut c_void,
+            Box::into_raw(Box::new(8_u64)) as *mut c_void,
+            Some(destroy_boxed::<u32>),
+            Some(destroy_boxed::<u64>),
+        );
+        // SAFETY: Test code: `entry` is the fresh entry above, read while alive and freed once.
+        unsafe {
+            assert_eq!(*(kafka_Map_Entry_key(entry as *const kafka_Map_Entry_t) as *const u32), 7);
+            assert_eq!(*(kafka_Map_Entry_value(entry as *const kafka_Map_Entry_t) as *const u64), 8);
+            destroy_map_entry_element(entry);
+        }
     }
 }

@@ -1340,11 +1340,11 @@ mod tests {
         );
         assert_eq!(out_lag, 7, "a failed current_lag leaves *out_lag unwritten");
         // Java's `metrics()` takes no `acquire()`: it still answers.
-        // SAFETY: Test code: `consumer` is a live handle; the map is owned and destroyed once.
+        // SAFETY: Test code: `consumer` is a live handle; the view is owned and destroyed once.
         unsafe {
             let metrics = kafka_consumer_Consumer_metrics(consumer);
             assert!(!metrics.is_null());
-            kafka_Map_destroy(metrics);
+            crate::ffi::common::metrics::metrics_view::kafka_common_metrics_MetricsView_destroy(metrics);
         }
 
         wait_until("the listener invocation to run", || {

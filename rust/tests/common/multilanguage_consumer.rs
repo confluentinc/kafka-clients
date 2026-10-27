@@ -59,7 +59,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
-use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, MetricsView, gauge};
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
@@ -582,7 +582,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         unimplemented!("handle() is not supported on the gRPC multilanguage backend; use wakeup() directly")
     }
 
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         // Added to the `Consumer` trait by Milestone-9 Phase M7, and wired
         // through to the backend's real registry over the `Metrics` RPC — this
         // is a live consumer in another language, NOT a mock, so reporting an
@@ -590,14 +590,13 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         //
         // Each entry is rebuilt locally as a `gauge::new` gauge returning the value
         // the backend measured while serving the RPC. That is snapshot, not
-        // live, semantics — which is exactly what `Consumer::metrics`
-        // documents ("a point-in-time snapshot taken under the registry lock
-        // ... not a live view"). A live cross-process measurable would need an
-        // RPC per `metric_value()` read and is not what the trait promises.
+        // live, semantics: a live cross-process view would need an RPC per
+        // read, so this test backend does not keep `Consumer::metrics`'s
+        // live-view contract.
         let mut client = self.client.clone();
         let id = self.consumer_id;
         let backend = self.backend;
-        self.block(async move {
+        MetricsView::from(self.block(async move {
             let resp = client
                 .metrics(proto::ConsumerIdRequest { consumer_id: id })
                 .await
@@ -613,7 +612,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 },
                 None => HashMap::new(),
             }
-        })
+        }))
     }
 
     // ── subscription / assignment ──

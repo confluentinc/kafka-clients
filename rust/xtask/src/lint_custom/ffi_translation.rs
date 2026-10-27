@@ -147,7 +147,8 @@
 //! consumer state reads the C handle's single-owner guard can refuse
 //! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
 //! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
-//! flag and an out-parameter instead of a `-1` sentinel; the factories of an error
+//! flag and an out-parameter instead of a `-1` sentinel; a live map's
+//! snapshot ([`C_SNAPSHOT_ITERATORS`]) crosses as an iterator over it; the factories of an error
 //! carrying a binding's opaque pointer ([`C_RELEASE_HOOKS`]) take a trailing
 //! nullable release hook in C only; a trait
 //! method with `where Self: Sized`
@@ -257,6 +258,28 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
     "kafka_producer_Producer_begin_transaction_cb",
     "kafka_producer_Producer_begin_transaction_cb_t",
 ];
+
+/// Rust methods returning a shared snapshot of a live map
+/// (`Arc<HashMap<..>>`), each paired with its C export, which hands out an
+/// iterator over that snapshot instead: `MetricsView::snapshot` stands for
+/// Java's weakly consistent iteration of the unmodifiable live map, so C gets
+/// `java.util.Iterator`'s `kafka_Iterator_t` of `kafka_Map_Entry_t`, not a
+/// copied `kafka_Map_t`.
+const C_SNAPSHOT_ITERATORS: &[(&str, &str)] = &[(
+    "kafka_common_metrics_MetricsView_snapshot",
+    "kafka_common_metrics_MetricsView_iterator",
+)];
+
+/// Replaces each expected snapshot method of [`C_SNAPSHOT_ITERATORS`] with its
+/// iterator export: same parameters, returning an owned `kafka_Iterator_t`.
+fn snapshot_iterators(items: &mut BTreeMap<String, Expected>) {
+    for (snapshot, iterator) in C_SNAPSHOT_ITERATORS {
+        if let Some(Expected { shape: Shape::Fn(sig), file }) = items.remove(*snapshot) {
+            let sig = Sig { ret: Some("*mut kafka_Iterator_t".to_string()), ..sig };
+            items.insert((*iterator).to_string(), Expected { shape: Shape::Fn(sig), file });
+        }
+    }
+}
 
 /// Consumer state reads that are infallible in Rust and Java's `Consumer`
 /// interface but fallible in C: the C consumer handle adds a single-owner guard
@@ -1169,7 +1192,8 @@ impl FfiTranslation {
     /// The findings before the baseline, and how many symbols were compared.
     pub(super) fn findings(&self, krate: &Crate) -> (Vec<Finding>, usize) {
         let surface = self.rust_surface(krate);
-        let expectations = self.expectations(&surface);
+        let mut expectations = self.expectations(&surface);
+        snapshot_iterators(&mut expectations.items);
         let actual = CSurface::load(krate);
         let mut findings = expectations.findings;
         let checked = expectations.items.len() + actual.fns.len() + actual.types.len();
