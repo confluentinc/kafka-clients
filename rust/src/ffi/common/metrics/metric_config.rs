@@ -51,7 +51,7 @@ enum MetricConfigImpl {
     Borrowed(*const MetricConfig),
 }
 
-/// What a [`kafka_common_metrics_MetricConfig_t`] points at.
+/// What a `kafka_common_metrics_MetricConfig_t` points at.
 pub(crate) struct MetricConfigInner {
     config: MetricConfigImpl,
 }
@@ -118,7 +118,7 @@ impl MetricConfigInner {
 }
 
 /// Hands `config` to C as an owned handle sharing it, freed with
-/// [`kafka_common_metrics_MetricConfig_destroy`].
+/// `kafka_common_metrics_MetricConfig_destroy`.
 pub(crate) fn box_metric_config(config: Arc<MetricConfig>) -> *mut kafka_common_metrics_MetricConfig_t {
     Box::into_raw(Box::new(MetricConfigInner::shared(config))) as *mut kafka_common_metrics_MetricConfig_t
 }
@@ -191,21 +191,25 @@ pub(crate) unsafe fn metric_config_option(
     }
 }
 
-/// `new MetricConfig()`: the defaults. Owned, freed with
-/// [`kafka_common_metrics_MetricConfig_destroy`].
+/// `new MetricConfig()`: the defaults.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_MetricConfig_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricConfig_new() -> *mut kafka_common_metrics_MetricConfig_t {
     box_metric_config(Arc::new(MetricConfig::new()))
 }
 
-/// `quota()`: the config's quota, or null when none is set. Borrowed from
-/// `self_`: valid until `self_` is destroyed or one of its setters runs, and
-/// never passed to `kafka_common_metrics_Quota_destroy`.
+/// Returns the config's quota, or `NULL` when none is set.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-config handle.
+/// `self_` must be a valid metric-config handle. The returned quota is borrowed from `self_`: valid
+/// until `self_` is destroyed or one of its setters runs, and never passed to
+/// `kafka_common_metrics_Quota_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
@@ -219,12 +223,16 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
     })
 }
 
-/// `quota(Quota quota)`: `quota` is cloned.
+/// Sets the quota.
+///
+/// # Parameters
+///
+/// - `quota` - The quota, copied.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time, and `quota` a valid quota handle.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
+/// and `quota` a valid quota handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
@@ -240,7 +248,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
     unsafe { inner_mut(self_) }.update(|config| config.set_quota(quota));
 }
 
-/// `eventWindow()`.
+/// Returns the event window.
 ///
 /// # Safety
 ///
@@ -255,12 +263,15 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_event_window(
     unsafe { metric_config_ref(self_) }.event_window()
 }
 
-/// `eventWindow(long window)`.
+/// Sets the event window.
+///
+/// # Parameters
+///
+/// - `window` - The number of events in a sample window.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_event_window(
@@ -273,7 +284,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_event_window(
     unsafe { inner_mut(self_) }.update(|config| config.set_event_window(window));
 }
 
-/// `timeWindowMs()`.
+/// Returns the time window, in milliseconds.
 ///
 /// # Safety
 ///
@@ -288,12 +299,17 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_time_window_ms(
     unsafe { metric_config_ref(self_) }.time_window_ms()
 }
 
-/// `timeWindow(long window, TimeUnit unit)`.
+/// Sets the time window.
+///
+/// # Parameters
+///
+/// - `window` - The time window, in `unit`.
+/// - `unit` - The unit of `window`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time, and `unit` a time-unit singleton.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
+/// and `unit` a time-unit singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
@@ -310,12 +326,12 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
     unsafe { inner_mut(self_) }.update(|config| config.set_time_window(window, unit));
 }
 
-/// `tags()`: an owned map of `char *` to `char *`, in key order, freed with
-/// `kafka_Map_destroy`.
+/// Returns the tags, a map of `char *` to `char *` in key order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-config handle.
+/// `self_` must be a valid metric-config handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
@@ -327,14 +343,16 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
     box_string_map(unsafe { metric_config_ref(self_) }.tags())
 }
 
-/// `tags(Map<String, String> tags)`: `tags` maps `const char *` to
-/// `const char *` and is copied.
+/// Sets the tags.
+///
+/// # Parameters
+///
+/// - `tags` - A map of `const char *` to `const char *`, copied.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time, and `tags` null or a valid map of NUL-terminated
-/// strings.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
+/// and `tags` `NULL` or a valid map of NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
@@ -351,7 +369,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
     unsafe { inner_mut(self_) }.update(|config| config.set_tags(tags));
 }
 
-/// `samples()`.
+/// Returns the number of samples.
 ///
 /// # Safety
 ///
@@ -366,14 +384,16 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
     unsafe { metric_config_ref(self_) }.samples()
 }
 
-/// `samples(int samples)`: `samples` must be at least 1, as Java requires
-/// (Java throws `IllegalArgumentException` below it). A smaller value breaks
-/// that precondition and is not reported as an error (CLAUDE.md §4).
+/// Sets the number of samples.
+///
+/// # Parameters
+///
+/// - `samples` - The number of samples; must be at least 1, as Java requires. A smaller value
+///   breaks that precondition and is not reported as an error.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
@@ -386,7 +406,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
     unsafe { inner_mut(self_) }.update(|config| config.set_samples(samples));
 }
 
-/// `recordLevel()`: the recording-level singleton.
+/// Returns the recording level, a singleton.
 ///
 /// # Safety
 ///
@@ -402,13 +422,16 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_record_level(
     recording_level_singleton(unsafe { metric_config_ref(self_) }.record_level())
 }
 
-/// `recordLevel(Sensor.RecordingLevel recordingLevel)`.
+/// Sets the recording level.
+///
+/// # Parameters
+///
+/// - `recording_level` - The recording level.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid owned metric-config handle that no other call
-/// uses at the same time, and `recording_level` a recording-level
-/// singleton.
+/// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
+/// and `recording_level` a recording-level singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_record_level(

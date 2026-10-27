@@ -36,8 +36,8 @@ impl RequestUtils {
     /// Whether the exception is fatal — retrying is pointless because the condition
     /// cannot clear on its own.
     ///
-    /// A direct translation of Java's `RequestUtils.isFatalException(Throwable)`
-    /// (`common/requests/RequestUtils.java:88`), an `instanceof` chain over seven
+    /// A direct translation of Java's `RequestUtils#isFatalException`,
+    /// an `instanceof` chain over seven
     /// classes. It is deliberately a free function, not a method on [`Error`] or a
     /// predicate on [`ErrorHierarchy`](crate::common::error::ErrorHierarchy):
     /// fatality is not a property of an exception's *type* (the same class is fatal

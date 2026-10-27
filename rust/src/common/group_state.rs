@@ -21,9 +21,22 @@ use std::fmt;
 
 use crate::common::GroupType;
 
-/// The state of a group.
+/// The group state.
 ///
-/// Corresponds to `org.apache.kafka.common.GroupState`.
+/// The following table shows the correspondence between the group states and
+/// types.
+///
+/// | State | Classic group | Consumer group | Share group | Streams group |
+/// | --- | --- | --- | --- | --- |
+/// | UNKNOWN | Yes | Yes | Yes | Yes |
+/// | PREPARING_REBALANCE | Yes | Yes |  |  |
+/// | COMPLETING_REBALANCE | Yes | Yes |  |  |
+/// | STABLE | Yes | Yes | Yes | Yes |
+/// | DEAD | Yes | Yes | Yes | Yes |
+/// | EMPTY | Yes | Yes | Yes | Yes |
+/// | ASSIGNING |  | Yes |  | Yes |
+/// | RECONCILING |  | Yes |  | Yes |
+/// | NOT_READY |  |  |  | Yes |
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupState")]
@@ -49,10 +62,8 @@ pub enum GroupState {
 }
 
 impl GroupState {
-    /// The display name of this group state (as used on the wire and in
-    /// `toString`).
-    ///
-    /// Mirrors the private `name` field in Java.
+    /// Returns the display name of this group state, as used on the wire and
+    /// by `Display`.
     #[doc(alias = "org.apache.kafka.common.GroupState#name")]
     pub fn name(&self) -> &'static str {
         match self {
@@ -70,8 +81,13 @@ impl GroupState {
 
     /// Case-insensitive group state lookup by string name.
     ///
-    /// Returns [`GroupState::Unknown`] if the name is unrecognized, mirroring
-    /// Java's `parse`.
+    /// # Arguments
+    ///
+    /// - `name` - the state name
+    ///
+    /// # Returns
+    ///
+    /// The state, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.GroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
@@ -90,7 +106,9 @@ impl GroupState {
 
     /// Returns the set of group states applicable to the given group type.
     ///
-    /// Mirrors `GroupState.groupStatesForType`.
+    /// # Arguments
+    ///
+    /// - `group_type` - the group type
     ///
     /// # Panics
     ///

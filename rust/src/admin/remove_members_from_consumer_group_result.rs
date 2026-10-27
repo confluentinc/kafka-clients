@@ -13,9 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::remove_members_from_consumer_group`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,9 +25,6 @@ use crate::leave_group_request_data::MemberIdentity;
 type MemberErrors = HashMap<MemberIdentity, Errors>;
 
 /// The result of `Admin::remove_members_from_consumer_group`.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult")]
 pub struct RemoveMembersFromConsumerGroupResult {
@@ -57,8 +51,6 @@ impl RemoveMembersFromConsumerGroupResult {
     /// Returns a future which indicates whether the request was 100% successful
     /// (no top-level or member-level error); otherwise the first member error
     /// is returned.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         // Stable iteration order for a deterministic "first error" (Java relies
@@ -95,11 +87,13 @@ impl RemoveMembersFromConsumerGroupResult {
 
     /// Returns the selected member's future.
     ///
-    /// Mirrors `memberResult(MemberToRemove)`.
+    /// # Arguments
+    ///
+    /// - `member` - the member to check.
     ///
     /// # Errors
     ///
-    /// Returns an error immediately (Java's `IllegalArgumentException`) when
+    /// Returns an error answering `Error::is_local_illegal_argument_error` immediately when
     /// called in `removeAll` mode, or when `member` was not part of the original
     /// request. The returned future fails if the member's removal failed (or the
     /// member is missing from the response).

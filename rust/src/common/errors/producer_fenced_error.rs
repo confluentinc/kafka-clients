@@ -18,14 +18,16 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// There is a newer producer with the same transactionalId which fences the
-    /// current one.
+    /// This fatal error indicates that another producer with the same `transactional.id` has been
+    /// started. It is only possible to have one producer instance with a `transactional.id` at any
+    /// given time, and the latest one to be started "fences" the previous instances so that they
+    /// can no longer make transactional requests. When you encounter this error, you must close the
+    /// producer instance.
     ///
-    /// Corresponds to Java's `ProducerFencedException`, error code `Errors::ProducerFenced`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ProducerFencedException` -> `ApplicationRecoverableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::ProducerFenced`. Java `extends` chain: `ProducerFencedException` ->
+    /// `ApplicationRecoverableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ProducerFencedException")]
     ProducerFencedError,
     code: Errors::ProducerFenced,

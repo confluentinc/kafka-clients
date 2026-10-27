@@ -87,7 +87,7 @@ const BROKER_IDS: [i32; 2] = [1, 2];
 
 type TestProducer = KafkaProducer<String, Vec<u8>>;
 
-/// `@ClusterTestDefaults` of `ProducerSendWhileDeletionTest.java:66-76`:
+/// `@ClusterTestDefaults` of `ProducerSendWhileDeletionTest`:
 /// two brokers with `num.partitions=2`, `default.replication.factor=2`,
 /// `auto.leader.rebalance.enable=false`, `log.segment.delete.delay.ms=1000`
 /// and `log.initial.task.delay.ms=100`. Topic auto-creation stays at the broker
@@ -115,7 +115,7 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
-/// `ProducerSendWhileDeletionTest.createProducer` (`:258-265`) through
+/// `ProducerSendWhileDeletionTest#createProducer` through
 /// `ClusterInstance.producer`: string key serializer, byte-array value
 /// serializer, everything else at the producer defaults.
 fn create_producer(bootstrap_servers: &str) -> TestProducer {
@@ -205,7 +205,7 @@ async fn delete_topic(admin: &dyn Admin, topic: &str) {
         .unwrap_or_else(|e| panic!("delete topic {topic}: {e:?}"));
 }
 
-/// `ProducerSendWhileDeletionTest.topicMetadata` (`:326-334`).
+/// `ProducerSendWhileDeletionTest#topicMetadata`.
 async fn topic_metadata(admin: &dyn Admin, topic: &str) -> Result<TopicDescription, String> {
     let mut all = admin
         .describe_topics_with_topic_names(&[topic.to_string()])
@@ -222,7 +222,7 @@ async fn topic_metadata(admin: &dyn Admin, topic: &str) -> Result<TopicDescripti
 /// retries while the answering broker reports `UNKNOWN_TOPIC_OR_PARTITION`.
 ///
 /// Java's `topicMetadata()` needs no retry, because `cluster.createTopic` waits
-/// in `waitTopicCreation` (`ClusterInstance.java:353-365`) until every broker's
+/// in `ClusterInstance#waitTopicCreation` until every broker's
 /// metadata cache has the topic. A client cannot read each broker's cache:
 /// [`cluster_create_topic`]'s waits show only that one broker has the topic,
 /// while the by-name describe goes to the least-loaded broker, which on this
@@ -236,9 +236,9 @@ async fn known_topic_metadata(admin: &dyn Admin, topic: &str) -> TopicDescriptio
 /// also retries while the answering broker still describes the deleted topic,
 /// whose id was `deleted_id`.
 ///
-/// Java's `cluster.createTopic` ends with `ensureConsistentMetadata`
-/// (`ClusterInstance.java:364, 371-378`), which waits until every broker has
-/// applied the controller's metadata log, so no broker still holds the deleted
+/// Java's `cluster.createTopic` ends, in `ClusterInstance#waitTopicCreation`, with
+/// `ClusterInstance#ensureConsistentMetadata(Collection,Collection)`, which waits
+/// until every broker has applied the controller's metadata log, so no broker still holds the deleted
 /// topic when `topicMetadata()` runs. [`verify_topic_deletion`] observes the
 /// deletion only through the broker answering `listTopics` and the brokers that
 /// held a replica: a broker that held none may not have applied it yet, and
@@ -283,7 +283,7 @@ async fn describe_until_current(admin: &dyn Admin, topic: &str, deleted_id: Opti
         .expect("set when the describe succeeded")
 }
 
-/// `ProducerSendWhileDeletionTest.verifyTopicDeletion` (`:267-306`) for the
+/// `ProducerSendWhileDeletionTest#verifyTopicDeletion` for the
 /// partitions `0` and `1`, replaced by admin polling (see the module docs).
 async fn verify_topic_deletion(admin: &dyn Admin, topic: &str) {
     let topic_partitions: Vec<TopicPartition> = (0..2).map(|p| TopicPartition::new(topic.to_string(), p)).collect();
@@ -332,7 +332,7 @@ async fn verify_topic_deletion(admin: &dyn Admin, topic: &str) {
     .await;
 }
 
-/// `ProducerSendWhileDeletionTest.assertLeader` (`:336-350`): wait until the
+/// `ProducerSendWhileDeletionTest#assertLeader`: wait until the
 /// leader of `partition` is `expected_leader`, treating an unknown topic as
 /// "not yet".
 async fn assert_leader(admin: &dyn Admin, topic: &str, partition: i32, expected_leader: i32) {
@@ -355,8 +355,8 @@ async fn assert_leader(admin: &dyn Admin, topic: &str, partition: i32, expected_
     .await;
 }
 
-/// Translated from `ProducerSendWhileDeletionTest.testSendWithTopicDeletionMidWay`
-/// (`ProducerSendWhileDeletionTest.java:95-131`): the producer recovers when
+/// Translated from `ProducerSendWhileDeletionTest#testSendWithTopicDeletionMidWay`:
+/// the producer recovers when
 /// its topic is deleted mid-way through producing and then auto-created by the
 /// producer's own metadata request.
 #[tokio::test(flavor = "multi_thread")]
@@ -392,8 +392,8 @@ async fn test_send_with_topic_deletion_mid_way() {
     admin.close().await;
 }
 
-/// Translated from `ProducerSendWhileDeletionTest.testSendWithRecreatedTopic`
-/// (`ProducerSendWhileDeletionTest.java:139-166`): after the topic is deleted
+/// Translated from `ProducerSendWhileDeletionTest#testSendWithRecreatedTopic`:
+/// after the topic is deleted
 /// and recreated with a new topic id, the producer produces to the new topic,
 /// starting at offset 0.
 #[tokio::test(flavor = "multi_thread")]
@@ -431,8 +431,8 @@ async fn test_send_with_recreated_topic() {
     admin.close().await;
 }
 
-/// Translated from `ProducerSendWhileDeletionTest.testSendWhileTopicGetRecreated`
-/// (`ProducerSendWhileDeletionTest.java:168-202`): while one task deletes and
+/// Translated from `ProducerSendWhileDeletionTest#testSendWhileTopicGetRecreated`:
+/// while one task deletes and
 /// recreates the topic five times, another sends ten records with callbacks
 /// and flushes; every record's callback fires exactly once (success or error).
 ///
@@ -530,8 +530,8 @@ async fn test_send_while_topic_get_recreated() {
     assert_eq!(NUM_RECORDS, num_acks.load(Ordering::SeqCst));
 }
 
-/// Translated from `ProducerSendWhileDeletionTest.testSendWithTopicReassignmentIsMidWay`
-/// (`ProducerSendWhileDeletionTest.java:204-235`): the producer keeps producing
+/// Translated from `ProducerSendWhileDeletionTest#testSendWithTopicReassignmentIsMidWay`:
+/// the producer keeps producing
 /// after the partition's only replica (and so its leader) moves to another
 /// broker, and the topic id is unchanged.
 #[tokio::test(flavor = "multi_thread")]

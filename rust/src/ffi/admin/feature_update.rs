@@ -91,21 +91,21 @@ pub(crate) unsafe fn upgrade_type_value_of(
     unsafe { *(upgrade_type as *const UpgradeType) }
 }
 
-/// `UpgradeType.UNKNOWN`.
+/// Returns `UpgradeType.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_unknown() -> *const kafka_admin_FeatureUpdate_UpgradeType_t {
     upgrade_type_singleton(UpgradeType::Unknown)
 }
 
-/// `UpgradeType.UPGRADE`.
+/// Returns `UpgradeType.UPGRADE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_upgrade() -> *const kafka_admin_FeatureUpdate_UpgradeType_t {
     upgrade_type_singleton(UpgradeType::Upgrade)
 }
 
-/// `UpgradeType.SAFE_DOWNGRADE`.
+/// Returns `UpgradeType.SAFE_DOWNGRADE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_safe_downgrade()
@@ -113,7 +113,7 @@ pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_safe_downgrade()
     upgrade_type_singleton(UpgradeType::SafeDowngrade)
 }
 
-/// `UpgradeType.UNSAFE_DOWNGRADE`.
+/// Returns `UpgradeType.UNSAFE_DOWNGRADE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_unsafe_downgrade()
@@ -121,7 +121,7 @@ pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_unsafe_downgrade()
     upgrade_type_singleton(UpgradeType::UnsafeDowngrade)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_FeatureUpdate_UpgradeType_UNKNOWN`.
 ///
@@ -138,12 +138,12 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType__enum(
     enum_of(unsafe { upgrade_type_value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns the constant's name, as Java's inherited `Enum.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_to_string(
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_to_string(
     into_c_string(&unsafe { upgrade_type_value_of(self_) }.to_string())
 }
 
-/// `UpgradeType.code()`: the wire-protocol byte of the upgrade type.
+/// Returns the wire-protocol byte of the upgrade type.
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`
 /// enum: its 0 is the valid `UNKNOWN`.
@@ -172,8 +172,15 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_code(
     unsafe { upgrade_type_value_of(self_) }.code()
 }
 
-/// `UpgradeType.fromCode(int code)`: the borrowed singleton with that wire
-/// code, `UNKNOWN` for a code Java does not know.
+/// Returns the singleton with the given wire code, `UNKNOWN` for a code Java does not know.
+///
+/// # Parameters
+///
+/// - `code` - the wire-protocol code of the upgrade type.
+///
+/// # Safety
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_FeatureUpdate_UpgradeType_from_code(
@@ -216,16 +223,28 @@ pub(crate) fn box_feature_update(update: FeatureUpdate) -> *mut kafka_admin_Feat
     Box::into_raw(Box::new(FeatureUpdateInner { update })) as *mut kafka_admin_FeatureUpdate_t
 }
 
-/// `new FeatureUpdate(short maxVersionLevel, UpgradeType upgradeType)`: returns
-/// the owned handle (freed with [`kafka_admin_FeatureUpdate_destroy`]), or
-/// stores the owned `IllegalArgumentException` translation in `*out_err` and
-/// returns `NULL` when the level is negative or a deletion (level 0) is
-/// requested with `UPGRADE`.
+/// Creates the update of a finalized feature.
+///
+/// # Parameters
+///
+/// - `max_version_level` - The new maximum version level for the finalized feature. a value of zero
+///   is special and indicates that the update is intended to delete the finalized feature, and
+///   should be accompanied by setting the upgradeType to safe or unsafe.
+/// - `upgrade_type` - Indicate what kind of upgrade should be performed in this operation. -
+///   UPGRADE: upgrading the feature level - SAFE_DOWNGRADE: only downgrades which do not result in
+///   metadata loss are permitted - UNSAFE_DOWNGRADE: any downgrade, including those which may
+///   result in metadata loss, are permitted
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `max_version_level` is negative, or
+///   is 0 (a deletion) with `UPGRADE`.
 ///
 /// # Safety
 ///
 /// `upgrade_type` must be an upgrade-type singleton and `out_err` a valid slot
-/// pointing at null.
+/// pointing at `NULL`. The returned handle is owned, freed with
+/// [`kafka_admin_FeatureUpdate_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
@@ -240,7 +259,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_new(
     unsafe { deliver_value(result, out_err, box_feature_update) }
 }
 
-/// `maxVersionLevel()`.
+/// Returns the new maximum version level for the finalized feature.
 ///
 /// # Safety
 ///
@@ -253,11 +272,12 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_max_version_level(self_: *con
     unsafe { feature_update_ref(self_) }.max_version_level()
 }
 
-/// `upgradeType()`: a borrowed singleton.
+/// Returns the kind of upgrade to perform.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid feature-update handle.
+/// `self_` must be a valid feature-update handle. The returned singleton is borrowed and never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
@@ -268,11 +288,12 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_upgrade_type(
     upgrade_type_singleton(unsafe { feature_update_ref(self_) }.upgrade_type())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the update.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid feature-update handle.
+/// `self_` must be a valid feature-update handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureUpdate_to_string(self_: *const kafka_admin_FeatureUpdate_t) -> *mut c_char {
@@ -281,11 +302,11 @@ pub unsafe extern "C" fn kafka_admin_FeatureUpdate_to_string(self_: *const kafka
     into_c_string(&unsafe { feature_update_ref(self_) }.to_string())
 }
 
-/// Frees an owned update handle; null is a no-op.
+/// Frees an owned update handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned update handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned update handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

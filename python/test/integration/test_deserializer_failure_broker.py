@@ -14,17 +14,19 @@
 
 """A failing value deserializer across two partitions against a broker, sync
 and asyncio: ``poll()`` raises ``RecordDeserializationError`` with Java's
-message (``CompletedFetch.java:347-349``), the failing record's
-``topic_partition()``, ``offset()``, ``origin()`` and ``value_buffer()``, and
-the deserializer's exception as its cause, leaving that partition's position
+message
+(``org.apache.kafka.clients.consumer.internals.CompletedFetch#newRecordDeserializationException``),
+the failing record's ``topic_partition()``, ``offset()``, ``origin()`` and
+``value_buffer()``, and the deserializer's exception as its cause, leaving that partition's position
 at the record; ``seek(partition=e.topic_partition(), offset=e.offset() + 1)``
 then skips the record.
 
 The other partition's records, produced after the first error: Java's
 ``FetchCollector`` keeps the failing partition's fetch next in line, so every
 ``poll()`` raises again and the other partition's records wait behind it until
-the failing partition is paused or sought past (``FetchCollector.java:98-143``,
-``CompletedFetch.java:271-305``). The binding instead seeks the failing
+the failing partition is paused or sought past
+(``org.apache.kafka.clients.consumer.internals.FetchCollector#collectFetch``,
+``CompletedFetch#fetchRecords``). The binding instead seeks the failing
 partition back after each failure (``confluent_kafka/consumer/_poll.py:176-185``)
 and returns the other partition's records between the errors. The first test
 asserts what the client does; the second, a strict xfail, Java's behaviour, a
@@ -148,7 +150,7 @@ def test_a_failing_record_does_not_hold_back_the_other_partition(kafka_broker: A
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "deviation for the owner to decide: Java keeps the failing partition's fetch next in "
     "line, so every poll() raises and the other partitions' records wait until it is "
-    "paused or sought past (FetchCollector.java:98-143); the binding seeks partition 0 "
+    "paused or sought past (FetchCollector#collectFetch); the binding seeks partition 0 "
     "back after each failure (confluent_kafka/consumer/_poll.py:176-185) and lets "
     "partition 1's records through between the errors"))
 @pytest.mark.parametrize("mode", MODES)

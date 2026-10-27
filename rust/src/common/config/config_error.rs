@@ -19,21 +19,11 @@ use std::fmt::Display;
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// A configuration value is invalid — wrong type, out of range, or otherwise
-    /// unacceptable.
+    /// Thrown if the user supplies an invalid configuration
     ///
-    /// Corresponds to Java's `ConfigException`, thrown throughout `ConfigDef` and
-    /// the `*Config` constructors. It lives in `org.apache.kafka.common.config`,
-    /// not `common.errors`, and has no entry in `Errors`, so it carries no
-    /// protocol code.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ConfigException` -> `KafkaException`
-    ///
-    /// Note it extends `KafkaException` directly, NOT `IllegalArgumentException`:
-    /// an invalid configuration is a Kafka error
-    /// ([`is_kafka_error`](crate::common::Error::is_kafka_error) is `true`),
-    /// unlike a `java.lang.IllegalArgumentException`.
+    /// No protocol code.
     #[doc(alias = "org.apache.kafka.common.config.ConfigException")]
     ConfigError,
     extends: [
@@ -43,9 +33,9 @@ kafka_error_type! {
 }
 
 impl ConfigError {
-    // Java's three `ConfigException` constructors — `(String message)`
-    // (`ConfigException.java:28`), `(String name, Object value)` (`:32`) and
-    // `(String name, Object value, String message)` (`:36`) — have an EMPTY
+    // Java's three `ConfigException` constructors — `ConfigException(String)`,
+    // `ConfigException(String, Object)` and
+    // `ConfigException(String, Object, String)` — have an EMPTY
     // parameter-name intersection, and no constructor is no-arg. So under
     // CLAUDE.md §2 nobody keeps the plain name, and the two below take their
     // full parameter lists as the suffix.
@@ -59,17 +49,26 @@ impl ConfigError {
     // than this one suffix; see the note on `message_only_error!` for the same
     // trade-off.
 
-    /// Create a config error naming the offending value and configuration key,
-    /// mirroring Java's `ConfigException(String name, Object value)` (`:32`):
+    /// Creates a config error naming the offending value and configuration key:
     /// `"Invalid value {value} for configuration {name}"`.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the configuration key
+    /// - `value` - the invalid value
     #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value(name: impl Display, value: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}"))
     }
 
-    /// Create a config error naming the value, key, and a detail message,
-    /// mirroring Java's `ConfigException(String name, Object value, String message)`
-    /// (`:36`): `"Invalid value {value} for configuration {name}: {message}"`.
+    /// Creates a config error naming the value, key, and a detail message:
+    /// `"Invalid value {value} for configuration {name}: {message}"`.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the configuration key
+    /// - `value` - the invalid value
+    /// - `message` - why the value is invalid
     #[doc(alias = "org.apache.kafka.common.config.ConfigException#ConfigException")]
     pub fn with_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}: {message}"))

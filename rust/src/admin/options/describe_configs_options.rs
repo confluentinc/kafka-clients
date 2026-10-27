@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_configs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsOptions`.
 
 /// Options for `Admin::describe_configs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions")]
 pub struct DescribeConfigsOptions {
@@ -34,8 +30,16 @@ impl DescribeConfigsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeConfigsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -43,14 +47,22 @@ impl DescribeConfigsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set whether to return configuration synonyms in the response.
+    /// Set to true if synonym configs should be returned in the response.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_synonyms` - `true` to return synonym configs.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeConfigsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms")]
     pub fn set_include_synonyms(mut self, include_synonyms: bool) -> Self {
@@ -58,13 +70,21 @@ impl DescribeConfigsOptions {
         self
     }
 
-    /// Whether to return configuration synonyms in the response.
+    /// Returns true if synonym configs should be returned in the response.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeSynonyms")]
     pub fn include_synonyms(&self) -> bool {
         self.include_synonyms
     }
 
-    /// Set whether to return configuration documentation in the response.
+    /// Set to true if config documentation should be returned in the response.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_documentation` - `true` to return config documentation.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeConfigsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation")]
     pub fn set_include_documentation(mut self, include_documentation: bool) -> Self {
@@ -72,7 +92,7 @@ impl DescribeConfigsOptions {
         self
     }
 
-    /// Whether to return configuration documentation in the response.
+    /// Returns true if config documentation should be returned in the response.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsOptions#includeDocumentation")]
     pub fn include_documentation(&self) -> bool {
         self.include_documentation

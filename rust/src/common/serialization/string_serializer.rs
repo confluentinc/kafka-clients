@@ -25,15 +25,15 @@ use std::borrow::Cow;
 use crate::common::Error;
 use crate::common::serialization::Serializer;
 
-/// Serializes strings to UTF-8 encoded bytes.
+/// String encoding defaults to UTF8 and can be customized by setting the
+/// property key.serializer.encoding, value.serializer.encoding or
+/// serializer.encoding. The first two take precedence over the last.
 ///
-/// In Java, `StringSerializer` supports configurable character encodings.
-/// In Rust, all `String` and `str` values are guaranteed to be valid UTF-8,
-/// so this serializer always uses UTF-8 encoding. A Rust string already is its
-/// UTF-8 bytes, so the serialized bytes borrow it ([`Cow::Borrowed`]) and
-/// nothing is allocated or copied (CLAUDE.md §14).
+/// # Translation notes
 ///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.StringSerializer`.
+/// WARNING: the encoding is always UTF-8; the properties are ignored.
+// A Rust string already is its UTF-8 bytes, so the serialized bytes borrow it
+// (`Cow::Borrowed`) and nothing is allocated or copied.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.serialization.StringSerializer")]

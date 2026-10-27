@@ -112,11 +112,11 @@ pub(crate) unsafe fn destroy_classic_group_description_element(element: *mut c_v
 }
 
 /// Reads a list of `const kafka_admin_MemberDescription_t *` into owned
-/// copies; null reads as empty.
+/// copies; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are member-description
+/// `list` must be `NULL` or a valid list whose elements are member-description
 /// handles, alive and not mutated for this call.
 unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescription> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, alive and not
@@ -131,21 +131,26 @@ unsafe fn list_member_descriptions(list: *const kafka_List_t) -> Vec<MemberDescr
         .collect()
 }
 
-/// `new ClassicGroupDescription(String groupId, String protocol, String
-/// protocolData, Collection<MemberDescription> members, ClassicGroupState
-/// state, Node coordinator, Set<AclOperation> authorizedOperations)`.
-/// `members` is a borrowed list of `const kafka_admin_MemberDescription_t *`,
-/// copied (null reads as empty); `state` is a singleton; `coordinator` is
-/// nullable and copied; `authorized_operations` is a borrowed list of
-/// `const kafka_common_acl_AclOperation_t *` singletons, copied, null being
-/// Java's null set. Owned, freed with
-/// [`kafka_admin_ClassicGroupDescription_destroy`].
+/// Creates the description of a classic group.
+///
+/// # Parameters
+///
+/// - `group_id` - the id of the classic group.
+/// - `protocol` - the group protocol type.
+/// - `protocol_data` - the group protocol data, such as the partition assignor name.
+/// - `members` - the members of the group, a list of `const kafka_admin_MemberDescription_t *`,
+///   copied; `NULL` reads as empty.
+/// - `state` - the classic group state, a singleton.
+/// - `coordinator` - the group coordinator, copied; `NULL` if not known.
+/// - `authorized_operations` - the authorized operations for this group, a list of
+///   `const kafka_common_acl_AclOperation_t *` singletons, copied; `NULL` if not known.
 ///
 /// # Safety
 ///
-/// The strings must be valid NUL-terminated strings, the lists null or valid
+/// The strings must be valid NUL-terminated strings, the lists `NULL` or valid borrowed
 /// lists of the documented handles, `state` a classic-group-state singleton
-/// and `coordinator` null or a valid node handle.
+/// and `coordinator` `NULL` or a valid node handle. The returned handle is owned, freed with
+/// [`kafka_admin_ClassicGroupDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
@@ -184,11 +189,13 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_new(
     ))
 }
 
-/// `groupId()`: borrowed from the handle.
+/// Returns the id of the classic group.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned string is borrowed, valid
+/// as long as the
+/// description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
@@ -200,11 +207,12 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_group_id(
     unsafe { inner_ref(self_) }.group_id_c.as_ptr()
 }
 
-/// `protocol()`: borrowed from the handle.
+/// Returns the group protocol type.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned string is borrowed,
+/// valid as long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
@@ -216,11 +224,14 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol(
     unsafe { inner_ref(self_) }.protocol_c.as_ptr()
 }
 
-/// `protocolData()`: borrowed from the handle.
+/// Returns the group protocol data. The meaning depends on the group protocol type. For a classic
+/// consumer group, this is the partition assignor name. For a classic connect group, this
+/// indicates which Connect protocols are enabled.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned string is borrowed,
+/// valid as long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
@@ -232,7 +243,11 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_protocol_data(
     unsafe { inner_ref(self_) }.protocol_data_c.as_ptr()
 }
 
-/// `isSimpleConsumerGroup()`: whether the protocol is empty.
+/// If the group is a simple consumer group or not.
+///
+/// # Returns
+///
+/// 1 if the protocol is empty, else 0.
 ///
 /// # Safety
 ///
@@ -247,12 +262,17 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_is_simple_consumer_
     i8::from(unsafe { classic_group_description_ref(self_) }.is_simple_consumer_group())
 }
 
-/// `members()`: an owned list of owned `kafka_admin_MemberDescription_t *`
-/// copies, in Java's order, freed with `kafka_List_destroy`.
+/// A list of the members of the classic group.
+///
+/// # Returns
+///
+/// A list of `kafka_admin_MemberDescription_t *` copies, in Java's order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned list is owned, freed
+/// together with
+/// its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_members(
@@ -268,11 +288,12 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_members(
     box_list(elements, Some(destroy_member_description_element))
 }
 
-/// `state()`: the `kafka_common_ClassicGroupState_t` singleton, never freed.
+/// Returns the classic group state, or `UNKNOWN` if the state is too new for us to parse.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned
+/// `kafka_common_ClassicGroupState_t` singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
@@ -283,12 +304,17 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_state(
     classic_group_state::singleton(unsafe { classic_group_description_ref(self_) }.state())
 }
 
-/// `coordinator()`: a borrowed node valid as long as the description (never
-/// passed to `kafka_common_Node_destroy`), or null for Java's null.
+/// The classic group coordinator, or `NULL` if the coordinator is not known.
+///
+/// # Returns
+///
+/// The coordinator node, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned node is borrowed, valid
+/// as long as the
+/// description, never passed to `kafka_common_Node_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
@@ -300,13 +326,16 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     optional_node_ptr(unsafe { inner_ref(self_) }.coordinator.as_ref())
 }
 
-/// `authorizedOperations()`: an owned list (freed with `kafka_List_destroy`)
-/// of borrowed `const kafka_common_acl_AclOperation_t *` singletons, or null
-/// when the broker did not report them (Java's null).
+/// authorizedOperations for this group, or `NULL` if that information is not known.
+///
+/// # Returns
+///
+/// A list of `const kafka_common_acl_AclOperation_t *` singletons, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid classic-group-description handle.
+/// `self_` must be a valid classic-group-description handle. The returned list is owned, freed with
+/// `kafka_List_destroy`; its singletons are borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operations(
@@ -317,11 +346,13 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
     acl_operation_list(unsafe { classic_group_description_ref(self_) }.authorized_operations())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a live classic-group-description handle.
+/// `self_` must be a live classic-group-description handle. The returned string is owned, freed
+/// with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_to_string(
@@ -332,11 +363,11 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_to_string(
     into_c_string(&unsafe { classic_group_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned classic-group-description handle; null is a no-op.
+/// Frees an owned classic-group-description handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -49,12 +49,17 @@ fn metric_name_view(payload: &Payload<QuotaViolationError>) -> &MetricNameInner 
     payload.views(|e| MetricNameInner::new(e.metric_name().clone()))
 }
 
-/// The payload of a `QuotaViolationException` error, borrowed from the
-/// error handle, or null when the error is another class.
+/// Returns the payload of a `QuotaViolationException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_quota_violation(
@@ -74,13 +79,18 @@ pub unsafe extern "C" fn kafka_common_Error_quota_violation(
 }
 
 /// `new QuotaViolationException(KafkaMetric metric, double value, double
-/// bound)`, taking the metric's name as the Rust translation does;
-/// `metric_name` is copied. Owned, freed with
-/// [`kafka_common_QuotaViolationError_destroy`].
+/// bound)`, taking the metric's name as the Rust translation does.
+///
+/// # Parameters
+///
+/// - `metric_name` - The name of the metric that violated its quota.
+/// - `value` - The value that was recorded.
+/// - `bound` - The quota bound that was crossed.
 ///
 /// # Safety
 ///
-/// `metric_name` must be a valid metric-name handle.
+/// `metric_name` must be a valid metric-name handle; it is copied. The returned handle is owned,
+/// freed with `kafka_common_QuotaViolationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
@@ -97,11 +107,12 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_new(
     ))
 }
 
-/// `metric()`'s name: borrowed from the handle, valid as long as it is.
+/// Returns the name of the metric that violated its quota (`metric()`'s name).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid quota-violation handle.
+/// `self_` must be a valid quota-violation handle. The returned handle is borrowed, valid until
+/// `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
@@ -115,7 +126,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
     metric_name_view(unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }).as_ptr()
 }
 
-/// `value()`: the measured value.
+/// Returns the value that was recorded (`value()`).
 ///
 /// # Safety
 ///
@@ -132,7 +143,7 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.value().value()
 }
 
-/// `bound()`: the quota it violated.
+/// Returns the quota bound that was crossed (`bound()`).
 ///
 /// # Safety
 ///
@@ -149,11 +160,12 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.value().bound()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
@@ -167,11 +179,12 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_source(
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid quota-violation handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
@@ -184,12 +197,12 @@ pub unsafe extern "C" fn kafka_common_QuotaViolationError_to_string(
     unsafe { Payload::<QuotaViolationError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_QuotaViolationError_destroy(self_: *mut kafka_common_QuotaViolationError_t) {

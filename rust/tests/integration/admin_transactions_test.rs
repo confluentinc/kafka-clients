@@ -801,7 +801,7 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
 
 /// (j) `force_terminate_transaction` for a fresh id succeeds via the same
 /// `InitProducerId` path (Java implements it as a thin wrapper over
-/// `fenceProducers` — `KafkaAdminClient.java:4848-4864`).
+/// `fenceProducers` — `KafkaAdminClient#forceTerminateTransaction`).
 ///
 /// The follow-up `describe_transactions` is what makes this more than an "it
 /// returned Ok" check: the id did not exist before the call

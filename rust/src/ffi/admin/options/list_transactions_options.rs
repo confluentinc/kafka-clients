@@ -107,16 +107,25 @@ fn boxed(options: ListTransactionsOptions) -> *mut kafka_admin_ListTransactionsO
     Box::into_raw(Box::new(ListTransactionsOptionsInner::new(options))) as *mut kafka_admin_ListTransactionsOptions_t
 }
 
-/// `new ListTransactionsOptions()`: no filter, with the client's default
-/// API timeout. Owned, freed with [`kafka_admin_ListTransactionsOptions_destroy`].
+/// `new ListTransactionsOptions()`: no filter, with the client's default API timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_ListTransactionsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListTransactionsOptions_new() -> *mut kafka_admin_ListTransactionsOptions_t {
     boxed(ListTransactionsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -133,8 +142,12 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_set_timeout_ms(
     unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -153,6 +166,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_timeout_ms(
 /// `ListTransactionsOptions.filterStates(Collection<TransactionState> states)`:
 /// `states` is a borrowed `kafka_List_t` of `kafka_admin_TransactionState_t`
 /// singletons, copied during the call (`NULL` reads as empty: no filter).
+///
+/// # Parameters
+///
+/// - `states` - the set of states to filter by
 ///
 /// # Safety
 ///
@@ -179,15 +196,21 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_states(
     unsafe { inner_mut(self_) }.replace(|options| options.filter_states(states));
 }
 
-/// `ListTransactionsOptions.filterProducerIds(Collection<Long> producerIds)`:
-/// `producer_ids` is a borrowed `kafka_List_t` of `const int64_t *`, copied
-/// during the call (`NULL` reads as empty: no filter).
+/// Filter only the transactions from producers in a specific set of producerIds. If no filter is
+/// specified or if the passed collection of producerIds is empty, then the transactions of all
+/// producerIds will be returned.
+///
+/// # Parameters
+///
+/// - `producer_ids` - the set of producerIds to filter by, a `kafka_List_t` of `const int64_t *`;
+///   `NULL` reads as empty.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
 /// `producer_ids` must be `NULL` or a valid list, not mutated during the
-/// call, whose elements point at readable, aligned `int64_t`s.
+/// call, whose elements point at readable, aligned `int64_t`s. The list is borrowed and copied
+/// during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids(
@@ -213,6 +236,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_producer_ids
 /// transactions running longer than `duration_ms`; a negative value disables
 /// the filter.
 ///
+/// # Parameters
+///
+/// - `duration_ms` - the duration in milliseconds to filter by
+///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time.
@@ -231,6 +258,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_duration(
 /// `ListTransactionsOptions.filterOnTransactionalIdPattern(String pattern)`:
 /// `pattern` is copied during the call; `NULL` is Java's `null`, no pattern
 /// filter.
+///
+/// # Parameters
+///
+/// - `pattern` - the transactional ID regular expression pattern to filter by
 ///
 /// # Safety
 ///
@@ -251,14 +282,20 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filter_on_transacti
     unsafe { inner_mut(self_) }.replace(|options| options.filter_on_transactional_id_pattern(pattern));
 }
 
-/// `ListTransactionsOptions.filteredStates()`: an owned `kafka_List_t` of
-/// borrowed `kafka_admin_TransactionState_t` singletons sorted by name,
-/// freed with `kafka_List_destroy` (the singletons are never freed); empty
-/// when no state filter is set.
+/// `ListTransactionsOptions.filteredStates()`: a `kafka_List_t` of borrowed
+/// `kafka_admin_TransactionState_t` singletons sorted by name; empty when no state filter is set.
+///
+/// # Returns
+///
+/// the current set of filtered states (empty means that no states are filtered and all transactions
+/// will be returned)
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy` (the singletons are
+/// never freed).
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
@@ -282,13 +319,19 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_states(
     )
 }
 
-/// `ListTransactionsOptions.filteredProducerIds()`: an owned, sorted
-/// `kafka_List_t` of owned `int64_t *`, freed with `kafka_List_destroy`;
-/// empty when no producer-id filter is set.
+/// `ListTransactionsOptions.filteredProducerIds()`: a sorted `kafka_List_t` of owned
+/// `int64_t *`; empty when no producer-id filter is set.
+///
+/// # Returns
+///
+/// the current set of filtered states (empty means that no producerIds are filtered and all
+/// transactions will be returned)
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_ids(
@@ -315,6 +358,11 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_producer_i
 /// `ListTransactionsOptions.filteredDuration()`: the duration filter in
 /// milliseconds, negative when no duration filter is set.
 ///
+/// # Returns
+///
+/// the current duration filter value in ms (negative value means transactions are not filtered by
+/// duration)
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -329,13 +377,17 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_duration(
     unsafe { list_transactions_options_ref(self_) }.filtered_duration()
 }
 
-/// `ListTransactionsOptions.filteredTransactionalIdPattern()`: a borrowed
-/// string valid until the handle is destroyed or the pattern is set again,
-/// `NULL` when no pattern filter is set.
+/// Returns transactional ID being filtered.
+///
+/// # Returns
+///
+/// The current transactional ID pattern filter (empty means no transactional IDs are filtered and
+/// all transactions will be returned), `NULL` when no pattern filter is set.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is borrowed, valid until the handle is destroyed or
+/// the pattern is set again.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactional_id_pattern(
@@ -352,11 +404,12 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_filtered_transactio
         .map_or(ptr::null(), |pattern| pattern.as_ptr())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the options' `toString()` form.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsOptions_to_string(

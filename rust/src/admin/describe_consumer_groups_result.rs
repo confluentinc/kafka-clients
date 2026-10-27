@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_consumer_groups`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeConsumerGroupsResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::admin::ConsumerGroupDescription;
 use crate::common::KafkaFuture;
 
 /// The result of `Admin::describe_consumer_groups`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeConsumerGroupsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsResult")]
 pub struct DescribeConsumerGroupsResult {
@@ -32,22 +28,22 @@ pub struct DescribeConsumerGroupsResult {
 
 impl DescribeConsumerGroupsResult {
     /// Creates a result from the per-group-id futures.
+    ///
+    /// # Arguments
+    ///
+    /// - `futures` - the future of each group id.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#DescribeConsumerGroupsResult")]
     pub fn new(futures: HashMap<String, KafkaFuture<ConsumerGroupDescription>>) -> Self {
         Self { futures }
     }
 
-    /// A map from group id to futures yielding group descriptions.
-    ///
-    /// Mirrors `describedGroups()`.
+    /// Returns a map from group id to futures yielding group descriptions.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#describedGroups")]
     pub fn described_groups(&self) -> HashMap<String, KafkaFuture<ConsumerGroupDescription>> {
         self.futures.clone()
     }
 
-    /// A future yielding all descriptions if all describes succeed.
-    ///
-    /// Mirrors `all()`.
+    /// Returns a future yielding all descriptions if all describes succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConsumerGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, ConsumerGroupDescription>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())

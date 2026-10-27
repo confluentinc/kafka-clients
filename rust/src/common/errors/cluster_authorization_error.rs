@@ -20,11 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Cluster authorization failed.
     ///
-    /// Corresponds to Java's `ClusterAuthorizationException`, error code `Errors::ClusterAuthorizationFailed`.
-    ///
-    /// Java `extends` chain:
-    ///    `ClusterAuthorizationException` -> `AuthorizationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::ClusterAuthorizationFailed`. Java `extends` chain:
+    /// `ClusterAuthorizationException` -> `AuthorizationException` ->
+    /// `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ClusterAuthorizationException")]
     ClusterAuthorizationError,
     code: Errors::ClusterAuthorizationFailed,

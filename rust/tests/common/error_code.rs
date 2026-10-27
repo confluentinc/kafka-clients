@@ -254,9 +254,7 @@ pub fn error_with_message(code: i32, message: String) -> Option<Error> {
         FENCED_STATE_EPOCH => Some(Error::FencedStateEpoch(FencedStateEpochError::new(message))),
         FETCH_SESSION_ID_NOT_FOUND => Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message))),
         FETCH_SESSION_TOPIC_ID_ERROR => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-        GROUP_AUTHORIZATION_FAILED => {
-            Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
-        },
+        GROUP_AUTHORIZATION_FAILED => Some(Error::GroupAuthorization(GroupAuthorizationError::new(message))),
         GROUP_DELETION_FAILED => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
         GROUP_ID_NOT_FOUND => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
         GROUP_MAX_SIZE_REACHED => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),

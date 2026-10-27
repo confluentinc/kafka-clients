@@ -43,7 +43,7 @@ pub struct kafka_common_quota_ClientQuotaAlteration_Op_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_quota_ClientQuotaAlteration_Op_t`] points at: the op
+/// What a `kafka_common_quota_ClientQuotaAlteration_Op_t` points at: the op
 /// plus the NUL-terminated key its getter borrows out.
 pub(crate) struct OpInner {
     op: Op,
@@ -82,7 +82,7 @@ pub(crate) unsafe fn op_ref<'a>(op: *const kafka_common_quota_ClientQuotaAlterat
 }
 
 /// Hands `op` to C as an owned handle, freed with
-/// [`kafka_common_quota_ClientQuotaAlteration_Op_destroy`].
+/// `kafka_common_quota_ClientQuotaAlteration_Op_destroy`.
 pub(crate) fn box_op(op: Op) -> *mut kafka_common_quota_ClientQuotaAlteration_Op_t {
     Box::into_raw(Box::new(OpInner::new(op))) as *mut kafka_common_quota_ClientQuotaAlteration_Op_t
 }
@@ -104,20 +104,25 @@ pub(crate) unsafe fn client_quota_alteration_ref<'a>(
 }
 
 /// Hands `alteration` to C as an owned handle, freed with
-/// [`kafka_common_quota_ClientQuotaAlteration_destroy`].
+/// `kafka_common_quota_ClientQuotaAlteration_destroy`.
 pub(crate) fn box_client_quota_alteration(
     alteration: ClientQuotaAlteration,
 ) -> *mut kafka_common_quota_ClientQuotaAlteration_t {
     Box::into_raw(Box::new(alteration)) as *mut kafka_common_quota_ClientQuotaAlteration_t
 }
 
-/// `new Op(String key, Double value)`: `value` is the quota to set, or `NAN`
-/// for Java's `null`, which removes the quota. Owned, freed with
-/// [`kafka_common_quota_ClientQuotaAlteration_Op_destroy`]; `key` is copied.
+/// `new Op(key, value)`.
+///
+/// # Parameters
+///
+/// - `key` - the quota type to alter
+/// - `value` - if set then the existing value is updated, otherwise if `NAN` (Java's `null`),
+///   the existing value is cleared
 ///
 /// # Safety
 ///
-/// `key` must be a valid NUL-terminated string.
+/// `key` must be a valid NUL-terminated string; it is copied.
+/// The returned handle is owned, freed with `kafka_common_quota_ClientQuotaAlteration_Op_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_new(
@@ -130,11 +135,16 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_new(
     box_op(Op::new(unsafe { c_str_to_string(key) }, (!value.is_nan()).then_some(value)))
 }
 
-/// `key()`: the quota type, borrowed from the handle.
+/// `key()`.
+///
+/// # Returns
+///
+/// the quota type to alter
 ///
 /// # Safety
 ///
 /// `self_` must be a valid op handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_key(
@@ -146,7 +156,12 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_key(
     unsafe { op_inner_ref(self_) }.key_c.as_ptr()
 }
 
-/// `value()`: the quota to set, or `NAN` for Java's `null` (remove).
+/// `value()`.
+///
+/// # Returns
+///
+/// if set then the existing value is updated, otherwise if `NAN` (Java's `null`), the existing
+/// value is cleared
 ///
 /// # Safety
 ///
@@ -161,11 +176,14 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_value(
     unsafe { op_ref(self_) }.value().unwrap_or(f64::NAN)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// # Returns
+///
+/// the string form of this op.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid op handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_to_string(
@@ -195,15 +213,18 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_Op_destroy(
     }
 }
 
-/// `new ClientQuotaAlteration(ClientQuotaEntity entity, Collection<Op> ops)`:
-/// `entity` and the borrowed `kafka_common_quota_ClientQuotaAlteration_Op_t`
-/// handles in `ops` are copied during the call. Owned, freed with
-/// [`kafka_common_quota_ClientQuotaAlteration_destroy`].
+/// `new ClientQuotaAlteration(entity, ops)`.
+///
+/// # Parameters
+///
+/// - `entity` - the entity whose config will be modified
+/// - `ops` - the alteration to perform
 ///
 /// # Safety
 ///
-/// `entity` must be a valid entity handle and `ops` null or a valid list of
-/// op handles.
+/// `entity` must be a valid entity handle and `ops` null or a valid list of borrowed
+/// `kafka_common_quota_ClientQuotaAlteration_Op_t` handles; both are copied during the call.
+/// The returned handle is owned, freed with `kafka_common_quota_ClientQuotaAlteration_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
@@ -227,11 +248,16 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_new(
     ))
 }
 
-/// `entity()`: borrowed from the handle; never destroyed.
+/// `entity()`.
+///
+/// # Returns
+///
+/// the entity whose config will be modified
 ///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+/// The returned entity is borrowed, valid as long as the handle, and never destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_entity(
@@ -244,14 +270,17 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_entity(
     client_quota_entity_ptr(unsafe { client_quota_alteration_ref(self_) }.entity())
 }
 
-/// `ops()`: an owned list of owned
-/// `kafka_common_quota_ClientQuotaAlteration_Op_t` copies, in the
-/// alteration's order. Freed with `kafka_List_destroy`, which also frees the
-/// ops.
+/// `ops()`.
+///
+/// # Returns
+///
+/// the alteration to perform
 ///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+/// The returned list is owned and holds owned `kafka_common_quota_ClientQuotaAlteration_Op_t`
+/// copies, in the alteration's order; `kafka_List_destroy` frees it and the ops.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_ops(
@@ -268,11 +297,14 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_ops(
     box_list(elements, Some(destroy_boxed::<OpInner>))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// # Returns
+///
+/// the string form of this alteration.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaAlteration_to_string(

@@ -150,17 +150,19 @@ impl RebalanceCallbackMetricsManager {
 
     /// Java: `recordPartitionsRevokedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_revoked_latency(&self, latency_ms: i64) {
-        self.partition_revoke_callback_sensor.record_with_value(latency_ms as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.partition_revoke_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsAssignedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_assigned_latency(&self, latency_ms: i64) {
-        self.partition_assign_callback_sensor.record_with_value(latency_ms as f64);
+        let _ = self.partition_assign_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsLostLatency(long latencyMs)`.
     pub(crate) fn record_partitions_lost_latency(&self, latency_ms: i64) {
-        self.partition_lost_callback_sensor.record_with_value(latency_ms as f64);
+        let _ = self.partition_lost_callback_sensor.record_with_value(latency_ms as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

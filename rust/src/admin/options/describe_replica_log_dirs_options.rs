@@ -13,13 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_replica_log_dirs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions`.
 
 /// Options for `Admin::describe_replica_log_dirs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions`. In Java this class only
-/// extends `AbstractOptions` (a `timeout_ms` field) with no additional fields.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsOptions")]
 pub struct DescribeReplicaLogDirsOptions {
@@ -33,8 +28,16 @@ impl DescribeReplicaLogDirsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeReplicaLogDirsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,8 +45,8 @@ impl DescribeReplicaLogDirsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

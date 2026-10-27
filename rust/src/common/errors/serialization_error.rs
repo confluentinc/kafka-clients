@@ -17,19 +17,11 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// Any exception during serialization or deserialization.
+    /// Any error during serialization or deserialization.
     ///
-    /// Corresponds to Java's `SerializationException`. It has no entry in
-    /// `Errors`, so it carries no protocol code.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `SerializationException` -> `KafkaException`
-    ///
-    /// Note it bypasses `ApiException`, which is why
-    /// [`is_kafka_error`](crate::common::Error::is_kafka_error) and
-    /// [`is_api_error`](crate::common::Error::is_api_error) disagree on it. It is
-    /// itself an intermediate class; its subclass is
-    /// `RecordDeserializationException`.
+    /// No protocol code.
     #[doc(alias = "org.apache.kafka.common.errors.SerializationException")]
     SerializationError,
     extends: [

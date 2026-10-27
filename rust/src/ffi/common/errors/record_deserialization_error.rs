@@ -58,7 +58,7 @@ pub enum kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e {
 }
 
 /// One static instance per value, indexed by
-/// [`kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e`].
+/// `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e`.
 static ORIGINS: [DeserializationErrorOrigin; 2] = [DeserializationErrorOrigin::Key, DeserializationErrorOrigin::Value];
 
 /// Exhaustive, so a value Java adds fails to compile until it has its C
@@ -96,7 +96,11 @@ pub(crate) unsafe fn origin_value_of(
     unsafe { *(origin as *const DeserializationErrorOrigin) }
 }
 
-/// `DeserializationExceptionOrigin.KEY`.
+/// Returns the `DeserializationExceptionOrigin.KEY` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_key()
@@ -104,7 +108,11 @@ pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOr
     origin_singleton(DeserializationErrorOrigin::Key)
 }
 
-/// `DeserializationExceptionOrigin.VALUE`.
+/// Returns the `DeserializationExceptionOrigin.VALUE` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_value()
@@ -112,7 +120,7 @@ pub extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOr
     origin_singleton(DeserializationErrorOrigin::Value)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns
 /// `kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY`, the first enumerator:
@@ -132,12 +140,12 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_Deserialization
     origin_enum_of(unsafe { origin_value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns `toString()`, Java's inherited `Enum.toString()`: the constant's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_DeserializationErrorOrigin_to_string(
@@ -188,7 +196,7 @@ fn views(payload: &Payload<RecordDeserializationError>) -> &Views {
 ///
 /// `self_` must be a valid record-deserialization handle (a view whose error
 /// is not destroyed, or an owned handle not yet destroyed), alive for `'a`,
-/// and [`kafka_common_RecordDeserializationError_with_source`] must not be
+/// and `kafka_common_RecordDeserializationError_with_source` must not be
 /// called on it during `'a`.
 unsafe fn payload<'a>(
     self_: *const kafka_common_RecordDeserializationError_t,
@@ -198,12 +206,17 @@ unsafe fn payload<'a>(
     unsafe { Payload::<RecordDeserializationError>::from_ptr(self_) }
 }
 
-/// The payload of a `RecordDeserializationException` error, borrowed from
-/// the error handle, or null when the error is another class.
+/// Returns the payload of a `RecordDeserializationException` error, or `NULL` when the error is
+/// another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
@@ -226,16 +239,27 @@ pub unsafe extern "C" fn kafka_common_Error_record_deserialization(
 /// TopicPartition partition, long offset, long timestamp, TimestampType
 /// timestampType, ByteBuffer keyBuffer, ByteBuffer valueBuffer, Headers
 /// headers, String message, Throwable cause)` without the cause, which
-/// [`kafka_common_RecordDeserializationError_with_source`] adds. The buffers'
-/// `data == NULL` and a null `headers` are Java's nulls; everything is
-/// copied. Owned, freed with
-/// [`kafka_common_RecordDeserializationError_destroy`].
+/// `kafka_common_RecordDeserializationError_with_source` adds.
+///
+/// # Parameters
+///
+/// - `origin` - Whether the key or the value failed to deserialize.
+/// - `partition` - The partition of the record.
+/// - `offset` - The offset of the record.
+/// - `timestamp` - The timestamp of the record.
+/// - `timestamp_type` - The timestamp type of the record.
+/// - `key_buffer` - The raw key; `data == NULL` is Java's null.
+/// - `value_buffer` - The raw value; `data == NULL` is Java's null.
+/// - `headers` - The record's headers, or `NULL` for Java's null.
+/// - `message` - The detail message.
 ///
 /// # Safety
 ///
 /// `origin` and `timestamp_type` must be singletons, `partition` a valid
-/// topic-partition handle, the buffers null or valid, `headers` null or a
-/// valid record-headers handle and `message` a valid NUL-terminated string.
+/// topic-partition handle, the buffers `NULL` or valid, `headers` `NULL` or a
+/// valid record-headers handle and `message` a valid NUL-terminated string; everything is
+/// copied. The returned handle is owned, freed with
+/// `kafka_common_RecordDeserializationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
@@ -286,15 +310,19 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_new(
 }
 
 /// `with_source(Error source)`: sets `source` as the cause, in place on an
-/// owned handle; `source` is consumed. Strings, the key and value buffer
-/// views and the cause previously borrowed from the handle are invalidated,
-/// the structured views (`topic_partition`, `headers`) stay valid.
+/// owned handle.
+///
+/// # Parameters
+///
+/// - `source` - The cause of the error, or `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be an owned handle not yet destroyed, never a view borrowed
 /// from a `kafka_common_Error_t`, that no other call uses at the same time,
-/// and `source` null or an owned error handle not yet destroyed.
+/// and `source` `NULL` or an owned error handle not yet destroyed; `source` is consumed. Strings,
+/// the key and value buffer views and the cause previously borrowed from the handle are
+/// invalidated, the structured views (`topic_partition`, `headers`) stay valid.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_with_source(
@@ -312,11 +340,11 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_with_source(
         .replace_value(|value| value.with_source(source));
 }
 
-/// `origin()`: the borrowed singleton.
+/// Returns whether the key or the value failed to deserialize (`origin()`).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
@@ -330,11 +358,12 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
     origin_singleton(unsafe { payload(self_) }.value().origin())
 }
 
-/// `topicPartition()`: borrowed from the handle, valid as long as it is.
+/// Returns the partition of the record (`topicPartition()`).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned handle is borrowed, valid
+/// until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_topic_partition(
@@ -349,7 +378,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_topic_partition
     views(unsafe { payload(self_) }).topic_partition.as_ptr()
 }
 
-/// `offset()`.
+/// Returns the offset of the record (`offset()`).
 ///
 /// # Safety
 ///
@@ -366,7 +395,7 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
     unsafe { payload(self_) }.value().offset()
 }
 
-/// `timestamp()`.
+/// Returns the timestamp of the record (`timestamp()`).
 ///
 /// # Safety
 ///
@@ -383,11 +412,11 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
     unsafe { payload(self_) }.value().timestamp()
 }
 
-/// `timestampType()`: the borrowed singleton.
+/// Returns the timestamp type of the record (`timestampType()`).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
@@ -401,13 +430,13 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
     timestamp_type::singleton(unsafe { payload(self_) }.value().timestamp_type())
 }
 
-/// `keyBuffer()`: a view over the raw key, valid as long as the handle, or
-/// until [`kafka_common_RecordDeserializationError_with_source`] is called on
-/// it; `data` is null for Java's null.
+/// Returns the raw key (`keyBuffer()`); `data` is `NULL` for Java's null.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned view is borrowed,
+/// valid until `self_` is destroyed, or until
+/// `kafka_common_RecordDeserializationError_with_source` is called on it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
@@ -421,13 +450,13 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
     kafka_Bytes_t::from_option(unsafe { payload(self_) }.value().key_buffer())
 }
 
-/// `valueBuffer()`: a view over the raw value, valid as long as the handle,
-/// or until [`kafka_common_RecordDeserializationError_with_source`] is called
-/// on it; `data` is null for Java's null.
+/// Returns the raw value (`valueBuffer()`); `data` is `NULL` for Java's null.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned view is borrowed,
+/// valid until `self_` is destroyed, or until
+/// `kafka_common_RecordDeserializationError_with_source` is called on it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
@@ -441,13 +470,13 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
     kafka_Bytes_t::from_option(unsafe { payload(self_) }.value().value_buffer())
 }
 
-/// `headers()`: borrowed from the handle, valid as long as it is, or null
-/// for Java's null. Read through
+/// Returns the record's headers (`headers()`), or `NULL` for Java's null. Read them through
 /// `kafka_common_header_internals_RecordHeaders__as_Headers`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned handle is borrowed, valid
+/// until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_headers(
@@ -465,13 +494,13 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_headers(
         .map_or(ptr::null(), |headers| headers.as_ptr())
 }
 
-/// `getMessage()`: borrowed from the handle, valid as long as it is, or
-/// until [`kafka_common_RecordDeserializationError_with_source`] is called on
-/// it.
+/// Returns the detail message of the error (`getMessage()`).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned string is borrowed,
+/// valid until `self_` is destroyed, or until
+/// `kafka_common_RecordDeserializationError_with_source` is called on it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
@@ -485,13 +514,13 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_message(
     unsafe { payload(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null; valid as long as the
-/// handle, or until [`kafka_common_RecordDeserializationError_with_source`]
-/// is called on it.
+/// Returns the cause of the error (`getCause()`), or `NULL` if there is none.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-deserialization handle.
+/// `self_` must be a valid record-deserialization handle. The returned handle is borrowed,
+/// valid until `self_` is destroyed, or until
+/// `kafka_common_RecordDeserializationError_with_source` is called on it.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
@@ -505,11 +534,12 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_source(
     unsafe { payload(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-deserialization handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_to_string(
@@ -523,12 +553,12 @@ pub unsafe extern "C" fn kafka_common_RecordDeserializationError_to_string(
     unsafe { payload(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordDeserializationError_destroy(

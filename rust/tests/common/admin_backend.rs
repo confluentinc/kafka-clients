@@ -353,8 +353,7 @@ pub trait AdminBackend {
     /// the cluster when `partitions` is `None` (Java's null `Set`).
     ///
     /// The two are not interchangeable and the difference is observable: Java's
-    /// `ReplicationControlManager.electLeaders`
-    /// (`ReplicationControlManager.java:1507`) takes a separate branch for a
+    /// `org.apache.kafka.controller.ReplicationControlManager#electLeaders` takes a separate branch for a
     /// null set and there **omits** every partition whose outcome is
     /// `ELECTION_NOT_NEEDED`, whereas the explicit branch always returns one
     /// result per requested partition. `Some(empty set)` is a third thing again:
@@ -376,7 +375,7 @@ pub trait AdminBackend {
     /// Start or cancel a reassignment of each partition's replica set.
     ///
     /// A `None` value **cancels** (reverts) that partition's ongoing
-    /// reassignment — Java's empty `Optional` (`Admin.java:1142-1143`) — which is
+    /// reassignment — Java's empty `Optional` (`Admin#alterPartitionReassignments(Map)`) — which is
     /// not the same as a `NewPartitionReassignment` with no replicas, a state
     /// Java rejects outright and that `NewPartitionReassignment::new` therefore
     /// cannot even construct.
@@ -490,9 +489,9 @@ pub trait AdminBackend {
     /// interchangeable: `RemoveMembersFromConsumerGroupOptions::default()` is
     /// Java's no-argument constructor ("remove every member"), while
     /// `new(members)` **rejects** an empty collection
-    /// (`RemoveMembersFromConsumerGroupOptions.java:33-37`), so `removeAll()` is
-    /// literally `members.isEmpty()` (`:57-59`) — Java's own emptiness rule, not
-    /// a binding shortcut.
+    /// (`RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions(Collection)`), so
+    /// `RemoveMembersFromConsumerGroupOptions#removeAll` is literally `members.isEmpty()` — Java's own
+    /// emptiness rule, not a binding shortcut.
     ///
     /// In `removeAll` mode the returned map is **empty**: Java's `memberResult`
     /// refuses in that mode, so `all()` is the only observable and any failure is
@@ -925,7 +924,7 @@ pub struct ClusterDescription {
 ///
 /// `ConfigSynonym::new` is `pub(crate)` — faithfully, because Java's
 /// `ConfigEntry.ConfigSynonym(String, String, ConfigSource)` constructor is
-/// package-private (`ConfigEntry.java:243`) — so a test crate cannot build one,
+/// package-private — so a test crate cannot build one,
 /// and a gRPC backend cannot rebuild what the wire carried.
 ///
 /// `source` is the `ConfigSource` *enum constant name*, which is what both
@@ -1003,8 +1002,8 @@ impl ConfigView {
 /// `FeatureMetadata`.
 ///
 /// `FeatureMetadata::new` is `pub(crate)` — faithfully, because Java's sole
-/// `FeatureMetadata` constructor is package-private (`FeatureMetadata.java:38`,
-/// no access modifier) — so a test crate cannot build one and a gRPC
+/// `FeatureMetadata` constructor is package-private (no access
+/// modifier) — so a test crate cannot build one and a gRPC
 /// backend cannot rebuild what the wire carried. Field-for-field identical to the
 /// production type, and the two range types inside it *are* the production ones
 /// (`SupportedVersionRange::new` and `FinalizedVersionRange::new` are both
@@ -1058,7 +1057,7 @@ pub struct FilterResultView {
 ///
 /// `ReplicaLogDirInfo::new` is `pub(crate)` — faithfully, because Java's
 /// `DescribeReplicaLogDirsResult.ReplicaLogDirInfo` constructors are
-/// package-private (`DescribeReplicaLogDirsResult.java:71,75`) — so a test crate
+/// package-private — so a test crate
 /// cannot build one. Field-for-field identical to the production type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplicaLogDirInfoView {

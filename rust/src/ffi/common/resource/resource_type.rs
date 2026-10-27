@@ -52,7 +52,7 @@ pub enum kafka_common_resource_ResourceType_e {
     kafka_common_resource_ResourceType_USER,
 }
 
-/// One static instance per value, indexed by [`kafka_common_resource_ResourceType_e`].
+/// One static instance per value, indexed by `kafka_common_resource_ResourceType_e`.
 static VARIANTS: [ResourceType; 8] = [
     ResourceType::Unknown,
     ResourceType::Any,
@@ -101,6 +101,10 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_resource_ResourceType_t
 }
 
 /// `ResourceType.UNKNOWN`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_unknown() -> *const kafka_common_resource_ResourceType_t {
@@ -108,6 +112,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_unknown() -> *const kafka_c
 }
 
 /// `ResourceType.ANY`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_any() -> *const kafka_common_resource_ResourceType_t {
@@ -115,6 +123,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_any() -> *const kafka_commo
 }
 
 /// `ResourceType.TOPIC`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_topic() -> *const kafka_common_resource_ResourceType_t {
@@ -122,6 +134,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_topic() -> *const kafka_com
 }
 
 /// `ResourceType.GROUP`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_group() -> *const kafka_common_resource_ResourceType_t {
@@ -129,6 +145,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_group() -> *const kafka_com
 }
 
 /// `ResourceType.CLUSTER`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_cluster() -> *const kafka_common_resource_ResourceType_t {
@@ -136,6 +156,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_cluster() -> *const kafka_c
 }
 
 /// `ResourceType.TRANSACTIONAL_ID`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_transactional_id() -> *const kafka_common_resource_ResourceType_t {
@@ -143,6 +167,10 @@ pub extern "C" fn kafka_common_resource_ResourceType_transactional_id() -> *cons
 }
 
 /// `ResourceType.DELEGATION_TOKEN`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_delegation_token() -> *const kafka_common_resource_ResourceType_t {
@@ -150,13 +178,17 @@ pub extern "C" fn kafka_common_resource_ResourceType_delegation_token() -> *cons
 }
 
 /// `ResourceType.USER`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_user() -> *const kafka_common_resource_ResourceType_t {
     singleton(ResourceType::User)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_resource_ResourceType_UNKNOWN`.
 ///
@@ -173,10 +205,11 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `code()`: the wire-protocol byte.
+/// Returns the code of this resource.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
+/// # Returns
+///
+/// The code, or -1 for a Rust panic caught at the FFI boundary, which is no code of this enum.
 ///
 /// # Safety
 ///
@@ -191,8 +224,15 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_code(
     unsafe { value_of(self_) }.code()
 }
 
-/// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
-/// for one this client does not know.
+/// Return the ResourceType with the provided code or `UNKNOWN` if one cannot be found.
+///
+/// # Parameters
+///
+/// - `code` - The wire-protocol code.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_from_code(
@@ -201,9 +241,15 @@ pub extern "C" fn kafka_common_resource_ResourceType_from_code(
     singleton(ResourceType::from_code(code))
 }
 
-/// `ResourceType.values()`: an owned list of the borrowed singletons in
-/// declaration order, freed with `kafka_List_destroy` (the elements are
-/// never freed).
+/// `ResourceType.values()`.
+///
+/// # Returns
+///
+/// The singletons in declaration order.
+///
+/// # Safety
+///
+/// The returned list is owned, freed with `kafka_List_destroy`; its elements are statics, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourceType_values() -> *mut kafka_List_t {
@@ -213,6 +259,14 @@ pub extern "C" fn kafka_common_resource_ResourceType_values() -> *mut kafka_List
 
 /// `fromString(String)`: the singleton named by `str` (Java's constant name),
 /// `UNKNOWN` for any other string.
+///
+/// # Parameters
+///
+/// - `str` - The string to parse.
+///
+/// # Returns
+///
+/// The ResourceType, or UNKNOWN if the string could not be matched.
 ///
 /// # Safety
 ///
@@ -228,7 +282,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_from_string(
     singleton(ResourceType::from_string(&unsafe { c_str_to_string(str) }))
 }
 
-/// `isUnknown()`: whether this is the `UNKNOWN` value.
+/// Returns 1 if this resource type is UNKNOWN, else 0.
 ///
 /// # Safety
 ///
@@ -243,12 +297,12 @@ pub unsafe extern "C" fn kafka_common_resource_ResourceType_is_unknown(
     i8::from(unsafe { value_of(self_) }.is_unknown())
 }
 
-/// `toString()`: Java's constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the constant's name.
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourceType_to_string(

@@ -136,7 +136,7 @@ impl MockConnectionState {
 
 /// A predicate asserted against the request a prepared response is about to answer.
 ///
-/// Translated from `MockClient.RequestMatcher` (`MockClient.java:623-625`), a
+/// Translated from `MockClient.RequestMatcher`, a
 /// functional interface whose `matches(AbstractRequest)` Java evaluates inside
 /// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
 /// supplies one, and the assertions live *inside* it — so a port without matchers
@@ -180,11 +180,11 @@ pub struct MockClient {
     future_responses: VecDeque<FutureResponse>,
     /// Nodes served by this mock client.
     nodes: Vec<Node>,
-    /// Java: `pendingAuthenticationErrors` (`MockClient.java:78`) — nodes whose
+    /// Java: `MockClient#pendingAuthenticationErrors` — nodes whose
     /// next [`KafkaClient::send`] fails authentication, with the backoff to apply
     /// to the node when it does. See [`Self::create_pending_authentication_error`].
     pending_authentication_errors: HashMap<Node, i64>,
-    /// Java: `authenticationErrors` (`MockClient.java:79`) — the error
+    /// Java: `MockClient#authenticationErrors` — the error
     /// [`KafkaClient::authentication_error`] reports for a node whose
     /// authentication failed.
     authentication_errors: HashMap<Node, Error>,
@@ -192,8 +192,7 @@ pub struct MockClient {
     /// flight, simulating `max.in.flight.requests.per.connection = 1`.
     ///
     /// The analogue of the anonymous `MockClient` subclass in
-    /// `SenderTest.createMockClientWithMaxFlightOneMetadataPending`
-    /// (`SenderTest.java:3956-3973`), which overrides `leastLoadedNode` to return
+    /// `SenderTest#createMockClientWithMaxFlightOneMetadataPending`, which overrides `leastLoadedNode` to return
     /// `null` unless a `canSendMore` flag is set. Rust cannot subclass a concrete
     /// struct, so the override becomes a flag.
     max_in_flight_one: bool,
@@ -215,8 +214,8 @@ pub struct MockClient {
     wakeup: Arc<Notify>,
     /// When set, [`KafkaClient::poll`] advances the caller's clock by its
     /// `timeout_ms` before returning, mirroring Java's
-    /// `MockClient.advanceTimeDuringPoll` flag (`MockClient.java:74`, `:145-147`,
-    /// applied at `:346-348`).
+    /// `MockClient#advanceTimeDuringPoll` flag (set by `MockClient#advanceTimeDuringPoll(boolean)`,
+    /// applied in `MockClient#poll`).
     ///
     /// Java's flag is a plain `boolean` and the sleep goes to `time.sleep(timeoutMs)`.
     /// The crate's [`Time`] translates only the clock reads, not `sleep` (a blocking
@@ -227,10 +226,10 @@ pub struct MockClient {
 impl MockClient {
     /// Creates a new `MockClient` with no static nodes.
     ///
-    /// Translates `MockClient(Time time)` (`MockClient.java:92-94`), which forwards to
-    /// `this(time, new NoOpMetadataUpdater())`. `NoOpMetadataUpdater.fetchNodes()` returns
-    /// `Collections.emptyList()` (`:769`), and `StaticMetadataUpdater` extends it overriding
-    /// only `fetchNodes()` (`:783-791`) — so Java's no-nodes form is exactly the
+    /// Translates `MockClient(Time time)`, which forwards to
+    /// `this(time, new NoOpMetadataUpdater())`. `MockClient.NoOpMetadataUpdater#fetchNodes` returns
+    /// `Collections.emptyList()`, and `StaticMetadataUpdater` extends it overriding
+    /// only `MockClient.StaticMetadataUpdater#fetchNodes` — so Java's no-nodes form is exactly the
     /// static-nodes form with an empty list, which is what this forwards to.
     pub fn new(time: Arc<dyn Time>) -> Self {
         Self::with_static_nodes(Vec::new(), time)
@@ -238,7 +237,7 @@ impl MockClient {
 
     /// Creates a new `MockClient` with the given static nodes and time.
     ///
-    /// Translates `MockClient(Time time, List<Node> staticNodes)` (`MockClient.java:105-107`).
+    /// Translates `MockClient(Time time, List<Node> staticNodes)`.
     pub fn with_static_nodes(static_nodes: Vec<Node>, time: Arc<dyn Time>) -> Self {
         Self {
             correlation: AtomicI32::new(0),
@@ -262,8 +261,7 @@ impl MockClient {
     /// Makes [`KafkaClient::poll`] advance the caller's clock by its `timeout_ms`
     /// before returning, so a backoff or throttle a test installs actually expires.
     ///
-    /// Translated from `MockClient.advanceTimeDuringPoll(boolean)`
-    /// (`MockClient.java:145-147`). `Some(sleep)` is Java's `true` and `None` is its
+    /// Translated from `MockClient#advanceTimeDuringPoll(boolean)`. `Some(sleep)` is Java's `true` and `None` is its
     /// `false`; the closure supplies what Java reads off its `Time` field — see the
     /// [`Self::advance_time_during_poll`] field docs.
     pub fn advance_time_during_poll(&mut self, sleep: Option<Arc<dyn Fn(i64) + Send + Sync>>) {
@@ -318,8 +316,7 @@ impl MockClient {
     /// `SASL_AUTHENTICATION_FAILED`'s error for it from now on, the node is
     /// disconnected, and it backs off for `backoff_ms`.
     ///
-    /// Translated from `MockClient.authenticationFailed(Node, long)`
-    /// (`MockClient.java:166-171`).
+    /// Translated from `MockClient#authenticationFailed(Node, long)`.
     #[doc(alias = "org.apache.kafka.clients.MockClient#authenticationFailed")]
     pub fn authentication_failed(&mut self, node: &Node, backoff_ms: i64) {
         self.pending_authentication_errors.remove(node);
@@ -335,8 +332,8 @@ impl MockClient {
     /// Makes the next request sent to `node` fail authentication, as
     /// [`Self::authentication_failed`] does, with `backoff_ms` as the node's backoff.
     ///
-    /// Translated from `MockClient.createPendingAuthenticationError(Node, long)`
-    /// (`MockClient.java:173-175`). The failure is raised by [`KafkaClient::send`]:
+    /// Translated from `MockClient#createPendingAuthenticationError(Node, long)`.
+    /// The failure is raised by [`KafkaClient::send`]:
     /// the request is answered with a disconnected response carrying an
     /// `AuthenticationException("Authentication failed")`.
     #[doc(alias = "org.apache.kafka.clients.MockClient#createPendingAuthenticationError")]
@@ -347,19 +344,17 @@ impl MockClient {
     /// Disconnects `node_id`, creating disconnect responses for all pending requests to
     /// that node.
     ///
-    /// Translated from `MockClient.disconnect(String)` (`MockClient.java:196-198`), which
+    /// Translated from `MockClient#disconnect(String)`, which
     /// delegates to the two-argument overload with `allowLateResponses = false`.
     ///
     /// # Why the `allowLateResponses` overload is not translated
     ///
-    /// `MockClient.disconnect(String, boolean allowLateResponses)`
-    /// (`MockClient.java:200-218`) retains the disconnected request so a later `respond*`
-    /// can answer it a *second* time. In Java that second answer reaches the `Sender`
-    /// because the routing lives on the request: `ClientRequest.callback()`
-    /// (`ClientRequest.java:104-105`) is a plain **getter**, so the disconnect
+    /// `MockClient.disconnect(String, boolean allowLateResponses)` retains the disconnected request so a later
+    /// `respond*` can answer it a *second* time. In Java that second answer reaches the `Sender`
+    /// because the routing lives on the request: `ClientRequest#callback`
+    /// is a plain **getter**, so the disconnect
     /// `ClientResponse` and the late one are handed the *same*
-    /// `RequestCompletionHandler`, and `ClientResponse.onComplete`
-    /// (`ClientResponse.java:152-154`) fires it both times.
+    /// `RequestCompletionHandler`, and `ClientResponse#onComplete` fires it both times.
     ///
     /// This port cannot reproduce that, because it deliberately does not route produce
     /// responses through callbacks: `Sender::send_produce_request` passes `None`
@@ -420,15 +415,14 @@ impl MockClient {
     /// Queue up a response for the next pending request, first asserting `matcher`
     /// against it.
     ///
-    /// Translated from `MockClient.respond(RequestMatcher, AbstractResponse)`
-    /// (`MockClient.java:382-392`), which `TransactionManagerTest`'s `sendProduceResponse`
-    /// / `sendAddPartitionsToTxnResponse` / `sendEndTxnResponse` use to answer a request
-    /// that is *already* in flight.
+    /// Translated from `MockClient#respond(RequestMatcher,AbstractResponse)`, which `TransactionManagerTest`'s
+    /// `sendProduceResponse` / `sendAddPartitionsToTxnResponse` / `sendEndTxnResponse` use to answer a request that is
+    /// *already* in flight.
     ///
     /// # Panics
     ///
-    /// If no request is pending (Java's `:384-385`), or if `matcher` rejects it — Java
-    /// throws `IllegalStateException` in the same place (`:388-389`).
+    /// If no request is pending, or if `matcher` rejects it — Java
+    /// throws `IllegalStateException` in the same two places.
     pub fn respond_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
         let built = self
             .requests
@@ -536,9 +530,8 @@ impl MockClient {
 
     /// Prepare a future response, asserting `matcher` against the request it answers.
     ///
-    /// Translated from `MockClient.prepareResponse(RequestMatcher, AbstractResponse)`
-    /// (`MockClient.java:445-447`), which delegates to the disconnect overload with
-    /// `disconnected = false`.
+    /// Translated from `MockClient#prepareResponse(RequestMatcher,AbstractResponse)`, which delegates to the disconnect
+    /// overload with `disconnected = false`.
     pub fn prepare_response_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
         self.push_future_response(None, Some(matcher), response, false, false);
     }
@@ -546,8 +539,7 @@ impl MockClient {
     /// Prepare a future response with both a matcher and a disconnect flag.
     ///
     /// Translated from
-    /// `MockClient.prepareResponse(RequestMatcher, AbstractResponse, boolean)`
-    /// (`MockClient.java:472-474`).
+    /// `MockClient#prepareResponse(RequestMatcher,AbstractResponse,boolean)`.
     pub fn prepare_response_matcher_disconnected(
         &mut self,
         matcher: RequestMatcher,
@@ -570,9 +562,8 @@ impl MockClient {
     /// Prepare a future response from a specific node, asserting `matcher` against the
     /// request it answers.
     ///
-    /// Translates `MockClient.prepareResponseFrom(RequestMatcher, AbstractResponse, Node)`
-    /// (`MockClient.java:449-451`), which forwards to the five-argument form with
-    /// `disconnected = false`.
+    /// Translates `MockClient#prepareResponseFrom(RequestMatcher,AbstractResponse,Node)`, which forwards to the
+    /// five-argument form with `disconnected = false`.
     pub fn prepare_response_from_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse, node: &Node) {
         self.push_future_response(Some(node.clone()), Some(matcher), response, false, false);
     }
@@ -581,8 +572,7 @@ impl MockClient {
     /// disconnect flag.
     ///
     /// Translates
-    /// `MockClient.prepareResponseFrom(RequestMatcher, AbstractResponse, Node, boolean)`
-    /// (`MockClient.java:453-455`).
+    /// `MockClient#prepareResponseFrom(RequestMatcher,AbstractResponse,Node,boolean)`.
     pub fn prepare_response_from_matcher_disconnected(
         &mut self,
         matcher: RequestMatcher,
@@ -595,8 +585,7 @@ impl MockClient {
 
     /// Prepare a future response from a specific node, with a disconnect flag.
     ///
-    /// Translates `MockClient.prepareResponseFrom(AbstractResponse, Node, boolean)`
-    /// (`MockClient.java:461-463`).
+    /// Translates `MockClient#prepareResponseFrom(AbstractResponse,Node,boolean)`.
     pub fn prepare_response_from_disconnected(&mut self, response: ConcreteResponse, node: &Node, disconnected: bool) {
         self.push_future_response(Some(node.clone()), None, response, disconnected, false);
     }
@@ -631,11 +620,10 @@ impl MockClient {
     /// The shared body of every `prepareResponse` / `prepareResponseFrom` overload.
     ///
     /// Translates Java's **private** five-argument
-    /// `prepareResponseFrom(RequestMatcher, AbstractResponse, Node, boolean, boolean)`
-    /// (`MockClient.java:484-490`). Java can give it the same identifier as the public
-    /// overloads because it overloads on arity; Rust cannot, and since the method is
-    /// private in both languages the name is free of CLAUDE.md §2's derivation — so it is
-    /// named for what it does rather than carrying a five-parameter suffix.
+    /// `MockClient#prepareResponseFrom(RequestMatcher,AbstractResponse,Node,boolean,boolean)`. Java can give it the
+    /// same identifier as the public overloads because it overloads on arity; Rust cannot, and since the method is
+    /// private in both languages the name is free of CLAUDE.md §2's derivation — so it is named for what it does rather
+    /// than carrying a five-parameter suffix.
     fn push_future_response(
         &mut self,
         node: Option<Node>,
@@ -657,7 +645,7 @@ impl MockClient {
     /// The `timeout_ms` of every [`KafkaClient::poll`] call, in order.
     ///
     /// Stands in for Mockito's `verify(client, times(n)).poll(eq(timeout), anyLong())`,
-    /// which `SenderTest.testDoNotPollWhenNoRequestSent` (Java 3001) uses to assert
+    /// which `SenderTest#testDoNotPollWhenNoRequestSent` uses to assert
     /// that a `runOnce` which sends nothing also polls nothing. Recording the timeout
     /// rather than a bare count is what makes the `eq(RETRY_BACKOFF_MS)` matcher
     /// expressible: `Sender` polls with two different timeouts and only the
@@ -698,8 +686,8 @@ impl MockClient {
         self.responses.clear();
         self.future_responses.clear();
         self.poll_timeouts.clear();
-        // Java's `reset` clears `authenticationErrors` but not
-        // `pendingAuthenticationErrors` (`MockClient.java:499-506`).
+        // Java's `MockClient#reset` clears `authenticationErrors` but not
+        // `pendingAuthenticationErrors`.
         self.authentication_errors.clear();
     }
 
@@ -748,7 +736,7 @@ impl KafkaClient for MockClient {
     }
 
     fn authentication_error(&self, node: &Node) -> Option<Error> {
-        // Java: `return authenticationErrors.get(node)` (`MockClient.java:182-185`).
+        // Java's `MockClient#authenticationException`: `return authenticationErrors.get(node)`.
         self.authentication_errors.get(node).cloned()
     }
 
@@ -759,7 +747,7 @@ impl KafkaClient for MockClient {
         }
 
         // Check if the request is directed to a node with a pending authentication
-        // error (`MockClient.java:225-246`).
+        // error, as `MockClient#send` does.
         let pending_authentication_error = self
             .pending_authentication_errors
             .iter()
@@ -802,11 +790,11 @@ impl KafkaClient for MockClient {
 
         if let Some(idx) = matched_idx {
             let future_resp = self.future_responses.remove(idx).unwrap();
-            // Java builds the request unconditionally here (`MockClient.java:259`, inside
-            // `send`) and then evaluates the matcher — unconditionally because its
-            // matcher-less overloads default to `ALWAYS_TRUE` (`:49`, used at `:432` /
-            // `:458`), so there is always a matcher to run. This port builds it only when a
-            // matcher is present, for two reasons:
+            // Java builds the request unconditionally here (in `org.apache.kafka.clients.MockClient#send`) and then
+            // evaluates the matcher — unconditionally because its matcher-less overloads default to
+            // `MockClient#ALWAYS_TRUE` (used by `MockClient#prepareResponse(AbstractResponse)` /
+            // `MockClient#prepareResponse(AbstractResponse,boolean)`), so there is always a matcher to run. This port
+            // builds it only when a matcher is present, for two reasons:
             //
             //   - Cost: doing it unconditionally would make every existing matcher-less
             //     test pay for a build it never reads. Nothing downstream of a matched
@@ -816,12 +804,12 @@ impl KafkaClient for MockClient {
             //     `std::mem::replace(&mut self.data, ProduceRequestData::new())`
             //     (`common/requests/produce_request.rs:307`) — so a second build of the
             //     same request yields empty `topic_data`. Java's
-            //     `ProduceRequest.Builder.build` does not do this
-            //     (`ProduceRequest.java:68-74` returns `new ProduceRequest(data, version)`,
+            //     `org.apache.kafka.common.requests.ProduceRequest.Builder#build` does not do this
+            //     (it returns `new ProduceRequest(data, version)`,
             //     sharing the reference), and it is the only one of this crate's 52
             //     `RequestBuilder` impls that drains. Tracked as
             //     **PLAN §9.30**, with a reproducer. Building here unconditionally would
-            //     put a second build in reach of `respond_matcher` (`:391-401`),
+            //     put a second build in reach of `respond_matcher`,
             //     which builds the queued request again.
             //
             // (An earlier revision of this comment cited PLAN §9.18 and attributed the
@@ -870,7 +858,8 @@ impl KafkaClient for MockClient {
     async fn poll(&mut self, _timeout: i64, now: i64) -> Vec<ClientResponse> {
         self.poll_timeouts.push(_timeout);
 
-        // Java 3970: `canSendMore = inFlightRequestCount() < 1`, recomputed before the
+        // `SenderTest#createMockClientWithMaxFlightOneMetadataPending`'s override:
+        // `canSendMore = inFlightRequestCount() < 1`, recomputed before the
         // superclass poll so the flag a later `leastLoadedNode` reads is this poll's
         // snapshot.
         self.can_send_more = self.in_flight_request_count() < 1;
@@ -892,7 +881,7 @@ impl KafkaClient for MockClient {
             result.push(response);
         }
 
-        // Java 344-348: "In real life, if poll() is called and we get to the end with no
+        // `org.apache.kafka.clients.MockClient#poll`: "In real life, if poll() is called and we get to the end with no
         // responses, time equal to timeoutMs would have passed." Applied
         // unconditionally at the end of the poll, as Java does — not only when `result`
         // is empty.
@@ -1028,7 +1017,8 @@ mod tests {
     /// `MockClient::new(time)` agrees with `new_nodes(vec![], time)`, because Java's
     /// `MockClient(Time)` installs a `NoOpMetadataUpdater` whose `fetchNodes()` returns an
     /// empty list — the same thing `StaticMetadataUpdater` returns for an empty list
-    /// (`MockClient.java:92-94`, `:769`, `:783-791`).
+    /// (`MockClient#MockClient(Time)`, `MockClient.NoOpMetadataUpdater#fetchNodes`,
+    /// `MockClient.StaticMetadataUpdater#fetchNodes`).
     #[test]
     fn test_new_matches_new_nodes_with_no_nodes() {
         let plain = MockClient::new(time());
@@ -1038,7 +1028,7 @@ mod tests {
     }
 
     /// `prepare_response_from(response, node)` agrees with the four-argument form it
-    /// forwards to (`MockClient.java:435-437`).
+    /// forwards to (`MockClient#prepareResponseFrom(AbstractResponse,Node)`).
     #[test]
     fn test_prepare_response_from_matches_disconnected_form() {
         let mut base = MockClient::new(time());
@@ -1057,7 +1047,8 @@ mod tests {
     }
 
     /// `prepare_response_from_matcher(..)` agrees with the disconnect form it forwards to
-    /// (`MockClient.java:449-451`), and both retain the matcher and the node.
+    /// (`MockClient#prepareResponseFrom(RequestMatcher,AbstractResponse,Node)`), and both retain the matcher and the
+    /// node.
     #[test]
     fn test_prepare_response_from_matcher_matches_disconnected_form() {
         let mut base = MockClient::new(time());
@@ -1074,7 +1065,8 @@ mod tests {
     }
 
     /// The `disconnected` flag actually reaches the queued `FutureResponse` on both
-    /// node-scoped forms (`MockClient.java:453-455`, `:461-463`).
+    /// node-scoped forms (`MockClient#prepareResponseFrom(RequestMatcher,AbstractResponse,Node,boolean)`,
+    /// `MockClient#prepareResponseFrom(AbstractResponse,Node,boolean)`).
     #[test]
     fn test_prepare_response_from_carries_disconnected_flag() {
         let mut client = MockClient::new(time());
@@ -1087,12 +1079,12 @@ mod tests {
     }
 
     /// A pending authentication error fails the next request sent to its node, as
-    /// `MockClient.send` does (`MockClient.java:225-246`): the request is answered
-    /// with a disconnected response carrying `AuthenticationException("Authentication
-    /// failed")`, and `authenticationFailed` (`:166-171`) makes
-    /// `authenticationException(node)` report `SASL_AUTHENTICATION_FAILED`'s
-    /// exception, disconnects the node and backs it off. A second request is sent
-    /// normally, and `reset` (`:499-506`) clears the recorded error.
+    /// `MockClient#send` does: the request is answered with a disconnected response
+    /// carrying `AuthenticationException("Authentication failed")`, and
+    /// `MockClient#authenticationFailed` makes `authenticationException(node)`
+    /// report `SASL_AUTHENTICATION_FAILED`'s exception, disconnects the node and
+    /// backs it off. A second request is sent normally, and `MockClient#reset`
+    /// clears the recorded error.
     #[tokio::test]
     async fn test_pending_authentication_error_fails_the_next_send() {
         let time = time();

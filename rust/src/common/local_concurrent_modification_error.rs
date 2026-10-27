@@ -23,7 +23,7 @@ message_only_error! {
     /// Concurrent modification error — the consumer was accessed from more than
     /// one task.
     ///
-    /// Corresponds to Java's `java.util.ConcurrentModificationException`, thrown
+    /// Java's `java.util.ConcurrentModificationException`, thrown
     /// by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
     /// multi-threaded access"). A plain `RuntimeException`, so no predicate
     /// holds for it.

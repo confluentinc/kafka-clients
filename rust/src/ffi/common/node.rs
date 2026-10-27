@@ -37,7 +37,7 @@ pub struct kafka_common_Node_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_Node_t`] points at: the value plus the
+/// What a `kafka_common_Node_t` points at: the value plus the
 /// NUL-terminated strings its getters borrow out.
 pub(crate) struct NodeInner {
     node: Node,
@@ -68,7 +68,7 @@ impl NodeInner {
 static NO_NODE: LazyLock<NodeInner> = LazyLock::new(|| NodeInner::new(Node::no_node().clone()));
 
 /// Hands `node` to C as an owned handle, freed with
-/// [`kafka_common_Node_destroy`].
+/// `kafka_common_Node_destroy`.
 pub(crate) fn box_node(node: Node) -> *mut kafka_common_Node_t {
     Box::into_raw(Box::new(NodeInner::new(node))) as *mut kafka_common_Node_t
 }
@@ -132,12 +132,18 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t) -> Vec<Node> {
         .collect()
 }
 
-/// `new Node(int id, String host, int port)`, as an owned handle freed with
-/// [`kafka_common_Node_destroy`].
+/// Creates a node with no rack, not fenced.
+///
+/// # Parameters
+///
+/// - `id` - the node id
+/// - `host` - the host name
+/// - `port` - the port
 ///
 /// # Safety
 ///
-/// `host` must be a valid NUL-terminated string.
+/// `host` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_Node_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, port: i32) -> *mut kafka_common_Node_t {
@@ -147,12 +153,19 @@ pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, por
     box_node(Node::new(id, unsafe { c_str_to_string(host) }, port))
 }
 
-/// `new Node(int id, String host, int port, String rack)`; a null `rack` is
-/// Java's `null`.
+/// Creates a node that is not fenced.
+///
+/// # Parameters
+///
+/// - `id` - the node id
+/// - `host` - the host name
+/// - `port` - the port
+/// - `rack` - the rack, or `NULL` for none
 ///
 /// # Safety
 ///
-/// `host` must be a valid NUL-terminated string and `rack` null or one.
+/// `host` must be a valid NUL-terminated string and `rack` `NULL` or one. The returned handle is
+/// owned, freed with `kafka_common_Node_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_with_rack(
@@ -169,11 +182,20 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
     }))
 }
 
-/// `new Node(int id, String host, int port, String rack, boolean isFenced)`.
+/// Creates a node.
+///
+/// # Parameters
+///
+/// - `id` - the node id
+/// - `host` - the host name
+/// - `port` - the port
+/// - `rack` - the rack, or `NULL` for none
+/// - `is_fenced` - 1 if the node is fenced, else 0
 ///
 /// # Safety
 ///
-/// `host` must be a valid NUL-terminated string and `rack` null or one.
+/// `host` must be a valid NUL-terminated string and `rack` `NULL` or one. The returned handle is
+/// owned, freed with `kafka_common_Node_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
@@ -198,15 +220,20 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
     ))
 }
 
-/// `Node.noNode()`: a borrowed handle on the shared "no node" instance,
-/// never destroyed.
+/// Returns the shared "no node" instance (id -1, empty host, port -1), a static singleton never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Node_no_node() -> *const kafka_common_Node_t {
     NO_NODE.as_ptr()
 }
 
-/// `isEmpty()`: whether this is `noNode()` (id `-1`, no host or port).
+/// Check whether this node is empty, which may be the case if `kafka_common_Node_no_node` is used as a placeholder
+/// in a response payload with an error.
+///
+/// # Returns
+///
+/// 1 if it is, 0 otherwise
 ///
 /// # Safety
 ///
@@ -219,7 +246,7 @@ pub unsafe extern "C" fn kafka_common_Node_is_empty(self_: *const kafka_common_N
     i8::from(unsafe { node_ref(self_) }.is_empty())
 }
 
-/// `id()`.
+/// Returns the node id of this node.
 ///
 /// # Safety
 ///
@@ -232,11 +259,14 @@ pub unsafe extern "C" fn kafka_common_Node_id(self_: *const kafka_common_Node_t)
     unsafe { node_ref(self_) }.id()
 }
 
-/// `idString()`: the id as text, borrowed from the handle.
+/// Returns the string representation of the node id.
+/// Typically, the integer id is used to serialize over the wire, the string representation is used as an
+/// identifier with NetworkClient code
 ///
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+/// The string is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_Node_t) -> *const c_char {
@@ -250,12 +280,12 @@ pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_
     unsafe { &*(self_ as *const NodeInner) }.id_string_c.as_ptr()
 }
 
-/// `host()`: the host name, borrowed from the handle and valid until it is
-/// destroyed.
+/// Returns the host name for this node
 ///
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+/// The string is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_t) -> *const c_char {
@@ -269,7 +299,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_
     unsafe { &*(self_ as *const NodeInner) }.host_c.as_ptr()
 }
 
-/// `port()`.
+/// Returns the port for this node.
 ///
 /// # Safety
 ///
@@ -282,7 +312,7 @@ pub unsafe extern "C" fn kafka_common_Node_port(self_: *const kafka_common_Node_
     unsafe { node_ref(self_) }.port()
 }
 
-/// `hasRack()`.
+/// Returns 1 if this node has a defined rack, else 0.
 ///
 /// # Safety
 ///
@@ -295,12 +325,16 @@ pub unsafe extern "C" fn kafka_common_Node_has_rack(self_: *const kafka_common_N
     i8::from(unsafe { node_ref(self_) }.has_rack())
 }
 
-/// `rack()`: the rack, borrowed from the handle, or null when the node has
-/// none (Java's `null`).
+/// The rack for this node
+///
+/// # Returns
+///
+/// The rack, or `NULL` when the node has none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+/// The string is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_t) -> *const c_char {
@@ -317,7 +351,10 @@ pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_
         .map_or(ptr::null(), |rack| rack.as_ptr())
 }
 
-/// `isFenced()`.
+/// Returns whether this node is fenced: 1 if it is, else 0.
+///
+/// This applies to broker nodes only. For controller quorum nodes, this field
+/// is not relevant and is defined to be 0.
 ///
 /// # Safety
 ///
@@ -330,12 +367,12 @@ pub unsafe extern "C" fn kafka_common_Node_is_fenced(self_: *const kafka_common_
     i8::from(unsafe { node_ref(self_) }.is_fenced())
 }
 
-/// `toString()`: `host:port (id: idString rack: rack)`, as an owned string
-/// freed with `kafka_string_destroy`.
+/// Returns `host:port (id: idString rack: rack isFenced: isFenced)`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid node handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_to_string(self_: *const kafka_common_Node_t) -> *mut c_char {

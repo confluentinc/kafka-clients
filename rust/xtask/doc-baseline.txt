@@ -1,0 +1,5 @@
+# check-api-docs findings not burnt down yet (.claude/rules/documentation.md).
+# One `<kind> <item>` per line; `java-line <file>` waives a whole file.
+# A line matching no finding any more is itself a finding: delete it. Rewrite with
+# `cargo xtask doc-baseline`; see everything with
+# `cargo xtask lint-custom check-api-docs --no-baseline`.

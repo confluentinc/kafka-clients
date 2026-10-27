@@ -13,16 +13,10 @@
 // limitations under the License.
 
 //! The specification of a transaction to abort.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AbortTransactionSpec`.
 
 use crate::common::TopicPartition;
 
 /// The identifiers required to abort a hanging transaction on a partition.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AbortTransactionSpec`.
-/// `producer_id` is `i64` and `producer_epoch` is `i16` (Java `long` /
-/// `short`); `coordinator_epoch` is `i32`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec")]
 pub struct AbortTransactionSpec {
@@ -34,30 +28,37 @@ pub struct AbortTransactionSpec {
 
 impl AbortTransactionSpec {
     /// Creates a new `AbortTransactionSpec`.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_partition` - the partition of the hanging transaction
+    /// - `producer_id` - the producer id of the hanging transaction
+    /// - `producer_epoch` - the producer epoch of the hanging transaction
+    /// - `coordinator_epoch` - the coordinator epoch of the hanging transaction
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#AbortTransactionSpec")]
     pub fn new(topic_partition: TopicPartition, producer_id: i64, producer_epoch: i16, coordinator_epoch: i32) -> Self {
         Self { topic_partition, producer_id, producer_epoch, coordinator_epoch }
     }
 
-    /// The topic partition of the hanging transaction.
+    /// Returns the topic partition of the hanging transaction.
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#topicPartition")]
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.topic_partition
     }
 
-    /// The producer id of the hanging transaction.
+    /// Returns the producer id of the hanging transaction.
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
-    /// The producer epoch of the hanging transaction.
+    /// Returns the producer epoch of the hanging transaction.
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#producerEpoch")]
     pub fn producer_epoch(&self) -> i16 {
         self.producer_epoch
     }
 
-    /// The coordinator epoch of the hanging transaction.
+    /// Returns the coordinator epoch of the hanging transaction.
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionSpec#coordinatorEpoch")]
     pub fn coordinator_epoch(&self) -> i32 {
         self.coordinator_epoch

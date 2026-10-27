@@ -103,9 +103,9 @@ impl ExpireDelegationTokenRequest {
 
     /// Returns a copy of `data` with the hmac emptied, for rendering.
     ///
-    /// Mirrors Java's private `maskData` (`ExpireDelegationTokenRequest.java:81-84`),
-    /// shared, as in Java, by the request's `toString()` (`:89-90`) and
-    /// `Builder.toString()` (`:76-77`). Java returns the copy's `toString()`,
+    /// Mirrors Java's private `ExpireDelegationTokenRequest#maskData`,
+    /// shared, as in Java, by the request's `toString()` and
+    /// `Builder.toString()`. Java returns the copy's `toString()`,
     /// and the callers here render the copy.
     fn mask_data(data: &ExpireDelegationTokenRequestData) -> ExpireDelegationTokenRequestData {
         let mut temp_data = data.clone();
@@ -180,7 +180,7 @@ impl RequestBuilder for Builder {
     }
 }
 
-/// Mirrors Java's `Builder.toString()` (`ExpireDelegationTokenRequest.java:76-77`),
+/// Mirrors Java's `ExpireDelegationTokenRequest.Builder#toString`,
 /// which returns `maskData(data)`: the data with the hmac emptied.
 impl std::fmt::Display for Builder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

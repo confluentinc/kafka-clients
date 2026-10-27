@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Broker epoch has changed.
     ///
-    /// Corresponds to Java's `StaleBrokerEpochException`, error code `Errors::StaleBrokerEpoch`.
-    ///
-    /// Java `extends` chain:
-    ///    `StaleBrokerEpochException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::StaleBrokerEpoch`. Java `extends` chain: `StaleBrokerEpochException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.StaleBrokerEpochException")]
     StaleBrokerEpochError,
     code: Errors::StaleBrokerEpoch,

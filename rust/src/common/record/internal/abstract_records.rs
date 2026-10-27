@@ -43,7 +43,7 @@ impl AbstractRecords {
     /// decompressed stream, where the size must be checked before it is
     /// allocated.
     ///
-    /// Java's `Records.SOFT_MAX_ARRAY_LENGTH` (`Records.java:62`, b69c07c816).
+    /// Java's `Records#SOFT_MAX_ARRAY_LENGTH` (b69c07c816).
     /// Like [`Self::LOG_OVERHEAD`], a `Records` interface constant hosted here.
     /// The Rust stream reader does not size its buffer from the declared size,
     /// so the bound is kept for Java's error, not to avoid the allocation.

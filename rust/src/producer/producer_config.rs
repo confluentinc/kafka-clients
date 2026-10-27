@@ -15,9 +15,9 @@
 //! Configuration for the Kafka Producer.
 //!
 //! Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`: the keys
-//! are defined on a `ConfigDef` in Java's order (`ProducerConfig.java:405-618`)
+//! are defined on a `ConfigDef` in Java's order (`ProducerConfig`)
 //! and parsed and validated by it, `postProcessParsedConfig` runs Java's steps
-//! (`ProducerConfig.java:620-628`), and the configuration answers Java's
+//! (`ProducerConfig#postProcessParsedConfig`), and the configuration answers Java's
 //! `AbstractConfig` getters.
 //!
 //! Not defined, and so reported by [`ProducerConfig::unused`] and the
@@ -67,7 +67,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// Process-wide counter for deriving a default `client.id`.
 ///
 /// Corresponds to Java's `static AtomicInteger PRODUCER_CLIENT_ID_SEQUENCE`
-/// (`ProducerConfig.java:404`), which starts at 1. Crate-level (not
+/// (`ProducerConfig#PRODUCER_CLIENT_ID_SEQUENCE`), which starts at 1. Crate-level (not
 /// per-config) to match Java's static scope, so successive producers in one
 /// process get distinct ids.
 static PRODUCER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
@@ -318,7 +318,7 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::High,
         )
-        // Java defines `enable.metrics.push` here (`ProducerConfig.java:477-481`);
+        // Java defines `enable.metrics.push` here (`ProducerConfig`);
         // it is left undefined until KIP-714 client telemetry is implemented.
         .define_with_validator(
             ProducerConfig::MAX_BLOCK_MS_CONFIG,
@@ -455,28 +455,24 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             true,
             Importance::Low,
         )
-    // Java ends the chain with `config.providers` (`ProducerConfig.java`
-    // 613-618);
-    // it is left undefined until config providers are translated.
+    // Java ends the chain with `config.providers` (the static initializer of
+    // `org.apache.kafka.clients.producer.ProducerConfig`); it is left undefined until config providers are translated.
 });
 
-/// Configuration for the Kafka Producer.
-///
-/// Documentation for the underlying keys can be found in the
+/// Configuration for the Kafka Producer. Documentation for these
+/// configurations can be found in the
 /// [Kafka documentation](http://kafka.apache.org/documentation.html#producerconfigs).
-///
-/// As in Java, the configuration is built from the property map by
-/// [`ProducerConfig::new`], which parses every key to its `ConfigDef` type,
-/// applies its validator and runs Java's `postProcessParsedConfig`. Values are
-/// read back with Java's `AbstractConfig` getters ([`Self::get_int`],
-/// [`Self::get_string`], ...). Keys it does not define are accepted, as Java
-/// accepts them; the producer reports them, with the defined keys it does not
-/// read, in one line when it is built ([`Self::log_unused`]).
-///
-/// Equality and hashing are Java's `equals` / `hashCode`: two configurations
-/// are equal when they were built from equal properties.
-///
-/// Corresponds to `org.apache.kafka.clients.producer.ProducerConfig`.
+//
+// As in Java, the configuration is built from the property map by
+// `ProducerConfig::new`, which parses every key to its `ConfigDef` type,
+// applies its validator and runs Java's `postProcessParsedConfig`. Values are
+// read back with Java's `AbstractConfig` getters (`get_int`, `get_string`,
+// ...). Keys it does not define are accepted, as Java accepts them; the
+// producer reports them, with the defined keys it does not read, in one line
+// when it is built (`log_unused`). Equality and hashing are Java's `equals` /
+// `hashCode`: two configurations are equal when they were built from equal
+// properties.
+//
 // `Debug` is derived: every secret the typed fields hold is a `Password`
 // inside `sasl_config` / `ssl_config`, which renders as `[hidden]`, and
 // `AbstractConfig`'s `Debug` renders the properties as their key set only: the
@@ -657,18 +653,18 @@ pub struct ProducerConfig {
 
     /// `metadata.recovery.strategy` - How the client recovers when none of the
     /// brokers known to it is available. Default: `rebootstrap`
-    /// (`ProducerConfig.java:595-601`).
+    /// (`ProducerConfig`).
     pub(crate) metadata_recovery_strategy: MetadataRecoveryStrategy,
 
     /// `metadata.recovery.rebootstrap.trigger.ms` - How long a client configured
     /// to rebootstrap waits without obtaining metadata before it rebootstraps.
-    /// Default: 300000 ms (`ProducerConfig.java:602-607`).
+    /// Default: 300000 ms (`ProducerConfig`).
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
 
     /// `metadata.cluster.check.enable` (KIP-1242) - Whether the client sends the
     /// cluster id and node id it expects in ApiVersions so the broker can detect
     /// a misrouted connection; ignored when `metadata.recovery.strategy=none`.
-    /// Default: true (`ProducerConfig.java:608-612`).
+    /// Default: true (`ProducerConfig`).
     pub(crate) metadata_cluster_check_enable: bool,
 
     // --- Partitioning ---
@@ -772,7 +768,7 @@ pub(crate) struct ConfiguredPartitioner {
 }
 
 impl PartialEq for ProducerConfig {
-    /// Java's `AbstractConfig.equals`: the originals are equal.
+    // Java's `AbstractConfig.equals`: the originals are equal.
     fn eq(&self, other: &Self) -> bool {
         self.config == other.config
     }
@@ -781,7 +777,7 @@ impl PartialEq for ProducerConfig {
 impl Eq for ProducerConfig {}
 
 impl Hash for ProducerConfig {
-    /// Java's `AbstractConfig.hashCode`, over the originals.
+    // Java's `AbstractConfig.hashCode`, over the originals.
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.hash(state);
     }
@@ -1083,33 +1079,44 @@ impl ProducerConfig {
     /// Config key: `socket.connection.setup.timeout.max.ms`
     pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &'static str = "socket.connection.setup.timeout.max.ms";
 
-    /// Creates a config from a property map: Java's `ProducerConfig(Map)` and
-    /// `ProducerConfig(Properties)`.
+    /// Constructs a new ProducerConfig with the given configuration map.
     ///
-    /// Every value is parsed to its `ConfigDef` type and checked by its
-    /// validator, then Java's `postProcessParsedConfig`
-    /// (`ProducerConfig.java:620-628`) runs: `postValidateSaslMechanismConfig`,
-    /// `warnDisablingExponentialBackoff`, `postProcessReconnectBackoffConfigs`,
-    /// `postProcessAndValidateIdempotenceConfigs` (an incompatible `retries` or
-    /// `acks` disables idempotence unless it was set explicitly) and
-    /// `maybeOverrideClientId` (an unset `client.id` becomes
-    /// `producer-<transactional.id or a process-wide sequence>`).
+    /// # Arguments
+    ///
+    /// - `props` - The producer configuration map
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when a value fails to parse or validate, with
-    /// `ConfigDef`'s message; when `bootstrap.servers` is missing; when a SASL
-    /// `security.protocol` has an empty `sasl.mechanism`; when the idempotence
-    /// settings conflict (`enable.idempotence=true` with `retries=0`, with
-    /// `acks` other than `all`, or `max.in.flight.requests.per.connection`
-    /// above 5 with idempotence enabled); when `transactional.id` is set
-    /// without idempotence; and when `transaction.timeout.ms` is set with
-    /// `transaction.two.phase.commit.enable=true`.
+    /// - `Error::is_config_error` if a value is invalid, the settings
+    ///   conflict, or `sasl.mechanism` is not `PLAIN` under a SASL
+    ///   `security.protocol`.
     ///
-    /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
-    /// returns a [`ConfigError`](crate::common::config::ConfigError): Java accepts any mechanism
-    /// name, but this client implements only PLAIN, and a client built
-    /// with another mechanism would fail only later, at authentication.
+    /// # Translation notes
+    ///
+    /// WARNING: `sasl.mechanism` must be `PLAIN`.
+    // Covers Java's `ProducerConfig(Map)` and `ProducerConfig(Properties)`.
+    // Every value is parsed to its `ConfigDef` type and checked by its
+    // validator, then Java's `postProcessParsedConfig` runs:
+    // `postValidateSaslMechanismConfig`, `warnDisablingExponentialBackoff`,
+    // `postProcessReconnectBackoffConfigs`,
+    // `postProcessAndValidateIdempotenceConfigs` (an incompatible `retries` or
+    // `acks` disables idempotence unless it was set explicitly) and
+    // `maybeOverrideClientId` (an unset `client.id` becomes
+    // `producer-<transactional.id or a process-wide sequence>`).
+    //
+    // The config errors: a value fails to parse or validate, with
+    // `ConfigDef`'s message; `bootstrap.servers` is missing; a SASL
+    // `security.protocol` has an empty `sasl.mechanism`; the idempotence
+    // settings conflict (`enable.idempotence=true` with `retries=0`, with
+    // `acks` other than `all`, or `max.in.flight.requests.per.connection`
+    // above 5 with idempotence enabled); `transactional.id` is set without
+    // idempotence; `transaction.timeout.ms` is set with
+    // `transaction.two.phase.commit.enable=true`.
+    //
+    // A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
+    // fails with a config error: Java accepts any mechanism name, but this
+    // client implements only PLAIN, and a client built with another mechanism
+    // would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#ProducerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         Self::build(string_originals(props), None)
@@ -1122,7 +1129,7 @@ impl ProducerConfig {
     ///
     /// Java hands each client the `ProducerConfig` it is given, which took
     /// its one number from the `client.id` sequence when it was built
-    /// (`KafkaProducer.java:366` reads it), so clients given one
+    /// (`KafkaProducer#KafkaProducer` reads it), so clients given one
     /// configuration share its id. Building the configuration again would
     /// take a second number; this copy does not. It is not `Clone`
     /// (CLAUDE.md §3).
@@ -1332,7 +1339,7 @@ impl ProducerConfig {
     /// [`Error::Config`] with `Invalid configuration value for 'acks': <value>`
     /// when the value is not `all` and not a `short`. Java's `parseAcks` turns
     /// the `NumberFormatException` into that `ConfigException`
-    /// (`ProducerConfig.java:705-711`). The `in("all", "-1", "0", "1")`
+    /// (`ProducerConfig#parseAcks`). The `in("all", "-1", "0", "1")`
     /// validator runs first, so the error is reachable only when this is
     /// called directly, as in Java.
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#parseAcks")]
@@ -1348,82 +1355,144 @@ impl ProducerConfig {
         }
     }
 
-    /// The `SHORT` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `SHORT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'` when
-    ///   `key` is not a configuration this class defines.
-    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type, where Java's cast fails with a `ClassCastException`.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getShort")]
     pub fn get_short(&self, key: &str) -> Result<Option<i16>, Error> {
         self.config.get_short(key)
     }
 
-    /// The `INT` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `INT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getInt")]
     pub fn get_int(&self, key: &str) -> Result<Option<i32>, Error> {
         self.config.get_int(key)
     }
 
-    /// The `LONG` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `LONG` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getLong")]
     pub fn get_long(&self, key: &str) -> Result<Option<i64>, Error> {
         self.config.get_long(key)
     }
 
-    /// The `DOUBLE` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `DOUBLE` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getDouble")]
     pub fn get_double(&self, key: &str) -> Result<Option<f64>, Error> {
         self.config.get_double(key)
     }
 
-    /// The `LIST` configuration `key`, borrowed from the parsed values, `None`
-    /// for Java's `null`. Reading a key marks it used ([`Self::unused`]).
+    /// The `LIST` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, borrowed from the parsed values, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getList")]
     pub fn get_list(&self, key: &str) -> Result<Option<&[String]>, Error> {
         self.config.get_list(key)
     }
 
-    /// The `BOOLEAN` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `BOOLEAN` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
     ///
     /// `enable.idempotence` answers the value `postProcessParsedConfig`
     /// settled on: `false` when an incompatible `retries` or `acks` disabled
     /// it.
     ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
+    ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getBoolean")]
     pub fn get_boolean(&self, key: &str) -> Result<Option<bool>, Error> {
         self.config.get_boolean(key)
     }
 
-    /// The `STRING` configuration `key`, trimmed, or `None` when it has no
-    /// value (Java's `null`, e.g. an unset `transactional.id`). Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `STRING` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
     ///
     /// `client.id` answers the resolved id: when the property is unset, `new`
     /// derives it the way Java's `maybeOverrideClientId` does, so this is the
@@ -1432,46 +1501,59 @@ impl ProducerConfig {
     /// answers the value as written, trimmed (`"sasl_ssl"`), as Java's does:
     /// its validator accepts it case-insensitively without changing it. A
     /// `PASSWORD` configuration that is not set answers `None`, as Java's
-    /// `null` default casts to `String` (`SslConfigs.java:135-142`,
-    /// `SaslConfigs.java:398`).
+    /// `null` default casts to `String` (`SslConfigs`, `SaslConfigs`).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, trimmed, or `None` when it has no value (Java's `null`,
+    /// e.g. an unset `transactional.id`).
     ///
     /// # Errors
     ///
-    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type (`batch.size`, a set `ssl.keystore.key`). Java's
-    ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
-    ///   and fails with a `ClassCastException`, which, like
-    ///   `IllegalArgumentException`, is not a `KafkaException`.
-    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'`
-    ///   (`AbstractConfig.java:176-181`) when `key` is not a configuration this
-    ///   class defines.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         self.config.get_string(key)
     }
 
-    /// The keys of the properties this configuration was built from that were
-    /// never read: through a getter, or by the producer built from it.
+    /// Returns the keys of the properties this configuration was built from
+    /// that were never read: through a getter, or by the producer built from
+    /// it.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#unused")]
     pub fn unused(&self) -> HashSet<String> {
         self.config.unused()
     }
 
     /// Marks the configuration `key` used without reading it.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#ignore")]
     pub fn ignore(&self, key: &str) {
         self.config.ignore(key);
     }
 
-    /// Info level log for any unused configurations: one line,
-    /// `These configurations '[a, b]' were supplied but are not used yet.`,
-    /// and nothing when every key was used.
+    /// Info level log for any unused configurations
+    // One line, `These configurations '[a, b]' were supplied but are not used
+    // yet.`, and nothing when every key was used.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#logUnused")]
     pub fn log_unused(&self) {
         self.config.log_unused();
     }
 
     /// The names of the configurations this class defines.
+    ///
+    /// # Returns
+    ///
+    /// The set of configuration names
     #[doc(alias = "org.apache.kafka.clients.producer.ProducerConfig#configNames")]
     pub fn config_names() -> HashSet<String> {
         CONFIG.names()
@@ -1531,7 +1613,7 @@ impl ProducerConfig {
     ///
     /// This is the Rust stand-in for Java's
     /// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class,
-    /// ...)` (`KafkaProducer.java:389-392`), which reflectively loads and
+    /// ...)` (`KafkaProducer#KafkaProducer`), which reflectively loads and
     /// instantiates the named class. Rust has no reflection, so only the
     /// built-in names resolve here:
     ///
@@ -1583,7 +1665,7 @@ impl ProducerConfig {
     /// Java names a class, which the producer instantiates by reflection; here
     /// the partitioner itself is the value. [`KafkaProducer::new`](crate::producer::KafkaProducer::new)
     /// `configure`s it with the user configs plus the resolved `client.id`, as
-    /// Java does (`KafkaProducer.java:388-395`), and closes it on `close`. As
+    /// Java does (`KafkaProducer#KafkaProducer`), and closes it on `close`. As
     /// with any configured partitioner, adaptive partitioning is then disabled.
     /// The producer built from this config takes ownership of the partitioner.
     ///
@@ -1593,6 +1675,14 @@ impl ProducerConfig {
     /// The partitioner's `K` / `V` must be the record types of the producer built
     /// from this config; otherwise `KafkaProducer::new` fails with
     /// "`<partitioner>` is not an instance of `<expected>`".
+    ///
+    /// # Arguments
+    ///
+    /// - `partitioner` - the partitioner the producer uses
+    ///
+    /// # Returns
+    ///
+    /// This configuration, with the partitioner set.
     // the partitioner set through a setter, not a class config (CLAUDE.md §2)
     #[doc(alias = "rust-only")]
     pub fn set_partitioner<K: 'static, V: 'static>(mut self, partitioner: Box<dyn Partitioner<K, V>>) -> Self {
@@ -1704,8 +1794,8 @@ mod tests {
     }
 
     /// `metadata.recovery.strategy` is a case-insensitive `none` / `rebootstrap`
-    /// string (`ProducerConfig.java:595-601`) and
-    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`:602-607`). Before
+    /// string (`ProducerConfig`) and
+    /// `metadata.recovery.rebootstrap.trigger.ms` a long (`ProducerConfig`). Before
     /// these keys were parsed the producer silently ignored them and never
     /// rebootstrapped (`ClientRebootstrapTest.testProducerRebootstrap`).
     #[test]
@@ -1758,7 +1848,7 @@ mod tests {
     }
 
     /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
-    /// `ProducerConfig.java:602-605`): 0 is accepted, -1 is rejected with
+    /// `ProducerConfig`): 0 is accepted, -1 is rejected with
     /// Java's `ConfigDef.Range.atLeast` message.
     #[test]
     fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
@@ -1781,7 +1871,7 @@ mod tests {
     }
 
     /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
-    /// (`ProducerConfig.java:608-612`).
+    /// (`ProducerConfig`).
     #[test]
     fn test_metadata_cluster_check_enable() {
         let c = ProducerConfig::new(&base_props()).unwrap();
@@ -1916,7 +2006,7 @@ mod tests {
         assert!(!config.enable_idempotence);
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig.java:407-409`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ProducerConfig`), so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -2035,7 +2125,7 @@ mod tests {
     /// [`resolve_partitioner`](ProducerConfig::resolve_partitioner) returns a
     /// built-in [`RoundRobinPartitioner`] instance for the simple name — the
     /// Rust stand-in for Java's reflective `getConfiguredInstance` of
-    /// `partitioner.class` (`KafkaProducer.java:389-392`).
+    /// `partitioner.class` (`KafkaProducer#KafkaProducer`).
     #[test]
     fn test_resolve_partitioner_round_robin_simple_name() {
         let mut props = base_props();
@@ -2119,8 +2209,8 @@ mod tests {
         let config = ProducerConfig::new(&props_with(&[("transactional.id", " my-txn ")])).unwrap();
         assert_eq!(config.transactional_id, Some("my-txn".to_string()));
 
-        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig.java:584-587`
-        // → `ConfigDef.java:1225-1233`) rejects an empty string; a whitespace-only
+        // Java's `ConfigDef.NonEmptyString` validator (`ProducerConfig`
+        // → `ConfigDef`) rejects an empty string; a whitespace-only
         // id trims to empty and is rejected the same way. The error prints the
         // trimmed (empty) value, so "Invalid value " is followed by two spaces.
         for raw in ["", "   "] {
@@ -2145,7 +2235,7 @@ mod tests {
         assert_eq!(ProducerConfig::new(&base_props()).unwrap().transactional_id, None);
     }
 
-    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig.java:416-577`):
+    /// Java's `ProducerConfig` `ConfigDef` validators (`ProducerConfig`):
     /// each bound rejects the value just below it with `ConfigDef.Range.atLeast`'s
     /// message and accepts the bound itself.
     #[test]
@@ -2192,7 +2282,7 @@ mod tests {
 
     /// `acks` accepts exactly `all`, `-1`, `0`, `1` (after trimming) and rejects
     /// anything else, mirroring Java's `ConfigDef.ValidString.in("all", "-1",
-    /// "0", "1")` (`ProducerConfig.java:430-435`, `ConfigDef.java:1116`), which
+    /// "0", "1")` (`ProducerConfig`, `ConfigDef`), which
     /// runs before `parseAcks`. The error names the trimmed value because the
     /// validator runs on the parsed (trimmed) value; the check is exact-match, so
     /// `ALL` and `2` are rejected while a padded ` all ` is accepted.
@@ -2224,7 +2314,7 @@ mod tests {
         assert_eq!(ProducerConfig::parse_acks("1").unwrap(), "1");
 
         // Java's `parseAcks` catches `NumberFormatException` and throws
-        // `ConfigException` (`ProducerConfig.java:705-711`), so the class matters
+        // `ConfigException` (`ProducerConfig#parseAcks`), so the class matters
         // as much as the message: `ConfigException extends KafkaException`, and a
         // caller validating a config map with `is_kafka_error()` must see it.
         let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a config error");
@@ -2236,7 +2326,7 @@ mod tests {
     /// Boolean config values are parsed case-insensitively after trimming, and an
     /// unparseable value is rejected with Java's message and the original,
     /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
-    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// (`ConfigDef#parseType`): `equalsIgnoreCase("true")` / `("false")`, else
     /// `ConfigException(name, value, "Expected value to be either true or false")`.
     #[test]
     fn test_parse_bool_matches_java_boolean() {
@@ -2267,10 +2357,8 @@ mod tests {
     /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
     ///
     /// The six sites are the `acks` `ConfigDef.ValidString` validator
-    /// (`ProducerConfig.java:430-435` → `ConfigDef.java:1116`, which runs before
-    /// Java's `parseAcks` at `:709`) and the five throws in
-    /// `postProcessAndValidateIdempotenceConfigs` (`:655`, `:664`, `:673`, `:687`,
-    /// `:697`). They all used to be `IllegalArgumentException`, which sits
+    /// (which runs before `ProducerConfig#parseAcks`) and the five throws in
+    /// `ProducerConfig#postProcessAndValidateIdempotenceConfigs`. They all used to be `IllegalArgumentException`, which sits
     /// *beside* `KafkaException` rather than below it, so `is_kafka_error()`
     /// answered `false` and a bad `acks` slipped past a caller that a bad
     /// `linger.ms` did not.
@@ -2428,8 +2516,8 @@ mod tests {
     /// An unrecognised `compression.type` is a `ConfigException`, not the
     /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
     /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
-    /// (`ProducerConfig.java:436`), so `ConfigDef.ValidString.ensureValid`
-    /// (`ConfigDef.java:1116`) rejects the value before the enum lookup runs.
+    /// (`ProducerConfig`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.ValidString#ensureValid`) rejects the value before the enum lookup runs.
     #[test]
     fn test_invalid_compression_type_is_a_config_error() {
         let mut props = base_props();
@@ -2860,7 +2948,7 @@ mod tests {
 
     /// `ConfigDef.parseType` trims `client.id`. The producer keys generation
     /// on the key being present in the originals, not on emptiness
-    /// (`ProducerConfig.java:633-635`), so a blank explicit id stays empty,
+    /// (`ProducerConfig`), so a blank explicit id stays empty,
     /// as in Java. The consumer and admin client generate one instead.
     #[test]
     fn test_explicit_client_id_is_trimmed() {
@@ -2992,7 +3080,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig.java:410`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)` (`ProducerConfig`): an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
@@ -3036,10 +3124,10 @@ mod tests {
 
     /// `{:?}` renders no secret the user passed, and `originals` only as its
     /// key set. The props hold the four `Type.PASSWORD` keys this client
-    /// parses (`SslConfigs.java:137-139`, `SaslConfigs.java:398`), the three
+    /// parses (`SslConfigs`, `SaslConfigs`), the three
     /// SSL store and key password keys it does not define
-    /// (`SslConfigs.java:135-136`, `:142`), the two OAuth `Type.PASSWORD` keys
-    /// it defines but does not parse (`SaslConfigs.java:410`, `:420`), and an
+    /// (`SslConfigs`), the two OAuth `Type.PASSWORD` keys
+    /// it defines but does not parse (`SaslConfigs`), and an
     /// unknown key carrying a serializer credential: Java
     /// prints none of those values. The parsed secrets render as `[hidden]`
     /// through their typed fields, and the non-secret `bootstrap.servers` value

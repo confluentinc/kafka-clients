@@ -21,8 +21,6 @@ use crate::common::resource::ResourcePatternFilter;
 use super::{AccessControlEntryFilter, AclBinding};
 
 /// A filter which can match `AclBinding` objects.
-///
-/// Corresponds to `org.apache.kafka.common.acl.AclBindingFilter`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter")]
 pub struct AclBindingFilter {
@@ -47,32 +45,32 @@ impl AclBindingFilter {
         AclBindingFilter::new(ResourcePatternFilter::any(), AccessControlEntryFilter::any())
     }
 
-    /// Return `true` if this filter has any UNKNOWN components.
+    /// Returns `true` if this filter has any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.pattern_filter.is_unknown() || self.entry_filter.is_unknown()
     }
 
-    /// Return the resource pattern filter.
+    /// Returns the resource pattern filter.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#patternFilter")]
     pub fn pattern_filter(&self) -> &ResourcePatternFilter {
         &self.pattern_filter
     }
 
-    /// Return the access control entry filter.
+    /// Returns the access control entry filter.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#entryFilter")]
     pub fn entry_filter(&self) -> &AccessControlEntryFilter {
         &self.entry_filter
     }
 
-    /// Return true if the resource and entry filters can only match one ACE. In
+    /// Returns true if the resource and entry filters can only match one ACE. In
     /// other words, if there are no ANY or UNKNOWN fields.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#matchesAtMostOne")]
     pub fn matches_at_most_one(&self) -> bool {
         self.pattern_filter.matches_at_most_one() && self.entry_filter.matches_at_most_one()
     }
 
-    /// Return a string describing an ANY or UNKNOWN field, or `None` if there is
+    /// Returns a string describing an ANY or UNKNOWN field, or `None` if there is
     /// no such field.
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#findIndefiniteField")]
     pub fn find_indefinite_field(&self) -> Option<String> {
@@ -82,8 +80,12 @@ impl AclBindingFilter {
         self.entry_filter.find_indefinite_field()
     }
 
-    /// Return true if the resource filter matches the binding's resource and the
+    /// Returns true if the resource filter matches the binding's resource and the
     /// entry filter matches the binding's entry.
+    ///
+    /// # Arguments
+    ///
+    /// - `binding` - the binding to match
     #[doc(alias = "org.apache.kafka.common.acl.AclBindingFilter#matches")]
     pub fn matches(&self, binding: &AclBinding) -> bool {
         self.pattern_filter.matches(binding.pattern()) && self.entry_filter.matches(binding.entry())

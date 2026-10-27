@@ -14,13 +14,9 @@
 
 //! An ongoing partition reassignment listed via
 //! `Admin::list_partition_reassignments`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.PartitionReassignment`.
 
 /// A partition reassignment, which has been listed via
 /// `Admin::list_partition_reassignments`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.PartitionReassignment`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment")]
 pub struct PartitionReassignment {
@@ -31,32 +27,34 @@ pub struct PartitionReassignment {
 
 impl PartitionReassignment {
     /// Creates a partition reassignment from its replica sets.
+    ///
+    /// # Arguments
+    ///
+    /// - `replicas` - the brokers which this partition currently resides on.
+    /// - `adding_replicas` - the brokers that we are adding this partition to as part of a
+    ///   reassignment.
+    /// - `removing_replicas` - the brokers that we are removing this partition from as part of
+    ///   a reassignment.
     #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#PartitionReassignment")]
     pub fn new(replicas: Vec<i32>, adding_replicas: Vec<i32>, removing_replicas: Vec<i32>) -> Self {
         Self { replicas, adding_replicas, removing_replicas }
     }
 
-    /// The brokers which this partition currently resides on.
-    ///
-    /// Mirrors `replicas()`.
+    /// Returns the brokers which this partition currently resides on.
     #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#replicas")]
     pub fn replicas(&self) -> &[i32] {
         &self.replicas
     }
 
-    /// The brokers that we are adding this partition to as part of a
+    /// Returns the brokers that we are adding this partition to as part of a
     /// reassignment. A subset of replicas.
-    ///
-    /// Mirrors `addingReplicas()`.
     #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#addingReplicas")]
     pub fn adding_replicas(&self) -> &[i32] {
         &self.adding_replicas
     }
 
-    /// The brokers that we are removing this partition from as part of a
+    /// Returns the brokers that we are removing this partition from as part of a
     /// reassignment. A subset of replicas.
-    ///
-    /// Mirrors `removingReplicas()`.
     #[doc(alias = "org.apache.kafka.clients.admin.PartitionReassignment#removingReplicas")]
     pub fn removing_replicas(&self) -> &[i32] {
         &self.removing_replicas

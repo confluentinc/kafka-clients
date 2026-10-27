@@ -124,18 +124,25 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `partitionsToOffsetAndMetadata()`: when exactly one group was requested,
-/// returns an owned future (freed with `kafka_common_KafkaFuture_destroy`)
-/// whose `get` yields a `kafka_Map_t *` (owned by the future) of
-/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and
-/// compared by value in `kafka_Map_get`, to `kafka_consumer_OffsetAndMetadata_t
-/// *` values or `NULL` for a partition without a committed offset; otherwise
-/// stores the owned `IllegalStateError` in `*out_err` and returns `NULL`.
+/// Return a future which yields a map of topic partitions to OffsetAndMetadata objects. If the
+/// group does not have a committed offset for this partition, the corresponding value in the
+/// returned map will be `NULL`.
+///
+/// # Returns
+///
+/// A future whose `get` yields a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and compared by value in
+/// `kafka_Map_get`, to `kafka_consumer_OffsetAndMetadata_t *` values; `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` - more than one group was requested
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `out_err` a valid slot pointing at
-/// null.
+/// `NULL`. The returned future is owned and freed with
+/// `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata(
@@ -157,16 +164,28 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     }
 }
 
-/// `partitionsToOffsetAndMetadata(String groupId)`: returns the future
-/// described in
-/// [`kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata`]
-/// for `group_id`, or stores the owned `IllegalArgumentError` translation in
-/// `*out_err` and returns `NULL` when that group was not part of the request.
+/// Return a future which yields a map of topic partitions to OffsetAndMetadata objects for the
+/// specified group. If the group doesn't have a committed offset for a specific partition, the
+/// corresponding value in the returned map will be `NULL`.
+///
+/// # Parameters
+///
+/// - `group_id` - the group id
+///
+/// # Returns
+///
+/// The future `kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata`
+/// describes, for `group_id`; `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `group_id` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `group_id` a valid NUL-terminated
-/// string and `out_err` a valid slot pointing at null.
+/// string and `out_err` a valid slot pointing at `NULL`. The returned future is
+/// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id(
@@ -194,14 +213,20 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_partitions_t
     }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *`
-/// group ids, sorted, to the per-group `kafka_Map_t *` described in
-/// [`kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata`].
+/// Return a future which yields all `Map<String, Map<TopicPartition, OffsetAndMetadata>` objects,
+/// if requests for all the groups succeed.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *` group ids,
+/// sorted, to the per-group `kafka_Map_t *` described in
+/// `kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
@@ -216,12 +241,12 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), all_map, destroy_map_element) }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

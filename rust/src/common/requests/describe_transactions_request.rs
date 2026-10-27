@@ -193,7 +193,7 @@ mod tests {
     /// which is generated separately from the mixed branch `DescribeGroupsRequest` pins.
     /// A compact length is the string length plus one, so 0 is a null element, which
     /// Java rejects — it reads the length as `readUnsignedVarint() - 1` = -1
-    /// (`MessageDataGenerator.java:602`, `:613-617`). Field-by-field:
+    /// (`MessageDataGenerator#generateVariableLengthReader`). Field-by-field:
     ///   transactional_ids: compact array len 1 + 1  -> 02
     ///     element: compact string len 0 (null)      -> 00 (or 01, an empty string, for the boundary)
     ///   _tagged_fields                              -> 00

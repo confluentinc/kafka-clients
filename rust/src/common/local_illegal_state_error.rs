@@ -22,7 +22,7 @@ use crate::common::error::message_only_error;
 message_only_error! {
     /// Illegal state error — a method was called in an invalid state.
     ///
-    /// Corresponds to Java's `java.lang.IllegalStateException`; like
+    /// Java's `java.lang.IllegalStateException`; like
     /// [`LocalIllegalArgumentError`](crate::common::LocalIllegalArgumentError),
     /// outside the `KafkaException` hierarchy.
     // translates java.lang.IllegalStateException, a JDK runtime exception (CLAUDE.md §2)

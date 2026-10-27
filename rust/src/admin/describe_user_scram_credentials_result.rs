@@ -13,9 +13,6 @@
 // limitations under the License.
 
 //! The result of the `Admin::describe_user_scram_credentials` call.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult`.
 
 use std::collections::HashMap;
 
@@ -27,14 +24,10 @@ use crate::describe_user_scram_credentials_response_data::DescribeUserScramCrede
 use super::{ScramCredentialInfo, ScramMechanism, UserScramCredentialsDescription};
 
 /// The result of the `Admin::describe_user_scram_credentials` call.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult`.
-///
-/// Holds a single future over the raw response data; `all()`, `users()` and
-/// `description()` are per-view refinements (Java uses `whenComplete` on the
-/// data future to complete new `KafkaFutureImpl`s — here `then_apply`
-/// expresses the same transform-on-completion).
+// Holds a single future over the raw response data; `all()`, `users()` and
+// `description()` are per-view refinements (Java uses `whenComplete` on the
+// data future to complete new `KafkaFutureImpl`s — here `then_apply`
+// expresses the same transform-on-completion).
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult")]
 pub struct DescribeUserScramCredentialsResult {
@@ -55,7 +48,7 @@ impl DescribeUserScramCredentialsResult {
     /// name. The future completes successfully only if all such user
     /// descriptions complete successfully.
     ///
-    /// Mirrors `DescribeUserScramCredentialsResult.all()`. A successfully
+    /// A successfully
     /// described user is one with *either* a `NONE` or a `RESOURCE_NOT_FOUND`
     /// error code; the first user with any other error code fails the whole
     /// future.
@@ -81,12 +74,15 @@ impl DescribeUserScramCredentialsResult {
         })
     }
 
-    /// Returns a future indicating the distinct users that meet the request
-    /// criteria and that have at least one credential.
-    ///
-    /// Mirrors `DescribeUserScramCredentialsResult.users()`. Users that do not
-    /// exist / have no credential (`RESOURCE_NOT_FOUND`) are excluded; users that
-    /// have a credential but could not be described are included.
+    /// Returns a future indicating the distinct users that meet the request criteria and that
+    /// have at least one credential. The future will not complete successfully if the user is
+    /// not authorized to perform the describe operation; otherwise, it will complete
+    /// successfully as long as the list of users with credentials can be successfully determined
+    /// within some hard-coded timeout period. Note that the returned list will not include users
+    /// that do not exist/have no credentials: a request to describe an explicit list of users,
+    /// none of which existed/had a credential, will result in a future that returns an empty
+    /// list being returned here. A returned list will include users that have a credential but
+    /// that could not be described.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#users")]
     pub fn users(&self) -> KafkaFuture<Vec<String>> {
         self.data_future.then_apply(|data: DescribeUserScramCredentialsResponseData| {
@@ -99,11 +95,15 @@ impl DescribeUserScramCredentialsResult {
         })
     }
 
-    /// Returns a future indicating the description results for the given user.
+    /// Returns a future indicating the description results for the given user. The future will
+    /// complete with an error if the future returned by [`users`](Self::users) completes with an
+    /// error. Note that if the given user does not exist in the list of described users then the
+    /// returned future will complete with an error answering
+    /// `Error::is_resource_not_found_error`.
     ///
-    /// Mirrors `DescribeUserScramCredentialsResult.description(String)`. If the
-    /// given user is not present in the described users, the future completes
-    /// exceptionally with a `RESOURCE_NOT_FOUND` error ("No such user: ...").
+    /// # Arguments
+    ///
+    /// - `user_name` - the name of the user description being requested
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult#description")]
     pub fn description(&self, user_name: &str) -> KafkaFuture<UserScramCredentialsDescription> {
         let user_name = user_name.to_string();
@@ -144,9 +144,9 @@ fn scram_credential_infos_for(user_result: &WireUserResult) -> Vec<ScramCredenti
 /// `Errors.forCode(code).exception(message)`.
 fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
-    // `Errors.exception(String)` falls back to the code's default text only when
-    // the message is **null** (`Errors.java:461-468`); a non-null empty string is
-    // passed straight through to the builder. Treating `Some("")` as absent would
+    // `org.apache.kafka.common.protocol.Errors#exception(String)` falls back to
+    // the code's default text only when the message is **null**; a non-null
+    // empty string is passed straight through to the builder. Treating `Some("")` as absent would
     // substitute the default where the broker deliberately sent none.
     match message {
         Some(m) => Error::with_message(error, m.clone()),

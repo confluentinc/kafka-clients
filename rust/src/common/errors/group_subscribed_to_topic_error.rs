@@ -21,10 +21,8 @@ kafka_error_type! {
     /// Deleting offsets of a topic is forbidden while the consumer group is
     /// actively subscribed to it.
     ///
-    /// Corresponds to Java's `GroupSubscribedToTopicException`, error code `Errors::GroupSubscribedToTopic`.
-    ///
-    /// Java `extends` chain:
-    ///    `GroupSubscribedToTopicException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::GroupSubscribedToTopic`. Java `extends` chain:
+    /// `GroupSubscribedToTopicException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.GroupSubscribedToTopicException")]
     GroupSubscribedToTopicError,
     code: Errors::GroupSubscribedToTopic,

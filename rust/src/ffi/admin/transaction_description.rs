@@ -75,19 +75,24 @@ pub(crate) unsafe fn destroy_transaction_description_element(element: *mut c_voi
     unsafe { kafka_admin_TransactionDescription_destroy(element as *mut kafka_admin_TransactionDescription_t) }
 }
 
-/// `new TransactionDescription(int coordinatorId, TransactionState state,
-/// long producerId, int producerEpoch, long transactionTimeoutMs,
-/// OptionalLong transactionStartTimeMs, Set<TopicPartition> topicPartitions)`.
-/// `state` is a `kafka_admin_TransactionState_t` singleton;
-/// `transaction_start_time_ms` is `-1` for `OptionalLong.empty()`;
-/// `topic_partitions` is a borrowed list of `const kafka_common_TopicPartition_t *`,
-/// copied (null reads as empty). Owned, freed with
-/// [`kafka_admin_TransactionDescription_destroy`].
+/// Creates the description of a transaction.
+///
+/// # Parameters
+///
+/// - `coordinator_id` - the broker id of the transaction coordinator.
+/// - `state` - the state of the transaction, a `kafka_admin_TransactionState_t` singleton.
+/// - `producer_id` - the producer id of the transaction.
+/// - `producer_epoch` - the producer epoch of the transaction.
+/// - `transaction_timeout_ms` - the transaction timeout, in milliseconds.
+/// - `transaction_start_time_ms` - the start time of the transaction, in milliseconds, `-1` for
+///   none.
+/// - `topic_partitions` - the partitions in the transaction, `NULL` for none.
 ///
 /// # Safety
 ///
-/// `state` must be a transaction-state singleton and `topic_partitions` null
-/// or a valid list of topic-partition handles.
+/// `state` must be a transaction-state singleton and `topic_partitions` `NULL` or a valid borrowed
+/// list of `const kafka_common_TopicPartition_t *`, copied. The returned handle is owned, freed
+/// with [`kafka_admin_TransactionDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
@@ -116,7 +121,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_new(
     ))
 }
 
-/// `coordinatorId()`.
+/// Returns the broker id of the transaction coordinator.
 ///
 /// # Safety
 ///
@@ -131,11 +136,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_coordinator_id(
     unsafe { transaction_description_ref(self_) }.coordinator_id()
 }
 
-/// `state()`: the `kafka_admin_TransactionState_t` singleton, never freed.
+/// Returns the state of the transaction.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-description handle.
+/// `self_` must be a valid transaction-description handle. The returned
+/// `kafka_admin_TransactionState_t` singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_state(
@@ -146,7 +152,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_state(
     transaction_state_singleton(unsafe { transaction_description_ref(self_) }.state())
 }
 
-/// `producerId()`.
+/// Returns the producer id of the transaction.
 ///
 /// # Safety
 ///
@@ -161,7 +167,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_id(
     unsafe { transaction_description_ref(self_) }.producer_id()
 }
 
-/// `producerEpoch()`.
+/// Returns the producer epoch of the transaction.
 ///
 /// # Safety
 ///
@@ -176,7 +182,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_producer_epoch(
     unsafe { transaction_description_ref(self_) }.producer_epoch()
 }
 
-/// `transactionTimeoutMs()`.
+/// Returns the transaction timeout, in milliseconds.
 ///
 /// # Safety
 ///
@@ -191,10 +197,11 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_timeout_
     unsafe { transaction_description_ref(self_) }.transaction_timeout_ms()
 }
 
-/// `transactionStartTimeMs()`: the start time, or `-1` for
+/// Returns the start time of the transaction, in milliseconds, or `-1` for
 /// `OptionalLong.empty()`.
 ///
-/// A caught Rust panic returns -2, which is no transaction start time: Java reads a negative one as `OptionalLong.empty()`.
+/// A caught Rust panic returns -2, which is no transaction start time: Java reads a negative one as
+/// `OptionalLong.empty()`.
 ///
 /// # Safety
 ///
@@ -211,12 +218,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_transaction_start_ti
         .unwrap_or(-1)
 }
 
-/// `topicPartitions()`: an owned list of owned `kafka_common_TopicPartition_t *`
-/// copies ordered by topic then partition, freed with `kafka_List_destroy`.
+/// Returns the partitions in the transaction, ordered by topic then partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-description handle.
+/// `self_` must be a valid transaction-description handle. The returned list of
+/// `kafka_common_TopicPartition_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_topic_partitions(
@@ -227,11 +234,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_topic_partitions(
     sorted_topic_partition_list(unsafe { transaction_description_ref(self_) }.topic_partitions())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-description handle.
+/// `self_` must be a valid transaction-description handle. The returned string is owned, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionDescription_to_string(
@@ -242,11 +250,11 @@ pub unsafe extern "C" fn kafka_admin_TransactionDescription_to_string(
     into_c_string(&unsafe { transaction_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned transaction-description handle; null is a no-op.
+/// Frees an owned transaction-description handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

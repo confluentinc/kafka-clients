@@ -361,7 +361,8 @@ impl AbstractFetch {
     ) {
         let session_id = request_data.metadata.session_id();
         // Record the fetch request latency FIRST, before either early return
-        // below (KAFKA-20585, `AbstractFetch.java:158`): the round trip
+        // below (KAFKA-20585,
+        // `org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess`): the round trip
         // completed even when the response carries a session-level error such
         // as `FETCH_SESSION_TOPIC_ID_ERROR`. Java passes `resp.destination()`
         // (the broker node id as a string); we pass the node id likewise so
@@ -370,8 +371,9 @@ impl AbstractFetch {
             .record_latency(&fetch_target.id().to_string(), request_latency_ms);
 
         // Java's `handler == null` `return` sits INSIDE the `try`, so the
-        // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
-        // still runs. Leaking the node id here would be permanent, not a
+        // `finally { removePendingFetchRequest(...) }` of
+        // `org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess` still runs.
+        // Leaking the node id here would be permanent, not a
         // delay: `prepare_fetch_requests` skips every node in
         // `nodes_with_pending_fetch_requests`, so that broker's partitions
         // would never be fetched again.
@@ -447,8 +449,9 @@ impl AbstractFetch {
 
         // KIP-951: accumulate per-partition new-leader info reported on a
         // leadership-change error, applied to metadata after the loop.
-        // Translates Java's `partitionsWithUpdatedLeaderInfo`
-        // (`AbstractFetch.java:180`). Lazily allocated like Java — empty on
+        // Translates Java's `partitionsWithUpdatedLeaderInfo` (in
+        // `org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess`). Lazily
+        // allocated like Java — empty on
         // the steady-state happy path (no leadership errors), so the hot
         // path pays only the per-partition `i16` error-code compare below.
         let mut partitions_with_updated_leader_info: HashMap<TopicPartition, crate::metadata::LeaderIdAndEpoch> =
@@ -468,7 +471,8 @@ impl AbstractFetch {
                     //
                     // DELIBERATE DIVERGENCE, recorded rather than assumed
                     // (definition-of-done.md §7). Java throws
-                    // `IllegalStateException` (`AbstractFetch.java:184-199`),
+                    // `IllegalStateException`
+                    // (`org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess`),
                     // which aborts the whole response: no `CompletedFetch` is
                     // added for this partition OR any partition after it (the
                     // buffer is still woken, since 4.4 does that in
@@ -516,7 +520,8 @@ impl AbstractFetch {
 
             // KIP-951: when a partition reports a leadership-change error AND
             // carries new leader info, record it for the post-loop metadata
-            // update. Translates `AbstractFetch.java:207-214`.
+            // update. Translates the KIP-951 step of
+            // `org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess`.
             let partition_error = crate::common::protocol::Errors::for_code(partition_data.error_code);
             if matches!(
                 partition_error,
@@ -555,7 +560,8 @@ impl AbstractFetch {
         // which every completion path (this one included, below) reaches.
 
         // KIP-951: apply any new-leader info reported on leadership-change
-        // errors. Translates `AbstractFetch.java:233-251`. Empty on the
+        // errors. Translates the post-loop KIP-951 step of
+        // `org.apache.kafka.clients.consumer.internals.AbstractFetch#handleFetchSuccess`. Empty on the
         // happy path — no allocation or lock on the steady-state path.
         if !partitions_with_updated_leader_info.is_empty() {
             // Build the leader node list from the response's node endpoints,
@@ -817,7 +823,8 @@ impl AbstractFetch {
         for partition in unbuffered {
             // Get position. Java's `positionForPartition` throws
             // `IllegalStateException` if the position is missing
-            // (`AbstractFetch.java:508-515`) and Java's `position()`
+            // (`org.apache.kafka.clients.consumer.internals.AbstractFetch#positionForPartition`) and
+            // Java's `position()`
             // throws if the partition is no longer assigned. In Java the
             // window between `fetchablePartitions()` (snapshot) and
             // `position(tp)` (per-partition query) is narrow because
@@ -1276,7 +1283,7 @@ mod tests {
 
     /// `prepare_fetch_requests` returns an empty map when no partitions
     /// are assigned (nothing to fetch). Mirrors the short-circuit at
-    /// Java `AbstractFetch.java:430-432`.
+    /// Java `AbstractFetch#prepareFetchRequests`.
     #[test]
     fn test_prepare_fetch_requests_empty_assignment_returns_empty_map() {
         let mut af = make_abstract_fetch();
@@ -1344,8 +1351,8 @@ mod tests {
     ///
     /// NOTE (Phase M3): this test previously POISONED the SubscriptionState mutex
     /// to prove the short-circuit ran before any subscription lock. That premise
-    /// no longer holds: faithful to Java's `prepareFetchRequests`
-    /// (`AbstractFetch.java:423`), the FIRST statement is now
+    /// no longer holds: faithful to Java's `AbstractFetch#prepareFetchRequests`,
+    /// the FIRST statement is now
     /// `metricsManager.maybeUpdateAssignment(subscriptions)`, which reads
     /// `subscription.assignmentId()` (a lock). The Phase-26 short-circuit still
     /// avoids the EXPENSIVE per-partition fetchable scan — it just no longer

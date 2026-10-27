@@ -14,8 +14,7 @@
 
 //! The result of `Admin::unregister_controller`.
 //!
-//! Corresponds to `org.apache.kafka.clients.admin.UnregisterControllerResult`
-//! (KAFKA-20395, Kafka 4.4).
+//! Added in Kafka 4.4 (KAFKA-20395).
 
 use crate::common::KafkaFuture;
 
@@ -23,8 +22,6 @@ use crate::common::KafkaFuture;
 /// call.
 ///
 /// The API of this class is evolving, see [`Admin`](crate::admin::Admin) for details.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.UnregisterControllerResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.UnregisterControllerResult")]
 pub struct UnregisterControllerResult {
@@ -38,7 +35,7 @@ impl UnregisterControllerResult {
         Self { future }
     }
 
-    /// Return a future which succeeds if the operation is successful.
+    /// Returns a future which succeeds if the operation is successful.
     #[doc(alias = "org.apache.kafka.clients.admin.UnregisterControllerResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.future.clone()

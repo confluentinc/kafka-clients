@@ -18,14 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The server disconnected before a response was received.
+    /// A misc. network-related `IOException` occurred when making a request. This could be because
+    /// the client's metadata is out of date and it is making a request to a node that is now dead.
     ///
-    /// Corresponds to Java's `NetworkException`, error code `Errors::NetworkError`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `NetworkException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::NetworkError`. Java `extends` chain: `NetworkException` ->
+    /// `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NetworkException")]
     NetworkError,
     code: Errors::NetworkError,

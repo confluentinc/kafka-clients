@@ -66,15 +66,24 @@ fn boxed(options: RenewDelegationTokenOptions) -> *mut kafka_admin_RenewDelegati
 }
 
 /// `new RenewDelegationTokenOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_RenewDelegationTokenOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_RenewDelegationTokenOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RenewDelegationTokenOptions_new() -> *mut kafka_admin_RenewDelegationTokenOptions_t {
     boxed(RenewDelegationTokenOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -92,8 +101,12 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -109,7 +122,11 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_timeout_ms(
     unsafe { renew_delegation_token_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `RenewDelegationTokenOptions.renewTimePeriodMs(long renewTimePeriodMs)`: the renew period in milliseconds; `-1` for the server default.
+/// `RenewDelegationTokenOptions.renewTimePeriodMs(long renewTimePeriodMs)`.
+///
+/// # Parameters
+///
+/// - `renew_time_period_ms` - the renew period in milliseconds; `-1` for the server default.
 ///
 /// # Safety
 ///
@@ -127,7 +144,11 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenOptions_set_renew_time_
     *options = std::mem::take(options).set_renew_time_period_ms(renew_time_period_ms);
 }
 
-/// `RenewDelegationTokenOptions.renewTimePeriodMs()`: the renew period in milliseconds.
+/// `RenewDelegationTokenOptions.renewTimePeriodMs()`.
+///
+/// # Returns
+///
+/// The renew period in milliseconds.
 ///
 /// # Safety
 ///

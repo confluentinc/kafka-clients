@@ -73,7 +73,7 @@ impl SaslConfigs {
 
 /// SASL configuration for Kafka connections.
 ///
-/// Translated from `org.apache.kafka.common.config.SaslConfigs`. The Java class
+/// The Java class
 /// hosts only the `sasl.*` config keys and defaults; the values themselves
 /// travel in the `Map<String, ?>` handed to `SaslChannelBuilder.configure`.
 /// The Rust struct keeps Java's name and constants, and additionally holds the
@@ -103,7 +103,7 @@ pub struct SaslConfigs {
     /// via [`SaslConfigs::resolve_username`] and [`SaslConfigs::resolve_password`].
     ///
     /// A [`Password`] because Java defines `sasl.jaas.config` as
-    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:398`): the string embeds
+    /// `ConfigDef.Type.PASSWORD` (`org.apache.kafka.common.config.SaslConfigs#addClientSaslSupport`): the string embeds
     /// the credentials, so every rendering of it is `[hidden]`.
     pub(crate) jaas_config: Option<Password>,
 

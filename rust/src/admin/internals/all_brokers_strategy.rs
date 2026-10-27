@@ -130,9 +130,10 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
     fn handle_response(&self, keys: &HashSet<BrokerKey>, response: &ConcreteResponse) -> LookupResult<BrokerKey> {
         Self::validate_lookup_keys(keys);
         let ConcreteResponse::Metadata(response) = response else {
-            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
-            // result would silently re-issue the lookup until the deadline. See
-            // `LookupResult::failed_all`.
+            // Java fails the call once
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`);
+            // an empty result would silently re-issue the lookup until the deadline.
+            // See `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 keys,
                 Error::local_illegal_state("AllBrokersStrategy received an unexpected response type"),
@@ -475,7 +476,8 @@ mod integration_tests {
 
     fn disconnect_error() -> Error {
         // Java's `DisconnectException`, the driver's retry-lookup trigger
-        // (`AdminApiDriver.java:265`), as raised by the admin runnable.
+        // (`org.apache.kafka.clients.admin.internals.AdminApiDriver#onFailure`),
+        // as raised by the admin runnable.
         Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
     }
 

@@ -17,8 +17,6 @@
 //! Corresponds to `org.apache.kafka.common.resource.ResourceType`.
 
 /// Represents a type of resource which an ACL can be applied to.
-///
-/// Corresponds to `org.apache.kafka.common.resource.ResourceType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.resource.ResourceType")]
@@ -43,9 +41,7 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
-    /// All resource types, in declaration (code) order.
-    ///
-    /// Mirrors `ResourceType.values()`.
+    /// Returns all resource types, in declaration (code) order.
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#values")]
     pub fn values() -> &'static [Self] {
         &[
@@ -60,7 +56,7 @@ impl ResourceType {
         ]
     }
 
-    /// Return the code of this resource.
+    /// Returns the code of this resource.
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#code")]
     pub fn code(&self) -> i8 {
         match self {
@@ -75,8 +71,12 @@ impl ResourceType {
         }
     }
 
-    /// Return the `ResourceType` with the provided code or
+    /// Returns the `ResourceType` with the provided code or
     /// [`ResourceType::Unknown`] if one cannot be found.
+    ///
+    /// # Arguments
+    ///
+    /// - `code` - the code to look up
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#fromCode")]
     pub fn from_code(code: i8) -> ResourceType {
         match code {
@@ -94,8 +94,13 @@ impl ResourceType {
 
     /// Parse the given string as an ACL resource type.
     ///
-    /// Returns the `ResourceType`, or [`ResourceType::Unknown`] if the string
-    /// could not be matched (case-insensitive).
+    /// # Arguments
+    ///
+    /// - `str` - The string to parse.
+    ///
+    /// # Returns
+    ///
+    /// The `ResourceType`, or `UNKNOWN` if the string could not be matched.
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#fromString")]
     pub fn from_string(str: &str) -> ResourceType {
         match str.to_uppercase().as_str() {
@@ -111,7 +116,7 @@ impl ResourceType {
         }
     }
 
-    /// Return whether this resource type is [`ResourceType::Unknown`].
+    /// Returns whether this resource type is [`ResourceType::Unknown`].
     #[doc(alias = "org.apache.kafka.common.resource.ResourceType#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == ResourceType::Unknown

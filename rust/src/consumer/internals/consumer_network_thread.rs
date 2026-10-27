@@ -171,9 +171,9 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// pass through the request managers.
     cached_max_time_to_wait_ms: Arc<AtomicI64>,
     /// Close timeout (millis) — Java's `volatile Duration closeTimeout`
-    /// (`ConsumerNetworkThread.java:84`). Written by the app side's close
+    /// (`ConsumerNetworkThread#closeTimeout`). Written by the app side's close
     /// path through the shared [`Self::close_timeout_handle`] (Java's
-    /// `closeInternal(timeout)` assigns `closeTimeout = timeout`, line 380)
+    /// `ConsumerNetworkThread#closeInternal` assigns `closeTimeout = timeout`)
     /// and read by [`Self::cleanup`].
     close_timeout_ms: Arc<AtomicI64>,
     /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
@@ -387,8 +387,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let mut delegate_guard = delegate_arc.lock().await;
 
         let current_time_ms = self.time.milliseconds();
-        // Java CNT:216 — record the time between network-thread polls. Only
-        // recorded once a prior poll has happened (Java's `lastPollTimeMs != 0`
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#runOnce` — record the time between
+        // network-thread polls. Only recorded once a prior poll has happened (Java's `lastPollTimeMs != 0`
         // guard). `current_time_ms` is already computed for the iteration, so
         // there is no extra clock read here.
         if self.last_poll_time_ms != 0
@@ -458,8 +458,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //     when present); acquired via the `Arc<Mutex<...>>`
             //     handle.
             //   * `commit.poll_with_coordinator(coord, now)` — Java's
-            //     `CommitRequestManager.poll(currentTimeMs)`
-            //     (`CommitRequestManager.java:181-209`). Drains
+            //     `org.apache.kafka.clients.consumer.internals.CommitRequestManager#poll`. Drains
             //     `unsent_offset_commits` and `unsent_offset_fetches`
             //     into `UnsentRequest`s and handles
             //     `closing && coordinator unknown` by failing pending
@@ -491,8 +490,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             if let Some(coord_arc) = coord_handle.as_ref() {
                 collected_before.push(coord_arc.poll_shared(current_time_ms));
             }
-            // Java: `CommitRequestManager.poll(currentTimeMs)`
-            // (`CommitRequestManager.java:181-209`). Must run between
+            // Java: `org.apache.kafka.clients.consumer.internals.CommitRequestManager#poll`. Must run between
             // coordinator and heartbeat so unsent commits/fetches are
             // shipped on every iteration. Both `CoordinatorRequestManager`
             // and `CommitRequestManager` use interior mutability
@@ -547,9 +545,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         //
         // The fence / fatal / stale transitions themselves are applied by
         // the heartbeat manager inline in its response handler, where Java
-        // applies them (`AbstractHeartbeatRequestManager.java:415,424,457`
-        // — synchronously inside the `whenComplete` lambda). What CAN'T be
-        // finished there is the §31 `onPartitionsLost` callback each one
+        // applies them (`org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onErrorResponse`
+        // and `AbstractHeartbeatRequestManager#handleFatalFailure`, synchronously inside the `whenComplete` lambda).
+        // What CAN'T be finished there is the §31 `onPartitionsLost` callback each one
         // enqueues: the app task runs the listener and acks, so the release
         // tail resumes here, mirroring Java's
         // `signalPartitionsLost(...).whenComplete(...)` resuming on the
@@ -578,7 +576,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // `can_commit = false`: this is the per-iteration call where
         // we have NOT just run `updateTimerAndMaybeCommit`, so it is
         // not safe to advance reconciliation when auto-commit is
-        // enabled (Java's `AbstractMembershipManager.java:854`).
+        // enabled (Java's `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`).
         //
         // Failures are logged and swallowed, matching Java's
         // surrounding-runOnce `try { ... } catch (Throwable e) { log }`.
@@ -682,9 +680,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
 
         // ──── Phase 6: reap expired application events ────
-        // Java CNT:282 — `recordApplicationEventExpiredSize(reaper.reap(now))`,
-        // recorded unconditionally (the Value stat tracks the latest count,
-        // which is 0 when nothing expired).
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#reapExpiredApplicationEvents` —
+        // `recordApplicationEventExpiredSize(reaper.reap(now))`, recorded unconditionally (the Value stat tracks the
+        // latest count, which is 0 when nothing expired).
         let expired = {
             let mut reaper = match self.application_event_reaper.lock() {
                 Ok(g) => g,
@@ -735,8 +733,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.notifiable_handles.retain(|h| !h.is_done());
         if self.notifiable_handles.is_empty() {
             // Java: "Don't get-and-clear the metadata error if there are
-            // no events that will be notified." (ConsumerNetworkThread
-            // .java:447-449).
+            // no events that will be notified."
+            // (`org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#maybeFailOnMetadataError`).
             return;
         }
 
@@ -795,9 +793,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
-        // Java CNT:253 records a literal 0 here, which is exact for Java because
-        // `LinkedBlockingQueue.drainTo` calls `fullyLock()` — it holds both the
-        // put and take locks, so nothing can arrive during the drain.
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents` records a
+        // literal 0 here, which is exact for Java because `LinkedBlockingQueue.drainTo` calls `fullyLock()` — it holds
+        // both the put and take locks, so nothing can arrive during the drain.
         //
         // The `try_recv` loop above (mandated by consumer-threading.md §10) does
         // NOT block senders, so a `store(0)` would be wrong: an `add` racing the
@@ -828,7 +826,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // test pushing onto the raw channel can.
             metrics.record_application_event_queue_size(remaining.max(0) as i32);
         }
-        // Java CNT:273 — measure the time to process all available events.
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents` — measure
+        // the time to process all available events.
         let start_ms = self.time.milliseconds();
 
         for env in envelopes.drain(..) {
@@ -853,12 +852,13 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // with an interrupt error, behind the listener's ops. The closed
             // ack is applied before the next event, so the leave cannot hang.
             self.maybe_apply_leave_callback_ack();
-            // Java CNT:256 — record the time this event spent in the queue.
+            // Java `ConsumerNetworkThread#processApplicationEvents`: record the
+            // time this event spent in the queue.
             if let Some(metrics) = &metrics {
                 metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
             }
-            // Java CNT:257-274 wraps each event in `try { ... } catch
-            // (Throwable t)`, so one failing event neither skips the rest of the
+            // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents` wraps
+            // each event in `try { ... } catch (Throwable t)`, so one failing event neither skips the rest of the
             // batch nor stops the network thread. Rust's processor is
             // infallible by signature (`fn process(&mut self, event)`): it
             // completes each event's handle itself, so what Java's catch-all
@@ -883,7 +883,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 }
             }
         }
-        // Java CNT:273 — record the total processing time for the batch.
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents` — record
+        // the total processing time for the batch.
         if let Some(metrics) = &metrics {
             metrics.record_application_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
@@ -1014,7 +1015,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         //     coordinator leads a fetched partition.
         //   * fetch builds the fetch-session close requests last.
         //
-        // Java 4.4 CNT:412-434 wraps `runAtClose(...)` in `try { ... } catch
+        // Java 4.4 `ConsumerNetworkThread#cleanup` wraps `runAtClose(...)` in `try { ... } catch
         // (Exception e) { log.error("Unexpected error during shutdown. Proceed
         // with closing.", e); } finally { ... }`, so a failure here still
         // sends the unsent requests, reaps, and closes the managers and the
@@ -1068,14 +1069,15 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
         // ──── 2. Drain unsent requests until timer expires ────
         //
-        // Java's `sendUnsentRequests` (`ConsumerNetworkThread.java:393-407`)
+        // Java's `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#sendUnsentRequests`
         // returns early only when nothing is pending; otherwise it is a
         // do-while that ALWAYS polls once — a non-blocking `poll(0)` when the
         // close timer is already spent — before checking
         // `timer.notExpired() && hasAnyPendingRequests()`. That first pass is
         // what sends the leave-group heartbeat `pollOnClose` builds for a
-        // close with zero timeout (`AbstractHeartbeatRequestManager.java:217-237`),
-        // so the timer check must not precede it.
+        // close with zero timeout
+        // (`org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#pollOnClose`), so the timer
+        // check must not precede it.
         let has_pending = |thread: &Self| {
             thread
                 .network_client_delegate
@@ -1137,8 +1139,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap_on_close(&mut leftover_erased)
         };
-        // Java CNT:427 — record the expired count during close, same as
-        // run_once's reap site.
+        // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#cleanup` — record the expired count
+        // during close, same as run_once's reap site.
         if let Some(metrics) = &self.async_consumer_metrics {
             metrics.record_application_event_expired_size(expired as i64);
         }
@@ -1172,7 +1174,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // Re-check the shutdown signal first so `signal_close()`
             // followed by `wakeup.wakeup()` exits immediately.
             //
-            // Java CNT:161-166: `try { runOnce(); } catch (final Throwable e)
+            // Java `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run`:
+            // `try { runOnce(); } catch (final Throwable e)
             // { log.error(...) }` — swallow and continue, so a failing
             // iteration neither ends the task nor skips `cleanup()`. Without
             // this boundary a panic would unwind out of `block_on` on the
@@ -1192,11 +1195,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 tokio::task::yield_now().await;
             }
         }
-        // Java 4.4 CNT:143-171: the `finally { cleanup(); }` sits outside the
+        // Java 4.4 `ConsumerNetworkThread#run`: the `finally { cleanup(); }` sits outside the
         // `catch (Throwable)`, so a failure in `cleanup()` leaves `run()` and
         // reaches `KafkaThread`'s uncaught-exception handler, which logs it at
-        // ERROR (`KafkaThread.java:51`); the thread then ends normally and
-        // `closeInternal`'s `join()` (CNT:379-390) returns, so `close()` does
+        // ERROR (`KafkaThread#configureThread`); the thread then ends normally and
+        // `ConsumerNetworkThread#closeInternal`'s `join()` returns, so `close()` does
         // not fail. Catch the panic here for the same outcome: log it, return
         // normally, and let `spawn_dedicated` signal `done`. Without the catch
         // the panic unwinds out of `block_on`, skips `done`, and only reaches
@@ -2045,7 +2048,7 @@ mod tests {
         }
     }
 
-    /// Java 4.4 `ConsumerNetworkThread.cleanup()` (CNT:412-434) catches a
+    /// Java 4.4 `ConsumerNetworkThread.cleanup()` catches a
     /// failure in `runAtClose(...)`, logs "Unexpected error during shutdown.
     /// Proceed with closing." and still reaps and closes the managers and the
     /// delegate in its `finally`. A panicking `poll_on_close` must therefore
@@ -2186,11 +2189,10 @@ mod tests {
         );
     }
 
-    /// Java's `sendUnsentRequests` is a do-while
-    /// (`ConsumerNetworkThread.java:393-407`): with a request pending it polls
+    /// Java's `ConsumerNetworkThread#sendUnsentRequests` is a do-while: with a request pending it polls
     /// once even when the close timeout is zero, which is how the leave-group
     /// heartbeat `pollOnClose` builds for a zero-timeout close gets sent
-    /// (`AbstractHeartbeatRequestManager.java:217-237`). A zero close timeout
+    /// (`AbstractHeartbeatRequestManager#pollOnClose`). A zero close timeout
     /// must therefore still perform exactly one non-blocking `poll(0)`.
     #[tokio::test]
     async fn test_send_unsent_requests_polls_once_with_zero_close_timeout() {
@@ -2292,7 +2294,7 @@ mod tests {
     }
 
     /// Java's `processApplicationEvents` catches `Throwable` per event
-    /// (CNT:257-274), so one failing event does not skip the rest of the
+    /// (`ConsumerNetworkThread#processApplicationEvents`), so one failing event does not skip the rest of the
     /// batch, and completes the failing event with the failure (KAFKA-18812).
     /// The failure is induced through the production path: with the delegate
     /// lock held elsewhere, the metadata-error arm's `try_lock().expect(..)`
@@ -2374,7 +2376,7 @@ mod tests {
     }
 
     /// Java's `run()` wraps each `runOnce()` in `catch (final Throwable e)`
-    /// and keeps looping (CNT:161-166), and `cleanup()` still runs in its
+    /// and keeps looping (`ConsumerNetworkThread#run`), and `cleanup()` still runs in its
     /// `finally`. A panicking iteration must therefore neither end the task
     /// nor skip `cleanup()`.
     #[tokio::test]
@@ -2494,7 +2496,7 @@ mod tests {
         assert_dedicated_thread_survives_panics(true, 3).await;
     }
 
-    /// Java 4.4 `ConsumerNetworkThread.run()` (CNT:143-171) runs `cleanup()`
+    /// Java 4.4 `ConsumerNetworkThread.run()` runs `cleanup()`
     /// in a `finally` outside its `catch (Throwable)`; a failure there is
     /// logged at ERROR by `KafkaThread`'s uncaught-exception handler and the
     /// thread still ends, so `closeInternal`'s `join()` returns normally.
@@ -3090,7 +3092,7 @@ mod tests {
     /// NOT consume the delegate's metadata error — Java's
     /// "Don't get-and-clear the metadata error if there are no events
     /// that will be notified" optimisation
-    /// (`ConsumerNetworkThread.java:450-452`). Subsequent runOnce
+    /// (`ConsumerNetworkThread#maybeFailOnMetadataError`). Subsequent runOnce
     /// iterations (which DO register a notifiable event later) must
     /// still see the same metadata error.
     #[tokio::test]
@@ -3316,7 +3318,8 @@ mod tests {
             time.sleep(10);
             thread.run_once().await;
 
-            // Drain resets the size gauge to 0 (Java CNT:253).
+            // Drain resets the size gauge to 0 (Java
+            // `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#processApplicationEvents`).
             assert_eq!(
                 read_metric(&metrics, "application-event-queue-size", group_name),
                 0.0,
@@ -3963,7 +3966,7 @@ mod tests {
     }
 
     /// COMMENTS c3-05 Issue 1: `run_once` Phase 5 consults the fetch manager
-    /// (Java's `entries()` includes it, `ConsumerNetworkThread.java:232-235`;
+    /// (Java's `entries()` includes it, `ConsumerNetworkThread#runOnce`;
     /// `RequestManagers::entries()` skips the fetch slot). Here it is the
     /// binding minimum: no coordinator, commit, heartbeat or topic-metadata
     /// manager, and the offsets manager reports `i64::MAX`. With no fetch in
@@ -4032,16 +4035,16 @@ mod tests {
     }
 
     /// Java `FetchRequestManagerTest.testFetcherCloseClosesFetchSessionsInBroker`,
-    /// driven through `ConsumerNetworkThread::cleanup` (Java's `runAtClose`
-    /// over `requestManagers.entries()`, `ConsumerNetworkThread.java:311-319`,
-    /// `:420`). A normal fetch establishes a session with node 0; closing then
-    /// sends node 0 a request carrying that session id, `FINAL_EPOCH` and no
-    /// partition data.
+    /// driven through `ConsumerNetworkThread::cleanup` (Java's
+    /// `ConsumerNetworkThread#runAtClose` over `requestManagers.entries()`,
+    /// called from `ConsumerNetworkThread#cleanup`). A normal fetch
+    /// establishes a session with node 0; closing then sends node 0 a request
+    /// carrying that session id, `FINAL_EPOCH` and no partition data.
     ///
     /// Rust addition: node 1 also holds a session but is in reconnect backoff,
     /// so its close request is skipped (`FetchRequestManager.pollOnClose` →
     /// `AbstractFetch.prepareCloseFetchSessionRequests` skips a node for which
-    /// `isUnavailable(node)` holds, `AbstractFetch.java:403`).
+    /// `isUnavailable(node)` holds).
     #[tokio::test]
     async fn test_fetcher_close_closes_fetch_sessions_in_broker() {
         use crate::common::requests::{AbstractRequest, ConcreteResponse, FetchMetadata, FetchResponse};

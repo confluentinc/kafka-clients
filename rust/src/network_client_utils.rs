@@ -80,8 +80,8 @@ impl NetworkClientUtils {
     /// dispatch the returned responses **before** propagating any error; dropping them
     /// silently loses a produce/transactional response for a different in-flight
     /// request that arrived on the shared selector while awaiting readiness. Java's
-    /// `client.poll()` self-dispatches before it throws
-    /// (`NetworkClientUtils.java:43,70-71,85-87`), so it loses nothing on these error
+    /// `client.poll()` self-dispatches before it throws (`NetworkClientUtils#isReady`,
+    /// `NetworkClientUtils#awaitReady`), so it loses nothing on these error
     /// paths — this shape reproduces that. (An earlier shape,
     /// `io::Result<(bool, Vec)>`, dropped the Vec on the two `Err` early-returns.)
     ///
@@ -144,7 +144,7 @@ impl NetworkClientUtils {
             responses.extend(client.poll(poll_timeout, attempt_start_time).await);
             if let Some(auth_error) = client.authentication_error(node) {
                 // Java rethrows `client.authenticationException(node)` verbatim
-                // (`NetworkClientUtils.java:86-87`), so the *class* must survive the
+                // (`org.apache.kafka.clients.NetworkClientUtils#awaitReady`), so the *class* must survive the
                 // hop. The crate's carrier for that is `auth_io_error`, whose typed
                 // `AuthenticationError` payload `is_authentication_error` recognises —
                 // classification is driven by the payload, NOT by the `io::ErrorKind`.
@@ -204,7 +204,7 @@ impl NetworkClientUtils {
                     // `UnsupportedVersionException` object itself, so the diagnostic
                     // `NodeApiVersions.latestUsableVersion` built (the requested and
                     // supported version ranges) reaches the caller
-                    // (`NetworkClientUtils.java:113-114`). Carry the message rather than
+                    // (`org.apache.kafka.clients.NetworkClientUtils#sendAndReceive`). Carry the message rather than
                     // substituting the class name, which would discard the one detail
                     // that makes the failure actionable.
                     if let Some(version_mismatch) = response.version_mismatch() {

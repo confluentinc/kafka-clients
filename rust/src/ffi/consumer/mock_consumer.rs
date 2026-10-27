@@ -96,14 +96,26 @@ unsafe fn with_mock_void(self_: *mut kafka_consumer_MockConsumer_t, name: &str, 
     }
 }
 
-/// `new MockConsumer(String offsetResetStrategy)`: returns the owned class
-/// handle, or stores the owned error (an unknown strategy) in `*out_err` and
-/// returns `NULL`.
+/// Create a mock consumer.
+///
+/// # Parameters
+///
+/// - `offset_reset_strategy` - the offset reset strategy to use
+///
+/// # Returns
+///
+/// The class handle, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `offset_reset_strategy` is not a
+///   valid strategy
 ///
 /// # Safety
 ///
-/// `offset_reset_strategy` must be a valid string and `out_err` a valid slot
-/// pointing at null.
+/// `offset_reset_strategy` must be a valid string and `out_err` a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with `kafka_consumer_MockConsumer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
@@ -126,13 +138,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     }
 }
 
-/// The class as a `Consumer`: a borrowed view valid until the class handle
-/// is destroyed, never destroyed itself (CLAUDE.md §4 rule 3). `*mut` because `poll` and the other operations
-/// take `&mut self`.
+/// The class as a `Consumer`.
+///
+/// # Returns
+///
+/// The `Consumer` view of the class, `*mut` because `poll` and the other
+/// operations take `&mut self`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class
+/// handle is destroyed; there is no `kafka_consumer_Consumer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer__as_Consumer(
@@ -169,14 +185,22 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_destroy(self_: *mut kafka_c
     }
 }
 
-/// `addRecord(ConsumerRecord<K, V> record)`: the record is copied (its
-/// `void *` key and value are shared with the caller, who keeps them alive
-/// until the records holding them are destroyed).
+/// Adds a record to be returned when `poll` is called.
+///
+/// # Parameters
+///
+/// - `record` - the record to add
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the partition is not assigned to the
+///   consumer
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `record` a live record. `out_err` must be
-/// a valid slot pointing at null.
+/// `self_` must be a live handle and `record` a live record, which is copied: its `void *` key
+/// and value are shared, so the caller keeps them alive until the records holding them are
+/// destroyed. `out_err` must be a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
@@ -199,6 +223,10 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
 /// `updateBeginningOffsets(Map<TopicPartition, Long>)`: a map of
 /// `kafka_common_TopicPartition_t *` to `int64_t *`, copied.
 ///
+/// # Parameters
+///
+/// - `new_offsets` - the beginning offsets to set
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` a valid map of
@@ -219,6 +247,10 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
 }
 
 /// `updateEndOffsets(Map<TopicPartition, Long>)`.
+///
+/// # Parameters
+///
+/// - `new_offsets` - the end offsets to set
 ///
 /// # Safety
 ///
@@ -241,6 +273,10 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
 
 /// `updateDurationOffsets(Map<TopicPartition, Long>)`.
 ///
+/// # Parameters
+///
+/// - `new_offsets` - the duration offsets to set
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and `new_offsets` a valid map of
@@ -260,8 +296,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_duration_offsets(
     unsafe { with_mock_void(self_, "updateDurationOffsets", |mock| mock.update_duration_offsets(offsets)) }
 }
 
-/// `updatePartitions(String topic, List<PartitionInfo> partitions)`: a list
-/// of `kafka_common_PartitionInfo_t *`, copied.
+/// Updates the partition information of a topic.
+///
+/// # Parameters
+///
+/// - `topic` - the topic to update
+/// - `partitions` - the partition information, a list of `kafka_common_PartitionInfo_t *`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer is closed
 ///
 /// # Safety
 ///
@@ -290,13 +334,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     unsafe { deliver_unit(result, out_err) }
 }
 
-/// `setPollException(KafkaException)`: the next `poll` fails with `error`,
-/// which Rust takes over.
+/// Sets an error to return when `poll` is called.
+///
+/// # Parameters
+///
+/// - `error` - the error to return, `NULL` to clear a pending one
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` an owned error not used
-/// afterwards, or NULL to clear the pending error as Java's `null` does.
+/// `self_` must be a live handle and `error` an owned error, taken over and not used
+/// afterwards, or `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
@@ -311,13 +358,16 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     unsafe { with_mock_void(self_, "setPollException", |mock| mock.set_poll_error(error)) }
 }
 
-/// `setOffsetsException(KafkaException)`: the next offsets query fails with
-/// `error`, which Rust takes over.
+/// Sets an error to return when offset-related methods are called.
+///
+/// # Parameters
+///
+/// - `error` - the error to return, `NULL` to clear a pending one
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `error` an owned error not used
-/// afterwards, or NULL to clear the pending error as Java's `null` does.
+/// `self_` must be a live handle and `error` an owned error, taken over and not used
+/// afterwards, or `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
@@ -332,7 +382,15 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_offsets_error(
     unsafe { with_mock_void(self_, "setOffsetsException", |mock| mock.set_offsets_error(error)) }
 }
 
-/// `setMaxPollRecords(long maxPollRecords)`.
+/// Sets the maximum number of records returned in a single call to `poll`.
+///
+/// # Parameters
+///
+/// - `max_poll_records` - the max.poll.records.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `max_poll_records` is less than 1
 ///
 /// # Safety
 ///
@@ -352,9 +410,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_max_poll_records(
     unsafe { deliver_unit(result, out_err) }
 }
 
-/// `rebalance(Collection<TopicPartition> newAssignment)`: blocking, the
-/// registered listener's callbacks run on the calling thread
-/// (CLAUDE.md §4 rule 5).
+/// Simulate a rebalance event.
+///
+/// # Parameters
+///
+/// - `new_assignment` - the new assignment
+///
+/// # Errors
+///
+/// - The error the listener returns.
+/// - `kafka_common_Error_is_local_illegal_argument_error` if a partition is not of a subscribed
+///   topic
 ///
 /// # Safety
 ///
@@ -368,6 +434,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
     new_assignment: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    // Blocking: the registered listener's callbacks run on the calling thread.
     // SAFETY: Per this function's `# Safety`, `new_assignment` is null or a valid list of
     // topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so the
     // borrow lasts for this call only.
@@ -389,8 +456,20 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance(
 pub type kafka_consumer_MockConsumer_rebalance_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// Non-blocking `rebalance`: the listener's callbacks and `cb` are queued
-/// for `kafka_consumer_Consumer__execute_callbacks`.
+/// Simulate a rebalance event.
+///
+/// # Parameters
+///
+/// - `new_assignment` - the new assignment
+/// - `cb` - the completion, receiving the error, `NULL` on success; it and the listener's
+///   callbacks are queued for `kafka_consumer_Consumer__execute_callbacks`
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - The error the listener returns.
+/// - `kafka_common_Error_is_local_illegal_argument_error` if a partition is not of a subscribed
+///   topic
 ///
 /// # Safety
 ///
@@ -447,9 +526,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_rebalance_cb(
 
 /// `losePartitions(Collection<TopicPartition> partitionsLost)`
 /// (KAFKA-20575): blocking, the registered listener's `on_partitions_lost`
-/// runs on the calling thread (CLAUDE.md §4 rule 5). Fails with Java's
+/// runs on the calling thread. Fails with Java's
 /// `IllegalStateException` when a partition is not currently assigned,
 /// before any state changes.
+///
+/// # Parameters
+///
+/// - `partitions_lost` - the partitions to lose; all must be currently assigned
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any partition is not currently assigned
 ///
 /// # Safety
 ///
@@ -486,6 +573,16 @@ pub type kafka_consumer_MockConsumer_lose_partitions_cb_t =
 
 /// Non-blocking `lose_partitions`: the listener's callbacks and `cb` are queued
 /// for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions_lost` - the partitions to lose; all must be currently assigned
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any partition is not currently assigned
 ///
 /// # Safety
 ///
@@ -554,10 +651,11 @@ unsafe fn mock_handle<'a>(self_: *const kafka_consumer_MockConsumer_t) -> &'a Co
     unsafe { client_ref(self_ as *const kafka_consumer_Consumer_t) }.handle()
 }
 
-/// `closed()`: `1` once `close` ran, else `0`. Read through the mock's
-/// handle, not the single-owner flag, so it answers while another call
-/// holds the mock: Java's `MockConsumer.closed()` waits on the monitor and
-/// never throws.
+/// Return whether the consumer has been closed.
+///
+/// # Returns
+///
+/// `1` if closed, `0` otherwise.
 ///
 /// # Safety
 ///
@@ -568,14 +666,17 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_closed(self_: *const kafka_
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
     let handle = unsafe { mock_handle(self_) };
+    // Read through the mock's handle, not the single-owner flag, so it answers while another
+    // call holds the mock: Java's `MockConsumer.closed()` waits on the monitor and never throws.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
     handle.mock_closed().map_or(-1, i8::from)
 }
 
-/// `shouldRebalance()`: `1` while an `enforceRebalance` is pending, else
-/// `0`. Read through the mock's handle, not the single-owner flag, so it
-/// answers while another call holds the mock, as Java's unsynchronized
-/// `MockConsumer.shouldRebalance()` does.
+/// Return whether an `enforceRebalance` request is pending.
+///
+/// # Returns
+///
+/// `1` if a rebalance is pending, `0` otherwise.
 ///
 /// # Safety
 ///
@@ -588,6 +689,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_should_rebalance(
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
     let handle = unsafe { mock_handle(self_) };
+    // Read through the mock's handle, not the single-owner flag, so it answers while another
+    // call holds the mock, as Java's unsynchronized `MockConsumer.shouldRebalance()` does.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the `None` arm is unreachable.
     handle.mock_should_rebalance().map_or(-1, i8::from)
 }
@@ -619,12 +722,12 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_schedule_nop_poll_task(self
     unsafe { with_mock_void(self_, "scheduleNopPollTask", Mock::schedule_nop_poll_task) }
 }
 
-/// `lastPollTimeout()`: the last `poll` timeout in milliseconds, `-1` when
-/// `poll` never ran (Java's `null`). Read through the mock's handle, not the
-/// single-owner flag, so it answers while another call holds the mock, as
-/// Java's unsynchronized `MockConsumer.lastPollTimeout()` does.
+/// Returns the timeout used in the last `poll` call.
 ///
-/// A caught Rust panic returns -2, which is no poll timeout: `Consumer.poll` rejects a negative one.
+/// # Returns
+///
+/// The last poll timeout in milliseconds, or `-1` if `poll` has not been called; `-2` on a
+/// caught Rust panic.
 ///
 /// # Safety
 ///
@@ -637,6 +740,10 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_last_poll_timeout(
     // SAFETY: Per this function's `# Safety`, `self_` is a live mock handle, alive for this
     // expression, as `mock_handle` requires.
     let handle = unsafe { mock_handle(self_) };
+    // Read through the mock's handle, not the single-owner flag, so it answers while another
+    // call holds the mock, as Java's unsynchronized `MockConsumer.lastPollTimeout()` does. `-1`
+    // is Java's `null`; `-2` (the panic fallback) is no poll timeout, as `poll` rejects a
+    // negative one.
     // A `kafka_consumer_MockConsumer_t` always wraps a mock, so the outer `None` is unreachable.
     handle
         .mock_last_poll_timeout()
@@ -1233,11 +1340,11 @@ mod tests {
         );
         assert_eq!(out_lag, 7, "a failed current_lag leaves *out_lag unwritten");
         // Java's `metrics()` takes no `acquire()`: it still answers.
-        // SAFETY: Test code: `consumer` is a live handle; the map is owned and destroyed once.
+        // SAFETY: Test code: `consumer` is a live handle; the view is owned and destroyed once.
         unsafe {
             let metrics = kafka_consumer_Consumer_metrics(consumer);
             assert!(!metrics.is_null());
-            kafka_Map_destroy(metrics);
+            crate::ffi::common::metrics::metrics_view::kafka_common_metrics_MetricsView_destroy(metrics);
         }
 
         wait_until("the listener invocation to run", || {
@@ -1580,7 +1687,7 @@ mod tests {
         }
     }
 
-    /// Java's `MockConsumer.currentLag` (`MockConsumer.java:764-771`) is the
+    /// Java's `org.apache.kafka.clients.consumer.MockConsumer#currentLag` is the
     /// end offset minus the position, negative for a position past the log
     /// end. A negative lag crosses as a present value: flag 1 with the lag in
     /// `*out_lag`, and `present` 1 beside the lag through the `_cb` twin, which

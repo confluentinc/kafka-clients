@@ -42,7 +42,7 @@ pub enum kafka_common_ElectionType_e {
     kafka_common_ElectionType_UNCLEAN,
 }
 
-/// One static instance per value, indexed by [`kafka_common_ElectionType_e`].
+/// One static instance per value, indexed by `kafka_common_ElectionType_e`.
 static VARIANTS: [ElectionType; 2] = [ElectionType::Preferred, ElectionType::Unclean];
 
 /// Exhaustive, so a value Java adds fails to compile until it has its C
@@ -71,21 +71,29 @@ pub(crate) unsafe fn value_of(election_type: *const kafka_common_ElectionType_t)
     unsafe { *(election_type as *const ElectionType) }
 }
 
-/// `ElectionType.PREFERRED`.
+/// Returns the `ElectionType.PREFERRED` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_preferred() -> *const kafka_common_ElectionType_t {
     singleton(ElectionType::Preferred)
 }
 
-/// `ElectionType.UNCLEAN`.
+/// Returns the `ElectionType.UNCLEAN` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_unclean() -> *const kafka_common_ElectionType_t {
     singleton(ElectionType::Unclean)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_ElectionType_PREFERRED`, the first enumerator: the
 /// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -104,12 +112,12 @@ pub unsafe extern "C" fn kafka_common_ElectionType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns the text form of the type (`toString()`): the constant's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_to_string(self_: *const kafka_common_ElectionType_t) -> *mut c_char {
@@ -118,7 +126,7 @@ pub unsafe extern "C" fn kafka_common_ElectionType_to_string(self_: *const kafka
     into_c_string(&unsafe { value_of(self_) }.to_string())
 }
 
-/// `value`: the wire-protocol byte.
+/// Returns the wire-protocol value of the type (Java's `value` field).
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`
 /// enum: its 0 is the valid `PREFERRED`.
@@ -134,13 +142,21 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value(self_: *const kafka_com
     unsafe { value_of(self_) }.value()
 }
 
-/// `ElectionType.valueOf(byte value)`: returns the singleton, or stores the
-/// owned `IllegalArgumentException` translation in `*out_err` and returns
-/// `NULL` for an unknown value.
+/// Returns the type whose wire-protocol value is `value` (`ElectionType.valueOf(byte value)`).
+///
+/// # Parameters
+///
+/// - `value` - The wire-protocol value.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `value` is not the value of a type.
+/// - `kafka_common_Error_is_local_illegal_state_error` if a Rust panic is caught.
 ///
 /// # Safety
 ///
-/// `out_err` must be a valid slot pointing at null.
+/// `out_err` must be a valid slot pointing at `NULL`. The returned singleton is static, never freed, and comparable
+/// with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
@@ -154,9 +170,12 @@ pub unsafe extern "C" fn kafka_common_ElectionType_value_of(
     }
 }
 
-/// `ElectionType.values()`: an owned list of the borrowed singletons in
-/// declaration order, freed with `kafka_List_destroy` (the elements are
-/// never freed).
+/// Returns every type in declaration order (`ElectionType.values()`).
+///
+/// # Safety
+///
+/// The returned list is owned, freed with `kafka_List_destroy`; its elements are the static
+/// singletons, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ElectionType_values() -> *mut kafka_List_t {

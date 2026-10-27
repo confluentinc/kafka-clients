@@ -403,9 +403,9 @@ def test_kafka_producer_config_route_serializer() -> None:
 
 def test_serializer_argument_wins_over_its_config_key() -> None:
     # Critic 74 F1 (Actor 74): the argument wins and the config key is ignored,
-    # not even parsed: Java's ProducerConfig.appendSerializerToConfig replaces
-    # the key with the argument's class before ConfigDef parses it
-    # (ProducerConfig.java:718).
+    # not even parsed: Java's
+    # org.apache.kafka.clients.producer.ProducerConfig#appendSerializerToConfig replaces
+    # the key with the argument's class before ConfigDef parses it.
     class NotAClass:
         pass
 
@@ -586,8 +586,8 @@ def test_send_failure_metadata_callback_and_future() -> None:
     # NO_TIMESTAMP, -1, -1), never null; the callback runs off the caller's
     # thread and before the future completes; the future cannot be cancelled.
     # send() waits for the record's handover, and the core's send() fires the
-    # callback of a metadata TimeoutError before it returns (Java's doSend
-    # does, KafkaProducer.java:1137-1149), so the callback may run before
+    # callback of a metadata TimeoutError before it returns (Java's
+    # org.apache.kafka.clients.producer.KafkaProducer#doSend does), so the callback may run before
     # send() returned the future: that future is not done either.
     caller = threading.get_ident()
     seen: list[tuple[int, bool, RecordMetadata, Exception | None]] = []
@@ -624,7 +624,7 @@ def test_a_send_waits_for_its_handover_and_keeps_api_errors_in_the_future(
     # returns once doSend appended it, so it can raise what Java's doSend
     # rethrows (Critic 75 F2; the broker tests in test/integration). The
     # metadata wait's TimeoutError is an ApiException: Java gives it to the
-    # callback and returns a failed future (KafkaProducer.java:1130-1142),
+    # callback and returns a failed future (org.apache.kafka.clients.producer.KafkaProducer#doSend),
     # after send() waited max.block.ms.
     configs = {**UNREACHABLE, "max.block.ms": 300}
     seen: list[Exception | None] = []
@@ -804,12 +804,12 @@ async def test_cancelling_a_send_waiting_for_its_handover_raises_after_it(
         await p.close(timeout=0)
 
 
-# A later completion of a record whose send() raised: Java's doSend appends the
-# record, its appendCallbacks carrying the Callback, before maybeAddPartition
-# throws (KafkaProducer.java:1110-1120), so the record completes with its batch
-# and its Callback runs then, with the batch's outcome: the metadata of a
-# committed record, or the error that aborted it, with the -1 metadata of
-# KafkaProducer.AppendCallbacks.onCompletion (:1676-1678).
+# A later completion of a record whose send() raised: Java's
+# org.apache.kafka.clients.producer.KafkaProducer#doSend appends the record, its appendCallbacks
+# carrying the Callback, before maybeAddPartition throws, so the record completes
+# with its batch and its Callback runs then, with the batch's outcome: the metadata
+# of a committed record, or the error that aborted it, with the -1 metadata of
+# KafkaProducer.AppendCallbacks#onCompletion.
 _LATE_OUTCOMES = {
     "committed": (("topic", 0, 7, 1234, 1, 1), None),
     "aborted": (None, "Producer is closed forcefully."),
@@ -940,7 +940,7 @@ def _core_callback_errors(capfd: pytest.CaptureFixture[str]) -> list[str]:
 def test_callbacks_run_in_completion_order_and_a_raising_one_is_reported(
         caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]) -> None:
     # Java logs a throwing onCompletion with its exception and fails nothing
-    # (ProducerBatch.completeFutureAndFireCallbacks, ProducerBatch.java:318-320).
+    # (org.apache.kafka.clients.producer.internals.ProducerBatch#completeFutureAndFireCallbacks).
     # Python reports it to the core, which logs it once with Java's message and
     # the exception's text; Python logs nothing.
     order: list[int] = []
@@ -1333,7 +1333,7 @@ def test_flush_in_a_callback_raises_and_close_in_a_callback_does_not_deadlock(
 def test_flush_in_a_callback_of_a_closed_producer_reports_the_closed_state() -> None:
     # Order (CLAUDE.md, Python Binding Conventions, Implementation over the
     # FFI): the closed check comes first on an FFI-backed class, then Java's
-    # in-callback check (KafkaProducer.java:1298-1300).
+    # in-callback check (org.apache.kafka.clients.producer.KafkaProducer#flush).
     p = KafkaProducer(configs=UNREACHABLE)
     out: dict[str, Any] = {}
     done = threading.Event()
@@ -1411,7 +1411,7 @@ def test_timed_close_is_bounded_and_wakes_a_send_waiting_for_metadata() -> None:
     # A send waiting for its topic's metadata (max.block.ms 60 s) does not hold
     # a timed close: the close wakes it, and it raises Java's
     # KafkaError("Producer closed while send in progress"), as doSend does when
-    # the metadata closes during its wait (KafkaProducer.java:1068-1074).
+    # the metadata closes during its wait (org.apache.kafka.clients.producer.KafkaProducer#doSend).
     p = KafkaProducer(configs={"bootstrap.servers": "127.0.0.1:59999"})  # max.block.ms 60 s
     raised: list[BaseException] = []
 
@@ -2236,7 +2236,7 @@ def test_a_cancelled_async_close_is_forced_and_raises_promptly() -> None:
     # shouldCloseProperlyAndThrowIfInterrupted (see test_kafka_producer.py):
     # close() waits for the callbacks of the records sent before it, here an
     # async def one that has not ended. Cancelling the task awaiting close()
-    # force-closes the producer (KafkaProducer.java:1514-1525) and frees it,
+    # force-closes the producer (org.apache.kafka.clients.producer.KafkaProducer#close(Duration,boolean)) and frees it,
     # which completes the callback's report, and re-raises CancelledError
     # instead of waiting for the callback; the callback still ends on the loop,
     # and its record's future completes then. The callback is released after
@@ -2374,8 +2374,8 @@ HELD_MS = 500
                                        "commit_transaction", "abort_transaction"])
 def test_control_operations_do_not_wait_for_a_send_in_progress(operation: str) -> None:
     # A send that has not returned has not reached the accumulator, as in Java,
-    # whose doSend appends the record after its metadata wait
-    # (KafkaProducer.java:1065-1111): Java's flush waits only for the batches
+    # whose org.apache.kafka.clients.producer.KafkaProducer#doSend appends the record after its metadata
+    # wait: Java's flush waits only for the batches
     # appended (RecordAccumulator.awaitFlushCompletion), and the
     # transaction-control operations do not wait for a send either. So each
     # returns, or raises Java's error, while another thread's send waits for
@@ -2465,10 +2465,11 @@ def test_sync_send_offsets_to_transaction_never_calls_its_blocking_entry_point(
         # Non-empty offsets: Java's empty map is a no-op on an idempotent producer
         # (see test_send_offsets_to_transaction_checks_group_metadata_first).
         # They make Java 4.4 await the offsets' topic metadata (awaitTopicMetadata,
-        # KafkaProducer.java:800-805) before ensureTransactional. Both outcomes are
+        # org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction) before ensureTransactional. Both outcomes are
         # Java-faithful, as in the C twin (test_kafka_producer.c): the unreachable
         # cluster times the wait out, or the sender's lazy bootstrap lands after the
-        # wait took the metadata version (Metadata.java:309 bumps it), ending the
+        # wait took the metadata version (org.apache.kafka.clients.Metadata#bootstrap
+        # bumps it), ending the
         # wait early, and ensureTransactional rejects the call. Either way the
         # error comes through the completion the call waits on.
         offsets = {TopicPartition(topic=TOPIC, partition=0): OffsetAndMetadata(offset=1)}
@@ -2710,8 +2711,9 @@ CLOSED_CASES: list[dict[str, Any]] = [{}, {"enable.idempotence": False}]
 @pytest.mark.parametrize("extra", CLOSED_CASES)
 def test_a_closed_producer_reports_the_closed_state(operation: str, extra: dict[str, Any]) -> None:
     # Java's transactional methods call throwIfNoTransactionManager() before
-    # throwIfProducerClosed() (KafkaProducer.java:709-710, 735-736, 797-798,
-    # 871-872, 905-906); here the core makes that check, which a closed producer
+    # throwIfProducerClosed() (org.apache.kafka.clients.producer.KafkaProducer#initTransactions,
+    # #beginTransaction, #sendOffsetsToTransaction, #commitTransaction,
+    # #abortTransaction); here the core makes that check, which a closed producer
     # can no longer reach (CLAUDE.md, Implementation over the FFI, exception 3).
     p = KafkaProducer(configs={**UNREACHABLE, **extra})
     p.close(timeout=0)
@@ -2743,7 +2745,7 @@ BACKPRESSURE_BOUND = 1000
 
 async def test_an_async_send_waiting_for_its_topic_metadata_leaves_the_loop_running() -> None:
     # send() waits up to max.block.ms for its record's topic metadata and for
-    # buffer space, as Java's doSend does (KafkaProducer.java:1065-1111): the
+    # buffer space, as Java's org.apache.kafka.clients.producer.KafkaProducer#doSend does: the
     # async send awaits that wait, so the loop runs other tasks meanwhile.
     p = AsyncKafkaProducer(configs={**UNREACHABLE, "max.block.ms": 300})
     ticks = 0
@@ -3018,8 +3020,8 @@ print("ok")
 
 async def test_async_send_callback_runs_on_the_loop_before_the_future() -> None:
     # send() waits for the record's handover, and the core's send() fires the
-    # callback of a metadata TimeoutError before it returns (Java's doSend
-    # does, KafkaProducer.java:1137-1149), so the callback may run before
+    # callback of a metadata TimeoutError before it returns (Java's
+    # org.apache.kafka.clients.producer.KafkaProducer#doSend does), so the callback may run before
     # send() returned the future: that future is not done either.
     loop_thread = threading.get_ident()
     seen: list[tuple[int, bool, RecordMetadata]] = []
@@ -3684,8 +3686,8 @@ def test_mock_callback_runs_on_the_caller_before_the_future_completes() -> None:
 
 
 def test_mock_raising_callback_propagates_from_the_completing_call() -> None:
-    # Java's MockProducer.Completion.complete calls onCompletion with no
-    # try/catch, before result.done() (MockProducer.java:640-650): the
+    # Java's org.apache.kafka.clients.producer.MockProducer.Completion#complete calls
+    # onCompletion with no try/catch, before result.done(): the
     # exception propagates out of the call that completed the record, the
     # record's future never completes, and the completions behind it stay
     # queued.

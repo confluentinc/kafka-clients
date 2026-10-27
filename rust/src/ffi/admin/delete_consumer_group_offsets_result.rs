@@ -52,19 +52,26 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `DeleteConsumerGroupOffsetsResult.partitionResult(TopicPartition
-/// partition)`: returns an owned `KafkaFuture<Void>` (its `get` delivers
-/// `NULL`) that succeeds once the offset of `partition` was deleted, freed with
-/// `kafka_common_KafkaFuture_destroy`. On failure it stores the owned
-/// translation of `IllegalArgumentException` in `*out_err` and returns `NULL`,
-/// when `partition` was not part of the request (Java throws it synchronously,
-/// so it is reported here rather than carried by the future). `partition` is
-/// borrowed and copied during the call.
+/// Return a future which can be used to check the result for a given partition.
+///
+/// # Parameters
+///
+/// - `partition` - the partition, copied during the call
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once the offset of `partition`
+/// was deleted, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `partition` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
-/// handle and `out_err` a valid slot pointing at null.
+/// handle and `out_err` a valid slot pointing at `NULL`. The returned future is
+/// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result(
@@ -83,13 +90,18 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_partition_
     unsafe { deliver_value(result, out_err, |future| h.ctx.void_future(&future)) }
 }
 
-/// `DeleteConsumerGroupOffsetsResult.all()`: an owned `KafkaFuture<Void>`
-/// (its `get` delivers `NULL`) that succeeds once every offset was deleted,
-/// freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the deletions succeed. If not, the first partition
+/// error shall be returned.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every offset was deleted.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
@@ -101,12 +113,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Futures taken from the result
+/// Frees a result handle; `NULL` is a no-op. Futures taken from the result
 /// stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

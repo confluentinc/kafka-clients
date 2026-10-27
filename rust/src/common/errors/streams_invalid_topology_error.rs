@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The supplied topology is invalid.
     ///
-    /// Corresponds to Java's `StreamsInvalidTopologyException`, error code `Errors::StreamsInvalidTopology`.
-    ///
-    /// Java `extends` chain:
-    ///    `StreamsInvalidTopologyException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::StreamsInvalidTopology`. Java `extends` chain:
+    /// `StreamsInvalidTopologyException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.StreamsInvalidTopologyException")]
     StreamsInvalidTopologyError,
     code: Errors::StreamsInvalidTopology,

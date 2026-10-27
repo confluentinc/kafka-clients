@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! A range of versions that a particular broker supports for a feature.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.SupportedVersionRange`.
 
 use crate::common::Error;
 
 /// Represents a range of versions that a particular broker supports for some
 /// feature.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.SupportedVersionRange`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange")]
 pub struct SupportedVersionRange {
@@ -30,12 +26,18 @@ pub struct SupportedVersionRange {
 }
 
 impl SupportedVersionRange {
-    /// Creates a new `SupportedVersionRange`.
+    /// Raises an error unless the following conditions are met: `0 <= min_version <=
+    /// max_version`.
+    ///
+    /// # Arguments
+    ///
+    /// - `min_version` - The minimum version value.
+    /// - `max_version` - The maximum version value.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] (mirroring Java's
-    /// `IllegalArgumentException`) unless `0 <= min_version <= max_version`.
+    /// - `Error::is_local_illegal_argument_error` Raised when the condition described above is not
+    ///   met.
     #[doc(alias = "org.apache.kafka.clients.admin.SupportedVersionRange#SupportedVersionRange")]
     pub fn new(min_version: i16, max_version: i16) -> Result<Self, Error> {
         if min_version < 0 || max_version < 0 || max_version < min_version {

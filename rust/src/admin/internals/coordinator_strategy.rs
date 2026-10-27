@@ -274,8 +274,9 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<CoordinatorKey> {
         let ConcreteResponse::FindCoordinator(resp) = response else {
-            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
-            // mismatch; see `LookupResult::failed_all`.
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // fails this one call on a response-type mismatch; see
+            // `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 keys,
                 Error::local_illegal_state("CoordinatorStrategy received an unexpected response type"),
@@ -284,13 +285,15 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
         match self.handle_lookup_response(keys, resp) {
             Ok(result) => result,
             Err(e) => {
-                // Java's `requireSingletonAndType` throws `IllegalArgumentException`
-                // for a malformed old-version response
-                // (`CoordinatorStrategy.java:118-127`), and that throw sits inside
-                // `KafkaAdminClient.java:1387`'s `catch (Throwable t)` — so the
-                // affected lookup fails and the client keeps running. Panicking
-                // instead killed the admin background task on a broker's malformed
-                // reply, which is not even a client-side programming error.
+                // Java's
+                // `org.apache.kafka.clients.admin.internals.CoordinatorStrategy#requireSingletonAndType`
+                // throws `IllegalArgumentException` for a malformed old-version
+                // response, and that throw sits inside
+                // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`'s
+                // `catch (Throwable t)` — so the affected lookup fails and the
+                // client keeps running. Panicking instead killed the admin
+                // background task on a broker's malformed reply, which is not even a
+                // client-side programming error.
                 kafka_error!(
                     self.log_context,
                     "CoordinatorStrategy.handle_response precondition violated: {}",
@@ -324,9 +327,10 @@ mod tests {
     /// `handle_response` runs on the admin background task under
     /// `driver.lock().unwrap()`, so a panic there (i) killed the whole task rather
     /// than one RPC and (ii) **poisoned the driver mutex**, making every later
-    /// `lock().unwrap()` panic too. Java's `catch (Throwable t)` at
-    /// `KafkaAdminClient.java:1387-1391` is positive proof the Java client treats
-    /// this as recoverable, and CLAUDE.md §12.1 forbids the panic outright.
+    /// `lock().unwrap()` panic too. Java's `catch (Throwable t)` in
+    /// `KafkaAdminClient.AdminClientRunnable#handleResponses` is positive proof
+    /// the Java client treats this as recoverable, and CLAUDE.md §12.1 forbids the
+    /// panic outright.
     #[test]
     fn an_unexpected_response_type_fails_every_lookup_key() {
         let s = strategy(CoordinatorType::Group);
@@ -612,7 +616,7 @@ mod tests {
         );
         let throwable = assert_fatal_old_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), Some("foo")),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }
@@ -646,7 +650,7 @@ mod tests {
         );
         let throwable = assert_fatal_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), Some("foo")),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }

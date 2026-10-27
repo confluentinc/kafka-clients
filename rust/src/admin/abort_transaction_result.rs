@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::abort_transaction`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AbortTransactionResult`.
 
 use std::collections::HashMap;
 
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::abort_transaction`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AbortTransactionResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionResult")]
 pub struct AbortTransactionResult {
@@ -38,8 +34,6 @@ impl AbortTransactionResult {
 
     /// Returns a future that completes when the transaction abort completes (or
     /// fails on error / timeout).
-    ///
-    /// Mirrors `AbortTransactionResult.all`.
     #[doc(alias = "org.apache.kafka.clients.admin.AbortTransactionResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

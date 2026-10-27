@@ -53,6 +53,15 @@ impl RecordMetadata {
     pub const UNKNOWN_PARTITION: i32 = -1;
 
     /// Creates a new instance with the provided parameters.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_partition` - the partition
+    /// - `base_offset` - the batch offset
+    /// - `batch_index` - the record's index
+    /// - `timestamp` - the timestamp
+    /// - `serialized_key_size` - the key size
+    /// - `serialized_value_size` - the value size
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#RecordMetadata")]
     pub fn new(
         topic_partition: TopicPartition,
@@ -73,6 +82,10 @@ impl RecordMetadata {
     }
 
     /// Indicates whether the record metadata includes the offset.
+    ///
+    /// # Returns
+    ///
+    /// true if the offset is included in the metadata, false otherwise.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#hasOffset")]
     pub fn has_offset(&self) -> bool {
         self.offset != RecordMetadata::INVALID_OFFSET
@@ -80,12 +93,20 @@ impl RecordMetadata {
 
     /// The offset of the record in the topic/partition.
     /// Returns -1 if [`has_offset()`](Self::has_offset) returns false.
+    ///
+    /// # Returns
+    ///
+    /// the offset of the record, or -1 if `Self::has_offset` returns false.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// Indicates whether the record metadata includes the timestamp.
+    ///
+    /// # Returns
+    ///
+    /// true if a valid timestamp exists, false otherwise.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#hasTimestamp")]
     pub fn has_timestamp(&self) -> bool {
         self.timestamp != RecordBatch::NO_TIMESTAMP
@@ -93,32 +114,36 @@ impl RecordMetadata {
 
     /// The timestamp of the record in the topic/partition.
     /// Returns -1 if [`has_timestamp()`](Self::has_timestamp) returns false.
+    ///
+    /// # Returns
+    ///
+    /// the timestamp of the record, or -1 if the `Self::has_timestamp` returns false.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// The size of the serialized, uncompressed key in bytes.
-    /// Returns -1 if key is null.
+    /// Returns the size of the serialized, uncompressed key in bytes. If key
+    /// is `None`, the returned size is -1.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#serializedKeySize")]
     pub fn serialized_key_size(&self) -> i32 {
         self.serialized_key_size
     }
 
-    /// The size of the serialized, uncompressed value in bytes.
-    /// Returns -1 if value is null.
+    /// Returns the size of the serialized, uncompressed value in bytes. If
+    /// value is `None`, the returned size is -1.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#serializedValueSize")]
     pub fn serialized_value_size(&self) -> i32 {
         self.serialized_value_size
     }
 
-    /// The topic the record was appended to.
+    /// Returns the topic the record was appended to.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#topic")]
     pub fn topic(&self) -> &str {
         self.topic_partition.topic()
     }
 
-    /// The partition the record was sent to.
+    /// Returns the partition the record was sent to.
     #[doc(alias = "org.apache.kafka.clients.producer.RecordMetadata#partition")]
     pub fn partition(&self) -> i32 {
         self.topic_partition.partition()

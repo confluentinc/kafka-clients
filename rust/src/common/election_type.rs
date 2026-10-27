@@ -19,8 +19,6 @@
 use crate::common::Error;
 
 /// Options for `Admin::elect_leaders`.
-///
-/// Translated from `org.apache.kafka.common.ElectionType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ElectionType")]
@@ -52,12 +50,14 @@ impl ElectionType {
 
     /// Returns the [`ElectionType`] for the given wire-protocol byte value.
     ///
-    /// Mirrors `ElectionType.valueOf(byte)`.
+    /// # Arguments
+    ///
+    /// - `value` - the wire-protocol byte value
     ///
     /// # Errors
     ///
-    /// Returns an [`Error`] (invalid argument) if `value` is not a valid
-    /// election type, mirroring Java's `IllegalArgumentException`.
+    /// [`Error::is_local_illegal_argument_error`] if `value` is not a valid
+    /// election type.
     #[doc(alias = "org.apache.kafka.common.ElectionType#valueOf")]
     pub fn value_of(value: i8) -> Result<Self, Error> {
         if value == Self::Preferred.value() {
@@ -82,9 +82,7 @@ impl ElectionType {
         }
     }
 
-    /// All election types, in declaration order.
-    ///
-    /// Mirrors `ElectionType.values()`.
+    /// Returns all election types, in declaration order.
     #[doc(alias = "org.apache.kafka.common.ElectionType#values")]
     pub fn values() -> &'static [Self] {
         &[Self::Preferred, Self::Unclean]

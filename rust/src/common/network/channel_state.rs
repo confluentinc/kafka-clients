@@ -83,7 +83,7 @@ impl fmt::Display for State {
 /// For other states, reusable constants are provided.
 ///
 /// Java stores the *object*: `private final AuthenticationException exception`
-/// (`ChannelState.java:76`), and `NetworkClient.processDisconnection` hands it
+/// (`ChannelState#exception`), and `NetworkClient.processDisconnection` hands it
 /// on to `metadataUpdater.handleServerDisconnect(.., Optional<AuthenticationException>)`
 /// unchanged, so the application ultimately catches the very
 /// `SaslAuthenticationException` / `SslAuthenticationException` the channel

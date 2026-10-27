@@ -54,7 +54,7 @@ pub type kafka_common_metrics_Measurable_type_name_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// A C implementation of [`Measurable`] registered through
-/// [`kafka_common_metrics_Measurable_new`].
+/// `kafka_common_metrics_Measurable_new`.
 struct CMeasurable {
     self_: *mut c_void,
     measure: kafka_common_metrics_Measurable_measure_fn_t,
@@ -110,7 +110,7 @@ impl Measurable for ArcMeasurable {
 }
 
 /// Hands `measurable` to C as an owned handle, freed with
-/// [`kafka_common_metrics_Measurable_destroy`] or consumed by a `*mut`
+/// `kafka_common_metrics_Measurable_destroy` or consumed by a `*mut`
 /// parameter.
 pub(crate) fn box_measurable(measurable: Arc<dyn Measurable>) -> *mut kafka_common_metrics_Measurable_t {
     Interface::owned(measurable) as *mut kafka_common_metrics_Measurable_t
@@ -144,11 +144,26 @@ pub(crate) unsafe fn take_measurable(measurable: *mut kafka_common_metrics_Measu
 
 /// Registers a C implementation of `Measurable`. The caller owns `self_` and
 /// keeps it alive until the handle is destroyed with
-/// [`kafka_common_metrics_Measurable_destroy`] or, once a `*mut` parameter
+/// `kafka_common_metrics_Measurable_destroy` or, once a `*mut` parameter
 /// consumed it, until the registry or sensor it went into is destroyed.
 /// The function may be called from any thread, concurrently, so the C
-/// caller is responsible for its thread-safety on `self_`. `type_name` may be `NULL`
-/// (see [`kafka_common_metrics_Measurable_type_name_fn_t`]).
+/// caller is responsible for its thread-safety on `self_`.
+///
+/// # Parameters
+///
+/// - `self_` - The implementation's state, passed back to every function.
+/// - `measure` - Its `measure(MetricConfig, long)`.
+/// - `type_name` - Its type name, or `NULL` for none (see
+///   `kafka_common_metrics_Measurable_type_name_fn_t`).
+///
+/// # Returns
+///
+/// A measurable handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_common_metrics_Measurable_destroy`
+/// unless a `*mut` parameter consumed it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Measurable_new(
@@ -160,6 +175,15 @@ pub extern "C" fn kafka_common_metrics_Measurable_new(
 }
 
 /// `measure(MetricConfig config, long now)`.
+///
+/// # Parameters
+///
+/// - `config` - The configuration for this metric
+/// - `now` - The POSIX time in milliseconds the measurement is being taken
+///
+/// # Returns
+///
+/// The measured value
 ///
 /// # Safety
 ///
@@ -178,13 +202,13 @@ pub unsafe extern "C" fn kafka_common_metrics_Measurable_measure(
     unsafe { measurable_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
 }
 
-/// The Rust-only `type_name()`: the provider's type name as
-/// `KafkaMetric_to_string` reports it, or `NULL` for none (a closure). The
-/// string is borrowed and stays valid for the rest of the program.
+/// Returns the provider's type name as `kafka_common_metrics_KafkaMetric_to_string` reports it,
+/// or `NULL` for none.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid measurable handle.
+/// `self_` must be a valid measurable handle. The returned string is borrowed and stays valid for the
+/// rest of the program.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Measurable_type_name(

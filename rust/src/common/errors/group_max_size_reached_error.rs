@@ -18,12 +18,12 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The group has reached its maximum size.
+    /// Indicates that a group is already at its configured maximum capacity and cannot accommodate
+    /// more members
     ///
-    /// Corresponds to Java's `GroupMaxSizeReachedException`, error code `Errors::GroupMaxSizeReached`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `GroupMaxSizeReachedException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::GroupMaxSizeReached`.
     #[doc(alias = "org.apache.kafka.common.errors.GroupMaxSizeReachedException")]
     GroupMaxSizeReachedError,
     code: Errors::GroupMaxSizeReached,

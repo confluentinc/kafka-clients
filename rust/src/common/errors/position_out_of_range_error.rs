@@ -21,10 +21,8 @@ kafka_error_type! {
     /// Requested position is not greater than or equal to zero, and less than the
     /// size of the snapshot.
     ///
-    /// Corresponds to Java's `PositionOutOfRangeException`, error code `Errors::PositionOutOfRange`.
-    ///
-    /// Java `extends` chain:
-    ///    `PositionOutOfRangeException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::PositionOutOfRange`. Java `extends` chain: `PositionOutOfRangeException`
+    /// -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.PositionOutOfRangeException")]
     PositionOutOfRangeError,
     code: Errors::PositionOutOfRange,

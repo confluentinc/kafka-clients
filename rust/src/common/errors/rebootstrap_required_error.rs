@@ -21,10 +21,8 @@ kafka_error_type! {
     /// Client metadata is stale. The client should rebootstrap to obtain new
     /// metadata.
     ///
-    /// Corresponds to Java's `RebootstrapRequiredException`, error code `Errors::RebootstrapRequired`.
-    ///
-    /// Java `extends` chain:
-    ///    `RebootstrapRequiredException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::RebootstrapRequired`. Java `extends` chain:
+    /// `RebootstrapRequiredException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.RebootstrapRequiredException")]
     RebootstrapRequiredError,
     code: Errors::RebootstrapRequired,

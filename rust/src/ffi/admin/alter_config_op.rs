@@ -80,35 +80,35 @@ pub(crate) unsafe fn op_type_value_of(op_type: *const kafka_admin_AlterConfigOp_
     unsafe { *(op_type as *const OpType) }
 }
 
-/// `OpType.SET`.
+/// Returns `OpType.SET`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_set() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Set)
 }
 
-/// `OpType.DELETE`.
+/// Returns `OpType.DELETE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_delete() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Delete)
 }
 
-/// `OpType.APPEND`.
+/// Returns `OpType.APPEND`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_append() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Append)
 }
 
-/// `OpType.SUBTRACT`.
+/// Returns `OpType.SUBTRACT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_subtract() -> *const kafka_admin_AlterConfigOp_OpType_t {
     op_type_singleton(OpType::Subtract)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_AlterConfigOp_OpType_SET`, the first enumerator: the
 /// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -127,12 +127,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType__enum(
     enum_of(unsafe { op_type_value_of(self_) })
 }
 
-/// `OpType.toString()`: the Java constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the Java constant name, as `OpType.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is owned by the caller, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
@@ -143,10 +143,10 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_to_string(
     into_c_string(&unsafe { op_type_value_of(self_) }.to_string())
 }
 
-/// `OpType.id()`: the wire-protocol byte of the operation.
+/// Returns the wire-protocol byte of the operation, as `OpType.id()`.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `SET`.
+/// A caught Rust panic returns -1, which is no code of this Java `byte` enum: its 0 is the valid
+/// `SET`.
 ///
 /// # Safety
 ///
@@ -159,8 +159,19 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_OpType_id(self_: *const kafka
     unsafe { op_type_value_of(self_) }.id()
 }
 
-/// `OpType.forId(byte id)`: the borrowed singleton with that wire byte, or
-/// `NULL` for an id Java does not know (Java returns null).
+/// `OpType.forId(byte id)`: the operation type with that wire byte.
+///
+/// # Parameters
+///
+/// - `id` - the wire byte
+///
+/// # Returns
+///
+/// The singleton, or `NULL` for an id Java does not know (Java returns null).
+///
+/// # Safety
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterConfigOp_OpType_for_id(id: i8) -> *const kafka_admin_AlterConfigOp_OpType_t {
@@ -221,14 +232,17 @@ pub(crate) fn box_alter_config_op(op: AlterConfigOp) -> *mut kafka_admin_AlterCo
     Box::into_raw(Box::new(AlterConfigOpInner::new(op))) as *mut kafka_admin_AlterConfigOp_t
 }
 
-/// `new AlterConfigOp(ConfigEntry configEntry, OpType operationType)`: the
-/// entry is copied, the caller keeps its handle. Owned, freed with
-/// [`kafka_admin_AlterConfigOp_destroy`].
+/// `new AlterConfigOp(ConfigEntry configEntry, OpType operationType)`.
+///
+/// # Parameters
+///
+/// - `config_entry` - the entry to alter, copied: the caller keeps its handle
+/// - `operation_type` - how to alter it
 ///
 /// # Safety
 ///
-/// `config_entry` must be a valid config-entry handle and `operation_type`
-/// an op-type singleton.
+/// `config_entry` must be a valid config-entry handle and `operation_type` an op-type singleton.
+/// The operation is owned by the caller, freed with `kafka_admin_AlterConfigOp_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
@@ -243,12 +257,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_new(
     }))
 }
 
-/// `configEntry()`: a borrowed handle valid as long as the operation, never
-/// passed to `kafka_admin_ConfigEntry_destroy`.
+/// Returns the entry to alter, as `configEntry()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid alter-config-op handle.
+/// `self_` must be a valid alter-config-op handle. The entry is borrowed, valid as long as the
+/// operation, and never passed to `kafka_admin_ConfigEntry_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
@@ -261,11 +275,13 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_config_entry(
     unsafe { inner_ref(self_) }.config_entry.as_ptr()
 }
 
-/// `opType()`: a borrowed singleton.
+/// Returns the operation type, as `opType()`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid alter-config-op handle.
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
@@ -276,11 +292,12 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_op_type(
     op_type_singleton(unsafe { alter_config_op_ref(self_) }.op_type())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the operation's string form, as Java's `toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid alter-config-op handle.
+/// `self_` must be a valid alter-config-op handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka_admin_AlterConfigOp_t) -> *mut c_char {
@@ -289,11 +306,11 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigOp_to_string(self_: *const kafka
     into_c_string(&unsafe { alter_config_op_ref(self_) }.to_string())
 }
 
-/// Frees an owned operation handle; null is a no-op.
+/// Frees an owned operation handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned operation handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned operation handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards, nor is the
 /// config-entry view it handed out.
 #[ffi_guard]
