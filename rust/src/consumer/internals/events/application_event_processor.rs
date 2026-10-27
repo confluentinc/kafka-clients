@@ -1322,8 +1322,9 @@ impl ApplicationEventProcessor {
             // AsyncPoll state here would report it a second time and skip this
             // poll's auto-commit timer, `onConsumerPoll`, poll-timer reset,
             // position update and fetch. The manager already logged a
-            // callback or commit failure (`fail_reconciliation`), so it is
-            // only traced here (see `log_async_poll_reconcile_error`).
+            // callback or commit failure at ERROR (`fail_reconciliation`), so
+            // it gets only a DEBUG line here (see
+            // `log_async_poll_reconcile_error`).
             let had_pending_reconcile = mm.has_pending_reconcile();
             log_async_poll_reconcile_error(mm.reconcile(poll_time_ms, true));
             // If that call only resumed a pending leg (a listener ack or the
@@ -1513,16 +1514,18 @@ impl ApplicationEventProcessor {
 /// Logs an error from the AsyncPoll reconcile step and drops it: the event
 /// goes on to its remaining steps, as Java's `void maybeReconcile(true)` does.
 /// A listener-callback or commit failure has already been logged by the
-/// membership manager as "Reconciliation failed" (Java's `whenComplete` log),
-/// so this is only a trace. The two synchronous errors `reconcile` can return
-/// besides those (an invalid local assignment, and the transition to
-/// ACKNOWLEDGING) are not logged there, but neither is reachable: the target
-/// epoch is never unset while there are partitions, and nothing can move the
-/// member out of RECONCILING mid-call now that only the background task
-/// reconciles. Java would log those at ERROR ("Error processing event").
+/// membership manager at ERROR as "Reconciliation failed" (Java's
+/// `whenComplete` log), so this is only a DEBUG follow-up, at the same level
+/// and with the same text as the background loop's Phase 2.5 caller. The two
+/// synchronous errors `reconcile` can return besides those (an invalid local
+/// assignment, and the transition to ACKNOWLEDGING) are not logged there and
+/// would get only this DEBUG line, but neither is reachable: the target epoch
+/// is never unset while there are partitions, and nothing can move the member
+/// out of RECONCILING mid-call now that only the background task reconciles.
+/// Java would log those at ERROR ("Error processing event").
 fn log_async_poll_reconcile_error(result: Result<(), Error>) {
     if let Err(err) = result {
-        log::trace!("Continuing AsyncPoll after a reconciliation failure: {err}");
+        log::debug!("Reconciliation failed, continuing: {err}");
     }
 }
 

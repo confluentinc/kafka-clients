@@ -1148,9 +1148,10 @@ impl ConsumerMembershipManager {
     /// timeout, giving a RECONCILING -> FENCED transition. Only the flag is
     /// cleared.
     ///
-    /// This is the one place a reconciliation failure is logged as
-    /// "Reconciliation failed", as in Java's chain; `process_async_poll` does
-    /// not log it again.
+    /// This is the one place a reconciliation failure is logged at ERROR as
+    /// "Reconciliation failed", as in Java's chain; both `reconcile` callers
+    /// (`process_async_poll` and the network thread's Phase 2.5) only add a
+    /// DEBUG follow-up.
     fn fail_reconciliation(&self, err: Error) -> Error {
         log::error!("Reconciliation failed: {err}");
         self.abstract_mm.mark_reconciliation_completed();

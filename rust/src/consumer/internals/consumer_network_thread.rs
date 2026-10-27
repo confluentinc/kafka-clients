@@ -580,12 +580,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // not safe to advance reconciliation when auto-commit is
         // enabled (Java's `AbstractMembershipManager.java:854`).
         //
-        // Failures are logged and swallowed, matching Java's
-        // surrounding-runOnce `try { ... } catch (Throwable e) { log }`.
+        // Failures are swallowed, matching Java's surrounding-runOnce
+        // `try { ... } catch (Throwable e) { log }`: the loop goes on. A
+        // listener-callback or commit failure has already been logged at
+        // ERROR by the membership manager as "Reconciliation failed" (Java's
+        // single line, from the reconciliation future's `whenComplete`), so
+        // this is only a DEBUG follow-up, as in the AsyncPoll caller
+        // (`log_async_poll_reconcile_error`).
         if let Some(membership) = self.membership.as_ref()
             && let Err(e) = membership.reconcile(current_time_ms, false)
         {
-            log::warn!("Membership reconcile failed: {}", e);
+            log::debug!("Reconciliation failed, continuing: {e}");
         }
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
