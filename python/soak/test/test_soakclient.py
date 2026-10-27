@@ -478,9 +478,19 @@ def test_jaas_credentials_does_not_match_a_key_inside_a_quoted_value():
 def test_jaas_credentials_handles_escaped_quote_in_value():
     # An escaped quote inside a value must not terminate it or misalign later
     # options; `username` after it still resolves. Value is returned raw (escapes
-    # not expanded), matching the Rust parser.
+    # not expanded): this check only needs to know the field is present, and the
+    # Rust client decodes the escapes itself, as Java's JaasConfig does.
     jaas = 'PlainLoginModule required password="a\\"b" username="right";'
     assert jaas_credentials(jaas) == ("right", 'a\\"b')
+
+
+def test_jaas_credentials_value_cut_by_a_raw_line_break_is_absent():
+    # Java's JaasConfig rejects a quoted value that a raw line break cuts
+    # short, and the Rust client treats it as malformed; this validator agrees
+    # that the field is not there. A line break between options is whitespace.
+    assert jaas_credentials('PlainLoginModule required username="u" password="ab\ncd";') == ("u", None)
+    assert jaas_credentials('PlainLoginModule required username="u" password="ab\rcd";') == ("u", None)
+    assert jaas_credentials('PlainLoginModule required username="u"\n password="abcd";') == ("u", "abcd")
 
 
 def test_jaas_credentials_absent():

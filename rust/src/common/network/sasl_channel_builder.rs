@@ -37,6 +37,7 @@ use crate::common::config::types::Password;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::authenticator::SaslClientAuthenticator;
 use crate::common::security::ssl::SslFactory;
+use crate::common::utils::SystemTime;
 use crate::common::utils::internals::LogContext;
 
 use std::io;
@@ -198,6 +199,11 @@ impl ChannelBuilder for SaslChannelBuilder {
             id,
             peer_host,
             &self.client_id,
+            // Java passes the client's `Time`. The selector's clock, against
+            // which the channel checks the re-authentication time this computes,
+            // is `SystemTime` too, and every `SystemTime` shares one monotonic
+            // origin.
+            Arc::new(SystemTime),
             self.log_context.clone(),
         ));
 

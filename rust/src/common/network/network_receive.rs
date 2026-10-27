@@ -496,6 +496,10 @@ mod tests {
         fn add_interest_ops(&mut self, _ops: InterestOps) {}
         fn remove_interest_ops(&mut self, _ops: InterestOps) {}
 
+        fn interest_ops(&self) -> InterestOps {
+            InterestOps::NONE
+        }
+
         fn is_mute(&self) -> bool {
             false
         }
@@ -613,6 +617,10 @@ mod tests {
         }
         fn add_interest_ops(&mut self, _ops: InterestOps) {}
         fn remove_interest_ops(&mut self, _ops: InterestOps) {}
+
+        fn interest_ops(&self) -> InterestOps {
+            InterestOps::NONE
+        }
         fn is_mute(&self) -> bool {
             false
         }

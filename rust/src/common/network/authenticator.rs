@@ -21,6 +21,7 @@
 //! this would perform the SASL authentication.
 
 use super::NetworkReceive;
+use super::ReauthenticationContext;
 use super::TransportLayer;
 
 use std::future::Future;
@@ -72,15 +73,34 @@ pub trait Authenticator: Send + Sync {
     #[doc(alias = "org.apache.kafka.common.network.Authenticator#complete")]
     fn complete(&self) -> bool;
 
-    /// Begins re-authentication.
+    /// Begins re-authentication. Uses transport layer to read or write tokens as
+    /// is done for [`authenticate`](Self::authenticate). For security protocols
+    /// PLAINTEXT and SSL, this is a no-op since re-authentication does not
+    /// apply/is not supported, respectively. For SASL_PLAINTEXT and SASL_SSL,
+    /// this performs a SASL authentication. Any in-flight responses from prior
+    /// requests can/will be read and collected for later processing as
+    /// required. There must not be partially sent requests; any request queued
+    /// for writing (for which zero bytes have been sent) remains queued until
+    /// after re-authentication succeeds.
     ///
-    /// For PLAINTEXT and SSL, this is a no-op since re-authentication does not
-    /// apply/is not supported.
+    /// The `transport` parameter is the channel's transport layer, which Java's
+    /// authenticator holds as a field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if authentication fails due to invalid credentials or
+    /// other security configuration errors, or if read/write fails due to an
+    /// I/O error.
     ///
     /// Default implementation is a no-op.
     #[doc(alias = "org.apache.kafka.common.network.Authenticator#reauthenticate")]
-    fn reauthenticate(&mut self) -> io::Result<()> {
-        Ok(())
+    fn reauthenticate<'a>(
+        &'a mut self,
+        reauthentication_context: ReauthenticationContext,
+        transport: &'a mut (dyn TransportLayer + Send),
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        let _ = (reauthentication_context, transport);
+        Box::pin(async { Ok(()) })
     }
 
     /// Return the session expiration time, if any.
