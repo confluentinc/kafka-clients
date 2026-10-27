@@ -392,20 +392,32 @@ pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
     Ok((repo_root.join(OUTPUT), render(&tables)))
 }
 
+/// Every generated file: the key-type tables and the config classes'
+/// constants (`config_consts`).
+fn all_outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
+    let mut out = vec![generated_output(repo_root)?];
+    out.extend(crate::config_consts::outputs(repo_root)?);
+    Ok(out)
+}
+
 pub fn generate(repo_root: &Path) -> Res<()> {
-    let (path, content) = generated_output(repo_root)?;
-    fs::write(&path, content)?;
-    println!("✅ Wrote {}", path.display());
+    for (path, content) in all_outputs(repo_root)? {
+        fs::write(&path, content)?;
+        println!("✅ Wrote {}", path.display());
+    }
     Ok(())
 }
 
-/// The generated file when it is stale.
-pub fn check_up_to_date(repo_root: &Path) -> Res<Option<PathBuf>> {
-    let (path, expected) = generated_output(repo_root)?;
-    match fs::read_to_string(&path) {
-        Ok(actual) if actual == expected => Ok(None),
-        _ => Ok(Some(path)),
+/// The generated files that are stale.
+pub fn check_up_to_date(repo_root: &Path) -> Res<Vec<PathBuf>> {
+    let mut stale = Vec::new();
+    for (path, expected) in all_outputs(repo_root)? {
+        match fs::read_to_string(&path) {
+            Ok(actual) if actual == expected => {},
+            _ => stale.push(path),
+        }
     }
+    Ok(stale)
 }
 
 #[cfg(test)]

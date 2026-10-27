@@ -21,7 +21,9 @@ One file per class; import the classes from this module, never from the files
 from __future__ import annotations
 
 from .kafka_principal import KafkaPrincipal as KafkaPrincipal
+from .security_protocol import SecurityProtocol as SecurityProtocol
 
 __all__ = [
     "KafkaPrincipal",
+    "SecurityProtocol",
 ]

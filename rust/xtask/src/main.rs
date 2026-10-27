@@ -14,6 +14,7 @@
 
 mod api_compat;
 mod bump_version;
+mod config_consts;
 mod config_types;
 mod error_hierarchy;
 mod error_predicates;
