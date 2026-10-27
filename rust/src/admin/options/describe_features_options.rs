@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_features`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesOptions`.
 
 /// Options for `Admin::describe_features`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions")]
 pub struct DescribeFeaturesOptions {
@@ -33,8 +29,16 @@ impl DescribeFeaturesOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeFeaturesOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,8 +46,8 @@ impl DescribeFeaturesOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
@@ -51,7 +55,13 @@ impl DescribeFeaturesOptions {
 
     /// Set the node id to which the request should be sent.
     ///
-    /// Mirrors `DescribeFeaturesOptions.nodeId(int)`.
+    /// # Arguments
+    ///
+    /// - `node_id` - the node id.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeFeaturesOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId")]
     pub fn set_node_id(mut self, node_id: i32) -> Self {
@@ -59,10 +69,12 @@ impl DescribeFeaturesOptions {
         self
     }
 
-    /// The node id to which the request should be sent. If empty, the request
-    /// will be sent to an arbitrary controller/broker.
+    /// The node id to which the request should be sent. If the node id is empty, the request
+    /// will be sent to the arbitrary controller/broker.
     ///
-    /// Mirrors `DescribeFeaturesOptions.nodeId()`.
+    /// # Returns
+    ///
+    /// The node id, or `None` if not set.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesOptions#nodeId")]
     pub fn node_id(&self) -> Option<i32> {
         self.node_id

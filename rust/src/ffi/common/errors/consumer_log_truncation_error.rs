@@ -76,11 +76,11 @@ pub(crate) fn topic_partition_offset_and_metadata_map(
 }
 
 /// Reads a map of `const kafka_common_TopicPartition_t *` keys and
-/// `const kafka_consumer_OffsetAndMetadata_t *` values; null reads as empty.
+/// `const kafka_consumer_OffsetAndMetadata_t *` values; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map of the stated key and value handles.
+/// `map` must be `NULL` or a valid map of the stated key and value handles.
 pub(crate) unsafe fn map_topic_partition_offset_and_metadata(
     map: *const kafka_Map_t,
 ) -> HashMap<TopicPartition, OffsetAndMetadata> {
@@ -104,12 +104,17 @@ pub(crate) unsafe fn map_topic_partition_offset_and_metadata(
         .collect()
 }
 
-/// The payload of a `LogTruncationException` error, borrowed from the error
-/// handle, or null when the error is another class.
+/// Returns the payload of a `LogTruncationException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
@@ -132,15 +137,20 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_log_truncation(
 
 /// `new LogTruncationException(Map<TopicPartition, Long>
 /// offsetOutOfRangePartitions, Map<TopicPartition, OffsetAndMetadata>
-/// divergentOffsets)`, with Java's default message. The first map holds
-/// `const kafka_common_TopicPartition_t *` keys and `const int64_t *`
-/// values, the second the same keys and
-/// `const kafka_consumer_OffsetAndMetadata_t *` values; both are copied.
-/// Owned, freed with [`kafka_common_ConsumerLogTruncationError_destroy`].
+/// divergentOffsets)`, with Java's default message.
+///
+/// # Parameters
+///
+/// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset, with
+///   `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values
+/// - `divergent_offsets` - The offsets where the consumer's log diverged from the broker's log,
+///   with `const kafka_common_TopicPartition_t *` keys and
+///   `const kafka_consumer_OffsetAndMetadata_t *` values
 ///
 /// # Safety
 ///
-/// Each map must be null or a valid map of the stated types.
+/// Each map must be `NULL` or a valid map of the stated types; both are copied. The returned
+/// handle is owned, freed with `kafka_common_ConsumerLogTruncationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
@@ -166,10 +176,20 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_new(
 /// offsetOutOfRangePartitions, Map<TopicPartition, OffsetAndMetadata>
 /// divergentOffsets)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message
+/// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset, with
+///   `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values
+/// - `divergent_offsets` - The offsets where the consumer's log diverged from the broker's log,
+///   with `const kafka_common_TopicPartition_t *` keys and
+///   `const kafka_consumer_OffsetAndMetadata_t *` values
+///
 /// # Safety
 ///
-/// `message` must be a valid NUL-terminated string and each map null or a
-/// valid map of the stated types.
+/// `message` must be a valid NUL-terminated string and each map `NULL` or a
+/// valid map of the stated types; both are copied. The returned handle is owned, freed with
+/// `kafka_common_ConsumerLogTruncationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
@@ -196,12 +216,16 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_with_message(
     ))
 }
 
-/// `partitions()`: an owned list of `kafka_common_TopicPartition_t *`,
-/// ordered by topic then partition, freed with `kafka_List_destroy`.
+/// `partitions()`: a list of `kafka_common_TopicPartition_t *`, ordered by topic then partition.
+///
+/// # Returns
+///
+/// The set of partitions with invalid offsets
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-truncation handle.
+/// `self_` must be a valid log-truncation handle. The returned list is owned, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_partitions(
@@ -218,13 +242,13 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_partitions(
     )
 }
 
-/// `offsetOutOfRangePartitions()`: an owned map of
-/// `kafka_common_TopicPartition_t *` to `int64_t *`, ordered by topic then
-/// partition, freed with `kafka_Map_destroy`.
+/// Returns the map of partition to the out-of-range offset (`offsetOutOfRangePartitions()`):
+/// `kafka_common_TopicPartition_t *` to `int64_t *`, ordered by topic then partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-truncation handle.
+/// `self_` must be a valid log-truncation handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(
@@ -241,13 +265,14 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_r
     )
 }
 
-/// `divergentOffsets()`: an owned map of `kafka_common_TopicPartition_t *` to
-/// `kafka_consumer_OffsetAndMetadata_t *`, ordered by topic then partition,
-/// freed with `kafka_Map_destroy`.
+/// Returns the offsets where the consumer's log diverged from the broker's log
+/// (`divergentOffsets()`): `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *`, ordered by topic then partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid log-truncation handle.
+/// `self_` must be a valid log-truncation handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
@@ -264,11 +289,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offse
     )
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_message(
@@ -282,11 +308,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_message(
     unsafe { Payload::<ConsumerLogTruncationError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_source(
@@ -300,11 +327,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_source(
     unsafe { Payload::<ConsumerLogTruncationError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid log-truncation handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_to_string(
@@ -317,12 +345,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_to_string(
     unsafe { Payload::<ConsumerLogTruncationError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_destroy(

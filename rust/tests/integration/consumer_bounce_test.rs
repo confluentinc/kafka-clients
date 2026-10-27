@@ -20,7 +20,7 @@
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize` (line 414).
+//! - `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
 //!   Java parameterizes it over two `@ClusterTest` arms that set the broker's
 //!   `group.consumer.assignment.interval.ms` to `0` and `1000` (KIP-1263
 //!   assignment batching). That broker config is new in 4.3; a 4.2 broker
@@ -38,7 +38,7 @@
 //!       arms wherever the broker has the config.
 //!
 //!   **Deviation (the assignment bound):** Java waits 10 s for a valid group
-//!   assignment (`validateGroupAssignment`, line 579); every arm here waits 20 s
+//!   assignment (`validateGroupAssignment`); every arm here waits 20 s
 //!   ([`ASSIGNMENT_TIMEOUT_MS`]). Under KIP-848 a target assignment reaches a
 //!   member only on its heartbeat, so convergence can take two
 //!   `group.consumer.heartbeat.interval.ms` rounds (5 s each): without batching
@@ -61,19 +61,19 @@
 //! (3 brokers + 1 isolated controller, [`bounce_cluster_config`]) and stop /
 //! restart brokers through `KafkaCluster::shutdown_broker` / `start_broker`:
 //!
-//! - `testAsyncConsumerConsumptionWithBrokerFailures` (line 154)
+//! - `testAsyncConsumerConsumptionWithBrokerFailures`
 //!   → `test_async_consumer_consumption_with_broker_failures`
-//! - `testAsyncConsumerSeekAndCommitWithBrokerFailures` (line 208)
+//! - `testAsyncConsumerSeekAndCommitWithBrokerFailures`
 //!   → `test_async_consumer_seek_and_commit_with_broker_failures`
-//! - `testAsyncSubscribeWhenTopicUnavailable` (line 258)
+//! - `testAsyncSubscribeWhenTopicUnavailable`
 //!   → `test_async_subscribe_when_topic_unavailable`
-//! - `testAsyncClose` (line 306), including its coordinator-failure and
+//! - `testAsyncClose`, including its coordinator-failure and
 //!   cluster-failure parts → `test_async_close`
 //!
 //! ## SKIPped
 //!
 //! - `testClassic*` twins — classic-protocol-only (`consumer-threading.md` §20).
-//! - `testAsyncCloseDuringRebalance` (line 618) — despite its name it runs the
+//! - `testAsyncCloseDuringRebalance` — despite its name it runs the
 //!   classic protocol: `testCloseDuringRebalance` builds its consumers (and
 //!   `createConsumerToRebalance` its extra members) without
 //!   `group.protocol`, so `clusterInstance.consumer(...)` defaults to
@@ -123,7 +123,7 @@ const BROKER_COUNT: u16 = 3;
 /// Java's `MAX_GROUP_SIZE`.
 const MAX_GROUP_SIZE: usize = 5;
 
-/// The class-level `@ClusterTestDefaults` of `ConsumerBounceTest` (lines 79-103).
+/// The class-level `@ClusterTestDefaults` of `ConsumerBounceTest`.
 ///
 /// Deviations, all for properties this test does not exercise:
 /// - `unclean.leader.election.enable`, `unclean.leader.election.interval.ms`,
@@ -172,7 +172,7 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
-/// `clusterInstance.consumer(configs)` (`ClusterInstance.java:162-170`):
+/// `org.apache.kafka.common.test.ClusterInstance#consumer(Map)`:
 /// byte-array deserializers, `auto.offset.reset=earliest` and a fresh
 /// `group_<random>` group id unless overridden, on the KIP-848 protocol this
 /// suite translates.
@@ -232,7 +232,7 @@ async fn close_consumer_ignoring_error(consumer: Option<BytesConsumer>) {
     }
 }
 
-/// Java's `addConsumersToGroup` (line 593): create `num_of_consumers_to_add`
+/// Java's `addConsumersToGroup`: create `num_of_consumers_to_add`
 /// consumers in `group` and start a poller for each.
 async fn add_consumers_to_group(
     ctx: &TestContext,
@@ -250,7 +250,7 @@ async fn add_consumers_to_group(
     }
 }
 
-/// Java's `isPartitionAssignmentValid` (line 517) with no expected assignment.
+/// Java's `isPartitionAssignmentValid` with no expected assignment.
 fn is_partition_assignment_valid(
     assignments: &[HashSet<TopicPartition>],
     partitions: &HashSet<TopicPartition>,
@@ -280,7 +280,7 @@ fn is_partition_assignment_valid(
 /// rounds with slack.
 const ASSIGNMENT_TIMEOUT_MS: u64 = 20_000;
 
-/// Java's two-argument `validateGroupAssignment` (line 579): wait up to
+/// Java's two-argument `validateGroupAssignment`: wait up to
 /// [`ASSIGNMENT_TIMEOUT_MS`] (Java: 10 s) for a valid assignment across
 /// `consumer_pollers`.
 async fn validate_group_assignment(
@@ -308,7 +308,7 @@ async fn validate_group_assignment(
     .await;
 }
 
-/// Java's `addConsumersToGroupAndWaitForGroupAssignment` (line 486), with the
+/// Java's `addConsumersToGroupAndWaitForGroupAssignment`, with the
 /// assignment bound passed through to [`validate_group_assignment`].
 async fn add_consumers_to_group_and_wait_for_group_assignment(
     ctx: &TestContext,
@@ -336,8 +336,8 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
     validate_group_assignment(consumer_pollers, subscriptions).await;
 }
 
-/// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`
-/// (line 418), run against `config`.
+/// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`,
+/// run against `config`.
 async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(config: ClusterConfig) {
     let mut ctx = TestContext::new(config).await;
     let group = ctx.group_id("fatal-exception-test");
@@ -391,8 +391,8 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
         panic!("expected GroupMaxSizeReached, got {thrown:?}");
     };
     // Stricter than Java (which asserts only the type): the broker's message
-    // (`GroupMetadataManager.java:1576`, `throwIfConsumerGroupIsFull`) is part of the
-    // contract the client surfaces verbatim (DoD §3).
+    // (`org.apache.kafka.coordinator.group.GroupMetadataManager#throwIfConsumerGroupIsFull`) is
+    // part of the contract the client surfaces verbatim (DoD §3).
     assert_eq!(
         thrown.message(),
         format!("The consumer group has reached its maximum capacity of {MAX_GROUP_SIZE} members.")
@@ -447,8 +447,8 @@ fn broker_has_assignment_interval() -> bool {
     kafka_cluster::broker_release() >= ASSIGNMENT_INTERVAL_RELEASE
 }
 
-/// Translates `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:414`) with the broker's default assignment
+/// Translates `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
+/// with the broker's default assignment
 /// behaviour, on a broker older than 4.3 only: there the broker has no
 /// assignment interval and the two Java arms skip themselves. On 4.3+ this
 /// test skips itself, since the Java arms run and the default interval would
@@ -466,8 +466,8 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
 }
 
 /// The `group.consumer.assignment.interval.ms=0` arm of
-/// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:407-409`). Skips itself on a broker older than 4.3,
+/// `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
+/// Skips itself on a broker older than 4.3,
 /// which ignores the config.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0() {
@@ -483,8 +483,8 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
 }
 
 /// The `group.consumer.assignment.interval.ms=1000` arm of
-/// `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// (`ConsumerBounceTest.java:410-412`). Skips itself on a broker older than 4.3,
+/// `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
+/// Skips itself on a broker older than 4.3,
 /// which ignores the config.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000() {
@@ -501,19 +501,18 @@ async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size
 
 // ── Broker bounces (Phase 17) ──────────────────────────────────────────
 
-/// Java's `topic` field, created in `setUp` (line 129).
+/// Java's `topic` field, created in `setUp`.
 const TOPIC: &str = "topic";
-/// Java's `numPartitions` (line 115).
+/// Java's `numPartitions`.
 const NUM_PARTITIONS: i32 = 3;
-/// Java's `numReplica` (line 116).
+/// Java's `numReplica`.
 const NUM_REPLICA: i16 = 3;
-/// The seed of Java's `TestUtils.SEEDED_RANDOM` (`TestUtils.java:97`). The
+/// The seed of Java's `org.apache.kafka.test.TestUtils#SEEDED_RANDOM`. The
 /// generator differs (Java's LCG vs `StdRng`), so the sequence is not Java's,
 /// but it is just as deterministic.
 const SEEDED_RANDOM_SEED: u64 = 192_348_092_834;
 
-/// The full class-level `@ClusterTestDefaults` of `ConsumerBounceTest` (lines
-/// 79-103) on a dedicated `Type.KRAFT` cluster (`BROKER_COUNT` brokers plus one
+/// The full class-level `@ClusterTestDefaults` of `ConsumerBounceTest` on a dedicated `Type.KRAFT` cluster (`BROKER_COUNT` brokers plus one
 /// isolated controller, Java's `@ClusterTest` default), since these tests stop
 /// and restart brokers.
 ///
@@ -542,7 +541,7 @@ fn bounce_cluster_config() -> ClusterConfig {
     ClusterConfig::kraft_dedicated(BROKER_COUNT, 1).set_server_properties(props)
 }
 
-/// Java's `setUp` (line 129): `createTopic(topic, numPartitions, numReplica)`.
+/// Java's `setUp`: `createTopic(topic, numPartitions, numReplica)`.
 /// Returns the per-test topic name.
 async fn set_up(ctx: &mut TestContext) -> String {
     let topic = ctx.topic(TOPIC);
@@ -560,9 +559,9 @@ fn current_time_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// `ClientsTestUtils.sendRecords(cluster, tp, numRecords)`
-/// (`ClientsTestUtils.java:242`): a fresh producer sends `numRecords` records
-/// (`key i` / `value i`, 1 ms timestamp increments), then flushes and closes.
+/// `ClientsTestUtils#sendRecords(ClusterInstance,TopicPartition,int)`: a fresh producer
+/// sends `numRecords` records (`key i` / `value i`, 1 ms timestamp increments), then
+/// flushes and closes.
 async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize) {
     let producer = create_producer(ctx);
     let starting_timestamp = current_time_ms();
@@ -585,7 +584,7 @@ async fn send_records(ctx: &TestContext, tp: &TopicPartition, num_records: usize
         .expect("producer close");
 }
 
-/// Java's `BounceBrokerScheduler` (line 784), a `ShutdownableThread` that
+/// Java's `BounceBrokerScheduler`, a `ShutdownableThread` that
 /// kills a random broker, restarts it after 500 ms, and repeats `numIters`
 /// times with a 500 ms pause in between.
 ///
@@ -632,7 +631,7 @@ impl BounceBrokerScheduler {
     }
 }
 
-/// Java's `restartDeadBrokers()` (lines 713 and 800): start every broker that
+/// Java's `restartDeadBrokers()`: start every broker that
 /// is shut down.
 async fn restart_dead_brokers(cluster: &KafkaCluster) {
     let alive = cluster.alive_broker_ids();
@@ -641,7 +640,7 @@ async fn restart_dead_brokers(cluster: &KafkaCluster) {
     }
 }
 
-/// Java's `consumeWithBrokerFailures(numIters, CONSUMER)` (line 162):
+/// Java's `consumeWithBrokerFailures(numIters, CONSUMER)`:
 /// produce 1000 records, then consume them while brokers are killed and
 /// restarted at random, committing after every non-empty poll and checking
 /// that the position and the committed offset agree.
@@ -678,6 +677,7 @@ async fn consume_with_broker_failures(num_iters: usize) {
                     .await
                     .expect("committed")
                     .get(&topic_partition)
+                    .and_then(Option::as_ref)
                     .expect("a committed offset for the partition")
                     .offset();
                 assert_eq!(current_position, committed_offset);
@@ -694,15 +694,14 @@ async fn consume_with_broker_failures(num_iters: usize) {
     close_consumer(Some(consumer)).await;
 }
 
-/// Translates `testAsyncConsumerConsumptionWithBrokerFailures`
-/// (`ConsumerBounceTest.java:154`).
+/// Translates `ConsumerBounceTest#testAsyncConsumerConsumptionWithBrokerFailures`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_consumption_with_broker_failures() {
     consume_with_broker_failures(10).await;
 }
 
-/// Java's wait (lines 220-222) until every broker's local log of `tp` has a
-/// high watermark of `num_records`, within 30 s.
+/// The wait in Java's `seekAndCommitWithBrokerFailures` until every broker's local
+/// log of `tp` has a high watermark of `num_records`, within 30 s.
 ///
 /// Deviation: Java reads each broker's `replicaManager` in-process. Over the
 /// wire only the leader's high watermark is visible (`ListOffsets` `LATEST`),
@@ -743,7 +742,7 @@ async fn wait_for_high_watermark(admin: &dyn Admin, tp: &TopicPartition, num_rec
     .await;
 }
 
-/// Java's `seekAndCommitWithBrokerFailures(numIters, CONSUMER)` (line 212):
+/// Java's `seekAndCommitWithBrokerFailures(numIters, CONSUMER)`:
 /// with a manually assigned partition, randomly seek to the end, seek to a
 /// random offset, or commit, while brokers are killed and restarted.
 async fn seek_and_commit_with_broker_failures(num_iters: usize) {
@@ -792,6 +791,7 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
                     .await
                     .expect("committed")
                     .get(&topic_partition)
+                    .and_then(Option::as_ref)
                     .expect("a committed offset for the partition")
                     .offset();
                 assert_eq!(position, committed);
@@ -803,14 +803,13 @@ async fn seek_and_commit_with_broker_failures(num_iters: usize) {
     close_consumer(Some(consumer)).await;
 }
 
-/// Translates `testAsyncConsumerSeekAndCommitWithBrokerFailures`
-/// (`ConsumerBounceTest.java:208`).
+/// Translates `ConsumerBounceTest#testAsyncConsumerSeekAndCommitWithBrokerFailures`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_seek_and_commit_with_broker_failures() {
     seek_and_commit_with_broker_failures(5).await;
 }
 
-/// Java's `receiveExactRecords(poller, numRecords, timeoutMs)` (line 778):
+/// Java's `receiveExactRecords(poller, numRecords, timeoutMs)`:
 /// wait until the poller has received exactly `num_records` records.
 async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
     test_utils::wait_for_condition_with_timeout(
@@ -830,10 +829,11 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
 }
 
 /// Translates `testAsyncSubscribeWhenTopicUnavailable`
-/// (`ConsumerBounceTest.java:258`, body `testSubscribeWhenTopicUnavailable`
-/// :262): subscribe to a topic that does not exist yet, create it 2 s later,
-/// consume 1000 records; then stop every broker, restart them all, and consume
-/// 1000 more on the same consumer.
+/// (`ConsumerBounceTest#testAsyncSubscribeWhenTopicUnavailable`, body
+/// `ConsumerBounceTest#testSubscribeWhenTopicUnavailable`): subscribe to a
+/// topic that does not exist yet, create it 2 s later, consume 1000 records;
+/// then stop every broker, restart them all, and consume 1000 more on the same
+/// consumer.
 ///
 /// Deviation: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
 /// comment at the config). Everything else, including `metadata.max.age.ms=100`
@@ -914,12 +914,12 @@ async fn test_async_subscribe_when_topic_unavailable() {
     close_consumer(poller2.shutdown().await).await;
 }
 
-/// Java's `gracefulCloseTimeMs` (line 111).
+/// Java's `gracefulCloseTimeMs`.
 const GRACEFUL_CLOSE_TIME_MS: u64 = 1000;
 /// Java's `Long.MAX_VALUE` close timeout, in milliseconds.
 const LONG_MAX_VALUE_MS: u64 = i64::MAX as u64;
 
-/// Java's `createConsumerAndReceive` (line 692): a consumer in `group_id`
+/// Java's `createConsumerAndReceive`: a consumer in `group_id`
 /// that either subscribes to `topic` or is manually assigned `topic_partition`,
 /// polled by a [`ConsumerAssignmentPoller`] until it has received exactly
 /// `num_records` records; the poller is then shut down and the consumer
@@ -945,7 +945,7 @@ async fn create_consumer_and_receive(
     poller.shutdown().await.expect("the poller owned the consumer")
 }
 
-/// Java's `submitCloseAndValidate` (line 752) followed by `.get()` — every
+/// Java's `submitCloseAndValidate` followed by `.get()` — every
 /// Java call site waits for the close at once, so the executor hop is
 /// dropped: close with `close_timeout_ms` and check the elapsed time against
 /// the optional bounds (with Java's 2 s `closeGraceTimeMs` on the upper one).
@@ -981,8 +981,8 @@ async fn close_and_validate(
     eprintln!("consumer.close() completed in {time_taken_ms} ms.");
 }
 
-/// The anonymous `ConsumerRebalanceListener` of Java's `checkClosedState`
-/// (line 727): releases a permit of `assignSemaphore` per assignment.
+/// The anonymous `ConsumerRebalanceListener` of Java's `checkClosedState`:
+/// releases a permit of `assignSemaphore` per assignment.
 struct AssignSemaphoreListener {
     permits: Arc<AtomicUsize>,
 }
@@ -1000,7 +1000,7 @@ impl ConsumerRebalanceListener for AssignSemaphoreListener {
     }
 }
 
-/// Java's `checkClosedState` (line 721): a new consumer in `group_id` must be
+/// Java's `checkClosedState`: a new consumer in `group_id` must be
 /// assigned partitions promptly and, when `committed_records > 0`, see that
 /// offset committed for `topic_partition`.
 ///
@@ -1048,6 +1048,7 @@ async fn check_closed_state(
             .expect("committed should succeed");
         let offset = committed
             .get(topic_partition)
+            .and_then(Option::as_ref)
             .expect("a committed offset for the partition")
             .offset();
         assert_eq!(committed_records, offset, "Committed offset does not match expected value.");
@@ -1056,7 +1057,7 @@ async fn check_closed_state(
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java's `findCoordinators` (line 376): the ids of the brokers coordinating
+/// Java's `findCoordinators`: the ids of the brokers coordinating
 /// `groups`, retried until every group has one (default 15 s bound).
 ///
 /// Deviation: Java sends a raw `FindCoordinator`, which answers for any group
@@ -1099,7 +1100,7 @@ async fn find_coordinators(admin: &dyn Admin, groups: &[String]) -> BTreeSet<i32
     }
 }
 
-/// Java's `checkCloseGoodPath` (line 324): closed while the cluster is
+/// Java's `checkCloseGoodPath`: closed while the cluster is
 /// healthy, the consumer commits and leaves; a new member joins at once and
 /// sees the committed offset.
 async fn check_close_good_path(
@@ -1115,7 +1116,7 @@ async fn check_close_good_path(
     check_closed_state(ctx, topic, topic_partition, group_id, num_records as i64).await;
 }
 
-/// Java's `checkCloseWithCoordinatorFailure` (line 336): closed while the
+/// Java's `checkCloseWithCoordinatorFailure`: closed while the
 /// coordinator is down, the group-managed consumer's close completes after its
 /// commit attempt, and the manually assigned consumer's commit succeeds since
 /// a broker is available.
@@ -1149,7 +1150,7 @@ async fn check_close_with_coordinator_failure(
     check_closed_state(ctx, topic, topic_partition, manual_group, num_records as i64).await;
 }
 
-/// Java's `checkCloseWithClusterFailure` (line 355): closed while every broker
+/// Java's `checkCloseWithClusterFailure`: closed while every broker
 /// is down, nothing can be committed; close must honour a short timeout, and
 /// with a very large timeout return after the request timeout.
 async fn check_close_with_cluster_failure(
@@ -1179,9 +1180,9 @@ async fn check_close_with_cluster_failure(
     close_and_validate(consumer2, LONG_MAX_VALUE_MS, None, Some(request_timeout)).await;
 }
 
-/// Translates `testAsyncClose` (`ConsumerBounceTest.java:306`, body
-/// `testClose` :310): the good path, coordinator failure and whole-cluster
-/// failure close scenarios, in Java's order on one cluster.
+/// Translates `ConsumerBounceTest#testAsyncClose` (body `ConsumerBounceTest#testClose`):
+/// the good path, coordinator failure and whole-cluster failure close scenarios,
+/// in Java's order on one cluster.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_close() {
     let mut ctx = TestContext::new(bounce_cluster_config()).await;

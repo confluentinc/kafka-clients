@@ -556,10 +556,10 @@ mod tests {
     }
 
     /// Java's `decompressionOutputSize()`: 16 KiB for gzip and zstd
-    /// (`GzipCompression.java:80-83`, `ZstdCompression.java:106-109`), 2 KiB
-    /// for snappy and lz4 (`SnappyCompression.java:67-72`,
-    /// `Lz4Compression.java:67-72`), and for no compression the interface
-    /// default's error (`Compression.java:61-63`).
+    /// (`GzipCompression#decompressionOutputSize`, `ZstdCompression#decompressionOutputSize`),
+    /// 2 KiB for snappy and lz4 (`SnappyCompression#decompressionOutputSize`,
+    /// `Lz4Compression#decompressionOutputSize`), and for no compression the interface
+    /// default's error (`Compression#decompressionOutputSize`).
     #[test]
     fn test_decompression_output_size_matches_java() {
         assert_eq!(16 * 1024, Compression::gzip().build().decompression_output_size().unwrap());

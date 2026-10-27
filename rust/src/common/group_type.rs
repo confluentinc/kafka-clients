@@ -19,8 +19,6 @@
 use std::fmt;
 
 /// The type of a group.
-///
-/// Corresponds to `org.apache.kafka.common.GroupType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupType")]
@@ -38,10 +36,8 @@ pub enum GroupType {
 }
 
 impl GroupType {
-    /// The display name of this group type (as used on the wire and in
-    /// `toString`).
-    ///
-    /// Mirrors the private `name` field in Java.
+    /// Returns the display name of this group type, as used on the wire and
+    /// by `Display`.
     #[doc(alias = "org.apache.kafka.common.GroupType#name")]
     pub fn name(&self) -> &'static str {
         match self {
@@ -53,10 +49,15 @@ impl GroupType {
         }
     }
 
-    /// Parse a string into a group type, in a case-insensitive manner.
+    /// Parse a string into a consumer group type, in a case-insensitive manner.
     ///
-    /// Returns [`GroupType::Unknown`] if the name is unrecognized (mirrors
-    /// Java's `parse`, including the `null` handling that maps to `Unknown`).
+    /// # Arguments
+    ///
+    /// - `name` - the type name
+    ///
+    /// # Returns
+    ///
+    /// The group type, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.GroupType#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_lowercase().as_str() {

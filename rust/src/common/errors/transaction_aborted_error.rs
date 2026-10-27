@@ -17,13 +17,14 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// The transaction was aborted, so the record was not written.
+    /// This is the error thrown when we are aborting any undrained batches during a transaction
+    /// which is aborted without any underlying cause - which likely means that the user chose to
+    /// abort.
     ///
-    /// Corresponds to Java's `TransactionAbortedException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `TransactionAbortedException` -> `ApiException` -> `KafkaException`
+    /// No protocol code. Java `extends` chain: `TransactionAbortedException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.TransactionAbortedException")]
     TransactionAbortedError,
     extends: [

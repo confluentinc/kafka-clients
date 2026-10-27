@@ -38,7 +38,7 @@ pub struct kafka_common_PartitionInfo_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_PartitionInfo_t`] points at.
+/// What a `kafka_common_PartitionInfo_t` points at.
 pub(crate) struct PartitionInfoInner {
     info: PartitionInfo,
     topic_c: CString,
@@ -68,7 +68,7 @@ impl PartitionInfoInner {
 }
 
 /// Hands `info` to C as an owned handle, freed with
-/// [`kafka_common_PartitionInfo_destroy`].
+/// `kafka_common_PartitionInfo_destroy`.
 pub(crate) fn box_partition_info(info: PartitionInfo) -> *mut kafka_common_PartitionInfo_t {
     Box::into_raw(Box::new(PartitionInfoInner::new(info))) as *mut kafka_common_PartitionInfo_t
 }
@@ -131,15 +131,21 @@ pub(crate) unsafe fn list_partition_infos(list: *const kafka_List_t) -> Vec<Part
         .collect()
 }
 
-/// `new PartitionInfo(String topic, int partition, Node leader, Node[]
-/// replicas, Node[] inSyncReplicas)`, with no offline replicas. `leader` is
-/// nullable; the lists hold `const kafka_common_Node_t *` and are copied.
-/// Owned, freed with [`kafka_common_PartitionInfo_destroy`].
+/// Creates a partition info with no offline replicas.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+/// - `partition` - the partition id
+/// - `leader` - the leader node, or `NULL` if there is none
+/// - `replicas` - the replicas, preferred replica first
+/// - `in_sync_replicas` - the in-sync replicas
 ///
 /// # Safety
 ///
-/// `topic` must be a valid NUL-terminated string, `leader` null or a valid
-/// node handle, and each list null or a valid list of node handles.
+/// `topic` must be a valid NUL-terminated string, `leader` `NULL` or a valid
+/// node handle, and each list `NULL` or a valid list of node handles; all are copied. The
+/// returned handle is owned, freed with `kafka_common_PartitionInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
@@ -169,12 +175,20 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_new(
     ))
 }
 
-/// `new PartitionInfo(String topic, int partition, Node leader, Node[]
-/// replicas, Node[] inSyncReplicas, Node[] offlineReplicas)`.
+/// Creates a partition info.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+/// - `partition` - the partition id
+/// - `leader` - the leader node, or `NULL` if there is none
+/// - `replicas` - the replicas, preferred replica first
+/// - `in_sync_replicas` - the in-sync replicas
+/// - `offline_replicas` - the offline replicas
 ///
 /// # Safety
 ///
-/// As [`kafka_common_PartitionInfo_new`], plus `offline_replicas` null or a
+/// As `kafka_common_PartitionInfo_new`, plus `offline_replicas` `NULL` or a
 /// valid list of node handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -210,11 +224,12 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_with_offline_replicas(
     ))
 }
 
-/// `topic()`: borrowed from the handle, valid until it is destroyed.
+/// Returns the topic name
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The string is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(self_: *const kafka_common_PartitionInfo_t) -> *const c_char {
@@ -224,7 +239,7 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_topic(self_: *const kafka_co
     unsafe { inner_ref(self_) }.topic_c.as_ptr()
 }
 
-/// `partition()`.
+/// Returns the partition id.
 ///
 /// # Safety
 ///
@@ -237,12 +252,12 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_partition(self_: *const kafk
     unsafe { partition_info_ref(self_) }.partition()
 }
 
-/// `leader()`: the leader node, borrowed from the handle, or null when the
-/// partition has none.
+/// Returns the node currently acting as a leader for this partition or `NULL` if there is no leader
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The returned handle is borrowed from the handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
@@ -254,12 +269,13 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_leader(
     unsafe { inner_ref(self_) }.leader_ptr()
 }
 
-/// `replicas()`: an owned list of `kafka_common_Node_t *` copies, freed with
-/// `kafka_List_destroy`.
+/// Returns the complete set of replicas for this partition regardless of whether they are alive or up-to-date.
+/// The preferred replica is the head of the list.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_replicas(
@@ -271,11 +287,13 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_replicas(
     node_list(unsafe { partition_info_ref(self_) }.replicas())
 }
 
-/// `inSyncReplicas()`: an owned list of `kafka_common_Node_t *` copies.
+/// Returns the subset of the replicas that are in sync, that is caught-up to the leader and ready to take over as
+/// leader if the leader should fail
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replicas(
@@ -287,11 +305,12 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_in_sync_replicas(
     node_list(unsafe { partition_info_ref(self_) }.in_sync_replicas())
 }
 
-/// `offlineReplicas()`: an owned list of `kafka_common_Node_t *` copies.
+/// Returns the subset of the replicas that are offline
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The returned list of `kafka_common_Node_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replicas(
@@ -303,11 +322,13 @@ pub unsafe extern "C" fn kafka_common_PartitionInfo_offline_replicas(
     node_list(unsafe { partition_info_ref(self_) }.offline_replicas())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `Partition(topic = <topic>, partition = <partition>, leader = <leader id or none>,
+/// replicas = <ids>, isr = <ids>, offlineReplicas = <ids>)`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid partition-info handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_PartitionInfo_to_string(

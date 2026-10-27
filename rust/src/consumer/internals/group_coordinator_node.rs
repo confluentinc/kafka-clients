@@ -43,8 +43,7 @@ impl GroupCoordinatorNode {
     /// Creates the coordinator node for broker `id`: the broker's real node id,
     /// with `idString` `"+<id>"`.
     ///
-    /// Translated from `GroupCoordinatorNode(int, String, int)`
-    /// (`GroupCoordinatorNode.java:32-34`).
+    /// Translated from `GroupCoordinatorNode#GroupCoordinatorNode`.
     ///
     /// # Errors
     ///
@@ -67,7 +66,7 @@ impl GroupCoordinatorNode {
         ))
     }
 
-    /// Translated from `GroupCoordinatorNode.validateId` (`GroupCoordinatorNode.java:36-41`).
+    /// Translated from `GroupCoordinatorNode#validateId`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.GroupCoordinatorNode#validateId")]
     fn validate_id(id: i32) -> Result<i32, Error> {
         if id < 0 {

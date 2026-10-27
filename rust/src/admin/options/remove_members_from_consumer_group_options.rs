@@ -13,9 +13,6 @@
 // limitations under the License.
 
 //! Options for `Admin::remove_members_from_consumer_group`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions`.
 
 use std::collections::HashSet;
 
@@ -24,9 +21,6 @@ use crate::common::Error;
 
 /// Options for `Admin::remove_members_from_consumer_group`. Carries the members
 /// to be removed from the consumer group.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions")]
 pub struct RemoveMembersFromConsumerGroupOptions {
@@ -36,10 +30,7 @@ pub struct RemoveMembersFromConsumerGroupOptions {
 }
 
 impl RemoveMembersFromConsumerGroupOptions {
-    /// Creates options that remove every member of the group.
-    ///
-    /// Mirrors Java's no-argument `RemoveMembersFromConsumerGroupOptions()`,
-    /// after which `removeAll()` is `true`.
+    /// Creates options that remove every member of the group: `remove_all()` returns `true`.
     #[doc(
         alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions"
     )]
@@ -49,12 +40,14 @@ impl RemoveMembersFromConsumerGroupOptions {
 
     /// Creates options for removing the given members.
     ///
-    /// Mirrors Java's `RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove>)`.
+    /// # Arguments
+    ///
+    /// - `members` - the members to remove from the group; must not be empty.
     ///
     /// # Errors
     ///
-    /// Returns an error (Java's `IllegalArgumentException`) if `members` is
-    /// empty. Use [`Self::new`] to remove all members instead.
+    /// - `Error::is_local_illegal_argument_error` if `members` is empty ("Invalid empty members
+    ///   has been provided"). Use [`Self::new`] to remove all members instead.
     #[doc(
         alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#RemoveMembersFromConsumerGroupOptions"
     )]
@@ -68,13 +61,24 @@ impl RemoveMembersFromConsumerGroupOptions {
 
     /// Sets an optional reason.
     ///
-    /// Mirrors Java's `reason(String)`.
+    /// # Arguments
+    ///
+    /// - `reason` - the reason sent with the request.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason")]
     pub fn set_reason(&mut self, reason: impl Into<String>) {
         self.reason = Some(reason.into());
     }
 
-    /// Set the operation timeout in milliseconds (or `None` for the default).
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `RemoveMembersFromConsumerGroupOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -82,32 +86,26 @@ impl RemoveMembersFromConsumerGroupOptions {
         self
     }
 
-    /// The members to remove.
-    ///
-    /// Mirrors Java's `members()`.
+    /// Returns the members to remove, empty when all members are removed.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#members")]
     pub fn members(&self) -> &HashSet<MemberToRemove> {
         &self.members
     }
 
-    /// The optional reason.
-    ///
-    /// Mirrors Java's `reason()`.
+    /// Returns the optional reason.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#reason")]
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
 
-    /// Whether all members should be removed (i.e. no specific members were
-    /// provided).
-    ///
-    /// Mirrors Java's `removeAll()`.
+    /// Returns whether all members should be removed, as no specific members were provided.
     #[doc(alias = "org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#removeAll")]
     pub fn remove_all(&self) -> bool {
         self.members.is_empty()
     }
 
-    /// The operation timeout in milliseconds, or `None` for the default.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

@@ -171,8 +171,9 @@ static void late_close_close(void *self, int64_t callback_id) {
 }
 
 // A constructor that fails after taking the deserializers closes them, as
-// Java's does (`AsyncKafkaConsumer.java:596-603`), without waiting for a C
-// `close` to report: the report arrives after the constructor returned, on the
+// Java's does (the constructor of
+// `org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer`), without waiting
+// for a C `close` to report: the report arrives after the constructor returned, on the
 // consumed handle, which stays valid for it (run under valgrind: no read of
 // freed memory, no leak).
 static void test_kafka_consumer_failed_new_keeps_a_closing_deserializer_until_it_reports(void) {
@@ -196,7 +197,8 @@ static void test_kafka_consumer_failed_new_keeps_a_closing_deserializer_until_it
     TEST_ASSERT_NULL(kc);
     TEST_ASSERT_NOT_NULL(err);
     /* Java's `KafkaException("Failed to construct kafka consumer", t)` around
-     * the `InvalidGroupIdException` (`AsyncKafkaConsumer.java:596-603`). */
+     * the `InvalidGroupIdException` (the constructor of
+     * `org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer`). */
     TEST_ASSERT_EQUAL_STRING("Failed to construct kafka consumer", kafka_common_Error_message(err));
     const kafka_common_Error_t *cause = kafka_common_Error_source(err);
     TEST_ASSERT_NOT_NULL(cause);

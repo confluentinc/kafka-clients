@@ -148,8 +148,8 @@ impl NodeApiVersions {
             .supported_versions
             .get(api_key)
             // Java interpolates the `ApiKeys` enum value itself
-            // (`NodeApiVersions.java:151`), and `ApiKeys` overrides no
-            // `toString()`, so the message carries the enum constant name
+            // (`org.apache.kafka.clients.NodeApiVersions#latestUsableVersion(ApiKeys,short,short)`),
+            // and `ApiKeys` overrides no `toString()`, so the message carries the enum constant name
             // (`METADATA`) — not the `name` field (`Metadata`).
             .ok_or_else(|| Error::unsupported_version(format!("The node does not support {api_key}")))?;
 
@@ -163,7 +163,8 @@ impl NodeApiVersions {
             Some(v) => Ok(v.max_version),
             None => Err(Error::unsupported_version(format!(
                 // As above: Java interpolates the enum value
-                // (`NodeApiVersions.java:162`), giving the constant name.
+                // (`org.apache.kafka.clients.NodeApiVersions#latestUsableVersion(ApiKeys,short,short)`),
+                // giving the constant name.
                 "The node does not support {} with version in range [{},{}]. \
                  The supported range is [{},{}].",
                 api_key,
@@ -434,7 +435,7 @@ mod tests {
     }
 
     /// Java builds both diagnostics by interpolating the `ApiKeys` enum value
-    /// (`NodeApiVersions.java:151` and `:162`). `ApiKeys` overrides no
+    /// (`NodeApiVersions#latestUsableVersion(ApiKeys,short,short)`). `ApiKeys` overrides no
     /// `toString()`, so `Enum.toString()` renders the constant name — `FETCH`,
     /// `PRODUCE` — and NOT the `name` field spelling (`Fetch`, `Produce`).
     #[test]

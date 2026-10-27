@@ -148,7 +148,15 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - Instance methods: `a.instance_method_a(a,b,c)` -> `package_prefix_ClassA_instance_method_a(package_prefix_ClassA_t *self,a,b,c)`
 5. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 6. **Comments and documentation**: Keep similar comments as the Java source,
-translate javadoc to rustdoc. Never change the contract of public API.
+translate javadoc to rustdoc. Never change the contract of public API
+  - all parameters, returns values, errors and panics must be documented. Copy them from Java when applicable
+  - contract must be clearly documented. Copy it from Java when applicable
+  - any additional Rust consideration MUST be in a dedicated "Translation notes" section, after the original documentation
+  - total size of the docstring must not exceed 150% of the Java size, non including tags if they're missing in Java. In case the Java one is missing the documentation entirely, the Rust one should be complete but not verbose and doesn't contain "Translation notes"
+  - when contract isn't the same the agent MUST add a WARNING to the Rust docstring and the linter MUST fail when finding it
+  - any contract change MUST the validated and accepted by listing it in a .md file in `design/current` before changing the documentation and adding an exclusion
+  - NEVER reference Java file lines, it's allowed to reference members of classes with their fully qualified class name
+  - linter must enforce for public API documentation: parameters are documented, return value is documented, at least the javadoc errors are documented. Size should be validated following previous rule. It should fail it the agent annotated the docstring with a WARNING because of different contract
 7. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `Error` — silently completing or hanging futures is worse than an explicit error.
 8. **Scripts**: Use xtask Rust programs instead of shell scripts
 9. **License**: All translated code, except GPL with CPE from OpenJDK, includes the Apache 2.0 license header.

@@ -132,7 +132,7 @@ const CONFIG_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Java's `TestUtils.waitForCondition` default, 15 s.
 const WAIT_FOR_CONDITION_MS: u64 = 15_000;
 
-/// Java's `UnsupportedEndpointTypeException` text (`KafkaAdminClient.java:1711-1712`).
+/// Java's `UnsupportedEndpointTypeException` text (`KafkaAdminClient.AdminClientRunnable#call`).
 const UNSUPPORTED_ENDPOINT_MESSAGE: &str =
     "This Admin API is not yet supported when communicating directly with the controller quorum.";
 
@@ -459,7 +459,7 @@ async fn verify_config_value(
 /// Java's `testIncrementalAlterConfigs(clusterInstance, usingBootstrapControllers)`:
 /// sets `max.connections` for each node and both connection configs for the
 /// default resource, then reads them back. Through the controllers, both
-/// resources go to the active controller (`KafkaAdminClient.java:2980-2984`).
+/// resources go to the active controller (`KafkaAdminClient#incrementalAlterConfigs`).
 async fn incremental_alter_configs(using_bootstrap_controllers: bool) {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     let node_ids = if using_bootstrap_controllers {

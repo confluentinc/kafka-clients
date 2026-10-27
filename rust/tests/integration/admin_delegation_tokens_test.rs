@@ -24,12 +24,11 @@
 //!
 //! # The test broker cannot mint a token
 //!
-//! `KafkaApis.allowTokenRequests`
-//! (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:2345-2354`) returns
-//! false whenever `request.context.securityProtocol == PLAINTEXT`, and all four
-//! handlers test it *before* anything else — `handleDescribeTokensRequest` checks
-//! it before `tokenManager.isEnabled` (`:2320-2323`). So over a PLAINTEXT
-//! connection every one of the four answers
+//! `kafka.server.KafkaApis#allowTokenRequests` returns false whenever
+//! `request.context.securityProtocol == PLAINTEXT`, and all four handlers test it
+//! *before* anything else — `KafkaApis#handleDescribeTokensRequest` checks it
+//! before `tokenManager.isEnabled`. So over a PLAINTEXT connection every one of
+//! the four answers
 //! `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED(64)` regardless of broker configuration.
 //!
 //! **Measured, not assumed.** A throwaway probe ran the four RPCs against a

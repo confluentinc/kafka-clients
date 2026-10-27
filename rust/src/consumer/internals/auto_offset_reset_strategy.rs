@@ -82,7 +82,7 @@ impl AutoOffsetResetStrategy {
     pub const LATEST_TIMESTAMP: i64 = -1;
 
     /// Java's `IllegalArgumentException("Negative duration is not supported in
-    /// by_duration offset reset strategy.")` (`AutoOffsetResetStrategy.java:90`),
+    /// by_duration offset reset strategy.")` (`AutoOffsetResetStrategy#fromString`),
     /// which `fromString`'s own `catch (Exception e)` immediately re-catches and
     /// carries as the cause of its outer error.
     const NEGATIVE_DURATION_MESSAGE: &str = "Negative duration is not supported in by_duration offset reset strategy.";
@@ -123,12 +123,12 @@ impl AutoOffsetResetStrategy {
             _ => {},
         }
         if let Some(iso) = s.strip_prefix("by_duration:") {
-            // Java (`AutoOffsetResetStrategy.java:87-96`) wraps whatever the
-            // `try` block raised as the CAUSE of its own
+            // Java (`org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#fromString`)
+            // wraps whatever the `try` block raised as the CAUSE of its own
             // `IllegalArgumentException`, and that cause is never null: it is
             // either `Duration.parse`'s failure or the
             // `IllegalArgumentException("Negative duration is not supported in
-            // by_duration offset reset strategy.")` thrown at `:90` and
+            // by_duration offset reset strategy.")` thrown inside the `try` and
             // re-caught by the same broad `catch (Exception e)`. Without the
             // cause the two are indistinguishable to a caller, since the outer
             // message is identical for both.
@@ -145,8 +145,7 @@ impl AutoOffsetResetStrategy {
         )))
     }
 
-    /// Java: `AutoOffsetResetStrategy.Validator.ensureValid(String name, Object value)`
-    /// (`AutoOffsetResetStrategy.java:158-168`).
+    /// Java: `AutoOffsetResetStrategy.Validator#ensureValid`.
     ///
     /// ```java
     /// public void ensureValid(String name, Object value) {
@@ -297,11 +296,12 @@ fn parse_failure() -> Error {
 /// Returns the [`Error::LocalIllegalArgument`] that Java's `try` block raises, which
 /// the caller then carries as the `source` of its own error: either
 /// [`NEGATIVE_DURATION_MESSAGE`] for a negative duration
-/// (`AutoOffsetResetStrategy.java:90`) or [`parse_failure`]'s message standing
+/// (`AutoOffsetResetStrategy#fromString`) or [`parse_failure`]'s message standing
 /// in for `Duration.parse`'s `DateTimeParseException`.
 fn parse_iso8601_duration(input: &str) -> Result<Duration, Error> {
     // Reject negative durations explicitly (Java rejects them via
-    // `duration.isNegative()` at `AutoOffsetResetStrategy.java:89-91`); a
+    // `duration.isNegative()` in
+    // `org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy#fromString`); a
     // leading '-' would otherwise be accepted by `Duration.parse`. Java's
     // message for this branch is reproduced verbatim because it is the one
     // thing that tells a negative value apart from a malformed one once both
@@ -706,7 +706,7 @@ mod tests {
     }
 
     /// Java's `catch (Exception e)` wraps the failure as the CAUSE of its own
-    /// `IllegalArgumentException` (`AutoOffsetResetStrategy.java:93-95`), and
+    /// `IllegalArgumentException` (`AutoOffsetResetStrategy#fromString`), and
     /// that cause is never null. Both branches share the same outer message, so
     /// the cause is the only thing that tells a malformed duration apart from a
     /// negative one.
@@ -724,7 +724,7 @@ mod tests {
 
     /// The negative-duration branch: Java throws
     /// `IllegalArgumentException("Negative duration is not supported in
-    /// by_duration offset reset strategy.")` at `:90` and its own broad
+    /// by_duration offset reset strategy.")` in `AutoOffsetResetStrategy#fromString` and its own broad
     /// `catch` re-wraps it, so the outer message is identical to the malformed
     /// case and only the cause distinguishes them.
     #[test]

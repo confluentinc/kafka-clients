@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::list_consumer_group_offsets_with_group_specs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions`.
 
 /// Options for `Admin::list_consumer_group_offsets_with_group_specs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions")]
 pub struct ListConsumerGroupOffsetsOptions {
@@ -33,7 +29,15 @@ impl ListConsumerGroupOffsetsOptions {
         Self::default()
     }
 
-    /// Sets an optional `requireStable` flag. Mirrors `requireStable(boolean)`.
+    /// Sets an optional `require_stable` flag.
+    ///
+    /// # Arguments
+    ///
+    /// - `require_stable` - `true` to require stable offsets.
+    ///
+    /// # Returns
+    ///
+    /// This `ListConsumerGroupOffsetsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable")]
     pub fn set_require_stable(mut self, require_stable: bool) -> Self {
@@ -41,7 +45,16 @@ impl ListConsumerGroupOffsetsOptions {
         self
     }
 
-    /// Set the operation timeout in milliseconds (or `None` for the default).
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `ListConsumerGroupOffsetsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -49,13 +62,14 @@ impl ListConsumerGroupOffsetsOptions {
         self
     }
 
-    /// Whether stable offsets are required. Mirrors `requireStable()`.
+    /// Returns whether stable offsets are required.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions#requireStable")]
     pub fn require_stable(&self) -> bool {
         self.require_stable
     }
 
-    /// The operation timeout in milliseconds, or `None` for the default.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

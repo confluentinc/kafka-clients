@@ -31,13 +31,30 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 #[doc(alias = "rust-only")]
 pub trait SampledStatKind: Send + Sync {
     /// Update the current sample with the recorded value (Java `update`).
+    ///
+    /// # Arguments
+    ///
+    /// - `sample` - the current sample
+    /// - `config` - the metric's configuration
+    /// - `value` - the recorded value
+    /// - `time_ms` - the POSIX time in milliseconds of the recording
     fn update(&self, sample: &mut Sample, config: &MetricConfig, value: f64, time_ms: i64);
 
     /// Combine all samples into a single measurement (Java `combine`).
+    ///
+    /// # Arguments
+    ///
+    /// - `samples` - the samples to combine
+    /// - `config` - the metric's configuration
+    /// - `now` - the current POSIX time in milliseconds
+    ///
+    /// # Returns
+    ///
+    /// The measurement.
     fn combine(&self, samples: &[Sample], config: &MetricConfig, now: i64) -> f64;
 
-    /// Whether this is a `WindowedCount` (counts invocations rather than summing
-    /// values). Used by [`crate::common::metrics::stats::Meter`] to decide
+    /// Returns whether this is a `WindowedCount` (counts invocations rather than
+    /// summing values). Used by [`crate::common::metrics::stats::Meter`] to decide
     /// whether the total records `1.0`, mirroring Java's
     /// `rate.stat instanceof WindowedCount` check. Defaults to `false`; only
     /// `WindowedCount` overrides it.
@@ -45,7 +62,7 @@ pub trait SampledStatKind: Send + Sync {
         false
     }
 
-    /// Whether this is a `WindowedSum` (or a subclass of it). `Meter` only
+    /// Returns whether this is a `WindowedSum` (or a subclass of it). `Meter` only
     /// supports a `WindowedSum`/`WindowedCount` rate stat, mirroring Java's
     /// `instanceof WindowedSum` guard. Defaults to `false`.
     fn is_windowed_sum(&self) -> bool {
@@ -63,10 +80,10 @@ pub trait SampledStatKind: Send + Sync {
 /// complete the oldest sample is cleared and recycled to begin recording the
 /// next sample.
 ///
-/// The mutable sample ring + cursor are guarded by a single [`Mutex`] mirroring
-/// Java's sensor `synchronized`. This lock is taken per-fetch / per-partition,
-/// never per-record on the hot path (CLAUDE.md §13/§27).
 #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat")]
+// The mutable sample ring + cursor are guarded by a single `Mutex` mirroring
+// Java's sensor `synchronized`. This lock is taken per-fetch / per-partition,
+// never per-record on the hot path.
 pub struct SampledStat {
     initial_value: f64,
     kind: Box<dyn SampledStatKind>,
@@ -82,6 +99,11 @@ struct SampledStatInner {
 impl SampledStat {
     /// Create a `SampledStat` with the given initial value and per-subclass
     /// behaviour.
+    ///
+    /// # Arguments
+    ///
+    /// - `initial_value` - the value a sample starts from
+    /// - `kind` - the subclass behaviour: `update` and `combine`
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat#SampledStat")]
     pub fn new(initial_value: f64, kind: Box<dyn SampledStatKind>) -> Self {
         Self {
@@ -261,6 +283,11 @@ pub struct Sample {
 
 impl Sample {
     /// Create a sample with no explicit time window.
+    ///
+    /// # Arguments
+    ///
+    /// - `initial_value` - the value the sample starts from
+    /// - `now` - the start time of the sample, in milliseconds
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#Sample")]
     pub fn new(initial_value: f64, now: i64) -> Self {
         Self {
@@ -274,6 +301,12 @@ impl Sample {
     }
 
     /// Create a sample with an explicit time window.
+    ///
+    /// # Arguments
+    ///
+    /// - `initial_value` - the value the sample starts from
+    /// - `now` - the start time of the sample, in milliseconds
+    /// - `time_window_ms` - the sample's time window, or `-1` for the config's
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#Sample")]
     pub fn with_time_window_ms(initial_value: f64, now: i64, time_window_ms: i64) -> Self {
         Self {
@@ -287,6 +320,10 @@ impl Sample {
     }
 
     /// Reset the sample for reuse at `now`, keeping its configured initial value.
+    ///
+    /// # Arguments
+    ///
+    /// - `now` - the new start time of the sample, in milliseconds
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#reset")]
     pub fn reset(&mut self, now: i64) {
         self.event_count = 0;
@@ -305,7 +342,12 @@ impl Sample {
         self.reset(now);
     }
 
-    /// Whether this sample's window is complete at `time_ms`.
+    /// Returns whether this sample's window is complete at `time_ms`.
+    ///
+    /// # Arguments
+    ///
+    /// - `time_ms` - the current POSIX time in milliseconds
+    /// - `config` - the metric's configuration, giving the event and time windows
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#isComplete")]
     pub fn is_complete(&self, time_ms: i64, config: &MetricConfig) -> bool {
         let window_ms = if self.time_window_ms > 0 {
@@ -316,7 +358,7 @@ impl Sample {
         time_ms.wrapping_sub(self.start_time_ms) >= window_ms || self.event_count >= config.event_window()
     }
 
-    /// The initial (reset) value of this sample.
+    /// Returns the initial (reset) value of this sample.
     ///
     /// Java's public `Sample.initialValue`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#initialValue")]
@@ -324,7 +366,7 @@ impl Sample {
         self.initial_value
     }
 
-    /// The number of events recorded into this sample.
+    /// Returns the number of events recorded into this sample.
     ///
     /// Java's public `Sample.eventCount`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#eventCount")]
@@ -332,7 +374,7 @@ impl Sample {
         self.event_count
     }
 
-    /// The time the sample started.
+    /// Returns the time the sample started.
     ///
     /// Java's public `Sample.startTimeMs`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#startTimeMs")]
@@ -340,7 +382,7 @@ impl Sample {
         self.start_time_ms
     }
 
-    /// The time of the last event recorded into the sample.
+    /// Returns the time of the last event recorded into the sample.
     ///
     /// Java's public `Sample.lastEventMs`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#lastEventMs")]
@@ -348,7 +390,7 @@ impl Sample {
         self.last_event_ms
     }
 
-    /// The accumulated value of the sample.
+    /// Returns the accumulated value of the sample.
     ///
     /// Java's public `Sample.value`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#value")]
@@ -356,7 +398,7 @@ impl Sample {
         self.value
     }
 
-    /// The per-sample time window (or `-1` to use the config's window).
+    /// Returns the per-sample time window (or `-1` to use the config's window).
     ///
     /// Java's public `Sample.timeWindowMs`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#timeWindowMs")]
@@ -366,6 +408,10 @@ impl Sample {
 
     /// Sets the number of events recorded into this sample, as Java's
     /// `SampledStat.record` does through the public `Sample.eventCount`.
+    ///
+    /// # Arguments
+    ///
+    /// - `event_count` - the number of events
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#eventCount")]
     pub fn set_event_count(&mut self, event_count: i64) {
         self.event_count = event_count;
@@ -373,6 +419,10 @@ impl Sample {
 
     /// Sets the time of the last event recorded into the sample, as Java's
     /// `SampledStat.record` does through the public `Sample.lastEventMs`.
+    ///
+    /// # Arguments
+    ///
+    /// - `last_event_ms` - the time of the last event, in milliseconds
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#lastEventMs")]
     pub fn set_last_event_ms(&mut self, last_event_ms: i64) {
         self.last_event_ms = last_event_ms;
@@ -380,6 +430,10 @@ impl Sample {
 
     /// Sets the accumulated value of the sample, as Java's `Avg`, `Max`, `Min`
     /// and `WindowedSum` do through the public `Sample.value`.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` - the accumulated value
     #[doc(alias = "org.apache.kafka.common.metrics.stats.SampledStat$Sample#value")]
     pub fn set_value(&mut self, value: f64) {
         self.value = value;
@@ -387,7 +441,7 @@ impl Sample {
 }
 
 impl std::fmt::Debug for SampledStat {
-    /// The fields Java's `toString()` prints; the stat's kind is a trait object.
+    // The fields Java's `toString()` prints; the stat's kind is a trait object.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.inner.lock().expect("sampled stat mutex poisoned");
         f.debug_struct("SampledStat")
@@ -484,7 +538,7 @@ mod tests {
 
     /// Extreme caller-given times and sample counts wrap as Java's `long` and
     /// `int` arithmetic does instead of panicking (they reach here from C
-    /// through the void `kafka_common_metrics_Sensor_record_with_value_time_ms`
+    /// through `kafka_common_metrics_Sensor_record_with_value_time_ms`
     /// and `kafka_common_metrics_MetricConfig_set_samples`). No Java
     /// counterpart.
     #[test]

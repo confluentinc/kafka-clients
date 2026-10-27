@@ -628,6 +628,7 @@ mod tests {
             is_default: false,
             param_names: params.iter().map(|_| "o".to_string()).collect(),
             returns_class: false,
+            javadoc: None,
         };
         java::JavaClass {
             module: package.split('.').filter(|s| *s != "clients").map(str::to_string).collect(),
@@ -649,6 +650,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: supertypes.iter().map(|s| s.to_string()).collect(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 

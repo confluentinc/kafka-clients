@@ -15,9 +15,9 @@
 //! Configuration for the Kafka Consumer.
 //!
 //! Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`: the keys
-//! are defined on a `ConfigDef` in Java's order (`ConsumerConfig.java:440-745`)
+//! are defined on a `ConfigDef` in Java's order (`ConsumerConfig.CONFIG`)
 //! and parsed and validated by it, `postProcessParsedConfig` runs Java's steps
-//! (`ConsumerConfig.java:748-757`), and the configuration answers Java's
+//! (`ConsumerConfig#postProcessParsedConfig`), and the configuration answers Java's
 //! `AbstractConfig` getters.
 //!
 //! Per `consumer-threading.md` §20 only the KIP-848 `consumer` group protocol
@@ -69,7 +69,7 @@ use crate::{ClientDnsLookup, CommonClientConfigs};
 /// Process-wide counter for deriving a default `client.id`.
 ///
 /// Corresponds to Java's `static AtomicInteger CONSUMER_CLIENT_ID_SEQUENCE`
-/// (`ConsumerConfig.java:418`), which starts at 1. Crate-level (not per-config)
+/// (`org.apache.kafka.clients.consumer.ConsumerConfig#CONSUMER_CLIENT_ID_SEQUENCE`), which starts at 1. Crate-level (not per-config)
 /// to match Java's static scope, so successive consumers in one process get
 /// distinct ids.
 static CONSUMER_CLIENT_ID_SEQUENCE: AtomicI32 = AtomicI32::new(1);
@@ -233,7 +233,7 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Range::at_least(0_i64),
             Importance::Low,
         )
-        // Java defines `enable.metrics.push` here (`ConsumerConfig.java:570-574`);
+        // Java defines `enable.metrics.push` here;
         // it is left undefined until KIP-714 client telemetry is implemented.
         .define_with_validator(
             ConsumerConfig::AUTO_OFFSET_RESET_CONFIG,
@@ -403,8 +403,7 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             share_acquire_mode_validator(),
             Importance::Medium,
         )
-    // Java ends the chain with `config.providers` (`ConsumerConfig.java`
-    // 740-745); it is left undefined until config providers are translated.
+    // Java ends the chain with `config.providers`; it is left undefined until config providers are translated.
 });
 
 /// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
@@ -456,23 +455,21 @@ fn share_acquire_mode_validator() -> LambdaValidator {
     )
 }
 
-/// Configuration for the Kafka Consumer.
-///
-/// Documentation for the underlying keys can be found in the
-/// [Kafka documentation](http://kafka.apache.org/documentation.html#consumerconfigs).
-///
-/// As in Java, the configuration is built from the property map by
-/// [`ConsumerConfig::new`], which parses every key to its `ConfigDef` type,
-/// applies its validator and runs Java's `postProcessParsedConfig`. Values are
-/// read back with Java's `AbstractConfig` getters ([`Self::get_int`],
-/// [`Self::get_string`], ...). Keys it does not define are accepted, as Java
-/// accepts them; the consumer reports them, with the defined keys it does not
-/// read, in one line when it is built ([`Self::log_unused`]).
-///
-/// Equality and hashing are Java's `equals` / `hashCode`: two configurations
-/// are equal when they were built from equal properties.
-///
-/// Corresponds to `org.apache.kafka.clients.consumer.ConsumerConfig`.
+/// The consumer configuration keys
+// Documentation for the underlying keys can be found in the Kafka
+// documentation (http://kafka.apache.org/documentation.html#consumerconfigs).
+//
+// As in Java, the configuration is built from the property map by
+// `ConsumerConfig::new`, which parses every key to its `ConfigDef` type,
+// applies its validator and runs Java's `postProcessParsedConfig`. Values are
+// read back with Java's `AbstractConfig` getters (`get_int`, `get_string`,
+// ...). Keys it does not define are accepted, as Java accepts them; the
+// consumer reports them, with the defined keys it does not read, in one line
+// when it is built (`log_unused`).
+//
+// Equality and hashing are Java's `equals` / `hashCode`: two configurations
+// are equal when they were built from equal properties.
+//
 // `Debug` is derived: every secret the typed fields hold is a `Password`
 // inside `sasl_config` / `ssl_config`, which renders as `[hidden]`, and
 // `AbstractConfig`'s `Debug` renders the properties as their key set only: the
@@ -573,7 +570,7 @@ pub struct ConsumerConfig {
     pub(crate) metadata_recovery_strategy: String,
     /// `metadata.recovery.rebootstrap.trigger.ms`
     pub(crate) metadata_recovery_rebootstrap_trigger_ms: i64,
-    /// `metadata.cluster.check.enable` (KIP-1242; `ConsumerConfig.java:723-727`)
+    /// `metadata.cluster.check.enable` (KIP-1242)
     pub(crate) metadata_cluster_check_enable: bool,
 
     // --- Misc / Behavior ---
@@ -607,7 +604,7 @@ pub struct ConsumerConfig {
 }
 
 impl PartialEq for ConsumerConfig {
-    /// Java's `AbstractConfig.equals`: the originals are equal.
+    // Java's `AbstractConfig.equals`: the originals are equal.
     fn eq(&self, other: &Self) -> bool {
         self.config == other.config
     }
@@ -616,7 +613,7 @@ impl PartialEq for ConsumerConfig {
 impl Eq for ConsumerConfig {}
 
 impl Hash for ConsumerConfig {
-    /// Java's `AbstractConfig.hashCode`, over the originals.
+    // Java's `AbstractConfig.hashCode`, over the originals.
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.config.hash(state);
     }
@@ -655,7 +652,8 @@ impl ConsumerConfig {
         // An empty `group.id` is kept, not coerced to `None`: Java's `ConfigDef`
         // does not coerce `""` to null, and
         // `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
-        // (`AsyncKafkaConsumer.java:839-844`). Coercing it here would turn
+        // (`org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#initializeGroupMetadata`).
+        // Coercing it here would turn
         // that configuration error into a groupless consumer.
         let group_id = values.string_or_null(Self::GROUP_ID_CONFIG)?.map(str::to_string);
         let group_instance_id = values.string_or_null(Self::GROUP_INSTANCE_ID_CONFIG)?.map(str::to_string);
@@ -801,14 +799,14 @@ impl ConsumerConfig {
 
     /// Config key: `bootstrap.servers`.
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
-    /// Config key: `client.dns.lookup`. Java's `ConsumerConfig.java` declares it as its
+    /// Config key: `client.dns.lookup`. Java's `ConsumerConfig` declares it as its
     /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
     /// Config key: `client.id`.
     pub const CLIENT_ID_CONFIG: &'static str = "client.id";
     /// Config key: `client.rack`.
     pub const CLIENT_RACK_CONFIG: &'static str = crate::CommonClientConfigs::CLIENT_RACK_CONFIG;
-    /// Default value of `client.rack`: no rack (`ConsumerConfig.java:267`).
+    /// Default value of `client.rack`: no rack.
     pub const DEFAULT_CLIENT_RACK: &'static str = crate::CommonClientConfigs::DEFAULT_CLIENT_RACK;
 
     /// Config key: `enable.auto.commit`.
@@ -864,7 +862,7 @@ impl ConsumerConfig {
     /// data on restart.
     ///
     /// (Text of Java's `ConsumerConfig.AUTO_OFFSET_RESET_DOC`,
-    /// `ConsumerConfig.java:183-206`, as rewritten by KAFKA-20539. This client
+    /// as rewritten by KAFKA-20539. This client
     /// implements only the `consumer` group protocol; the `classic` item is kept
     /// because the setting itself is protocol-independent.)
     pub const AUTO_OFFSET_RESET_CONFIG: &'static str = "auto.offset.reset";
@@ -934,7 +932,7 @@ impl ConsumerConfig {
     pub const DEFAULT_EXCLUDE_INTERNAL_TOPICS: bool = true;
     /// Config key: `internal.throw.on.fetch.stable.offset.unsupported`.
     ///
-    /// Package-private in Java (`ConsumerConfig.java:370`), like every
+    /// Package-private in Java, like every
     /// `internal.*` key: Java may remove it in a minor release.
     pub(crate) const THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED: &'static str =
         "internal.throw.on.fetch.stable.offset.unsupported";
@@ -943,8 +941,7 @@ impl ConsumerConfig {
     /// Default for `isolation.level`: `read_committed`, so a consumer returns
     /// only the transactional records that were committed.
     ///
-    /// This deviates from Java, whose `DEFAULT_ISOLATION_LEVEL` is
-    /// `read_uncommitted` (`ConsumerConfig.java:382`); `read_committed` is
+    /// WARNING: Java's default is `read_uncommitted`. `read_committed` is
     /// librdkafka's default, which users of the other Confluent clients
     /// expect. Set `isolation.level=read_uncommitted` for Java's behaviour.
     pub const DEFAULT_ISOLATION_LEVEL: &'static str = "read_committed";
@@ -965,36 +962,47 @@ impl ConsumerConfig {
     /// Config key: `share.acquire.mode`.
     pub const SHARE_ACQUIRE_MODE_CONFIG: &'static str = "share.acquire.mode";
 
-    /// Creates a config from a property map: Java's `ConsumerConfig(Map)`.
+    /// Constructs a new ConsumerConfig with the given properties.
     ///
-    /// Every value is parsed to its `ConfigDef` type and checked by its
-    /// validator, then Java's `postProcessParsedConfig`
-    /// (`ConsumerConfig.java:748-757`) runs: `postValidateSaslMechanismConfig`,
-    /// `warnDisablingExponentialBackoff`, `postProcessReconnectBackoffConfigs`,
-    /// `maybeOverrideClientId` (an unset or empty `client.id` becomes
-    /// `consumer-<group.id>-<group.instance.id or a process-wide sequence>`),
-    /// `maybeOverrideEnableAutoCommit` (`enable.auto.commit` defaults to
-    /// `false` without a `group.id`), `checkUnsupportedConfigsPostProcess` and
-    /// the `connections.max.idle.ms` warning.
+    /// # Arguments
+    ///
+    /// - `props` - The consumer configuration properties
     ///
     /// # Errors
     ///
-    /// - [`Error::Config`] when a value fails to parse or validate, with
-    ///   `ConfigDef`'s message; when `bootstrap.servers` is missing; when a SASL
-    ///   `security.protocol` has an empty `sasl.mechanism`; when a key the
-    ///   `group.protocol` does not support is set (`group.remote.assignor`,
-    ///   `share.acknowledgement.mode` or `share.acquire.mode` with `classic`;
-    ///   `partition.assignment.strategy`, `heartbeat.interval.ms`,
-    ///   `session.timeout.ms` or the two share keys with `consumer`).
-    /// - [`Error::InvalidConfiguration`] when `enable.auto.commit` is `true`
-    ///   without a `group.id`.
-    /// - The error of `JoinGroupRequest.validateGroupInstanceId` for an invalid
-    ///   `group.instance.id` when `client.id` is derived from it.
-    /// - A [`ConfigError`](crate::common::config::ConfigError) when a SASL
-    ///   `security.protocol` has a `sasl.mechanism` other than `PLAIN`: Java
-    ///   accepts any mechanism name, but this client implements only PLAIN,
-    ///   and a client built with another mechanism would fail only later, at
-    ///   authentication.
+    /// - `Error::is_config_error` if a value is invalid, the settings
+    ///   conflict, or `sasl.mechanism` is not `PLAIN` under a SASL
+    ///   `security.protocol`.
+    /// - `Error::is_invalid_configuration_error` if `enable.auto.commit` is
+    ///   `true` without a `group.id`.
+    ///
+    /// # Translation notes
+    ///
+    /// WARNING: `sasl.mechanism` must be `PLAIN`.
+    // Every value is parsed to its `ConfigDef` type and checked by its
+    // validator, then Java's `postProcessParsedConfig` runs:
+    // `postValidateSaslMechanismConfig`, `warnDisablingExponentialBackoff`,
+    // `postProcessReconnectBackoffConfigs`, `maybeOverrideClientId` (an unset
+    // or empty `client.id` becomes
+    // `consumer-<group.id>-<group.instance.id or a process-wide sequence>`),
+    // `maybeOverrideEnableAutoCommit` (`enable.auto.commit` defaults to `false`
+    // without a `group.id`), `checkUnsupportedConfigsPostProcess` and the
+    // `connections.max.idle.ms` warning.
+    //
+    // The config errors: a value fails to parse or validate, with
+    // `ConfigDef`'s message; `bootstrap.servers` is missing; a SASL
+    // `security.protocol` has an empty `sasl.mechanism`; a key the
+    // `group.protocol` does not support is set (`group.remote.assignor`,
+    // `share.acknowledgement.mode` or `share.acquire.mode` with `classic`;
+    // `partition.assignment.strategy`, `heartbeat.interval.ms`,
+    // `session.timeout.ms` or the two share keys with `consumer`). An invalid
+    // `group.instance.id` fails with `JoinGroupRequest.validateGroupInstanceId`'s
+    // error when `client.id` is derived from it.
+    //
+    // A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
+    // fails with a config error: Java accepts any mechanism name, but this
+    // client implements only PLAIN, and a client built with another one
+    // would fail only later, at authentication.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#ConsumerConfig(Map)")]
     pub fn new(props: &HashMap<String, String>) -> Result<Self, Error> {
         Self::build(string_originals(props), None)
@@ -1006,7 +1014,8 @@ impl ConsumerConfig {
     ///
     /// Java hands each client the `ConsumerConfig` it is given, which took
     /// its one number from the `client.id` sequence when it was built
-    /// (`AsyncKafkaConsumer.java:476` reads it), so clients given one
+    /// (`org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer`'s
+    /// constructor reads it), so clients given one
     /// configuration share its id. Building the configuration again would
     /// take a second number; this copy does not. It is not `Clone`
     /// (CLAUDE.md §3).
@@ -1209,128 +1218,203 @@ impl ConsumerConfig {
         }
     }
 
-    /// The `SHORT` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `SHORT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'` when
-    ///   `key` is not a configuration this class defines.
-    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type, where Java's cast fails with a `ClassCastException`.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getShort")]
     pub fn get_short(&self, key: &str) -> Result<Option<i16>, Error> {
         self.config.get_short(key)
     }
 
-    /// The `INT` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `INT` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getInt")]
     pub fn get_int(&self, key: &str) -> Result<Option<i32>, Error> {
         self.config.get_int(key)
     }
 
-    /// The `LONG` configuration `key`, `None` for Java's `null`. Reading a key
-    /// marks it used ([`Self::unused`]).
+    /// The `LONG` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getLong")]
     pub fn get_long(&self, key: &str) -> Result<Option<i64>, Error> {
         self.config.get_long(key)
     }
 
-    /// The `DOUBLE` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `DOUBLE` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getDouble")]
     pub fn get_double(&self, key: &str) -> Result<Option<f64>, Error> {
         self.config.get_double(key)
     }
 
-    /// The `LIST` configuration `key`, borrowed from the parsed values, `None`
-    /// for Java's `null`. Reading a key marks it used ([`Self::unused`]).
+    /// The `LIST` configuration `key`, borrowed from the parsed values.
+    /// Reading a key marks it used ([`Self::unused`]).
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
     ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getList")]
     pub fn get_list(&self, key: &str) -> Result<Option<&[String]>, Error> {
         self.config.get_list(key)
     }
 
-    /// The `BOOLEAN` configuration `key`, `None` for Java's `null`. Reading a
-    /// key marks it used ([`Self::unused`]).
+    /// The `BOOLEAN` configuration `key`. Reading a key marks it used
+    /// ([`Self::unused`]).
     ///
     /// `enable.auto.commit` answers the value `postProcessParsedConfig`
     /// settled on: `false` without a `group.id` when it was not set.
     ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` for Java's `null`.
+    ///
     /// # Errors
     ///
-    /// As [`Self::get_short`].
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getBoolean")]
     pub fn get_boolean(&self, key: &str) -> Result<Option<bool>, Error> {
         self.config.get_boolean(key)
     }
 
-    /// The `STRING` configuration `key`, trimmed, or `None` when it has no
-    /// value (Java's `null`, e.g. an unset `group.id`). Reading a key marks it
-    /// used ([`Self::unused`]).
+    /// The `STRING` configuration `key`, trimmed. Reading a key marks it used
+    /// ([`Self::unused`]).
     ///
     /// `client.id` answers the resolved id: when the property is unset, `new`
     /// derives it the way Java's `maybeOverrideClientId` does, so this is the
     /// id the consumer reports to the brokers. `security.protocol` answers the
     /// value as written, trimmed (`"sasl_ssl"`), as Java's does: its validator
     /// accepts it case-insensitively without changing it. A `PASSWORD`
-    /// configuration that is not set answers `None`, as Java's `null`
-    /// default casts to `String` (`SslConfigs.java:135-142`,
-    /// `SaslConfigs.java:398`).
+    /// configuration that is not set answers `None`, as Java's `null` default
+    /// casts to `String`.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
+    ///
+    /// # Returns
+    ///
+    /// The value, `None` when it has no value (Java's `null`, e.g. an unset
+    /// `group.id`).
     ///
     /// # Errors
     ///
-    /// - [`Error::LocalIllegalArgument`] when `key` is a configuration of
-    ///   another type (`max.poll.records`, a set `ssl.keystore.key`). Java's
-    ///   `getString` casts `get(key)` to `String` (`AbstractConfig.java:212-215`)
-    ///   and fails with a `ClassCastException`, which, like
-    ///   `IllegalArgumentException`, is not a `KafkaException`.
-    /// - [`Error::Config`] with Java's `Unknown configuration '<key>'`
-    ///   (`AbstractConfig.java:176-181`) when `key` is not a configuration this
-    ///   class defines.
+    /// - `Error::is_config_error` with Java's `Unknown configuration '<key>'`
+    ///   if `key` is not a configuration this class defines.
+    /// - `Error::is_local_illegal_argument_error` if `key` is a configuration
+    ///   of another type, where Java's cast fails with a `ClassCastException`.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#getString")]
     pub fn get_string(&self, key: &str) -> Result<Option<&str>, Error> {
         self.config.get_string(key)
     }
 
-    /// The keys of the properties this configuration was built from that were
-    /// never read: through a getter, or by the consumer built from it.
+    /// Returns the keys of the properties this configuration was built from
+    /// that were never read: through a getter, or by the consumer built from
+    /// it.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#unused")]
     pub fn unused(&self) -> HashSet<String> {
         self.config.unused()
     }
 
     /// Marks the configuration `key` used without reading it.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - the configuration name
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#ignore")]
     pub fn ignore(&self, key: &str) {
         self.config.ignore(key);
     }
 
-    /// Info level log for any unused configurations: one line,
-    /// `These configurations '[a, b]' were supplied but are not used yet.`,
-    /// and nothing when every key was used.
+    /// Info level log for any unused configurations
+    // One line, `These configurations '[a, b]' were supplied but are not used
+    // yet.`, and nothing when every key was used.
     #[doc(alias = "org.apache.kafka.common.config.AbstractConfig#logUnused")]
     pub fn log_unused(&self) {
         self.config.log_unused();
     }
 
     /// The names of the configurations this class defines.
+    ///
+    /// # Returns
+    ///
+    /// The set of configuration keys
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerConfig#configNames")]
     pub fn config_names() -> HashSet<String> {
         CONFIG.names()
@@ -1534,7 +1618,7 @@ mod tests {
     /// Boolean config values are parsed case-insensitively after trimming, and an
     /// unparseable value is rejected with Java's message and the original,
     /// untrimmed value. Mirrors `ConfigDef.parseType(BOOLEAN)`
-    /// (`ConfigDef.java:703-737`): `equalsIgnoreCase("true")` / `("false")`, else
+    /// (`org.apache.kafka.common.config.ConfigDef#parseType`): `equalsIgnoreCase("true")` / `("false")`, else
     /// `ConfigException(name, value, "Expected value to be either true or false")`.
     #[test]
     fn test_parse_bool_matches_java_boolean() {
@@ -1596,8 +1680,7 @@ mod tests {
         assert!(ConsumerConfig::new(&props).is_err());
     }
 
-    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`
-    /// (`ConsumerConfig.java:723-727`).
+    /// `metadata.cluster.check.enable` (KIP-1242): `Type.BOOLEAN`, default `true`.
     #[test]
     fn test_metadata_cluster_check_enable() {
         assert!(ConsumerConfig::new(&base_props()).unwrap().metadata_cluster_check_enable);
@@ -1619,8 +1702,8 @@ mod tests {
         );
     }
 
-    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java
-    /// `ConsumerConfig.java:717-721`): 0 is accepted, -1 is rejected with
+    /// `metadata.recovery.rebootstrap.trigger.ms` is `atLeast(0)` (Java's
+    /// `ConsumerConfig.CONFIG`): 0 is accepted, -1 is rejected with
     /// Java's `ConfigDef.Range.atLeast` message.
     #[test]
     fn test_metadata_recovery_rebootstrap_trigger_ms_validator() {
@@ -1643,8 +1726,8 @@ mod tests {
     }
 
     /// `request.timeout.ms` and `default.api.timeout.ms` are `atLeast(0)`
-    /// (Java `ConsumerConfig.java:618-629`): 0 is accepted and a negative
-    /// value is rejected when the config is built. A negative value would
+    /// (Java `org.apache.kafka.clients.consumer.ConsumerConfig#CONFIG`): 0 is
+    /// accepted and a negative value is rejected when the config is built. A negative value would
     /// otherwise reach `CompletableEvent::calculate_deadline_ms`, which maps a
     /// negative timeout to "no deadline", so every default-timeout API and
     /// `close()` could wait forever.
@@ -1800,7 +1883,7 @@ mod tests {
         assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
     }
 
-    /// `bootstrap.servers` has `NO_DEFAULT_VALUE` (`ConsumerConfig.java:441-443`), so a config
+    /// `bootstrap.servers` has `NO_DEFAULT_VALUE`, so a config
     /// without it fails at parse time with `ConfigDef.parseValue`'s message.
     #[test]
     fn test_missing_bootstrap_servers_rejected_with_exact_message() {
@@ -2063,7 +2146,8 @@ mod tests {
 
     /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
     /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
-    /// (`AsyncKafkaConsumer.java:839-844`). Coercing it to `None` here would
+    /// (`org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#initializeGroupMetadata`).
+    /// Coercing it to `None` here would
     /// turn a hard configuration error into a groupless consumer, which then
     /// fails much later and much less legibly.
     #[test]
@@ -2112,7 +2196,7 @@ mod tests {
     }
 
     /// `bootstrap.servers` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(false, false)` (`ConsumerConfig.java:444`): an empty
+    /// `ValidList.anyNonDuplicateValues(false, false)`: an empty
     /// element is rejected with `ConfigDef`'s exact message and duplicates are removed
     /// (single-message `ConfigException`, no `Invalid value` prefix). An empty list is rejected too.
     #[test]
@@ -2526,7 +2610,7 @@ mod tests {
     // others (`getList`, `getBoolean`, `getInt`, `originals()`) are not, and the
     // crate-private getters and fields stand in for them, which is why these
     // tests live in the crate rather than in `tests/consumer`. Java seeds `key.deserializer` / `value.deserializer` into
-    // every property map (`ConsumerConfigTest.java:60`) because its `ConfigDef`
+    // every property map (`org.apache.kafka.clients.consumer.ConsumerConfigTest`) because its `ConfigDef`
     // defines them with no default; Rust takes the deserializers as constructor
     // arguments to the consumer, and `ConsumerConfig` holds no deserializer state,
     // so the two keys are absent from `base_props`.
@@ -2872,7 +2956,7 @@ mod tests {
         );
     }
 
-    /// Java's `atLeast` validators (`ConsumerConfig.java:440-745`), each with
+    /// Java's `atLeast` validators (`ConsumerConfig.CONFIG`), each with
     /// `ConfigDef.Range`'s message.
     #[test]
     fn test_at_least_validators() {

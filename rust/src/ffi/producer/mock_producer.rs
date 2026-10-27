@@ -169,7 +169,17 @@ fn box_mock(
 // ---------------------------------------------------------------------------
 
 /// `new MockProducer(boolean autoComplete, Serializer, Serializer)` without
-/// serializers: owned, freed with [`kafka_producer_MockProducer_destroy`].
+/// serializers.
+///
+/// # Parameters
+///
+/// - `auto_complete` - If true automatically complete all requests successfully and execute the
+///   callback. Otherwise the user must call `complete_next` or `error_next` after
+///   send() to complete the call and unblock the Future<RecordMetadata> that is returned.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with [`kafka_producer_MockProducer_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducer_with_auto_complete(
@@ -181,9 +191,18 @@ pub extern "C" fn kafka_producer_MockProducer_with_auto_complete(
 /// `new MockProducer(Cluster, boolean autoComplete, Serializer, Serializer)`
 /// without serializers; the cluster is copied.
 ///
+/// # Parameters
+///
+/// - `cluster` - The cluster holding metadata for this producer
+/// - `auto_complete` - If true automatically complete all requests successfully and execute the
+///   callback. Otherwise the user must call `complete_next` or `error_next` after
+///   send() to complete the call and unblock the Future<RecordMetadata> that is returned.
+///
 /// # Safety
 ///
 /// `cluster` must be a live handle.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_MockProducer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_with_cluster_auto_complete(
@@ -201,12 +220,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_cluster_auto_complete(
     )
 }
 
-/// `MockProducer::with_options`: the five-parameter constructor through
-/// built [`kafka_producer_MockProducerOptions_t`], which stay the caller's.
+/// `MockProducer::with_options`: the five-parameter constructor.
+///
+/// # Parameters
+///
+/// - `options` - the constructor's parameters
 ///
 /// # Safety
 ///
-/// `options` must be a live handle.
+/// `options` must be a live handle, which stays the caller's.
+///
+/// The returned handle is owned by the caller, freed with `kafka_producer_MockProducer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
@@ -221,12 +245,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_with_options(
     box_mock(MockProducer::with_options(options.build()), !has_c_serializer)
 }
 
-/// The class as a `Producer`: a borrowed view valid until the class handle
-/// is destroyed (CLAUDE.md §4 rule 3).
+/// The class as a `Producer`.
+///
+/// # Returns
+///
+/// The `Producer` view of the class.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class
+/// handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
@@ -238,8 +266,22 @@ pub unsafe extern "C" fn kafka_producer_MockProducer__as_Producer(
     unsafe { handle(self_) }.as_producer()
 }
 
-/// Frees the handle (see "Destroy" in the module docs of
-/// [`crate::ffi::producer`]); null is a no-op.
+/// Frees the handle; `NULL` is a no-op. Every `__as_Producer` view of it is
+/// invalid afterwards.
+///
+/// It waits for the tasks spawned by `_cb` calls, then stops the submission
+/// task and waits for it and for the records it left waiting on tasks of their
+/// own, runs the still-pending callbacks so each fires exactly once, and drops
+/// the producer; the `kafka_common_KafkaFuture_get_cb` calls still waiting on
+/// its futures fire last, once each. The delivery callbacks it runs may report
+/// inline; once it ran them it completes the ones still unreported as if each
+/// had reported success, so nothing waits forever, and
+/// `kafka_producer_Producer__set_callback_result` must not be called for it
+/// from elsewhere once this call began. It does not close the producer: one
+/// destroyed without `close` is force-closed with a warning, so a caller that
+/// wants a graceful shutdown calls `close` first. Called inside a tokio
+/// runtime, where it cannot wait, it returns at once and does all of this on a
+/// new thread, the pending callbacks included.
 ///
 /// # Safety
 ///
@@ -359,12 +401,16 @@ unsafe fn destroy_map(element: *mut c_void) {
     unsafe { kafka_Map_destroy(element as *mut kafka_Map_t) }
 }
 
-/// `MockProducer.history()`: an owned `kafka_List_t` of owned
-/// `kafka_producer_ProducerRecord_t *`.
+/// Get the list of sent records since the last call to `clear`.
+///
+/// # Returns
+///
+/// The sent records.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The returned list of
+/// `kafka_producer_ProducerRecord_t *` and its records are owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_history(
@@ -375,12 +421,19 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history(
     record_list(unsafe { mock(self_) }.history())
 }
 
-/// `MockProducer.uncommittedRecords()`: an owned `kafka_List_t` of owned
+/// `MockProducer.uncommittedRecords()`: a `kafka_List_t` of
 /// `kafka_producer_ProducerRecord_t *`.
+///
+/// # Returns
+///
+/// A list of uncommitted producer records
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// records; their keys and values stay the application's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
@@ -391,13 +444,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_records(
     record_list(unsafe { mock(self_) }.uncommitted_records())
 }
 
-/// `MockProducer.consumerGroupOffsetsHistory()`: an owned `kafka_List_t` of
-/// owned `kafka_Map_t *`, each a `char *` group id to an owned `kafka_Map_t *`
-/// of `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`.
+/// Get the list of committed consumer group offsets since the last call to `clear`.
+///
+/// # Returns
+///
+/// The committed offsets, one map per commit.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The returned list, owned by the caller, holds
+/// owned `kafka_Map_t *`, each a `char *` group id to an owned `kafka_Map_t *` of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_history(
@@ -413,13 +470,20 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_consumer_group_offsets_hist
     box_list(elements, Some(destroy_map))
 }
 
-/// `MockProducer.uncommittedOffsets()`: an owned `kafka_Map_t` of `char *`
-/// group id to an owned `kafka_Map_t *` of `kafka_common_TopicPartition_t *`
-/// to `kafka_consumer_OffsetAndMetadata_t *`.
+/// `MockProducer.uncommittedOffsets()`: a `kafka_Map_t` of `char *` group id
+/// to a `kafka_Map_t *` of `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *`.
+///
+/// # Returns
+///
+/// A map of consumer group IDs to their uncommitted offsets
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and the inner maps with their keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_uncommitted_offsets(
@@ -447,8 +511,15 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(self_: *const kafka_p
     unsafe { mock(self_) }.clear();
 }
 
-/// `MockProducer.completeNext()`: completes the earliest uncompleted send
-/// successfully (its delivery callback is queued); `0` when none was pending.
+/// Complete the earliest uncompleted call successfully.
+///
+/// # Returns
+///
+/// 1 if there was an uncompleted call to complete, 0 otherwise
+///
+/// # Translation notes
+///
+/// Its delivery callback is queued.
 ///
 /// # Safety
 ///
@@ -461,15 +532,20 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(self_: *const
     i8::from(unsafe { mock(self_) }.complete_next())
 }
 
-/// `MockProducer.errorNext(RuntimeException e)`: fails the earliest
-/// uncompleted send with `error`, whose ownership moves to the mock. As in
-/// Java, a `NULL` error completes the send successfully. `0` when none was
-/// pending.
+/// Complete the earliest uncompleted call with the given error.
+///
+/// # Parameters
+///
+/// - `error` - the error, or `NULL` to complete successfully
+///
+/// # Returns
+///
+/// 1 if there was an uncompleted call to complete
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
@@ -490,6 +566,12 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
 
 /// `MockProducer.fenceProducer()`.
 ///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the mock is closed or not initialized
+///   for transactions
+/// - `kafka_common_Error_is_producer_fenced_error` if it is already fenced
+///
 /// # Safety
 ///
 /// `self_` must be a live handle. `out_err` must be a valid slot pointing at
@@ -509,6 +591,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_fence_producer(
 
 /// `MockProducer.transactionInitialized()`.
 ///
+/// # Returns
+///
+/// `true` if transactions have been initialized, `false` otherwise
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -523,6 +609,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_initialized(
 }
 
 /// `MockProducer.transactionInFlight()`.
+///
+/// # Returns
+///
+/// `true` if a transaction is in progress, `false` otherwise
 ///
 /// # Safety
 ///
@@ -539,6 +629,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_in_flight(
 
 /// `MockProducer.transactionCommitted()`.
 ///
+/// # Returns
+///
+/// `true` if the transaction was committed, `false` otherwise
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -553,6 +647,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_committed(
 }
 
 /// `MockProducer.transactionAborted()`.
+///
+/// # Returns
+///
+/// `true` if the transaction was aborted, `false` otherwise
 ///
 /// # Safety
 ///
@@ -569,6 +667,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_transaction_aborted(
 
 /// `MockProducer.sentOffsets()`.
 ///
+/// # Returns
+///
+/// `true` if offsets were sent in the current transaction, `false` otherwise
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -582,6 +684,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(self_: *const 
 
 /// `MockProducer.closed()`.
 ///
+/// # Returns
+///
+/// `true` if the producer has been closed, `false` otherwise
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -594,6 +700,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_closed(self_: *const kafka_
 }
 
 /// `MockProducer.flushed()`.
+///
+/// # Returns
+///
+/// `true` if there are no pending completions, `false` otherwise
 ///
 /// # Safety
 ///
@@ -610,6 +720,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_flushed(self_: *const kafka
 ///
 /// A caught Rust panic returns -1, which no count is.
 ///
+/// # Returns
+///
+/// The commit count
+///
 /// # Safety
 ///
 /// `self_` must be a live handle.
@@ -621,13 +735,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_commit_count(self_: *const 
     unsafe { mock(self_) }.commit_count()
 }
 
-/// `MockProducer.sendException = e`: the error the next `send` fails with.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `send` or `send_with_callback` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
@@ -640,13 +757,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_error(
     unsafe { mock(self_) }.set_send_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.flushException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `flush` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
@@ -659,13 +779,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_flush_error(
     unsafe { mock(self_) }.set_flush_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.partitionsForException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `partitions_for` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
@@ -678,13 +801,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_partitions_for_error(
     unsafe { mock(self_) }.set_partitions_for_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.closeException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `close` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
@@ -697,13 +823,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_close_error(
     unsafe { mock(self_) }.set_close_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.initTransactionException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `init_transactions` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
@@ -716,13 +845,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_init_transaction_error(
     unsafe { mock(self_) }.set_init_transaction_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.beginTransactionException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `begin_transaction` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error(
@@ -735,13 +867,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_begin_transaction_error
     unsafe { mock(self_) }.set_begin_transaction_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.sendOffsetsToTransactionException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `send_offsets_to_transaction` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transaction_error(
@@ -754,13 +889,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_send_offsets_to_transac
     unsafe { mock(self_) }.set_send_offsets_to_transaction_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.commitTransactionException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `commit_transaction` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_error(
@@ -773,13 +911,16 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_erro
     unsafe { mock(self_) }.set_commit_transaction_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.abortTransactionException = e`.
-/// The error's ownership moves to the mock; `NULL` clears it.
+/// The error to throw when `abort_transaction` is called.
+///
+/// # Parameters
+///
+/// - `error` - `NULL` clears it
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle and `error` null or an owned error not yet
-/// destroyed.
+/// destroyed, whose ownership moves to the mock.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_abort_transaction_error(
@@ -792,12 +933,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_set_abort_transaction_error
     unsafe { mock(self_) }.set_abort_transaction_error(unsafe { take_error(error) });
 }
 
-/// `MockProducer.setMockMetrics(MetricName, Metric)`: both are copied
-/// (the metric shares its Rust value).
+/// Set a mock metric for testing purpose
+///
+/// # Parameters
+///
+/// - `name` - its name
+/// - `metric` - the metric
 ///
 /// # Safety
 ///
-/// `self_`, `name` and `metric` must be live handles.
+/// `self_`, `name` and `metric` must be live handles. `name` and `metric` stay the
+/// caller's: the mock keeps a copy of the name and shares the metric's value.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducer_set_mock_metrics(
@@ -834,7 +980,15 @@ unsafe fn builder<'a>(self_: *mut kafka_producer_MockProducerOptionsBuilder_t) -
     unsafe { &mut *(self_ as *mut BuilderInner) }
 }
 
-/// `MockProducerOptionsBuilder::new()`: owned, freed with
+/// `MockProducerOptionsBuilder::new()`.
+///
+/// # Returns
+///
+/// A new builder.
+///
+/// # Safety
+///
+/// The builder is owned by the caller, freed with
 /// [`kafka_producer_MockProducerOptionsBuilder_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -842,7 +996,11 @@ pub extern "C" fn kafka_producer_MockProducerOptionsBuilder_new() -> *mut kafka_
     Box::into_raw(Box::new(BuilderInner::default())) as *mut kafka_producer_MockProducerOptionsBuilder_t
 }
 
-/// `set_cluster`: copied; unset means `Cluster.empty()`.
+/// `set_cluster`.
+///
+/// # Parameters
+///
+/// - `cluster` - the cluster, copied; unset means `Cluster.empty()`
 ///
 /// # Safety
 ///
@@ -862,6 +1020,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_cluster(
 
 /// `set_auto_complete`: mandatory.
 ///
+/// # Parameters
+///
+/// - `auto_complete` - whether each send completes at once
+///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time.
@@ -877,14 +1039,18 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_auto_comp
     unsafe { builder(self_) }.auto_complete = Some(auto_complete != 0);
 }
 
-/// `set_partitioner`: consumes an owned `kafka_producer_Partitioner_t` or
-/// shares an `__as_Partitioner` view (the class handle then outlives the
-/// producers built from these options); `NULL` means none.
+/// `set_partitioner`.
+///
+/// # Parameters
+///
+/// - `partitioner` - the partitioner; `NULL` means none
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time,
-/// and `partitioner` null or a live handle.
+/// and `partitioner` null or a live handle: an owned `kafka_producer_Partitioner_t`
+/// is consumed, an `__as_Partitioner` view shared, its class handle then
+/// outliving the producers built from these options.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partitioner(
@@ -898,14 +1064,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_partition
     unsafe { builder(self_) }.partitioner = (!partitioner.is_null()).then(|| unsafe { take_partitioner(partitioner) });
 }
 
-/// `set_key_serializer`: consumes an owned
-/// `kafka_common_serialization_Serializer_t` or shares an `__as_Serializer`
-/// view; `NULL` means none.
+/// `set_key_serializer`.
+///
+/// # Parameters
+///
+/// - `key_serializer` - the key serializer; `NULL` means none
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time,
-/// and `key_serializer` null or a live handle.
+/// and `key_serializer` null or a live handle: an owned one is consumed, an
+/// `__as_Serializer` view shared.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_serializer(
@@ -922,13 +1091,17 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_key_seria
         (!key_serializer.is_null()).then(|| unsafe { take_serializer(key_serializer) });
 }
 
-/// `set_value_serializer`: as
-/// [`kafka_producer_MockProducerOptionsBuilder_set_key_serializer`].
+/// `set_value_serializer`.
+///
+/// # Parameters
+///
+/// - `value_serializer` - the value serializer; `NULL` means none
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time,
-/// and `value_serializer` null or a live handle.
+/// and `value_serializer` null or a live handle: an owned one is consumed, an
+/// `__as_Serializer` view shared.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_serializer(
@@ -945,15 +1118,21 @@ pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_set_value_ser
         (!value_serializer.is_null()).then(|| unsafe { take_serializer(value_serializer) });
 }
 
-/// `build`: validates the mandatory `auto_complete` with the Rust builder's
-/// own check and delivers the options, owned by the caller
-/// ([`kafka_producer_MockProducerOptions_destroy`]). The builder stays
-/// usable.
+/// `build`: validates the mandatory `auto_complete`. The builder stays usable.
+///
+/// # Returns
+///
+/// The options.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `auto_complete` was not set
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time, and
-/// `out_err` a valid slot pointing at null.
+/// `out_err` a valid slot pointing at null. The options are owned by the caller,
+/// freed with [`kafka_producer_MockProducerOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_MockProducerOptionsBuilder_build(

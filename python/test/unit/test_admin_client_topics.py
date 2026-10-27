@@ -210,7 +210,8 @@ _CALLS: list[tuple[str, str, Callable[[Any], Any], Callable[[Any], Any]]] = [
 @pytest.mark.xfail(strict=True, reason=(
     "core gap: the Rust core's by-name describeTopics times out as 'listNodes' "
     "(its first step); Java's KafkaAdminClient sends it as "
-    "'describeTopicPartitions' (KafkaAdminClient.java:2231)"))
+    "'describeTopicPartitions' "
+    "(KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi)"))
 def test_describe_topics_by_name_times_out_with_java_call_name() -> None:
     with _admin() as admin:
         result = admin.describe_topics(topic_names=["t"],

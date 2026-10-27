@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::create_acls`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreateAclsResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::common::KafkaFuture;
 use crate::common::acl::AclBinding;
 
 /// The result of the `Admin::create_acls` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreateAclsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult")]
 pub struct CreateAclsResult {
@@ -37,14 +33,14 @@ impl CreateAclsResult {
         Self { futures }
     }
 
-    /// Return a map from ACL bindings to futures which can be used to check the
+    /// Returns a map from ACL bindings to futures which can be used to check the
     /// status of the creation of each ACL binding.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#values")]
     pub fn values(&self) -> &HashMap<AclBinding, KafkaFuture<()>> {
         &self.futures
     }
 
-    /// Return a future which succeeds only if all the ACL creations succeed.
+    /// Returns a future which succeeds only if all the ACL creations succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

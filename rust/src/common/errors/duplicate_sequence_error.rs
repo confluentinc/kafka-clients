@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The broker received a duplicate sequence number.
     ///
-    /// Corresponds to Java's `DuplicateSequenceException`, error code `Errors::DuplicateSequenceNumber`.
-    ///
-    /// Java `extends` chain:
-    ///    `DuplicateSequenceException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::DuplicateSequenceNumber`. Java `extends` chain:
+    /// `DuplicateSequenceException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateSequenceException")]
     DuplicateSequenceError,
     code: Errors::DuplicateSequenceNumber,

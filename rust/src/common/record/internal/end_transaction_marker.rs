@@ -82,7 +82,7 @@ impl EndTransactionMarker {
 
     /// The coordinator epoch when the marker was written.
     ///
-    /// Translated from `coordinatorEpoch()` (Java 49-51).
+    /// Translated from `coordinatorEpoch()`.
     #[doc(alias = "org.apache.kafka.common.record.internal.EndTransactionMarker#coordinatorEpoch")]
     pub(crate) fn coordinator_epoch(&self) -> i32 {
         self.coordinator_epoch
@@ -90,7 +90,7 @@ impl EndTransactionMarker {
 
     /// The control type of this marker.
     ///
-    /// Translated from `controlType()` (Java 53-55).
+    /// Translated from `controlType()`.
     #[doc(alias = "org.apache.kafka.common.record.internal.EndTransactionMarker#controlType")]
     pub(crate) fn control_type(&self) -> ControlRecordType {
         self.control_type
@@ -98,7 +98,7 @@ impl EndTransactionMarker {
 
     /// The serialized marker value.
     ///
-    /// Translated from `serializeValue()` (Java 57-59). Java returns a
+    /// Translated from `serializeValue()`. Java returns a
     /// `ByteBuffer.duplicate()` so the caller's reads do not disturb the marker's
     /// own buffer position; a `&[u8]` is inherently a read-only view with no
     /// position state, so borrowing the owned bytes is the faithful zero-copy
@@ -110,7 +110,7 @@ impl EndTransactionMarker {
 
     /// Rejects a control type that is not a transaction marker.
     ///
-    /// Translated from `ensureTransactionMarkerControlType` (Java 77-80).
+    /// Translated from `ensureTransactionMarkerControlType`.
     #[doc(alias = "org.apache.kafka.common.record.internal.EndTransactionMarker#ensureTransactionMarkerControlType")]
     fn ensure_transaction_marker_control_type(control_type: ControlRecordType) -> Result<(), Error> {
         if control_type != ControlRecordType::Commit && control_type != ControlRecordType::Abort {
@@ -126,7 +126,7 @@ impl EndTransactionMarker {
 
     /// Reads a marker out of a control record.
     ///
-    /// Translated from `deserialize(Record record)` (Java 82-85).
+    /// Translated from `deserialize(Record record)`.
     ///
     /// # Errors
     ///
@@ -141,7 +141,7 @@ impl EndTransactionMarker {
     /// Reads a marker out of a control record's already-parsed type and value.
     ///
     /// Translated from `deserializeValue(ControlRecordType, ByteBuffer)`
-    /// (Java 87-103, package-private "visible for testing").
+    /// (package-private, "visible for testing").
     ///
     /// # Errors
     ///
@@ -180,7 +180,7 @@ impl EndTransactionMarker {
 
     /// The size in bytes a control record carrying this marker would occupy.
     ///
-    /// Translated from `endTxnMarkerValueSize()` (Java 105-110).
+    /// Translated from `endTxnMarkerValueSize()`.
     #[doc(alias = "org.apache.kafka.common.record.internal.EndTransactionMarker#endTxnMarkerValueSize")]
     pub(crate) fn end_txn_marker_value_size(&self) -> i32 {
         DefaultRecord::do_size_in_bytes_with_key_size_value_size(
@@ -193,7 +193,7 @@ impl EndTransactionMarker {
     }
 }
 
-/// Equality mirrors Java's `equals` (Java 61-68): two markers are equal when they
+/// Equality mirrors Java's `equals`: two markers are equal when they
 /// share a coordinator epoch and control type. The serialized `buffer` is
 /// excluded — it is derived from the coordinator epoch, so it carries no
 /// independent identity.
@@ -205,7 +205,7 @@ impl PartialEq for EndTransactionMarker {
 
 impl Eq for EndTransactionMarker {}
 
-/// Hashing mirrors Java's `hashCode` (Java 70-75): `31 * type.hashCode() +
+/// Hashing mirrors Java's `hashCode`: `31 * type.hashCode() +
 /// coordinatorEpoch`. It reads the same two fields `eq` does, keeping the
 /// `Eq`/`Hash` contract, and excludes the derived `buffer`.
 impl std::hash::Hash for EndTransactionMarker {

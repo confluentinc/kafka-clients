@@ -74,21 +74,21 @@ pub(crate) unsafe fn value_of(protocol: *const kafka_consumer_GroupProtocol_t) -
     unsafe { *(protocol as *const GroupProtocol) }
 }
 
-/// `GroupProtocol.CLASSIC`.
+/// Returns `GroupProtocol.CLASSIC`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_GroupProtocol_classic() -> *const kafka_consumer_GroupProtocol_t {
     singleton(GroupProtocol::Classic)
 }
 
-/// `GroupProtocol.CONSUMER`.
+/// Returns `GroupProtocol.CONSUMER`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_GroupProtocol_consumer() -> *const kafka_consumer_GroupProtocol_t {
     singleton(GroupProtocol::Consumer)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_consumer_GroupProtocol_CLASSIC`, the first enumerator: the
 /// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -107,11 +107,16 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name`: the upper-case Java enum name, a static string never freed.
+/// String representation of the group protocol.
+///
+/// # Returns
+///
+/// The upper-case name (e.g. `"CLASSIC"`).
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is static,
+/// never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
@@ -123,9 +128,19 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_name(
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `GroupProtocol.of(String name)`, case-insensitive: returns the singleton, or
-/// stores the owned `IllegalArgumentException` translation in `*out_err` and
-/// returns `NULL` for an unknown name.
+/// Case-insensitive group protocol lookup by string name.
+///
+/// # Parameters
+///
+/// - `name` - The name of the group protocol
+///
+/// # Returns
+///
+/// The corresponding GroupProtocol
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the name does not match any protocol
 ///
 /// # Safety
 ///
@@ -146,12 +161,16 @@ pub unsafe extern "C" fn kafka_consumer_GroupProtocol_of(
     }
 }
 
-/// Java `toString()`: the lower-case name, an owned string freed with
-/// `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The lower-case name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is owned by the
+/// caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_GroupProtocol_to_string(

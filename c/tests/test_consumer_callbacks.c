@@ -676,7 +676,7 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     TEST_ASSERT_EQUAL_INT32(1, kafka_List_size(l));
     kafka_List_destroy(l);
 
-    /* Java's MockConsumer.groupMetadata() sentinels (MockConsumer.java:692-693). */
+    /* The sentinels of Java's `org.apache.kafka.clients.consumer.MockConsumer#groupMetadata`. */
     kafka_consumer_ConsumerGroupMetadata_t *gm = kafka_consumer_ConsumerHandle_group_metadata(h);
     TEST_ASSERT_NOT_NULL(gm);
     TEST_ASSERT_EQUAL_STRING("dummy.group.id", kafka_consumer_ConsumerGroupMetadata_group_id(gm));
@@ -685,7 +685,7 @@ static void test_consumer_handle_sync_getters_read_the_mock(void) {
     TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(gm));
     kafka_consumer_ConsumerGroupMetadata_destroy(gm);
 
-    /* currentLag() (MockConsumer.java:764-771): no end offset yet -> 0, the
+    /* `org.apache.kafka.clients.consumer.MockConsumer#currentLag`: no end offset yet -> 0, the
      * test modelling being caught up; then end 10 - position 4 = 6. A mock
      * handle is not gated (Java's MockConsumer has no acquire()), so the
      * blocking form answers outside a listener. */

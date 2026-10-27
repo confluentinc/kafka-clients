@@ -20,18 +20,13 @@ use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::protocol::Errors;
 
-/// The request was throttled due to a quota violation.
+/// Error thrown if an operation on a resource exceeds the throttling quota.
 ///
-/// Corresponds to Java's `ThrottlingQuotaExceededException`, error code
-/// `Errors::ThrottlingQuotaExceeded`.
+/// # Translation notes
 ///
-/// Java `extends` chain:
-///    `ThrottlingQuotaExceededException` -> `RetriableException` ->
-///   `ApiException` -> `KafkaException`
-///
-/// Hand-written rather than declared with `kafka_error_type!` because it adds
-/// a field: Java's constructor is
-/// `ThrottlingQuotaExceededException(int throttleTimeMs, String message)`.
+/// Error code `Errors::ThrottlingQuotaExceeded`.
+// Hand-written rather than declared with `kafka_error_type!` because it adds the
+// `throttleTimeMs` field.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException")]
 pub struct ThrottlingQuotaExceededError {
@@ -41,28 +36,35 @@ pub struct ThrottlingQuotaExceededError {
 }
 
 impl ThrottlingQuotaExceededError {
-    /// Create a new throttling quota exceeded error.
+    /// Creates a throttling quota exceeded error.
+    ///
+    /// # Arguments
+    ///
+    /// - `throttle_time_ms` - the amount of time to wait before retrying, in milliseconds
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#ThrottlingQuotaExceededException")]
     pub fn new(throttle_time_ms: i32, message: impl Into<String>) -> Self {
         Self { message: message.into(), throttle_time_ms }
     }
 
-    /// Create the error with the default message for its error code.
+    /// Creates the error with the default message of `Errors::ThrottlingQuotaExceeded`, as the
+    /// broker's error code is turned into an error.
+    ///
+    /// # Arguments
+    ///
+    /// - `throttle_time_ms` - the amount of time to wait before retrying, in milliseconds
     #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#ThrottlingQuotaExceededException")]
     pub fn with_default_message(throttle_time_ms: i32) -> Self {
         Self::new(throttle_time_ms, Errors::ThrottlingQuotaExceeded.message())
     }
 
-    /// The error message.
-    // Java's Throwable.getMessage, a JDK method
+    /// Returns the error message: Java's `getMessage()`.
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// The amount of time to wait before retrying, in milliseconds.
-    ///
-    /// Mirrors Java's `ThrottlingQuotaExceededException.throttleTimeMs()`.
+    /// Returns the amount of time to wait before retrying, in milliseconds.
     #[doc(alias = "org.apache.kafka.common.errors.ThrottlingQuotaExceededException#throttleTimeMs")]
     pub fn throttle_time_ms(&self) -> i32 {
         self.throttle_time_ms
@@ -108,11 +110,10 @@ impl ErrorSource for ThrottlingQuotaExceededError {
 }
 
 impl ThrottlingQuotaExceededError {
-    /// Always `None`: `ThrottlingQuotaExceededException` exposes no `Throwable cause` constructor, so its
-    /// cause is null in Java too. Present as an inherent method so it shadows
-    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
-    /// `x.source()` unambiguous and typed.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause: always `None`, as Java's class has no constructor taking
+    /// one.
+    // An inherent method, so it shadows both `ErrorSource::source` and
+    // `std::error::Error::source`, keeping `x.source()` unambiguous and typed.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         None

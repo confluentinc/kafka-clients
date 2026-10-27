@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_transactions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeTransactionsResult`.
 
 use std::collections::HashMap;
 
@@ -22,12 +20,10 @@ use crate::admin::TransactionDescription;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::describe_transactions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeTransactionsResult`.
-/// Java keys the per-transaction futures by `CoordinatorKey`; since
-/// `CoordinatorKey` is an internal (`pub(crate)`) type, the Rust result keys
-/// them by the transactional id string (the `idValue`), following the
-/// `DescribeConsumerGroupsResult` precedent.
+// Java keys the per-transaction futures by `CoordinatorKey`; since
+// `CoordinatorKey` is an internal (`pub(crate)`) type, the Rust result keys
+// them by the transactional id string (the `idValue`), following the
+// `DescribeConsumerGroupsResult` precedent.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult")]
 pub struct DescribeTransactionsResult {
@@ -43,12 +39,19 @@ impl DescribeTransactionsResult {
 
     /// Get the description of a specific transactional id.
     ///
-    /// Mirrors `DescribeTransactionsResult.description`.
+    /// # Arguments
+    ///
+    /// - `transactional_id` - the transactional ID to describe
+    ///
+    /// # Returns
+    ///
+    /// a future which completes when the transaction description of a particular transactional ID
+    /// is available.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
-    /// included in the request (mirroring Java's `IllegalArgumentException`).
+    /// - `Error::is_local_illegal_argument_error` if `transactional_id` was not included in the
+    ///   respective call to `Admin::describe_transactions`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult#description")]
     pub fn description(&self, transactional_id: &str) -> Result<KafkaFuture<TransactionDescription>, Error> {
         self.futures.get(transactional_id).cloned().ok_or_else(|| {
@@ -61,7 +64,10 @@ impl DescribeTransactionsResult {
     /// Get a future yielding a map of every requested transactional id's
     /// description. Fails if any transactional id's request fails.
     ///
-    /// Mirrors `DescribeTransactionsResult.all`.
+    /// # Returns
+    ///
+    /// a future which either completes when all transaction descriptions complete or fails if any
+    /// of the descriptions cannot be obtained
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTransactionsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<String, TransactionDescription>> {
         KafkaFuture::join_map(self.futures.iter().map(|(id, f)| (id.clone(), f.clone())).collect())

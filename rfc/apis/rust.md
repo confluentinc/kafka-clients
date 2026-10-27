@@ -277,7 +277,7 @@ pub trait Producer<K, V>: Send + Sync {
     ) -> impl Future<Output = Result<KafkaFuture<RecordMetadata>, Error>> + Send;
     fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
     fn partitions_for(&self, topic: &str) -> impl Future<Output = Result<Vec<PartitionInfo>, Error>> + Send;
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
     fn close(&self) -> impl Future<Output = Result<(), Error>> + Send;
     fn close_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 }
@@ -375,7 +375,7 @@ where
     fn group_metadata(&mut self) -> Arc<dyn ConsumerGroupMetadata>;
     // Java's `currentLag` waits on the background thread, so it is async.
     fn current_lag(&mut self, topic_partition: &TopicPartition) -> impl Future<Output = Result<Option<i64>, Error>> + Send;
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
+    fn metrics(&self) -> MetricsView;
     // --- Subscription and assignment ---
     fn subscribe_with_topics(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
     fn subscribe_with_topics_listener(

@@ -68,7 +68,7 @@ use crate::common::utils::internals::LogContext;
 use crate::common::utils::{SystemTime, Time};
 
 /// Builds the DEBUG message Java logs for every in-flight request cancelled by
-/// a disconnect or a timeout (`NetworkClient.java:405-409`): every field of
+/// a disconnect or a timeout (`NetworkClient#cancelInFlightRequests`): every field of
 /// Java's line, in Java's order.
 ///
 /// Rust-only: Java formats the message inline in `cancelInFlightRequests`. It is
@@ -79,9 +79,8 @@ use crate::common::utils::{SystemTime, Time};
 /// translation of the `toString()` that Java's `{}` placeholder calls, which
 /// redacts secrets such as SCRAM salts, config values and delegation-token
 /// HMACs. A missing request renders as `null`, as SLF4J renders a null argument.
-/// The field is `None` only where Java's is null: `InFlightRequestsTest.addRequest`
-/// builds its in-flight requests with a null request
-/// (`InFlightRequestsTest.java:123-124`); every request the client sends has one.
+/// The field is `None` only where Java's is null: `InFlightRequestsTest#addRequest`
+/// builds its in-flight requests with a null request; every request the client sends has one.
 ///
 /// The message is formatted lazily, when the log line writes it, and allocates
 /// nothing. The caller calls this only inside its `log_enabled!(Debug)` branch,
@@ -270,7 +269,7 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
 /// `S` and `H` are Rust-side injection parameters with no counterpart in
 /// Java — `NetworkClient.java` is not generic — and
 /// [`NetworkClient::parse_response`] (Java's `public static
-/// NetworkClient.parseResponse`, `NetworkClient.java:917`) reads neither, but
+/// NetworkClient.parseResponse`) reads neither, but
 /// Rust still cannot infer them at a call site (E0283).
 pub(crate) type NetworkClientStatics = NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>;
 
@@ -279,7 +278,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// into the classes the rest of the client dispatches on.
     ///
     /// Translated from the public static `NetworkClient.parseResponse(ByteBuffer,
-    /// RequestHeader)` (`NetworkClient.java:917-933`), whose whole body is two
+    /// RequestHeader)`, whose whole body is two
     /// `catch` clauses around `AbstractResponse.parseResponse`:
     ///
     ///  - `BufferUnderflowException` -> `SchemaException("Buffer underflow while
@@ -292,7 +291,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// range at all: during re-authentication a response to an *earlier*, unrelated
     /// Kafka request can arrive on the channel, and a `SchemaException` is what tells
     /// `SaslClientAuthenticator.receiveKafkaResponse` to set it aside rather than
-    /// fail authentication (`SaslClientAuthenticator.java:118-126,581-597`).
+    /// fail authentication (`SaslClientAuthenticator#MAX_RESERVED_CORRELATION_ID`,
+    /// `SaslClientAuthenticator#receiveKafkaResponse`).
     /// A genuine mismatch between two *reserved* ids is a client bug and keeps
     /// escaping as the `IllegalStateException` subclass Java rethrows.
     ///
@@ -314,9 +314,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// consumer of the distinction already treats it as: Java's own
     /// `SaslClientAuthenticator` catch clause lists `BufferUnderflowException |
     /// SchemaException | IllegalArgumentException` together
-    /// (`SaslClientAuthenticator.java:581`), and `Schema`/`ArrayOf`/`Struct` raise
+    /// (in `SaslClientAuthenticator#receiveKafkaResponse`), and `Schema`/`ArrayOf`/`Struct` raise
     /// `SchemaException` for exactly these malformed-buffer cases
-    /// (`protocol/types/ArrayOf.java:73,76`).
+    /// (`ArrayOf#read`).
     #[doc(alias = "org.apache.kafka.clients.NetworkClient#parseResponse")]
     pub fn parse_response(
         buffer: &mut dyn crate::common::protocol::Readable,
@@ -327,7 +327,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             Err(error) => error,
         };
 
-        // Java 829-838: `catch (CorrelationIdMismatchException e)`.
+        // `NetworkClient#parseResponse`: `catch (CorrelationIdMismatchException e)`.
         if let Some(mismatch) = CorrelationIdMismatchError::correlation_id_mismatch(&error) {
             if SaslClientAuthenticator::is_reserved(request_header.correlation_id())
                 && !SaslClientAuthenticator::is_reserved(mismatch.response_correlation_id())
@@ -339,12 +339,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     SaslClientAuthenticator::SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID
                 )));
             }
-            // Java 836-837: `else { throw e; }` — the mismatch propagates as the
+            // `NetworkClient#parseResponse`: `else { throw e; }` — the mismatch propagates as the
             // `IllegalStateException` subclass it is, NOT as a `SchemaException`.
             return Err(Error::CorrelationIdMismatch(mismatch.clone()));
         }
 
-        // Java 826-828: `catch (BufferUnderflowException e)`.
+        // `NetworkClient#parseResponse`: `catch (BufferUnderflowException e)`.
         if error.kind() == std::io::ErrorKind::UnexpectedEof {
             return Err(Error::schema(format!(
                 "Buffer underflow while parsing response for request with header {request_header}"
@@ -617,8 +617,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Wires in `metadata.cluster.check.enable` (KIP-1242), which defaults to
     /// `false`. Java passes it to the `NetworkClient` constructor
-    /// (`NetworkClient.java:358,391`, from `ClientUtils.createNetworkClient`,
-    /// `ClientUtils.java:309`); it is set after construction here, following
+    /// (`NetworkClient#metadataClusterCheckEnable`, from `ClientUtils#createNetworkClient`);
+    /// it is set after construction here, following
     /// the [`set_bootstrap_configuration`](Self::set_bootstrap_configuration)
     /// precedent, so the many constructor call sites that pass `false` in Java
     /// need no change.
@@ -797,7 +797,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 Err(e) => {
                     // Java propagates the `UnsupportedVersionException` object into
                     // both the `ClientResponse` and `handleFailedRequest`
-                    // (`NetworkClient.java:653-660`), so the caller sees
+                    // (`org.apache.kafka.clients.NetworkClient#doSend(ClientRequest,boolean,long)`), so the caller sees
                     // `NodeApiVersions.latestUsableVersion`'s diagnostic — which API,
                     // which range was asked for, what the broker supports. The bare
                     // `message()` is carried (not `Display`, which prefixes the class
@@ -852,10 +852,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         // Build the request at the determined version, then serialize it.
         //
-        // Java wraps **both** steps in one `try`: `NetworkClient.send` catches
-        // `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-        // (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
-        // at `:673` — inside that same `try`. Serialization is a second place the
+        // Java wraps **both** steps in one `try`:
+        // `org.apache.kafka.clients.NetworkClient#doSend(ClientRequest,boolean,long)` catches
+        // `UnsupportedVersionException` around `doSend(.., builder.build(version))`, and
+        // `NetworkClient#doSend(ClientRequest,boolean,long,AbstractRequest)` calls `request.toSend(header)`
+        // — inside that same `try`. Serialization is a second place the
         // exception is raised, because the generated `write` refuses to encode a
         // non-default field the chosen version cannot carry
         // (`FieldSpec.generateNonIgnorableFieldCheck`). Both failures must therefore
@@ -896,7 +897,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// aborted send, instead of putting it on the wire.
     ///
     /// This is the body of Java's `catch (UnsupportedVersionException)` in
-    /// `NetworkClient.send` (`NetworkClient.java:648-663`), shared by the two failures
+    /// `NetworkClient#doSend(ClientRequest,boolean,long)`, shared by the two failures
     /// that `try` covers: `builder.build(version)` and `request.toSend(header)`.
     fn abort_send_with_unsupported_version(
         &mut self,
@@ -906,7 +907,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         error: &std::io::Error,
     ) {
         // Java propagates the `UnsupportedVersionException` the builder
-        // threw (`NetworkClient.java:653-660`), so the builder's own
+        // threw (`org.apache.kafka.clients.NetworkClient#doSend(ClientRequest,boolean,long)`), so the builder's own
         // diagnostic, and its class, is what the caller reads. A builder
         // carries the error object inside the `io::Error`
         // (`UnsupportedVersionError::into_io_error`); a serialize failure is a
@@ -916,7 +917,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         // `Error`'s `Display` added its own (finding 232).
         let version_mismatch = UnsupportedVersionError::from_io_error(error);
         // Java builds the response header at `builder.latestAllowedVersion()`, not at
-        // the version that failed (`NetworkClient.java:653`).
+        // the version that failed (`org.apache.kafka.clients.NetworkClient#doSend(ClientRequest,boolean,long)`).
         let header = client_request
             .make_header(client_request.request_builder().latest_allowed_version())
             .expect("Failed to create header");
@@ -1060,7 +1061,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
                 // Java calls the static `parseResponse` here, not
                 // `AbstractResponse.parseResponse` directly
-                // (`NetworkClient.java:1092`), so the two `catch` clauses apply.
+                // (`org.apache.kafka.clients.NetworkClient#handleCompletedReceives`), so the two
+                // `catch` clauses apply.
                 match Self::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
                         // Record the throttle time of EVERY response (Java
@@ -1068,7 +1070,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
                         // before deciding whether to actually throttle.
                         if let Some(sensor) = &self.throttle_time_sensor {
-                            sensor.record_with_value_time_ms(response.throttle_time_ms() as f64, now);
+                            // The client's sensors are built from a `MetricConfig` without a quota, so
+                            // `record` cannot fail and its result is discarded.
+                            let _ = sensor.record_with_value_time_ms(response.throttle_time_ms() as f64, now);
                         }
 
                         // Handle throttle
@@ -1130,7 +1134,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
                 && api_versions_response.data().error_code == Errors::RebootstrapRequired.code()
             {
-                // KIP-1242 (`NetworkClient.java:1120-1130`): the broker found the
+                // KIP-1242 (`org.apache.kafka.clients.NetworkClient#handleApiVersionsResponse`): the
+                // broker found the
                 // cluster id / node id this client sent do not match its own, so
                 // the connection is misrouted and the cached metadata is stale.
                 // Disconnect from every known node, as `handleRebootstrap` does,
@@ -1252,7 +1257,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             // If we know the cluster ID and node ID we are connecting to, we can include
             // those details in the ApiVersions request for checking in the broker,
             // provided that the metadata recovery strategy is not NONE. (KIP-1242,
-            // `NetworkClient.java:1214-1224`)
+            // `org.apache.kafka.clients.NetworkClient#handleInitiateApiVersionRequests`)
             if self.metadata_recovery_strategy != MetadataRecoveryStrategy::None && self.metadata_cluster_check_enable {
                 let cluster_id = self.cluster_id();
                 // Java's `Integer.parseInt(node)`. A connection id is always a
@@ -1315,9 +1320,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Closes and disconnects every node the metadata knows, then rebootstraps.
     ///
-    /// The shared body of `handleRebootstrap` (`NetworkClient.java:1232-1243`)
-    /// and the `REBOOTSTRAP_REQUIRED` branch of `handleApiVersionsResponse`
-    /// (`NetworkClient.java:1120-1130`), which Java writes out twice.
+    /// The shared body of `NetworkClient#handleRebootstrap`
+    /// and the `REBOOTSTRAP_REQUIRED` branch of `NetworkClient#handleApiVersionsResponse`,
+    /// which Java writes out twice.
     async fn disconnect_all_and_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         let node_ids: Vec<String> = self.fetch_nodes().iter().map(|n| n.id_string().to_string()).collect();
         for node_id in node_ids {
@@ -1361,7 +1366,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_flight_requests
                 .increment_throttle_time(node_id, throttle_time_ms as i64);
             self.connection_states.throttle(node_id, now + throttle_time_ms as i64);
-            // `log.warn` since KAFKA-19117 (525b278288, `NetworkClient.java:1076`).
+            // `log.warn` since KAFKA-19117 (525b278288,
+            // `org.apache.kafka.clients.NetworkClient#maybeThrottle`).
             kafka_warn!(
                 self.log_context,
                 "Connection to node {} is throttled for {} ms until timestamp {}",
@@ -1390,7 +1396,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             channel_state::State::AuthenticationFailed => {
                 // Java: `AuthenticationException exception = disconnectState.exception();
                 // connectionStates.authenticationFailed(nodeId, now, exception)`
-                // (`NetworkClient.java:980-981`) — the object, so the subclass the
+                // (`org.apache.kafka.clients.NetworkClient#processDisconnection`) — the object, so
+                // the subclass the
                 // channel raised (`SaslAuthenticationException` vs
                 // `SslAuthenticationException`) survives all the way to
                 // `client.authenticationException(node)`. `ChannelState` only
@@ -1440,8 +1447,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             node_id,
             // Java passes `disconnectState.exception()` — the object itself, typed
             // `AuthenticationException` and non-null only in the
-            // AUTHENTICATION_FAILED state (`NetworkClient.java:999`,
-            // `ChannelState.java:76`), which `DefaultMetadataUpdater` plants with
+            // AUTHENTICATION_FAILED state
+            // (`org.apache.kafka.clients.NetworkClient#processDisconnection`,
+            // `org.apache.kafka.common.network.ChannelState#exception`), which `DefaultMetadataUpdater` plants with
             // `metadata.fatalError(e)` and `maybeThrowAnyException()` rethrows.
             // `ChannelState` carries that typed error, so it is forwarded
             // unchanged: rebuilding it as `UnknownServerError` here made
@@ -1664,11 +1672,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// How long `close()` waits for the resolver thread per phase: Java's
     /// `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1,
-    /// TimeUnit.SECONDS)` (`NetworkClient.java:806`).
+    /// TimeUnit.SECONDS)` (`NetworkClient#close()`).
     const BOOTSTRAP_RESOLVER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
     /// Java's `ThreadUtils.shutdownExecutorServiceQuietly(bootstrapExecutor, 1, SECONDS)`
-    /// (`ThreadUtils.java:95-117`): wait up to 1 s for the resolver to finish,
+    /// (`ThreadUtils#shutdownExecutorServiceQuietly`): wait up to 1 s for the resolver to finish,
     /// then interrupt it (`shutdownNow()`) and wait up to 1 s more, then give up
     /// with Java's error log. The Rust interrupt — the closed result channel —
     /// was already delivered by `cancel_bootstrap_resolution`, which `close()`
@@ -1806,7 +1814,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// Gets the current cluster id without blocking, `None` if unknown.
     ///
     /// Java's `MetadataUpdater.clusterId()`: `DefaultMetadataUpdater` reads the
-    /// metadata's `ClusterResource` (`NetworkClient.java:1426-1433`); an
+    /// metadata's `ClusterResource` (`NetworkClient.DefaultMetadataUpdater#clusterId`); an
     /// external updater answers for itself, `None` by default.
     fn cluster_id(&self) -> Option<String> {
         if let Some(ref metadata) = self.metadata {
@@ -2077,7 +2085,8 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn authentication_error(&self, node: &crate::common::Node) -> Option<Error> {
         // Java: `return connectionStates.authenticationException(node.idString())`
-        // (`NetworkClient.java:571-572`) — the object, so the subclass reaches the
+        // (`org.apache.kafka.clients.NetworkClient#authenticationException`) — the object,
+        // so the subclass reaches the
         // caller.
         self.connection_states.authentication_error(node.id_string()).cloned()
     }
@@ -2893,7 +2902,7 @@ mod tests {
     }
 
     /// The admin client builds its `NetworkClient` with one in-flight request per
-    /// connection (`KafkaAdminClient.java:625`), so a connected node that already
+    /// connection (`KafkaAdminClient#createInternal`), so a connected node that already
     /// has a request in flight cannot take another one and `leastLoadedNode`
     /// prefers a node it can connect to (`NetworkClient.java` `leastLoadedNode`:
     /// `canSendRequest` is false, `canConnect` is true). With a larger limit the
@@ -2944,7 +2953,7 @@ mod tests {
     }
 
     /// The admin client builds its `NetworkClient` with a one-hour default request
-    /// timeout (`KafkaAdminClient.java:626`), not `request.timeout.ms`. The
+    /// timeout (`KafkaAdminClient#createInternal`), not `request.timeout.ms`. The
     /// `ApiVersions` handshake is sent with that default
     /// (`NetworkClient.handleInitiateApiVersionRequests`), so a broker that answers
     /// it after `request.timeout.ms` is waited for and the node becomes ready; the
@@ -3350,10 +3359,10 @@ mod tests {
     /// A request that builds cleanly but cannot be **serialized** at the negotiated
     /// version becomes an aborted send, exactly like one that fails to build.
     ///
-    /// Java covers both with a single `try`: `NetworkClient.send` catches
-    /// `UnsupportedVersionException` around `doSend(.., builder.build(version))`
-    /// (`NetworkClient.java:647-648`), and `doSend` calls `request.toSend(header)`
-    /// inside it at `:673`. The serialize half became reachable when the generator
+    /// Java covers both with a single `try`: `NetworkClient#doSend(ClientRequest,boolean,long)` catches
+    /// `UnsupportedVersionException` around `doSend(.., builder.build(version))`,
+    /// and `NetworkClient#doSend(ClientRequest,boolean,long,AbstractRequest)` calls `request.toSend(header)`
+    /// inside it. The serialize half became reachable when the generator
     /// gained Java's non-default-at-unsupported-version guard (PLAN §9.1); before
     /// that fix this call site was an `.expect(..)`, so the whole class of condition
     /// would have panicked the I/O task instead of taking the path the callers'
@@ -3362,7 +3371,7 @@ mod tests {
     /// The scenario is an old broker: it advertises Metadata up to v7, and the caller
     /// asks for topic authorized operations, a v8+ non-ignorable field.
     /// `AllowAutoTopicCreation` is left at `true` so the builder's own v<4 gate (Java
-    /// `MetadataRequest.java:60-73`) does not fire first — the point is to reach
+    /// `MetadataRequest.Builder#build`) does not fire first — the point is to reach
     /// `write`.
     #[tokio::test]
     async fn test_unsupported_version_during_serialization_aborts_send() {
@@ -3527,7 +3536,7 @@ mod tests {
     }
 
     /// New test, no Java original: the DEBUG message logged for every request
-    /// cancelled by a disconnect or a timeout (`NetworkClient.java:405-409`)
+    /// cancelled by a disconnect or a timeout (`NetworkClient#cancelInFlightRequests`)
     /// carries every field of Java's line and renders the request through its
     /// redacting `Display`, as Java renders it through `toString()`, so a SCRAM
     /// upsertion's salt and salted password never reach the log.
@@ -3604,10 +3613,10 @@ mod tests {
     }
 
     /// New test, no Java original: the cancelled-request DEBUG message
-    /// (`NetworkClient.java:405-409`) of an in-flight request with no request
+    /// (`NetworkClient#cancelInFlightRequests`) of an in-flight request with no request
     /// ends in `null`, as SLF4J renders the null `request.request` argument.
-    /// The in-flight request is built like `InFlightRequestsTest.addRequest`'s
-    /// (`InFlightRequestsTest.java:122-124`), the only ones with no request; a
+    /// The in-flight request is built like `InFlightRequestsTest#addRequest`'s,
+    /// the only ones with no request; a
     /// placeholder stands in for Java's null send, which Rust cannot express.
     #[test]
     fn test_cancelled_in_flight_request_debug_message_renders_missing_request_as_null() {
@@ -4630,8 +4639,9 @@ mod tests {
     /// **object** from the channel to the metadata layer —
     /// `processDisconnection` calls
     /// `metadataUpdater.handleServerDisconnect(now, nodeId, Optional.ofNullable(disconnectState.exception()))`
-    /// (`NetworkClient.java:999`, parameter typed
-    /// `Optional<AuthenticationException>` at `:1487`), the updater plants it with
+    /// (`NetworkClient#processDisconnection`, parameter typed
+    /// `Optional<AuthenticationException>` in
+    /// `NetworkClient.DefaultMetadataUpdater#handleServerDisconnect`), the updater plants it with
     /// `metadata.fatalError(e)`, and `Metadata.maybeThrowAnyException()` rethrows
     /// that same object. So the application catches a real
     /// `AuthenticationException`.
@@ -4683,19 +4693,19 @@ mod tests {
         );
         // `AuthenticationException` has no `Errors` entry of its own, but
         // `Errors.forException` walks the superclass chain
-        // (`protocol/Errors.java:520-531`) and finds
+        // (`org.apache.kafka.common.protocol.Errors#forException`) and finds
         // `InvalidConfigurationException` at `INVALID_CONFIG(40)`
-        // (`Errors.java:264`), so 40 is Java's answer here.
+        // (`Errors#INVALID_CONFIG`), so 40 is Java's answer here.
         assert_eq!(err.error(), Errors::InvalidConfig);
         assert_eq!(err.error().code(), 40);
     }
 
     /// `KafkaClient.authenticationException(Node)` returns the exception
-    /// **object** (`KafkaClient.java:88`), so the caller can tell a TLS
+    /// **object**, so the caller can tell a TLS
     /// certificate rejection from a rejected SASL credential — `KafkaChannel.prepare`
-    /// catches the two subclasses separately (`KafkaChannel.java:463-472`) and
-    /// `ClusterConnectionStates.authenticationFailed` stores whichever it caught
-    /// (`ClusterConnectionStates.java:272-274`).
+    /// catches the two subclasses separately (and `KafkaChannel#receive` a post-handshake
+    /// `SslAuthenticationException`) and
+    /// `ClusterConnectionStates#authenticationFailed` stores whichever it caught.
     ///
     /// The carrier used to flatten to a `String` in `ClusterConnectionStates`, so
     /// every caller rebuilt the base class and both failures read identically.
@@ -4764,9 +4774,9 @@ mod tests {
 
     /// Regression for finding 232: Java propagates the
     /// `UnsupportedVersionException` object built by
-    /// `NodeApiVersions.latestUsableVersion` (`NodeApiVersions.java:162-164`)
+    /// `NodeApiVersions#latestUsableVersion(ApiKeys,short,short)`
     /// into the `ClientResponse` and into `handleFailedRequest`
-    /// (`NetworkClient.java:653-660`), so the caller learns which API, which
+    /// (`NetworkClient#doSend(ClientRequest,boolean,long)`), so the caller learns which API, which
     /// range was asked for, and what the broker supports. The literal string
     /// `"UnsupportedVersionError"` was substituted instead.
     #[tokio::test]
@@ -4800,7 +4810,8 @@ mod tests {
         let responses = client.poll(0, now).await;
 
         // Java interpolates the `ApiKeys` enum value itself
-        // (`NodeApiVersions.java:151`) and `ApiKeys` overrides no `toString()`, so
+        // (`org.apache.kafka.clients.NodeApiVersions#latestUsableVersion(ApiKeys,short,short)`)
+        // and `ApiKeys` overrides no `toString()`, so
         // the message carries the enum constant name (`METADATA`). `Display` is
         // what renders that; `name()` is the spec's `name` field (`Metadata`) and
         // is the wrong spelling here.
@@ -4825,7 +4836,7 @@ mod tests {
     /// Regression for finding 232, second arm: the request builder's own
     /// diagnostic must reach the caller unprefixed. Java propagates the
     /// `UnsupportedVersionException` the builder threw
-    /// (`NetworkClient.java:653-660`); prefixing it with the class name here
+    /// (`NetworkClient#doSend(ClientRequest,boolean,long)`); prefixing it with the class name here
     /// rendered `"UnsupportedVersionError: UnsupportedVersionError: .."` once
     /// `Error`'s `Display` added its own.
     #[tokio::test]
@@ -5483,7 +5494,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // `parseResponse`'s two catch clauses (`NetworkClient.java:917-933`).
+    // `org.apache.kafka.clients.NetworkClient#parseResponse`'s two catch clauses.
     // ---------------------------------------------------------------------------
 
     /// Translated from `NetworkClientTest.testMetadataClusterCheckFailureCausesRebootstrap`
@@ -5566,7 +5577,7 @@ mod tests {
     }
 
     /// `REBOOTSTRAP_REQUIRED` rebootstraps only under the `rebootstrap`
-    /// recovery strategy (`NetworkClient.java:1120`). Under `none` it is an
+    /// recovery strategy (`NetworkClient#handleApiVersionsResponse`). Under `none` it is an
     /// ordinary ApiVersions error: only the answering node is disconnected and
     /// there is no rebootstrap. Rust-only: Java's test covers the
     /// `rebootstrap` branch alone.
@@ -5688,7 +5699,7 @@ mod tests {
         client
     }
 
-    /// KIP-1242 (`NetworkClient.java:1214-1224`): with the check enabled, the
+    /// KIP-1242 (`NetworkClient#handleInitiateApiVersionRequests`): with the check enabled, the
     /// `rebootstrap` strategy and a known cluster id, the ApiVersions v5
     /// request carries the cluster id from the metadata
     /// (`DefaultMetadataUpdater.clusterId`) and the node's id. Rust-only: Java
@@ -5754,7 +5765,7 @@ mod tests {
     }
 
     /// A negative node id is never sent (`nodeId >= 0`,
-    /// `NetworkClient.java:1220`), even with the cluster id known: bootstrap
+    /// `NetworkClient#handleInitiateApiVersionRequests`), even with the cluster id known: bootstrap
     /// connections use negative ids that name no broker.
     #[tokio::test]
     async fn test_api_versions_request_omits_negative_node_id() {
@@ -5766,8 +5777,8 @@ mod tests {
     }
 
     /// The rebootstrap cadence when every broker is unreachable (Milestone 17
-    /// Phase 4 follow-up). Java's `DefaultMetadataUpdater.maybeUpdate`
-    /// (`NetworkClient.java:1450-1484`) rebootstraps whenever an update is due
+    /// Phase 4 follow-up). Java's `NetworkClient.DefaultMetadataUpdater#maybeUpdate(long)`
+    /// rebootstraps whenever an update is due
     /// and no node is available, and then, with the bootstrap node still in
     /// reconnect backoff, returns `reconnectBackoffMs` as the poll bound: one
     /// rebootstrap per poll, the poll bounded by the reconnect backoff, not 0.
@@ -5964,7 +5975,7 @@ mod tests {
         assert!(matches!(response, ConcreteResponse::Metadata(_)));
     }
 
-    /// Java 836-837: for a non-SASL request the mismatch is rethrown as the
+    /// `NetworkClient#parseResponse`: for a non-SASL request the mismatch is rethrown as the
     /// `CorrelationIdMismatchException` it already is — an
     /// `IllegalStateException`, so `is_kafka_error()` is `false` and it must NOT
     /// be converted to a `SchemaException`.
@@ -5987,7 +5998,7 @@ mod tests {
         assert!(!error.is_kafka_error(), "IllegalStateException is outside the hierarchy");
     }
 
-    /// Java 830-835: the request used a SASL-reserved correlation id and the
+    /// `NetworkClient#parseResponse`: the request used a SASL-reserved correlation id and the
     /// response did not, so the response belongs to an earlier, unrelated Kafka
     /// request and is reported as a `SchemaException` — the class
     /// `SaslClientAuthenticator.receiveKafkaResponse` catches in order to set the
@@ -6012,7 +6023,7 @@ mod tests {
         assert!(!error.is_api_error(), "but it bypasses ApiException");
     }
 
-    /// The `&&` in Java 830-831 is load-bearing in both directions: when BOTH ids
+    /// The `&&` in `NetworkClient#parseResponse`'s SASL check is load-bearing in both directions: when BOTH ids
     /// are reserved the response *is* related to the SASL exchange, so the `else`
     /// branch rethrows rather than converting. Without the second conjunct this
     /// row would be a `SchemaException` too.
@@ -6098,7 +6109,7 @@ mod tests {
         assert!(!error.is_kafka_error(), "IllegalStateException is outside the hierarchy");
     }
 
-    /// Java 826-828: a short buffer becomes a `SchemaException` naming the
+    /// `NetworkClient#parseResponse`: a short buffer becomes a `SchemaException` naming the
     /// request header. This crate's readers report the short read as
     /// `ErrorKind::UnexpectedEof` (see the divergence note on `parse_response`).
     #[test]
@@ -6418,7 +6429,7 @@ mod tests {
     /// Critic 92, Issue 2: `close()` waits for an in-flight resolution no
     /// longer than Java does — `shutdownExecutorServiceQuietly(.., 1, SECONDS)`,
     /// at most 1 s, then the interrupt and at most 1 s more
-    /// (`NetworkClient.java:805-806`, `ThreadUtils.java:95-117`) — however slow
+    /// (`NetworkClient#close()`, `ThreadUtils#shutdownExecutorServiceQuietly`) — however slow
     /// the lookups are. Three 5 s lookups used to hold `close()` (and the
     /// runtime drop behind it) for all 15 s.
     #[tokio::test]

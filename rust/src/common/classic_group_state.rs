@@ -18,9 +18,7 @@
 
 use std::fmt;
 
-/// The state of a classic group.
-///
-/// Corresponds to `org.apache.kafka.common.ClassicGroupState`.
+/// The classic group state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ClassicGroupState")]
@@ -41,10 +39,8 @@ pub enum ClassicGroupState {
 }
 
 impl ClassicGroupState {
-    /// The display name of this classic group state (as used on the wire and in
-    /// `toString`).
-    ///
-    /// Mirrors the private `name` field in Java.
+    /// Returns the display name of this classic group state, as used on the
+    /// wire and by `Display`.
     #[doc(alias = "org.apache.kafka.common.ClassicGroupState#name")]
     pub fn name(&self) -> &'static str {
         match self {
@@ -59,8 +55,13 @@ impl ClassicGroupState {
 
     /// Case-insensitive classic group state lookup by string name.
     ///
-    /// Returns [`ClassicGroupState::Unknown`] if the name is unrecognized,
-    /// mirroring Java's `parse`.
+    /// # Arguments
+    ///
+    /// - `name` - the state name
+    ///
+    /// # Returns
+    ///
+    /// The state, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.ClassicGroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {

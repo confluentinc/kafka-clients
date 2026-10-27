@@ -410,7 +410,7 @@ impl SaslClientAuthenticator {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
         let mut buffer = ByteBufferAccessor::new(response_bytes);
-        // Java routes through `NetworkClient.parseResponse` (`:824-840`), not the
+        // Java routes through `org.apache.kafka.clients.NetworkClient#parseResponse`, not the
         // raw parse, so a correlation-id mismatch is converted to a
         // `SchemaException` **only** when the request used a reserved SASL
         // correlation id and the response did not; otherwise it is rethrown.

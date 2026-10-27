@@ -421,7 +421,7 @@ mod tests {
     /// Issue 6 regression: `invokePartitionsRevoked` must exercise the
     /// paused-partition log path when the revoked set intersects the
     /// paused set. Without this test the pause-flag-clear branch
-    /// (`ConsumerRebalanceListenerInvoker.java:91-95`) is unexercised.
+    /// (`ConsumerRebalanceListenerInvoker#invokePartitionsRevoked`) is unexercised.
     /// We pre-assign + pause a partition, then call
     /// `invoke_partitions_revoked` with the SAME partition — the call
     /// must succeed (no panic on lock acquire, log line emitted).
@@ -451,7 +451,7 @@ mod tests {
     }
 
     /// Issue 6 regression: symmetric paused-partition log path for
-    /// `invokePartitionsLost` (`ConsumerRebalanceListenerInvoker.java:104-108`).
+    /// `ConsumerRebalanceListenerInvoker#invokePartitionsLost`.
     #[tokio::test]
     async fn invoke_partitions_lost_with_paused_partition_exercises_log_path() {
         let subs = make_subs();

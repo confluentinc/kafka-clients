@@ -19,12 +19,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-/// Whether the server requires or requests client TLS authentication.
-///
-/// This is primarily a server-side setting, but included for config
-/// compatibility with Java's `SslClientAuth`.
-///
-/// Translated from `org.apache.kafka.common.config.SslClientAuth`.
+/// Describes whether the server should require or request client authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.SslClientAuth")]
@@ -51,14 +46,16 @@ impl SslClientAuth {
         }
     }
 
-    /// Case-insensitive lookup by config string.
+    /// Returns the constant whose name matches `key` ignoring case, or
+    /// [`SslClientAuth::None`] when `key` is `None`.
     ///
-    /// Returns `SslClientAuth::None` if `key` is `None`.
-    /// Returns `None` if `key` is `Some` but does not match any variant.
+    /// # Arguments
     ///
-    /// Matches Java's `SslClientAuth.forConfig(String)` behavior:
-    /// - `null` maps to `NONE`
-    /// - Unknown string returns `null` (here: `Option::None`)
+    /// - `key` - the config value to look up
+    ///
+    /// # Returns
+    ///
+    /// The matching constant, or `None` when `key` is set but matches no constant.
     #[doc(alias = "org.apache.kafka.common.config.SslClientAuth#forConfig")]
     pub fn for_config(key: Option<&str>) -> Option<Self> {
         match key {
@@ -81,7 +78,7 @@ impl fmt::Display for SslClientAuth {
 impl FromStr for SslClientAuth {
     type Err = String;
 
-    /// Parses an `SslClientAuth` from its name (case-insensitive).
+    // Parses an `SslClientAuth` from its name (case-insensitive).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let upper = s.to_uppercase();
         SslClientAuth::ALL

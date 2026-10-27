@@ -86,12 +86,12 @@ pub(crate) unsafe fn user_scram_credential_upsertion_ref<'a>(
     &unsafe { inner_ref(upsertion) }.upsertion
 }
 
-/// Copies a borrowed `kafka_Bytes_t`; a null `data` (Java's null array) reads
+/// Copies a borrowed `kafka_Bytes_t`; a `NULL` `data` (Java's null array) reads
 /// as empty.
 ///
 /// # Safety
 ///
-/// `bytes.data` must be null or point to `bytes.len` readable bytes that are
+/// `bytes.data` must be `NULL` or point to `bytes.len` readable bytes that are
 /// not written during this call.
 unsafe fn bytes_to_vec(bytes: kafka_Bytes_t) -> Vec<u8> {
     // SAFETY: Per this function's `# Safety`, `bytes.data` is null or points to `bytes.len`
@@ -100,16 +100,23 @@ unsafe fn bytes_to_vec(bytes: kafka_Bytes_t) -> Vec<u8> {
     unsafe { bytes.as_slice() }.map(<[u8]>::to_vec).unwrap_or_default()
 }
 
-/// `new UserScramCredentialUpsertion(String user, ScramCredentialInfo
-/// credentialInfo, String password)`: the password is the UTF-8 bytes of the
-/// string, and a random salt is generated as in Java. `credential_info` is
-/// copied, the caller keeps its handle. Owned, freed with
-/// [`kafka_admin_UserScramCredentialUpsertion_destroy`].
+/// Constructor that generates a random salt
+///
+/// # Parameters
+///
+/// - `user` - the user for which the credential is to be updated/inserted
+/// - `credential_info` - the mechanism and iterations to be used
+/// - `password` - the password
+///
+/// # Translation notes
+///
+/// The password is the UTF-8 bytes of the string.
 ///
 /// # Safety
 ///
 /// `user` and `password` must be valid NUL-terminated strings and
-/// `credential_info` a valid SCRAM-credential-info handle.
+/// `credential_info` a valid SCRAM-credential-info handle, copied: the caller keeps it. The
+/// returned handle is owned, freed with [`kafka_admin_UserScramCredentialUpsertion_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
@@ -131,17 +138,24 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_str(
     ))
 }
 
-/// `new UserScramCredentialUpsertion(String user, ScramCredentialInfo
-/// credentialInfo, byte[] password)`: the password bytes are copied and a
-/// random salt is generated as in Java. `credential_info` is copied, the
-/// caller keeps its handle. Owned, freed with
-/// [`kafka_admin_UserScramCredentialUpsertion_destroy`].
+/// `new UserScramCredentialUpsertion(String user, ScramCredentialInfo credentialInfo, byte[] password)`:
+/// the password bytes are copied and a random salt is generated as in Java. `credential_info` is
+/// copied, the caller keeps its handle.
+///
+/// # Parameters
+///
+/// - `user` - the user for which the credential is to be updated/inserted
+/// - `credential_info` - the mechanism and iterations to be used
+/// - `password` - the password
 ///
 /// # Safety
 ///
 /// `user` must be a valid NUL-terminated string, `credential_info` a valid
 /// SCRAM-credential-info handle and `password` a view over readable bytes
 /// that are not written during the call.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_UserScramCredentialUpsertion_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
@@ -163,15 +177,23 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_bytes(
     ))
 }
 
-/// `new UserScramCredentialUpsertion(String user, ScramCredentialInfo
-/// credentialInfo, byte[] password, byte[] salt)`: both byte arrays are
-/// copied. `credential_info` is copied, the caller keeps its handle. Owned,
-/// freed with [`kafka_admin_UserScramCredentialUpsertion_destroy`].
+/// `new UserScramCredentialUpsertion(String user, ScramCredentialInfo credentialInfo, byte[] password, byte[] salt)`:
+/// both byte arrays are copied. `credential_info` is copied, the caller keeps its handle.
+///
+/// # Parameters
+///
+/// - `user` - the user for which the credential is to be updated/inserted
+/// - `credential_info` - the mechanism and iterations to be used
+/// - `password` - the password
+/// - `salt` - the salt to be used
 ///
 /// # Safety
 ///
 /// As [`kafka_admin_UserScramCredentialUpsertion_with_bytes`], plus `salt` a
 /// view over readable bytes that are not written during the call.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_UserScramCredentialUpsertion_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
@@ -200,11 +222,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_with_salt(
     ))
 }
 
-/// `user()`: borrowed from the handle.
+/// # Returns
+///
+/// the always non-`NULL` user
 ///
 /// # Safety
 ///
-/// `self_` must be a valid upsertion handle.
+/// `self_` must be a valid upsertion handle. The returned string is borrowed, valid as long as the
+/// upsertion.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
@@ -216,12 +241,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_user(
     unsafe { inner_ref(self_) }.user_c.as_ptr()
 }
 
-/// `credentialInfo()`: a borrowed handle valid as long as the upsertion,
-/// never passed to `kafka_admin_ScramCredentialInfo_destroy`.
+/// # Returns
+///
+/// the mechanism and iterations
 ///
 /// # Safety
 ///
-/// `self_` must be a valid upsertion handle.
+/// `self_` must be a valid upsertion handle. The returned handle is borrowed, valid as long as the
+/// upsertion, never passed to `kafka_admin_ScramCredentialInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_info(
@@ -233,12 +260,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_credential_inf
     scram_credential_info_ptr(unsafe { user_scram_credential_upsertion_ref(self_) }.credential_info())
 }
 
-/// `salt()`: a view over the salt bytes, borrowed from the handle and valid
-/// as long as it.
+/// # Returns
+///
+/// the salt
 ///
 /// # Safety
 ///
-/// `self_` must be a valid upsertion handle.
+/// `self_` must be a valid upsertion handle. The returned bytes are a view borrowed from the
+/// upsertion, valid as long as it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
@@ -250,12 +279,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_salt(
     kafka_Bytes_t::from_slice(unsafe { user_scram_credential_upsertion_ref(self_) }.salt())
 }
 
-/// `password()`: a view over the password bytes, borrowed from the handle
-/// and valid as long as it.
+/// # Returns
+///
+/// the password
 ///
 /// # Safety
 ///
-/// `self_` must be a valid upsertion handle.
+/// `self_` must be a valid upsertion handle. The returned bytes are a view borrowed from the
+/// upsertion, valid as long as it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
@@ -267,11 +298,11 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialUpsertion_password(
     kafka_Bytes_t::from_slice(unsafe { user_scram_credential_upsertion_ref(self_) }.password())
 }
 
-/// Frees an owned upsertion handle; null is a no-op.
+/// Frees an owned upsertion handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

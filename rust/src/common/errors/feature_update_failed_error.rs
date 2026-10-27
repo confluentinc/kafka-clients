@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Unable to update finalized features due to an unexpected server error.
     ///
-    /// Corresponds to Java's `FeatureUpdateFailedException`, error code `Errors::FeatureUpdateFailed`.
-    ///
-    /// Java `extends` chain:
-    ///    `FeatureUpdateFailedException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::FeatureUpdateFailed`. Java `extends` chain:
+    /// `FeatureUpdateFailedException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.FeatureUpdateFailedException")]
     FeatureUpdateFailedError,
     code: Errors::FeatureUpdateFailed,

@@ -18,14 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The request included message batch larger than the configured segment size
-    /// on the server.
+    /// This record batch is larger than the maximum allowable size
     ///
-    /// Corresponds to Java's `RecordBatchTooLargeException`, error code `Errors::RecordListTooLarge`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `RecordBatchTooLargeException` -> `InvalidConfigurationException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::RecordListTooLarge`.
     #[doc(alias = "org.apache.kafka.common.errors.RecordBatchTooLargeException")]
     RecordBatchTooLargeError,
     code: Errors::RecordListTooLarge,

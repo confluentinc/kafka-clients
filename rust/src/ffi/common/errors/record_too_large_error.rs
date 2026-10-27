@@ -42,13 +42,17 @@ impl PayloadClass for RecordTooLargeError {
     }
 }
 
-/// The payload of a `RecordTooLargeException` error, borrowed from the error
-/// handle, or null when the error is another class. The suffix stays because
-/// `kafka_common_Error_record_too_large` is the `Error` factory.
+/// Returns the payload of a `RecordTooLargeException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large_error(
@@ -67,12 +71,16 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large_error(
     }
 }
 
-/// `new RecordTooLargeException(String message)`. Owned, freed with
-/// [`kafka_common_RecordTooLargeError_destroy`].
+/// `new RecordTooLargeException(String message)`.
+///
+/// # Parameters
+///
+/// - `message` - The detail message.
 ///
 /// # Safety
 ///
-/// `message` must be a valid NUL-terminated string.
+/// `message` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_RecordTooLargeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_new(
@@ -85,19 +93,28 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_new(
 }
 
 /// `new RecordTooLargeException()` with Java's default message.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_RecordTooLargeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_RecordTooLargeError_with_default_message() -> *mut kafka_common_RecordTooLargeError_t {
     Payload::boxed(RecordTooLargeError::with_default_message())
 }
 
-/// `new RecordTooLargeException(String message, Throwable cause)`; `source`
-/// is consumed and must not be destroyed by the caller afterwards.
+/// `new RecordTooLargeException(String message, Throwable cause)`.
+///
+/// # Parameters
+///
+/// - `message` - The detail message.
+/// - `source` - The cause of the error.
 ///
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string and `source` an owned
-/// error handle not yet destroyed.
+/// error handle not yet destroyed; `source` is consumed, so the caller must not destroy it
+/// afterwards. The returned handle is owned, freed with `kafka_common_RecordTooLargeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_source(
@@ -114,14 +131,20 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_source(
 }
 
 /// `new RecordTooLargeException(String message, Map<TopicPartition, Long>
-/// recordTooLargePartitions)`; the map holds
-/// `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values,
-/// copied.
+/// recordTooLargePartitions)`.
+///
+/// # Parameters
+///
+/// - `message` - The detail message.
+/// - `record_too_large_partitions` - The partitions whose records were too large, with their
+///   offsets: `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values, or
+///   `NULL`.
 ///
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string and
-/// `record_too_large_partitions` null or a valid map of the stated types.
+/// `record_too_large_partitions` `NULL` or a valid map of the stated types; both are copied. The
+/// returned handle is owned, freed with `kafka_common_RecordTooLargeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_record_too_large_partitions(
@@ -141,14 +164,14 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_with_record_too_large_
     ))
 }
 
-/// `recordTooLargePartitions()`: an owned map of
-/// `kafka_common_TopicPartition_t *` to `int64_t *`, ordered by topic then
-/// partition and freed with `kafka_Map_destroy`, or null when Java's field
-/// is null (not an empty map).
+/// Returns `recordTooLargePartitions()`: a map of `kafka_common_TopicPartition_t *` to
+/// `int64_t *`, ordered by topic then partition, or `NULL` when Java's field is null (not an
+/// empty map).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid record-too-large handle.
+/// `self_` must be a valid record-too-large handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
@@ -164,11 +187,12 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_parti
         .map_or(ptr::null_mut(), topic_partition_i64_map)
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_message(
@@ -182,11 +206,12 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_message(
     unsafe { Payload::<RecordTooLargeError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_source(
@@ -200,11 +225,12 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_source(
     unsafe { Payload::<RecordTooLargeError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-too-large handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_to_string(
@@ -217,12 +243,12 @@ pub unsafe extern "C" fn kafka_common_RecordTooLargeError_to_string(
     unsafe { Payload::<RecordTooLargeError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_RecordTooLargeError_destroy(self_: *mut kafka_common_RecordTooLargeError_t) {

@@ -971,7 +971,7 @@ mod tests {
     }
 
     /// A position exactly on a chunk boundary stays in the full chunk (Java's walk,
-    /// `ChunkedByteBufferOutputStream.java:274-289`, advances only while bytes remain), so
+    /// `ChunkedByteBufferOutputStream#position(int)`, advances only while bytes remain), so
     /// `close()` releases the chunk after it as never written.
     #[test]
     fn test_set_position_on_chunk_boundary_stays_in_the_full_chunk() {

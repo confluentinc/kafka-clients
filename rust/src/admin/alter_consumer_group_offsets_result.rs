@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::alter_consumer_group_offsets`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult`.
 
 use std::collections::HashMap;
 
@@ -25,8 +23,6 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 type PartitionErrors = HashMap<TopicPartition, Errors>;
 
 /// The result of `Admin::alter_consumer_group_offsets`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult")]
 pub struct AlterConsumerGroupOffsetsResult {
@@ -43,10 +39,16 @@ impl AlterConsumerGroupOffsetsResult {
     /// Returns a future which can be used to check the result for a given
     /// partition.
     ///
-    /// Mirrors `partitionResult(TopicPartition)`. The returned future fails
-    /// (Java's `IllegalArgumentException`) if the partition was not part of the
-    /// alter request, and otherwise fails with the partition's error if it was
-    /// not `NONE`.
+    /// # Arguments
+    ///
+    /// - `partition` - the partition to check
+    ///
+    /// # Errors
+    ///
+    /// The returned future completes with:
+    /// - `Error::is_local_illegal_argument_error` if the partition was not part of
+    ///   the alter request;
+    /// - the partition's own error, if its commit failed.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> KafkaFuture<()> {
         let partition = partition.clone();
@@ -62,8 +64,6 @@ impl AlterConsumerGroupOffsetsResult {
     }
 
     /// Returns a future which succeeds if all the alter offsets succeed.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.future.then_apply(|topic_partition_errors: PartitionErrors| {

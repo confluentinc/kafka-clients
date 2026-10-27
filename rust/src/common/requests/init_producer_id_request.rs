@@ -159,7 +159,7 @@ impl Builder {
     ///
     /// Test-only. `TransactionManager.initializeTransactions` never calls
     /// `setKeepPreparedTxn` in Apache Kafka 4.2, so the KIP-939 response arm at
-    /// `TransactionManager.java:1501` cannot be reached without setting the flag on
+    /// `TransactionManager.InitProducerIdHandler#handleResponse` cannot be reached without setting the flag on
     /// an already-built request — which is what
     /// `TransactionManagerTest.prepareInitPidResponse`'s `keepPreparedTxn = true`
     /// overload asserts the broker sees. Production code has no reason to mutate a
@@ -315,9 +315,9 @@ mod tests {
     /// `producer_id` is a v3+ field, so serializing a non-default value at v2
     /// must fail. The check belongs to the generated code, not this wrapper: the
     /// generator emits it as the `else` half of the field's version gate, mirroring
-    /// `FieldSpec.generateNonIgnorableFieldCheck` (`FieldSpec.java:652-665`), and
-    /// `ProducerId` is not `"ignorable"` so the gate at
-    /// `MessageDataGenerator.java:792` lets it through.
+    /// `FieldSpec#generateNonIgnorableFieldCheck`, and
+    /// `ProducerId` is not `"ignorable"` so the gate in
+    /// `MessageDataGenerator#generateClassWriter` lets it through.
     #[test]
     fn test_init_producer_id_request_versions() {
         let mut data = InitProducerIdRequestData::new();

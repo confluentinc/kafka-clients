@@ -13,18 +13,13 @@
 // limitations under the License.
 
 //! Options for `Admin::fence_producers`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.FenceProducersOptions`.
 
 /// Options for `Admin::fence_producers`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FenceProducersOptions`. In
-/// Java this class only extends `AbstractOptions` (a `timeout_ms` field) with
-/// no additional fields; the timeout doubles as the transaction timeout the
-/// coordinator uses to append the new producer epoch to the transaction log.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersOptions")]
 pub struct FenceProducersOptions {
+    // Also the transaction timeout the coordinator uses to append the new
+    // producer epoch to the transaction log.
     timeout_ms: Option<i32>,
 }
 
@@ -35,8 +30,16 @@ impl FenceProducersOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `FenceProducersOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -44,8 +47,8 @@ impl FenceProducersOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

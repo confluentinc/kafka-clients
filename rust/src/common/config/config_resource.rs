@@ -17,8 +17,6 @@
 //! Corresponds to `org.apache.kafka.common.config.ConfigResource`.
 
 /// Type of a [`ConfigResource`].
-///
-/// Corresponds to `ConfigResource.Type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type")]
@@ -53,8 +51,6 @@ impl std::fmt::Display for Type {
 
 impl Type {
     /// Returns the wire id for this resource type.
-    ///
-    /// Corresponds to `ConfigResource.Type.id()`.
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type#id")]
     pub fn id(&self) -> i8 {
         match self {
@@ -70,7 +66,9 @@ impl Type {
     /// Returns the resource type for the given wire id, or
     /// [`Type::Unknown`] if the id is unrecognized.
     ///
-    /// Corresponds to `ConfigResource.Type.forId(byte)`.
+    /// # Arguments
+    ///
+    /// - `id` - the wire id
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource$Type#forId")]
     pub fn for_id(id: i8) -> Type {
         match id {
@@ -85,8 +83,6 @@ impl Type {
 }
 
 /// A class representing resources that have configs.
-///
-/// Corresponds to `org.apache.kafka.common.config.ConfigResource`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.config.ConfigResource")]
 pub struct ConfigResource {
@@ -97,20 +93,22 @@ pub struct ConfigResource {
 impl ConfigResource {
     /// Create an instance of this class with the provided parameters.
     ///
-    /// * `resource_type` - a resource type
-    /// * `name` - a resource name
+    /// # Arguments
+    ///
+    /// - `resource_type` - a non-None resource type
+    /// - `name` - a non-None resource name
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource#ConfigResource")]
     pub fn new(resource_type: Type, name: String) -> Self {
         Self { resource_type, name }
     }
 
-    /// Return the resource type.
+    /// Returns the resource type.
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource#type")]
     pub fn r#type(&self) -> Type {
         self.resource_type
     }
 
-    /// Return the resource name.
+    /// Returns the resource name.
     #[doc(alias = "org.apache.kafka.common.config.ConfigResource#name")]
     pub fn name(&self) -> &str {
         &self.name

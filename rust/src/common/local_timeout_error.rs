@@ -23,8 +23,8 @@ use crate::common::error::message_only_error;
 message_only_error! {
     /// A wait on a future timed out.
     ///
-    /// Corresponds to Java's `java.util.concurrent.TimeoutException`, thrown by
-    /// `Future.get(timeout, unit)` — **not** to
+    /// Java's `java.util.concurrent.TimeoutException`, thrown by
+    /// `Future.get(timeout, unit)` — **not**
     /// `org.apache.kafka.common.errors.TimeoutException`, which is a
     /// `RetriableException` under `KafkaException` and is spelled
     /// [`Error::timeout`](crate::common::Error::timeout). The two are unrelated
@@ -34,9 +34,8 @@ message_only_error! {
     /// plain checked `java.util` class outside the Kafka hierarchy, so no
     /// predicate holds.
     ///
-    /// The `Local` prefix marks this as a JDK class rather than a Kafka one, per
-    /// CLAUDE.md §2 — every `java.*` error carries it, independently of the
-    /// subpackage. That is what separates this from
+    /// The `Local` prefix marks this as a JDK class rather than a Kafka one —
+    /// every `java.*` error carries it, independently of the subpackage. That is what separates this from
     /// [`Error::Timeout`](crate::common::Error::Timeout): Java tells the two
     /// `TimeoutException`s apart by package, and a flat enum cannot, so the
     /// prefix carries what the package used to. It also says something the

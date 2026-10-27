@@ -39,7 +39,7 @@ pub struct kafka_common_TopicCollection_t {
 }
 
 /// The variants of [`TopicCollection`], for a `switch` over
-/// [`kafka_common_TopicCollection__enum`].
+/// `kafka_common_TopicCollection__enum`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_TopicCollection_e {
@@ -49,7 +49,7 @@ pub enum kafka_common_TopicCollection_e {
     kafka_common_TopicCollection_TOPIC_NAMES,
 }
 
-/// Which variant `self_` holds.
+/// Returns which variant `self_` holds.
 ///
 /// A caught Rust panic returns `kafka_common_TopicCollection_TOPIC_IDS`, the first enumerator: the
 /// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -88,13 +88,18 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
     Box::into_raw(Box::new(topics)) as *mut kafka_common_TopicCollection_t
 }
 
-/// `TopicCollection.ofTopicIds(Collection<Uuid>)`: `topics` holds
-/// `const kafka_common_Uuid_t *` elements, copied. Owned, freed with
-/// [`kafka_common_TopicCollection_destroy`].
+/// # Parameters
+///
+/// - `topics` - the topic ids, a list of `const kafka_common_Uuid_t *`, copied; `NULL` reads as empty
+///
+/// # Returns
+///
+/// a collection of topics defined by topic ID
 ///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of uuid handles.
+/// `topics` must be `NULL` or a valid list of uuid handles. The returned handle is owned, freed
+/// with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
@@ -105,12 +110,18 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
     boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics) }))
 }
 
-/// `TopicCollection.ofTopicNames(Collection<String>)`: `topics` holds
-/// `const char *` elements, copied.
+/// # Parameters
+///
+/// - `topics` - the topic names, a list of `const char *`, copied; `NULL` reads as empty
+///
+/// # Returns
+///
+/// a collection of topics defined by topic name
 ///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of NUL-terminated strings.
+/// `topics` must be `NULL` or a valid list of NUL-terminated strings. The returned handle is
+/// owned, freed with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(

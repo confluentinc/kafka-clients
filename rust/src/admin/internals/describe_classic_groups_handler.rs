@@ -160,8 +160,9 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ClassicGroupDescription> {
         let ConcreteResponse::DescribeGroups(response) = response else {
-            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
-            // mismatch; see `ApiResult::failed_all`.
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // fails this one call on a response-type mismatch; see
+            // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
                 Error::local_illegal_state("DescribeClassicGroupsHandler received an unexpected response type"),

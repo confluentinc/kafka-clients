@@ -33,9 +33,9 @@ pub struct ByteBufferAccessor {
 impl ByteBufferAccessor {
     /// Create a `ByteBufferAccessor` over an existing buffer.
     ///
-    /// Translates Java's sole constructor `ByteBufferAccessor(ByteBuffer buf)`
-    /// (`ByteBufferAccessor.java:27`). A caller that wants Java's
-    /// `ByteBuffer.allocate(n)` passes `Vec::with_capacity(n)`.
+    /// Translates Java's sole constructor `ByteBufferAccessor(ByteBuffer buf)`.
+    /// A caller that wants Java's `ByteBuffer.allocate(n)` passes
+    /// `Vec::with_capacity(n)`.
     #[doc(alias = "org.apache.kafka.common.protocol.ByteBufferAccessor#ByteBufferAccessor")]
     pub fn new(bytes: Vec<u8>) -> Self {
         ByteBufferAccessor { buffer: bytes, position: 0 }

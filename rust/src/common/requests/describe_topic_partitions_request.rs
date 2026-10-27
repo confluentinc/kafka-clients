@@ -140,7 +140,7 @@ impl Builder {
     ///
     /// Java's `Builder(DescribeTopicPartitionsRequestData)` calls
     /// `super(ApiKeys.DESCRIBE_TOPIC_PARTITIONS)`, which caps the version at the
-    /// latest *released* one (`AbstractRequest.java:46-51`), hence
+    /// latest *released* one (`AbstractRequest.Builder#Builder(ApiKeys)`), hence
     /// `latest_version_enable_unstable_last_version(false)`
     /// (`producer-transactions.md` §12).
     #[doc(alias = "org.apache.kafka.common.requests.DescribeTopicPartitionsRequest$Builder#Builder")]

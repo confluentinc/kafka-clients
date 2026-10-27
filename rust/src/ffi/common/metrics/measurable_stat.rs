@@ -62,7 +62,7 @@ pub type kafka_common_metrics_MeasurableStat_type_name_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// A C implementation of [`MeasurableStat`] registered through
-/// [`kafka_common_metrics_MeasurableStat_new`].
+/// `kafka_common_metrics_MeasurableStat_new`.
 struct CMeasurableStat {
     self_: *mut c_void,
     record: kafka_common_metrics_MeasurableStat_record_fn_t,
@@ -172,12 +172,27 @@ pub(crate) unsafe fn take_measurable_stat(stat: *mut kafka_common_metrics_Measur
 
 /// Registers a C implementation of `MeasurableStat`. The caller owns `self_`
 /// and keeps it alive until the handle is destroyed with
-/// [`kafka_common_metrics_MeasurableStat_destroy`] or, once a `*mut`
+/// `kafka_common_metrics_MeasurableStat_destroy` or, once a `*mut`
 /// parameter consumed it, until the sensor it went into is destroyed with
 /// its registry. The functions may be called from any thread, concurrently,
 /// so the C caller is responsible for their thread-safety on `self_`.
-/// `type_name` may be `NULL` (see
-/// [`kafka_common_metrics_MeasurableStat_type_name_fn_t`]).
+///
+/// # Parameters
+///
+/// - `self_` - The implementation's state, passed back to every function.
+/// - `record` - Its `record(MetricConfig, double, long)`.
+/// - `measure` - Its `measure(MetricConfig, long)`.
+/// - `type_name` - Its type name, or `NULL` for none (see
+///   `kafka_common_metrics_MeasurableStat_type_name_fn_t`).
+///
+/// # Returns
+///
+/// A measurable-stat handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_MeasurableStat_destroy` unless a `*mut` parameter consumed it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MeasurableStat_new(
@@ -191,6 +206,12 @@ pub extern "C" fn kafka_common_metrics_MeasurableStat_new(
 }
 
 /// `record(MetricConfig config, double value, long timeMs)`.
+///
+/// # Parameters
+///
+/// - `config` - The configuration to use for this metric
+/// - `value` - The value to record
+/// - `time_ms` - The POSIX time in milliseconds this value occurred
 ///
 /// # Safety
 ///
@@ -212,6 +233,15 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_record(
 
 /// `measure(MetricConfig config, long now)`.
 ///
+/// # Parameters
+///
+/// - `config` - The configuration for this metric
+/// - `now` - The POSIX time in milliseconds the measurement is being taken
+///
+/// # Returns
+///
+/// The measured value
+///
 /// # Safety
 ///
 /// `self_` must be a valid measurable-stat handle and `config` a valid
@@ -229,13 +259,13 @@ pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_measure(
     unsafe { measurable_stat_ref(self_) }.measure(unsafe { metric_config_ref(config) }, now)
 }
 
-/// The Rust-only `type_name()`: the provider's type name as
-/// `KafkaMetric_to_string` reports it, or `NULL` for none (a closure). The
-/// string is borrowed and stays valid for the rest of the program.
+/// Returns the provider's type name as `kafka_common_metrics_KafkaMetric_to_string` reports it,
+/// or `NULL` for none.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid measurable-stat handle.
+/// `self_` must be a valid measurable-stat handle. The returned string is borrowed and stays valid for the
+/// rest of the program.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MeasurableStat_type_name(

@@ -31,7 +31,7 @@ pub struct kafka_common_security_token_delegation_DelegationToken_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_security_token_delegation_DelegationToken_t`] points
+/// What a `kafka_common_security_token_delegation_DelegationToken_t` points
 /// at: the token plus the token-information handle its getter borrows out.
 ///
 /// The HMAC is raw bytes, not a string: it is a SHA-512 MAC and can contain
@@ -87,7 +87,7 @@ pub(crate) unsafe fn delegation_token_ref<'a>(
 }
 
 /// Hands `token` to C as an owned handle, freed with
-/// [`kafka_common_security_token_delegation_DelegationToken_destroy`].
+/// `kafka_common_security_token_delegation_DelegationToken_destroy`.
 pub(crate) fn box_delegation_token(
     token: DelegationToken,
 ) -> *mut kafka_common_security_token_delegation_DelegationToken_t {
@@ -95,15 +95,18 @@ pub(crate) fn box_delegation_token(
         as *mut kafka_common_security_token_delegation_DelegationToken_t
 }
 
-/// `new DelegationToken(TokenInformation tokenInformation, byte[] hmac)`:
-/// `token_information` and the bytes behind `hmac` are copied during the
-/// call; a null `hmac.data` is an empty MAC. Owned, freed with
-/// [`kafka_common_security_token_delegation_DelegationToken_destroy`].
+/// Creates a delegation token.
+///
+/// # Parameters
+///
+/// - `token_information` - the token's details, copied
+/// - `hmac` - the token's MAC, copied; a `NULL` `hmac.data` is an empty MAC
 ///
 /// # Safety
 ///
-/// `token_information` must be a valid token-information handle and
-/// `hmac.data` null or valid for `hmac.len` bytes.
+/// `token_information` must be a valid token-information handle and `hmac.data` `NULL` or valid
+/// for `hmac.len` bytes. The returned handle is owned, freed with
+/// `kafka_common_security_token_delegation_DelegationToken_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_new(
@@ -122,11 +125,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     ))
 }
 
-/// `tokenInfo()`: borrowed from the handle; never destroyed.
+/// Returns the token's details.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid delegation-token handle.
+/// `self_` must be a valid delegation-token handle. The returned handle is borrowed, valid as long
+/// as the token, and never destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_token_info(
@@ -139,14 +143,14 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     unsafe { inner_ref(self_) }.token_info.as_ptr()
 }
 
-/// `hmac()`: the raw MAC bytes, borrowed from the handle. They are **not**
-/// NUL-terminated and may contain NUL, so `len` is the only way to know how
-/// many there are. Pass them back verbatim to `renewDelegationToken` /
+/// Returns the raw MAC bytes. They are **not** NUL-terminated and may contain NUL, so `len` is the
+/// only way to know how many there are. Pass them back verbatim to `renewDelegationToken` /
 /// `expireDelegationToken`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid delegation-token handle.
+/// `self_` must be a valid delegation-token handle. The returned bytes are borrowed, valid as long
+/// as the token.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac(
@@ -158,13 +162,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     kafka_Bytes_t::from_slice(unsafe { delegation_token_ref(self_) }.hmac())
 }
 
-/// `hmacAsBase64String()`, as an owned string freed with
-/// `kafka_string_destroy`: the form most tooling passes back to
-/// `renewDelegationToken`.
+/// Returns the MAC in Base64, the form most tooling passes back to `renewDelegationToken`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid delegation-token handle.
+/// `self_` must be a valid delegation-token handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_hmac_as_base64_string(
@@ -176,11 +179,12 @@ pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_
     into_c_string(&unsafe { delegation_token_ref(self_) }.hmac_as_base64_string())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the token.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid delegation-token handle.
+/// `self_` must be a valid delegation-token handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_token_delegation_DelegationToken_to_string(

@@ -27,38 +27,37 @@
 //!
 //! # Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testAsyncConsumerAutoCommitOnClose` (line 96)
+//! - `testAsyncConsumerAutoCommitOnClose`
 //!   → `test_async_consumer_auto_commit_on_close`
-//! - `testAsyncConsumerAutoCommitOnCloseAfterWakeup` (line 124)
+//! - `testAsyncConsumerAutoCommitOnCloseAfterWakeup`
 //!   → `test_async_consumer_auto_commit_on_close_after_wakeup`
-//! - `testAsyncConsumerCommitMetadata` (line 157)
+//! - `testAsyncConsumerCommitMetadata`
 //!   → `test_async_consumer_commit_metadata`
-//! - `testAsyncConsumerAsyncCommit` (line 187)
+//! - `testAsyncConsumerAsyncCommit`
 //!   → `test_async_consumer_async_commit`
-//! - `testAsyncConsumerCommitSpecifiedOffsets` (line 308)
+//! - `testAsyncConsumerCommitSpecifiedOffsets`
 //!   → `test_async_consumer_commit_specified_offsets`
-//! - `testAsyncConsumerAutoCommitOnRebalance` (line 350)
+//! - `testAsyncConsumerAutoCommitOnRebalance`
 //!   → `test_async_consumer_auto_commit_on_rebalance` (see deviation below)
-//! - `testAsyncConsumerSubscribeAndCommitSync` (line 396)
+//! - `testAsyncConsumerSubscribeAndCommitSync`
 //!   → `test_async_consumer_subscribe_and_commit_sync`
-//! - `testAsyncConsumerPositionAndCommit` (line 419)
+//! - `testAsyncConsumerPositionAndCommit`
 //!   → `test_async_consumer_position_and_commit`
-//! - `testCommitAsyncCompletedBeforeConsumerCloses` (line 492)
+//! - `testCommitAsyncCompletedBeforeConsumerCloses`
 //!   → `test_commit_async_completed_before_consumer_closes`
-//! - `testCommitAsyncCompletedBeforeCommitSyncReturns` (line 519)
+//! - `testCommitAsyncCompletedBeforeCommitSyncReturns`
 //!   → `test_commit_async_completed_before_commit_sync_returns`
 //!
 //! # Added in Apache Kafka 4.3.1
 //!
-//! - `testAsyncConsumerNoCommittedOffsets` (line 187)
+//! - `testAsyncConsumerNoCommittedOffsets`
 //!   → `test_async_consumer_no_committed_offsets`
-//! - `testAsyncConsumerCommittedDeletedTopic` (line 225, KAFKA-20165)
+//! - `testAsyncConsumerCommittedDeletedTopic` (KAFKA-20165)
 //!   → `test_async_consumer_committed_deleted_topic`
 //!
 //! # Broker fault injection (Phase 16)
 //!
-//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
-//!   (4.3.1 line 552)
+//! - `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose` (4.3.1)
 //!   → `test_commit_async_fails_when_coordinator_unavailable_during_close`
 //!   — runs on its own dedicated `Type::Kraft` cluster (3 brokers + 1
 //!   isolated controller) because it stops every broker with
@@ -66,7 +65,7 @@
 //!
 //! # SKIPped (CONSUMER-arm)
 //!
-//! - SKIP: `testAsyncConsumerAutoCommitIntercept` (line 225) —
+//! - SKIP: `testAsyncConsumerAutoCommitIntercept` —
 //!   `ConsumerInterceptor` integration (`MockConsumerInterceptor.
 //!   ON_COMMIT_COUNT`) is not in scope for this phase (report 07: "no
 //!   interceptor integration coverage at all"). Also depends on
@@ -260,13 +259,12 @@ async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records:
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Java `PlaintextConsumerCommitTest.BROKER_COUNT` (`PlaintextConsumerCommitTest.java:73`).
+/// Java `PlaintextConsumerCommitTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;
 
 /// Translates `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`,
-/// as the suite's `@BeforeEach` does for `topic`
-/// (`PlaintextConsumerCommitTest.java:85-88`). Creates the topic EMPTY (the
-/// first produced record lands at offset 0).
+/// as the suite's `@BeforeEach` (`PlaintextConsumerCommitTest#setup`) does for
+/// `topic`. Creates the topic EMPTY (the first produced record lands at offset 0).
 ///
 /// Creates the topic through the admin client and then waits until every
 /// partition leader accepts leader-only requests, before the test produces.
@@ -480,7 +478,7 @@ fn current_time_ms() -> i64 {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncConsumerAutoCommitOnClose` (line 96).
+/// Translates Java's `testAsyncConsumerAutoCommitOnClose`.
 ///
 /// With `enable.auto.commit=true`, seek positions are auto-committed
 /// when the consumer closes; another consumer in the same group sees the
@@ -524,13 +522,27 @@ async fn test_async_consumer_auto_commit_on_close() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed present").offset(), 500);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        300
+    );
+    assert_eq!(
+        committed
+            .get(&tp1)
+            .and_then(Option::as_ref)
+            .expect("tp1 committed present")
+            .offset(),
+        500
+    );
     another.close().await.expect("another close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerAutoCommitOnCloseAfterWakeup`
-/// (line 124). Same as above but `wakeup()` is called before close to
+/// Translates Java's `testAsyncConsumerAutoCommitOnCloseAfterWakeup`.
+/// Same as above but `wakeup()` is called before close to
 /// simulate breaking a poll loop from another thread; auto-commit still
 /// flushes.
 #[tokio::test(flavor = "multi_thread")]
@@ -573,12 +585,26 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed present").offset(), 500);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        300
+    );
+    assert_eq!(
+        committed
+            .get(&tp1)
+            .and_then(Option::as_ref)
+            .expect("tp1 committed present")
+            .offset(),
+        500
+    );
     another.close().await.expect("another close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerCommitMetadata` (line 157).
+/// Translates Java's `testAsyncConsumerCommitMetadata`.
 ///
 /// Sync commit with leaderEpoch + metadata round-trips; async commit with
 /// metadata round-trips; null metadata (empty string in Rust) round-trips.
@@ -606,7 +632,10 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &sync_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &sync_metadata
+    );
 
     // Async commit: offset 10, metadata "bar".
     let async_metadata = OffsetAndMetadata::with_metadata(10, "bar").expect("OffsetAndMetadata");
@@ -617,7 +646,10 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &async_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &async_metadata
+    );
 
     // Null metadata: Java `new OffsetAndMetadata(5, null)` normalizes to
     // empty metadata. Rust `OffsetAndMetadata::new(5)` is the same
@@ -633,12 +665,15 @@ async fn test_async_consumer_commit_metadata() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present"), &null_metadata);
+    assert_eq!(
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed present"),
+        &null_metadata
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerAsyncCommit` (line 187).
+/// Translates Java's `testAsyncConsumerAsyncCommit`.
 ///
 /// Five `commitAsync` calls with offsets 1..=5; poll until the callback
 /// has observed 5 successes; assert no error, success count 5, and the
@@ -656,7 +691,8 @@ async fn test_async_consumer_async_commit() {
 
     // Java pre-creates the GROUP_METADATA_TOPIC_NAME (offsets) topic up front to
     // prevent transient RetriableCommitFailed errors during the async commits
-    // below (`PlaintextConsumerCommitTest.java:192-198`). This test uses a
+    // below (`org.apache.kafka.clients.consumer.PlaintextConsumerCommitTest#testAsyncCommit`).
+    // This test uses a
     // `committed()` query instead: it discovers the coordinator and makes the
     // broker create the offsets topic, so the five async commits all succeed
     // rather than racing coordinator load. The topic is not created explicitly
@@ -693,12 +729,19 @@ async fn test_async_consumer_async_commit() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), count);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        count
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerCommitSpecifiedOffsets` (line 308).
+/// Translates Java's `testAsyncConsumerCommitSpecifiedOffsets`.
 ///
 /// Commits specific per-partition offsets; positions are unchanged by the
 /// commit; async commit picks up the committed changes.
@@ -734,7 +777,14 @@ async fn test_async_consumer_commit_specified_offsets() {
         .expect("commit_sync_with_offsets tp");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed tp");
-    assert_eq!(committed.get(&tp).expect("tp committed present").offset(), 3);
+    assert_eq!(
+        committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("tp committed present")
+            .offset(),
+        3
+    );
     let committed_tp1 = consumer.committed(std::slice::from_ref(&tp1)).await.expect("committed tp1");
     assert!(!committed_tp1.contains_key(&tp1), "tp1 should not be committed yet");
 
@@ -750,20 +800,20 @@ async fn test_async_consumer_commit_specified_offsets() {
         .expect("commit_sync_with_offsets tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed both");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 5);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 3);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 5);
 
     // Async should pick up the committed changes after commit completes.
     let mut commit3 = HashMap::new();
     commit3.insert(tp1.clone(), OffsetAndMetadata::new(7).expect("OffsetAndMetadata"));
     send_and_await_async_commit(consumer.as_mut(), commit3).await;
     let committed = consumer.committed(std::slice::from_ref(&tp1)).await.expect("committed tp1");
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 7);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 7);
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerAutoCommitOnRebalance` (line 350).
+/// Translates Java's `testAsyncConsumerAutoCommitOnRebalance`.
 ///
 /// Auto-commit fires on rebalance; after the rebalance, `committed()`
 /// reflects the seeks.
@@ -841,13 +891,16 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
         .committed(&[tp.clone(), tp1.clone()])
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 300);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 500);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 300);
+    assert_eq!(
+        committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(),
+        500
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerSubscribeAndCommitSync` (line 396).
+/// Translates Java's `testAsyncConsumerSubscribeAndCommitSync`.
 ///
 /// Ensures the member ID is propagated from the group coordinator when
 /// the assignment is received into a subsequent offset commit:
@@ -876,7 +929,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerPositionAndCommit` (line 419).
+/// Translates Java's `testAsyncConsumerPositionAndCommit`.
 ///
 /// `position()` on an unassigned partition throws `LocalIllegalState`; after
 /// assigning, position resets to 0; commit/position interplay; another
@@ -930,7 +983,7 @@ async fn test_async_consumer_position_and_commit() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 0);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 0);
 
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     assert_eq!(
@@ -944,7 +997,7 @@ async fn test_async_consumer_position_and_commit() {
         .await
         .expect("committed should succeed");
     assert_eq!(
-        committed.get(&tp).expect("tp committed").offset(),
+        committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(),
         5,
         "committed offset should be returned"
     );
@@ -961,8 +1014,7 @@ async fn test_async_consumer_position_and_commit() {
     other.close().await.expect("other close should succeed");
 }
 
-/// Translates Java's `testCommitAsyncCompletedBeforeConsumerCloses`
-/// (`PlaintextConsumerCommitTest.java:583-606`).
+/// Translates Java's `PlaintextConsumerCommitTest#testCommitAsyncCompletedBeforeConsumerCloses`.
 ///
 /// Contract: async offset commits complete before the consumer is closed,
 /// even when no commit-sync is performed as part of close (auto-commit
@@ -975,10 +1027,12 @@ async fn test_commit_async_completed_before_consumer_closes() {
     let tp = TopicPartition::new(topic.clone(), 0);
     let tp1 = TopicPartition::new(topic.clone(), 1);
 
-    // Create offsets topic to ensure coordinator is available during close:
-    // `cluster.createTopic(Topic.GROUP_METADATA_TOPIC_NAME,
-    // OFFSETS_TOPIC_PARTITIONS = 1, OFFSETS_TOPIC_REPLICATION = 3)`
-    // (`PlaintextConsumerCommitTest.java:589-590`, `:74-75`). Java gets a fresh
+    // Create offsets topic to ensure coordinator is available during close, as
+    // org.apache.kafka.clients.consumer.PlaintextConsumerCommitTest#testCommitAsyncCompletedBeforeConsumerCloses
+    // does with `cluster.createTopic(Topic.GROUP_METADATA_TOPIC_NAME,
+    // OFFSETS_TOPIC_PARTITIONS = 1, OFFSETS_TOPIC_REPLICATION = 3)`, the constants
+    // being `PlaintextConsumerCommitTest#OFFSETS_TOPIC_PARTITIONS` and
+    // `PlaintextConsumerCommitTest#OFFSETS_TOPIC_REPLICATION`. Java gets a fresh
     // cluster per test; the pooled cluster may already hold the topic from an
     // earlier test, in which case `TopicExists` means the precondition holds.
     {
@@ -1034,8 +1088,7 @@ async fn test_commit_async_completed_before_consumer_closes() {
     assert_eq!(cb.success_count(), 2, "both async commits should complete before close");
 }
 
-/// Translates Java's `testCommitAsyncCompletedBeforeCommitSyncReturns`
-/// (line 519).
+/// Translates Java's `testCommitAsyncCompletedBeforeCommitSyncReturns`.
 ///
 /// Contract: async commits sent before a `commitSync` are guaranteed to
 /// have their callbacks invoked prior to completion of `commitSync`.
@@ -1077,7 +1130,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
         .expect("commit_sync empty");
 
     let committed = consumer.committed(std::slice::from_ref(&tp)).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 1);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 1);
     assert_eq!(cb.success_count(), 1, "async callback should fire before commitSync returns");
 
     // Try with coordinator known.
@@ -1092,8 +1145,8 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     consumer.commit_sync_with_offsets(sync2).await.expect("commit_sync tp1");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 2);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 2);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 2);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 2);
     assert_eq!(cb.success_count(), 2);
 
     // Try with empty sync commit.
@@ -1109,8 +1162,8 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
         .expect("commit_sync empty");
 
     let committed = consumer.committed(&[tp.clone(), tp1.clone()]).await.expect("committed");
-    assert_eq!(committed.get(&tp).expect("tp committed").offset(), 3);
-    assert_eq!(committed.get(&tp1).expect("tp1 committed").offset(), 2);
+    assert_eq!(committed.get(&tp).and_then(Option::as_ref).expect("tp committed").offset(), 3);
+    assert_eq!(committed.get(&tp1).and_then(Option::as_ref).expect("tp1 committed").offset(), 2);
     assert_eq!(cb.success_count(), 3);
 
     consumer.close().await.expect("consumer close should succeed");
@@ -1134,8 +1187,8 @@ fn dedicated_kraft_3brokers() -> ClusterConfig {
     ClusterConfig::kraft_dedicated(3, 1).set_server_properties(props)
 }
 
-/// Translates Java's `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
-/// (`PlaintextConsumerCommitTest.java:552`, AK 4.3.1).
+/// Translates Java's `PlaintextConsumerCommitTest#testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`
+/// (AK 4.3.1).
 ///
 /// Every broker is stopped before the consumer ever looks up its coordinator
 /// (it only `assign`s), so the async commit issued afterwards can never find
@@ -1229,21 +1282,12 @@ fn admin_for(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(config).expect("admin client")
 }
 
-/// Translates Java's `testAsyncConsumerNoCommittedOffsets`
-/// (`PlaintextConsumerCommitTest.java:187`, body `testNoCommittedOffsets` :191).
+/// Translates Java's `PlaintextConsumerCommitTest#testAsyncConsumerNoCommittedOffsets`
+/// (body `PlaintextConsumerCommitTest#testNoCommittedOffsets`).
 ///
 /// Fetches committed offsets for three partitions: `tp` (committed), `tp1`
 /// (exists, never committed) and `tp2` (partition 2 of a 2-partition topic —
 /// does not exist).
-///
-/// **Deviation (representation only):** Java asserts `committed.size() == 3`
-/// with `null` values for `tp1`/`tp2`. The Rust `committed` API returns
-/// `HashMap<TopicPartition, OffsetAndMetadata>`, where "no committed offset"
-/// is represented by *absence* (the `null`s of Java's
-/// `toOffsetMapWithNulls()` are stripped in
-/// `ApplicationEventProcessor::process_fetch_committed_offsets`). So the
-/// Rust assertions are: exactly one entry (`tp`), and `tp1`/`tp2` absent —
-/// the same observable contract `committed.get(tpN) == null` checks in Java.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_no_committed_offsets() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -1275,21 +1319,20 @@ async fn test_async_consumer_no_committed_offsets() {
         .committed(&[tp.clone(), tp1.clone(), tp2.clone()])
         .await
         .expect("committed should succeed");
-    // Java: `assertEquals(3, committed.size())` — see the deviation note above.
-    assert_eq!(1, committed.len(), "unexpected committed map: {committed:?}");
-    assert_eq!(Some(&metadata), committed.get(&tp));
-    assert_eq!(None, committed.get(&tp1));
-    assert_eq!(None, committed.get(&tp2));
+    assert_eq!(3, committed.len(), "unexpected committed map: {committed:?}");
+    assert_eq!(Some(&Some(metadata)), committed.get(&tp));
+    assert_eq!(Some(&None), committed.get(&tp1));
+    assert_eq!(Some(&None), committed.get(&tp2));
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerCommittedDeletedTopic`
-/// (`PlaintextConsumerCommitTest.java:225`, body
-/// `testConsumerCommittedDeletedTopic` :242) — validates KAFKA-20165.
+/// Translates Java's `PlaintextConsumerCommitTest#testAsyncConsumerCommittedDeletedTopic`
+/// (body `PlaintextConsumerCommitTest#testConsumerCommittedDeletedTopic`) — validates
+/// KAFKA-20165.
 ///
 /// Calling `committed()` for a deleted topic eventually returns "no offset"
-/// (Java `null`, Rust absent entry) for the partition: the group coordinator
+/// (Java `null`, Rust `None`) for the partition: the group coordinator
 /// answers `UNKNOWN_TOPIC_ID` for the deleted topic when the client uses topic
 /// ids, which the consumer handles as a retriable partition error and reports
 /// as no committed offset.
@@ -1324,7 +1367,14 @@ async fn test_async_consumer_committed_deleted_topic() {
         .committed(std::slice::from_ref(&tp_to_delete))
         .await
         .expect("committed should succeed");
-    assert_eq!(0, committed.get(&tp_to_delete).expect("committed entry present").offset());
+    assert_eq!(
+        0,
+        committed
+            .get(&tp_to_delete)
+            .and_then(Option::as_ref)
+            .expect("committed entry present")
+            .offset()
+    );
 
     // Delete the topic
     admin
@@ -1343,7 +1393,7 @@ async fn test_async_consumer_committed_deleted_topic() {
             .committed_with_timeout(std::slice::from_ref(&tp_to_delete), Duration::from_millis(5000))
             .await
         {
-            Ok(committed) if !committed.contains_key(&tp_to_delete) => break,
+            Ok(committed) if committed.get(&tp_to_delete).is_some_and(Option::is_none) => break,
             Ok(committed) => format!(
                 "Condition not met within timeout 10000. Expected null for deleted topic partition (got {committed:?})"
             ),

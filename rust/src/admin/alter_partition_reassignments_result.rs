@@ -13,18 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::alter_partition_reassignments`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult`.
 
 use std::collections::HashMap;
 
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::alter_partition_reassignments`.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult")]
 pub struct AlterPartitionReassignmentsResult {
@@ -38,19 +32,23 @@ impl AlterPartitionReassignmentsResult {
         Self { futures }
     }
 
-    /// Return a map from partitions to futures which can be used to check the
-    /// status of the reassignment.
+    /// Returns a map from partitions to futures which can be used to check the status of the
+    /// reassignment. Possible errors:
     ///
-    /// Mirrors `values()`.
+    /// - `Error::is_invalid_replica_assignment_error` (`INVALID_REPLICA_ASSIGNMENT`, 39) - if
+    ///   the specified replica assignment was not valid -- for example, if it included negative
+    ///   numbers, repeated numbers, or specified a broker ID that the controller was not aware
+    ///   of.
+    /// - `Error::is_no_reassignment_in_progress_error` (`NO_REASSIGNMENT_IN_PROGRESS`, 85) - if
+    ///   the request wants to cancel reassignments but none exist
+    /// - `Error::is_unknown_server_error` (`UNKNOWN`, -1)
     #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#values")]
     pub fn values(&self) -> &HashMap<TopicPartition, KafkaFuture<()>> {
         &self.futures
     }
 
-    /// Return a future which succeeds only if all the reassignments were
+    /// Returns a future which succeeds only if all the reassignments were
     /// successfully initiated.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

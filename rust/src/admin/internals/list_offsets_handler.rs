@@ -197,9 +197,10 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, ListOffsetsResultInfo> {
         let ConcreteResponse::ListOffsets(response) = response else {
-            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
-            // result would silently re-issue the request until the deadline. See
-            // `ApiResult::failed_all`.
+            // Java fails the call once
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`);
+            // an empty result would silently re-issue the request until the
+            // deadline. See `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
                 Error::local_illegal_state("ListOffsetsHandler received an unexpected response type"),
@@ -243,10 +244,11 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                // `new ApiException(..)` (`ListOffsetsHandler.java:159-161`) — the
-                // concrete base class, which `Error::Api` translates. Spelling it
-                // `Errors::UnknownServerError` resolved to the `UnknownServerError`
-                // *subclass* instead (finding 246).
+                // `new ApiException(..)`
+                // (`org.apache.kafka.clients.admin.internals.ListOffsetsHandler#handleResponse`) —
+                // the concrete base class, which `Error::Api` translates. Spelling
+                // it `Errors::UnknownServerError` resolved to the
+                // `UnknownServerError` *subclass* instead (finding 246).
                 let sanity_check_error = Error::Api(ApiError::new(format!(
                     "The response from broker {} did not contain a result for topic partition {}",
                     broker.id(),

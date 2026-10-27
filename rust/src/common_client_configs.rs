@@ -115,8 +115,7 @@ impl CommonClientConfigs {
     /// brokers for `metadata.recovery.rebootstrap.trigger.ms` milliseconds or
     /// if server requests rebootstrap.
     ///
-    /// (Text of Java's `CommonClientConfigs.METADATA_RECOVERY_STRATEGY_DOC`
-    /// (`CommonClientConfigs.java:248-257`), carried as rustdoc for the reason
+    /// (Text of Java's `CommonClientConfigs#METADATA_RECOVERY_STRATEGY_DOC`, carried as rustdoc for the reason
     /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
     pub const METADATA_RECOVERY_STRATEGY_CONFIG: &str = "metadata.recovery.strategy";
 
@@ -129,8 +128,7 @@ impl CommonClientConfigs {
     /// configuration.
     ///
     /// (Text of Java's
-    /// `CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC`
-    /// (`CommonClientConfigs.java:262-264`), carried as rustdoc for the reason
+    /// `CommonClientConfigs#METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC`, carried as rustdoc for the reason
     /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`].)
     pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &str = "metadata.recovery.rebootstrap.trigger.ms";
 
@@ -143,8 +141,7 @@ impl CommonClientConfigs {
     /// If the client is connecting to a broker older than Apache Kafka 4.4, no
     /// checking is performed and this configuration has no effect.
     ///
-    /// (Text of Java's `CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_DOC`
-    /// (`CommonClientConfigs.java:267-271`), carried as rustdoc for the reason
+    /// (Text of Java's `CommonClientConfigs#METADATA_CLUSTER_CHECK_ENABLE_DOC`, carried as rustdoc for the reason
     /// given on [`Self::CLIENT_DNS_LOOKUP_CONFIG`]. The producer, consumer and
     /// admin configs define it as `Type.BOOLEAN` with default `true`.)
     pub const METADATA_CLUSTER_CHECK_ENABLE_CONFIG: &str = "metadata.cluster.check.enable";

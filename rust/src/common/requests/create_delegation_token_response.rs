@@ -38,18 +38,17 @@ pub struct CreateDelegationTokenResponse {
 }
 
 /// The parameters of Java's ten-argument
-/// `CreateDelegationTokenResponse.prepareResponse(...)`
-/// (`CreateDelegationTokenResponse.java:42`).
+/// `CreateDelegationTokenResponse#prepareResponse`.
 ///
-/// The two `prepareResponse` forms (`:42`, `:69`) intersect on
+/// The two `prepareResponse` forms intersect on
 /// `{version, throttleTimeMs, error, owner, tokenRequester}`, leaving five
-/// parameters to reach `:42`'s derived name. CLAUDE.md §2 caps that at three
+/// parameters to reach the ten-argument form's derived name. CLAUDE.md §2 caps that at three
 /// parameters and makes this struct the method's *only* parameter, so every
 /// Java parameter lives here — the intersection members included. This struct
 /// has no Java counterpart: it exists solely to satisfy that naming rule
 /// (DoD #7).
 ///
-/// It deliberately has **no** `Default`. Java's narrower `:69` overload does
+/// It deliberately has **no** `Default`. Java's narrower five-argument overload does
 /// supply the five token fields (`-1, -1, -1, "", ByteBuffer.wrap(new byte[0])`)
 /// but takes `version`, `throttleTimeMs`, `error`, `owner` and `requester` from
 /// its caller, so those five have no Java-derived default — a synthesised empty
@@ -72,21 +71,21 @@ pub struct CreateDelegationTokenResponseOptions<'a> {
     pub(crate) owner: &'a KafkaPrincipal,
     /// Java's `tokenRequester`.
     pub(crate) token_requester: &'a KafkaPrincipal,
-    /// Java's `issueTimestamp`. Starts as `-1`, as in `:69`.
+    /// Java's `issueTimestamp`. Starts as `-1`, as in the five-argument `prepareResponse`.
     pub(crate) issue_timestamp: i64,
-    /// Java's `expiryTimestamp`. Starts as `-1`, as in `:69`.
+    /// Java's `expiryTimestamp`. Starts as `-1`, as in the five-argument `prepareResponse`.
     pub(crate) expiry_timestamp: i64,
-    /// Java's `maxTimestamp`. Starts as `-1`, as in `:69`.
+    /// Java's `maxTimestamp`. Starts as `-1`, as in the five-argument `prepareResponse`.
     pub(crate) max_timestamp: i64,
-    /// Java's `tokenId`. Starts empty, as in `:69`.
+    /// Java's `tokenId`. Starts empty, as in the five-argument `prepareResponse`.
     pub(crate) token_id: &'a str,
-    /// Java's `hmac`. Starts empty, as in `:69`.
+    /// Java's `hmac`. Starts empty, as in the five-argument `prepareResponse`.
     pub(crate) hmac: Vec<u8>,
 }
 
 /// Renders every field as the derive it replaces did, except the token id and
 /// the hmac, which render as Java's `CreateDelegationTokenResponse.toString()`
-/// renders them (`CreateDelegationTokenResponse.java:109-113`): the token id as
+/// renders them: the token id as
 /// `"REDACTED"` and the hmac as empty.
 ///
 /// This struct has no Java counterpart, so it has no Java rendering of its
@@ -271,8 +270,7 @@ impl CreateDelegationTokenResponse {
     /// Prepares a full response.
     ///
     /// Corresponds to Java's ten-argument
-    /// `CreateDelegationTokenResponse.prepareResponse(...)`
-    /// (`CreateDelegationTokenResponse.java:42`).
+    /// `CreateDelegationTokenResponse#prepareResponse`.
     pub fn prepare_response_options(options: CreateDelegationTokenResponseOptions<'_>) -> Self {
         let CreateDelegationTokenResponseOptions {
             version,
@@ -307,7 +305,7 @@ impl CreateDelegationTokenResponse {
     ///
     /// Corresponds to Java's five-argument
     /// `CreateDelegationTokenResponse.prepareResponse(int, int, Errors,
-    /// KafkaPrincipal, KafkaPrincipal)` (`CreateDelegationTokenResponse.java:69`).
+    /// KafkaPrincipal, KafkaPrincipal)`.
     #[doc(alias = "org.apache.kafka.common.requests.CreateDelegationTokenResponse#prepareResponse")]
     pub fn prepare_response(
         version: i16,
@@ -473,8 +471,7 @@ mod tests {
     }
 
     /// Translates the rendering assertions of
-    /// `RequestResponseTest.createCreateTokenResponse`
-    /// (`RequestResponseTest.java:3185-3201`): the redacting `Display` masks the
+    /// `RequestResponseTest#createCreateTokenResponse`: the redacting `Display` masks the
     /// token id and empties the hmac. Java's `tokenId='REDACTED'` and `hmac=[]`
     /// read `token_id: "REDACTED"` and `hmac: []` in the Rust rendering.
     #[test]
@@ -503,8 +500,8 @@ mod tests {
         assert!(!rendered.contains(&format!("{:?}", &b"secret-hmac"[..])), "{rendered}");
     }
 
-    /// The `Debug` counterpart of `RequestResponseTest.createCreateTokenResponse`'s
-    /// rendering assertions (`RequestResponseTest.java:3185-3201`): `Debug`
+    /// The `Debug` counterpart of `RequestResponseTest#createCreateTokenResponse`'s
+    /// rendering assertions: `Debug`
     /// renders exactly what `Display` does (Java has a single `toString()`), so
     /// the token id is masked and the hmac, which a derived `Debug` would print
     /// as its byte values, renders empty.
@@ -537,8 +534,8 @@ mod tests {
     }
 
     /// New test, no Java original (Java has no such struct): `Debug` renders
-    /// the token id and the hmac as Java's `toString()` renders the response's
-    /// (`CreateDelegationTokenResponse.java:109-113`), and every other field as
+    /// the token id and the hmac as Java's `CreateDelegationTokenResponse#toString` renders the
+    /// response's, and every other field as
     /// the derive did.
     #[test]
     fn options_debug_redacts_token_id_and_hmac() {

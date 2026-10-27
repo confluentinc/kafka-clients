@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Supplied principalType is not supported.
     ///
-    /// Corresponds to Java's `InvalidPrincipalTypeException`, error code `Errors::InvalidPrincipalType`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidPrincipalTypeException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidPrincipalType`. Java `extends` chain:
+    /// `InvalidPrincipalTypeException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidPrincipalTypeException")]
     InvalidPrincipalTypeError,
     code: Errors::InvalidPrincipalType,

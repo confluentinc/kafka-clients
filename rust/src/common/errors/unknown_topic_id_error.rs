@@ -20,12 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// This server does not host this topic ID.
     ///
-    /// Corresponds to Java's `UnknownTopicIdException`, error code `Errors::UnknownTopicId`.
-    ///
-    /// Java `extends` chain:
-    ///    `UnknownTopicIdException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::UnknownTopicId`. Java `extends` chain: `UnknownTopicIdException` ->
+    /// `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicIdException")]
     UnknownTopicIdError,
     code: Errors::UnknownTopicId,

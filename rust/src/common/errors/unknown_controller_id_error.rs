@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// This controller ID is not known.
     ///
-    /// Corresponds to Java's `UnknownControllerIdException`, error code `Errors::UnknownControllerId`.
-    ///
-    /// Java `extends` chain:
-    ///    `UnknownControllerIdException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnknownControllerId`. Java `extends` chain:
+    /// `UnknownControllerIdException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownControllerIdException")]
     UnknownControllerIdError,
     code: Errors::UnknownControllerId,

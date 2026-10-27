@@ -21,17 +21,13 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorName, E
 use crate::common::protocol::Errors;
 use crate::common::{Error, TopicPartition};
 
-/// The request included a message larger than the max message size the
-/// server will accept.
+/// This record is larger than the maximum allowable size
 ///
-/// Corresponds to Java's `RecordTooLargeException`, error code
-/// `Errors::MessageTooLarge`.
+/// # Translation notes
 ///
-/// Java `extends` chain:
-///    `RecordTooLargeException` -> `ApiException` -> `KafkaException`
-///
-/// Hand-written rather than declared with `kafka_error_type!` because it
-/// carries Java's `recordTooLargePartitions` field and accessor.
+/// Error code `Errors::MessageTooLarge`.
+// Hand-written rather than declared with `kafka_error_type!` because it carries Java's
+// `recordTooLargePartitions` field and accessor.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException")]
 pub struct RecordTooLargeError {
@@ -42,20 +38,22 @@ pub struct RecordTooLargeError {
 }
 
 impl RecordTooLargeError {
-    /// Create the error with the given message and no partitions — Java's
-    /// `RecordTooLargeException(String message)` (`RecordTooLargeException.java:39`).
+    /// Creates the error with the given message and no partitions.
     ///
-    /// The three translated constructors intersect on `{message}`, which is
-    /// exactly this one — so it keeps the plain name and the other two are
-    /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), record_too_large_partitions: None, source: None }
     }
 
-    /// Create the error with the given message and an underlying cause,
-    /// mirroring Java's `RecordTooLargeException(String message, Throwable cause)`
-    /// (`:35`). Suffixed per [`new`](Self::new).
+    /// Creates the error with the given message and an underlying cause.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error's message
+    /// - `source` - the error's cause
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_source(message: impl Into<String>, source: Error) -> Self {
         Self {
@@ -65,16 +63,19 @@ impl RecordTooLargeError {
         }
     }
 
-    /// Create the error with the code's default message — used by
-    /// `Errors::error`.
+    /// Creates the error with the default message of `Errors::MessageTooLarge`, as the broker's
+    /// error code is turned into an error.
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::MessageTooLarge.message())
     }
 
-    /// Create the error naming the offending partitions, mirroring Java's
-    /// `RecordTooLargeException(String message, Map<TopicPartition, Long> recordTooLargePartitions)`
-    /// (`:47`). Suffixed per [`new`](Self::new).
+    /// Creates the error naming the offending partitions.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error's message
+    /// - `record_too_large_partitions` - the size of the too-large record of each partition
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#RecordTooLargeException")]
     pub fn with_record_too_large_partitions(
         message: impl Into<String>,
@@ -87,22 +88,19 @@ impl RecordTooLargeError {
         }
     }
 
-    /// The per-partition record size that exceeded the limit, or `None` if
-    /// not recorded. Mirrors Java's `recordTooLargePartitions()`.
+    /// Returns the per-partition record size that exceeded the limit, or `None` if not recorded.
     #[doc(alias = "org.apache.kafka.common.errors.RecordTooLargeException#recordTooLargePartitions")]
     pub fn record_too_large_partitions(&self) -> Option<&HashMap<TopicPartition, i64>> {
         self.record_too_large_partitions.as_ref()
     }
 
-    /// The error message.
-    // Java's Throwable.getMessage, a JDK method
+    /// Returns the error message: Java's `getMessage()`.
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// The underlying cause, if any. Mirrors Java's `getCause()`.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause, if any: Java's `getCause()`.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()

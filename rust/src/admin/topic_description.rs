@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A detailed description of a single topic in the cluster.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.TopicDescription`.
 
 use std::collections::BTreeSet;
 
@@ -22,18 +20,15 @@ use crate::common::acl::AclOperation;
 use crate::common::{TopicPartitionInfo, Uuid};
 
 /// A detailed description of a single topic in the cluster.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.TopicDescription`.
-///
-/// `authorized_operations` uses `BTreeSet` for a deterministic ordering; Java
-/// uses an unordered `Set<AclOperation>`. It is `Option` because Java's field is
-/// nullable: `KafkaAdminClient` fills it from `AdminUtils.validAclOperations`,
-/// which returns `null` when the broker did not report the operations — distinct
-/// from a broker reporting an empty set.
-///
-/// Equality mirrors Java's `TopicDescription.equals`, which compares `name`,
-/// `internal`, `partitions` and `authorized_operations` but **not** `topic_id`
-/// — see the manual [`PartialEq`] impl below.
+// `authorized_operations` uses `BTreeSet` for a deterministic ordering; Java
+// uses an unordered `Set<AclOperation>`. It is `Option` because Java's field is
+// nullable: `KafkaAdminClient` fills it from `AdminUtils.validAclOperations`,
+// which returns `null` when the broker did not report the operations — distinct
+// from a broker reporting an empty set.
+//
+// Equality mirrors Java's `TopicDescription.equals`, which compares `name`,
+// `internal`, `partitions` and `authorized_operations` but **not** `topic_id`
+// — see the manual [`PartialEq`] impl below.
 #[derive(Clone, Debug, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription")]
 pub struct TopicDescription {
@@ -54,8 +49,8 @@ impl PartialEq for TopicDescription {
 }
 
 impl std::hash::Hash for TopicDescription {
-    /// Hashes the fields [`PartialEq`] compares, leaving out `topic_id` as
-    /// Java's `TopicDescription.hashCode()` does.
+    // Hashes the fields [`PartialEq`] compares, leaving out `topic_id` as
+    // Java's `TopicDescription.hashCode()` does.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.internal.hash(state);
@@ -65,29 +60,29 @@ impl std::hash::Hash for TopicDescription {
 }
 
 impl TopicDescription {
-    /// Create an instance with name, internal flag and partitions (empty
-    /// authorized operations, zero topic id).
+    /// Create an instance with the specified parameters.
     ///
-    /// Mirrors `TopicDescription(String, boolean, List<TopicPartitionInfo>)`,
-    /// which passes `Collections.emptySet()` — a reported-but-empty set, i.e.
-    /// `Some(empty)` rather than `None`.
+    /// # Arguments
+    ///
+    /// - `name` - The topic name
+    /// - `internal` - Whether the topic is internal to Kafka
+    /// - `partitions` - A list of partitions where the index represents the partition id and the
+    ///   element contains leadership and replica information for that partition.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn new(name: impl Into<String>, internal: bool, partitions: Vec<TopicPartitionInfo>) -> Self {
         Self::with_authorized_operations(name, internal, partitions, Some(BTreeSet::new()))
     }
 
-    /// Create an instance with the specified parameters (zero topic id).
+    /// Create an instance with the specified parameters.
     ///
-    /// * `name` - the topic name
-    /// * `internal` - whether the topic is internal to Kafka
-    /// * `partitions` - a list of partitions where the index represents the
-    ///   partition id and the element contains leadership and replica
-    ///   information for that partition
-    /// * `authorized_operations` - authorized operations for this topic, or
-    ///   `None` if this is not known (Java's nullable `Set<AclOperation>`)
+    /// # Arguments
     ///
-    /// Mirrors `TopicDescription(String, boolean, List<TopicPartitionInfo>,
-    /// Set<AclOperation>)`, which passes `Uuid.ZERO_UUID`.
+    /// - `name` - The topic name
+    /// - `internal` - Whether the topic is internal to Kafka
+    /// - `partitions` - A list of partitions where the index represents the partition id and the
+    ///   element contains leadership and replica information for that partition.
+    /// - `authorized_operations` - authorized operations for this topic, or `None` if this is
+    ///   not known.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn with_authorized_operations(
         name: impl Into<String>,
@@ -100,14 +95,15 @@ impl TopicDescription {
 
     /// Create an instance with the specified parameters.
     ///
-    /// * `name` - the topic name
-    /// * `internal` - whether the topic is internal to Kafka
-    /// * `partitions` - a list of partitions where the index represents the
-    ///   partition id and the element contains leadership and replica
-    ///   information for that partition
-    /// * `authorized_operations` - authorized operations for this topic, or
-    ///   `None` if this is not known (Java's nullable `Set<AclOperation>`)
-    /// * `topic_id` - the topic id
+    /// # Arguments
+    ///
+    /// - `name` - The topic name
+    /// - `internal` - Whether the topic is internal to Kafka
+    /// - `partitions` - A list of partitions where the index represents the partition id and the
+    ///   element contains leadership and replica information for that partition.
+    /// - `authorized_operations` - authorized operations for this topic, or `None` if this is
+    ///   not known.
+    /// - `topic_id` - the topic id
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#TopicDescription")]
     pub fn with_authorized_operations_topic_id(
         name: impl Into<String>,
@@ -119,26 +115,26 @@ impl TopicDescription {
         Self { name: name.into(), internal, partitions, authorized_operations, topic_id }
     }
 
-    /// The name of the topic.
+    /// Returns the name of the topic.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Whether the topic is internal to Kafka. An example of an internal topic
+    /// Returns whether the topic is internal to Kafka. An example of an internal topic
     /// is the offsets and group management topic: `__consumer_offsets`.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#isInternal")]
     pub fn is_internal(&self) -> bool {
         self.internal
     }
 
-    /// The topic id.
+    /// Returns the topic id.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
-    /// A list of partitions where the index represents the partition id and the
+    /// Returns a list of partitions where the index represents the partition id and the
     /// element contains leadership and replica information for that partition.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#partitions")]
     pub fn partitions(&self) -> &[TopicPartitionInfo] {
@@ -150,16 +146,14 @@ impl TopicDescription {
     /// Java's `partitions()` returns the mutable backing list, and
     /// `KafkaAdminClient` appends each continuation page of a paginated
     /// `DescribeTopicPartitions` response to it
-    /// (`partiallyFinishedTopicDescription.partitions().addAll(...)`,
-    /// `KafkaAdminClient.java:2384`). The public [`partitions`](Self::partitions)
-    /// getter stays read-only.
+    /// (`partiallyFinishedTopicDescription.partitions().addAll(...)` in
+    /// `KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`).
+    /// The public [`partitions`](Self::partitions) getter stays read-only.
     pub(crate) fn partitions_mut(&mut self) -> &mut Vec<TopicPartitionInfo> {
         &mut self.partitions
     }
 
-    /// Authorized operations for this topic, or `None` if the broker did not
-    /// report them (Java returns `null` in that case). `Some` holding an empty
-    /// set means the broker reported that no operation is authorized.
+    /// Returns the authorized operations for this topic, or `None` if this is not known.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicDescription#authorizedOperations")]
     pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
         self.authorized_operations.as_ref()
@@ -200,8 +194,7 @@ mod tests {
 
     #[test]
     fn four_arg_constructor_defaults_the_topic_id() {
-        // Java's 4-arg constructor forwards with Uuid.ZERO_UUID
-        // (TopicDescription.java:77).
+        // Java's 4-arg constructor forwards with Uuid.ZERO_UUID.
         let ops = BTreeSet::from([AclOperation::Describe]);
         let desc = TopicDescription::with_authorized_operations("t", true, vec![], Some(ops.clone()));
         assert_eq!(desc.name(), "t");

@@ -68,7 +68,11 @@ fn boxed(options: AlterPartitionReassignmentsOptions) -> *mut kafka_admin_AlterP
 }
 
 /// `new AlterPartitionReassignmentsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_AlterPartitionReassignmentsOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_AlterPartitionReassignmentsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_new()
@@ -76,8 +80,13 @@ pub extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_new()
     boxed(AlterPartitionReassignmentsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -95,8 +104,12 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_time
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -115,7 +128,11 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_timeout_
         .unwrap_or(-1)
 }
 
-/// `AlterPartitionReassignmentsOptions.allowReplicationFactorChange(boolean allow)`: whether a reassignment may change the replication factor of a partition.
+/// `AlterPartitionReassignmentsOptions.allowReplicationFactorChange(boolean allow)`.
+///
+/// # Parameters
+///
+/// - `allow` - whether a reassignment may change the replication factor of a partition.
 ///
 /// # Safety
 ///
@@ -133,7 +150,11 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_allo
     *options = std::mem::take(options).set_allow_replication_factor_change(allow != 0);
 }
 
-/// `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()`: whether a reassignment may change the replication factor.
+/// `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()`.
+///
+/// # Returns
+///
+/// Whether a reassignment may change the replication factor.
 ///
 /// # Safety
 ///

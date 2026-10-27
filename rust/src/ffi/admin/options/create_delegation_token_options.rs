@@ -124,25 +124,31 @@ unsafe fn destroy_kafka_principal_element(element: *mut c_void) {
     }
 }
 
-/// `new CreateDelegationTokenOptions()`: the server-default lifetime, no
-/// renewers, the request principal as owner, the client's default API
-/// timeout. Owned, freed with [`kafka_admin_CreateDelegationTokenOptions_destroy`].
+/// `new CreateDelegationTokenOptions()`: the server-default lifetime, no renewers, the request
+/// principal as owner, the client's default API timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_CreateDelegationTokenOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_CreateDelegationTokenOptions_new() -> *mut kafka_admin_CreateDelegationTokenOptions_t {
     boxed(CreateDelegationTokenOptions::new())
 }
 
-/// `CreateDelegationTokenOptions.renewers(List<KafkaPrincipal> renewers)`:
-/// `renewers` is a borrowed `kafka_List_t` of borrowed
-/// `kafka_common_security_auth_KafkaPrincipal_t *`, copied during the call
-/// (`NULL` reads as an empty list).
+/// `CreateDelegationTokenOptions.renewers(List<KafkaPrincipal> renewers)`.
+///
+/// # Parameters
+///
+/// - `renewers` - the principals allowed to renew the token, a `kafka_List_t` of
+///   `kafka_common_security_auth_KafkaPrincipal_t *`; `NULL` reads as an empty list.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
 /// `renewers` must be `NULL` or a valid list whose elements are live
-/// principal handles.
+/// principal handles. The list and its elements are borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
@@ -158,13 +164,17 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_renewers(
     unsafe { inner_mut(self_) }.replace(|options| options.set_renewers(renewers));
 }
 
-/// `CreateDelegationTokenOptions.renewers()`: an owned `kafka_List_t` of
-/// owned `kafka_common_security_auth_KafkaPrincipal_t *` in the order they
-/// were set, freed with `kafka_List_destroy`.
+/// `CreateDelegationTokenOptions.renewers()`.
+///
+/// # Returns
+///
+/// The principals allowed to renew the token, a `kafka_List_t` of
+/// `kafka_common_security_auth_KafkaPrincipal_t *` in the order they were set.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list and its elements are owned by the caller, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
@@ -183,13 +193,16 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_renewers(
     )
 }
 
-/// `CreateDelegationTokenOptions.owner(KafkaPrincipal owner)`: `owner` is
-/// borrowed and copied during the call.
+/// `CreateDelegationTokenOptions.owner(KafkaPrincipal owner)`.
+///
+/// # Parameters
+///
+/// - `owner` - the principal that owns the token.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `owner` must be a live principal handle.
+/// `owner` must be a live principal handle, borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
@@ -206,13 +219,17 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_owner(
     unsafe { inner_mut(self_) }.replace(|options| options.set_owner(owner));
 }
 
-/// `CreateDelegationTokenOptions.owner()`: a borrowed principal valid until
-/// the handle is destroyed or the owner is set again, `NULL` when unset
-/// (Java's empty `Optional`: the request principal owns the token).
+/// `CreateDelegationTokenOptions.owner()`.
+///
+/// # Returns
+///
+/// The principal that owns the token, `NULL` when unset (Java's empty `Optional`: the request
+/// principal owns the token).
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The principal is borrowed, valid until the handle is destroyed
+/// or the owner is set again.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_owner(
@@ -229,9 +246,12 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_owner(
         .map_or(ptr::null(), KafkaPrincipalInner::as_ptr)
 }
 
-/// `CreateDelegationTokenOptions.maxlifeTimeMs(long maxLifeTimeMs)`: the
-/// maximum lifetime of the token in milliseconds, `-1` for the server
-/// default.
+/// `CreateDelegationTokenOptions.maxlifeTimeMs(long maxLifeTimeMs)`.
+///
+/// # Parameters
+///
+/// - `max_lifetime_ms` - the maximum lifetime of the token in milliseconds, `-1` for the server
+///   default.
 ///
 /// # Safety
 ///
@@ -248,8 +268,11 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_max_lifeti
     unsafe { inner_mut(self_) }.replace(|options| options.set_max_lifetime_ms(max_lifetime_ms));
 }
 
-/// `CreateDelegationTokenOptions.maxlifeTimeMs()`: the maximum lifetime of
-/// the token in milliseconds.
+/// `CreateDelegationTokenOptions.maxlifeTimeMs()`.
+///
+/// # Returns
+///
+/// The maximum lifetime of the token in milliseconds.
 ///
 /// # Safety
 ///
@@ -265,8 +288,13 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_max_lifetime_m
     unsafe { create_delegation_token_options_ref(self_) }.max_lifetime_ms()
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -283,8 +311,12 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenOptions_set_timeout_ms
     unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///

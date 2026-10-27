@@ -13,16 +13,10 @@
 // limitations under the License.
 
 //! The result of `Admin::renew_delegation_token`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.RenewDelegationTokenResult`.
 
 use crate::common::KafkaFuture;
 
 /// The result of the `Admin::renew_delegation_token` call.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.RenewDelegationTokenResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult")]
 pub struct RenewDelegationTokenResult {
@@ -37,8 +31,6 @@ impl RenewDelegationTokenResult {
     }
 
     /// Returns a future which yields the new expiry timestamp.
-    ///
-    /// Mirrors `RenewDelegationTokenResult.expiryTimestamp()`.
     #[doc(alias = "org.apache.kafka.clients.admin.RenewDelegationTokenResult#expiryTimestamp")]
     pub fn expiry_timestamp(&self) -> &KafkaFuture<i64> {
         &self.expiry_timestamp

@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The voter is not part of the set of voters.
     ///
-    /// Corresponds to Java's `VoterNotFoundException`, error code `Errors::VoterNotFound`.
-    ///
-    /// Java `extends` chain:
-    ///    `VoterNotFoundException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::VoterNotFound`. Java `extends` chain: `VoterNotFoundException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.VoterNotFoundException")]
     VoterNotFoundError,
     code: Errors::VoterNotFound,
