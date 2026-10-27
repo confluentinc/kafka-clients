@@ -18,12 +18,15 @@ A class (CLAUDE.md, Python Binding Conventions, Types), in
 ``confluent_kafka.common.metrics``, the module of its Java package. It reaches the surface through
 ``QuotaViolationError.metric()``.
 
-Java's constructor takes a ``MetricValueProvider`` and a ``Time``, types the
-rules map to nothing: here they are any object with Java's methods under their
-snake_case names (``value(config, now)``, ``milliseconds()``), the way a mock
-uses the ``Partitioner`` and ``Cluster`` it is given. ``MetricConfig`` and
-``Measurable`` are the placeholder aliases of ``object`` *(deviation)*; a value
-provider is measurable when it has Java's ``measure(config, now)``.
+Java's constructor takes a ``MetricValueProvider`` and a ``Time``.
+``MetricValueProvider``, ``Gauge``, ``MetricConfig`` and ``Measurable`` are the
+placeholder aliases of ``object`` *(deviation)* (Types), used through Java's
+methods under their snake_case names (``value(config, now)``, ``measure(config,
+now)``), the way a mock uses the ``Partitioner`` and ``Cluster`` it is given; a
+value provider is measurable when it has Java's ``measure(config, now)``.
+``Time`` is not ``@InterfaceAudience.Public``, so it is typed ``object`` with no
+public name, and is used through ``milliseconds()`` *(deviation: Java's
+signature names a non-public type; the binding does not make it public)*.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from confluent_kafka.illegal_state_error import IllegalStateError
 if TYPE_CHECKING:
     from .measurable import Measurable
     from .metric_config import MetricConfig
+    from .metric_value_provider import MetricValueProvider
     from confluent_kafka.common.metric_name import MetricName
 
 __all__ = ["KafkaMetric"]
@@ -53,7 +57,7 @@ class KafkaMetric:
     __slots__ = ("_metric_name", "_lock", "_time", "_metric_value_provider", "_config")
 
     def __init__(self, *, lock: object, metric_name: MetricName,
-                 value_provider: object, config: MetricConfig,
+                 value_provider: MetricValueProvider, config: MetricConfig,
                  time: object) -> None:
         """Create a metric to monitor an object that implements
         ``MetricValueProvider``: ``lock`` guards its reads (a context manager

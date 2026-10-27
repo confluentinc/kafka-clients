@@ -14,21 +14,26 @@
 
 """``confluent_kafka.common.metrics``: Java's ``org.apache.kafka.common.metrics``.
 
-``KafkaMetric``, ``MetricConfig`` and ``Measurable``, and the errors of the Java
-package (``QuotaViolationError``). One file per class; import the classes from
+``KafkaMetric``, the placeholders ``MetricConfig``, ``Measurable``,
+``MetricValueProvider`` and ``Gauge``, and the errors of the Java package
+(``QuotaViolationError``). One file per class; import the classes from
 this module, never from the files (CLAUDE.md, Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
 
+from .gauge import Gauge as Gauge
 from .kafka_metric import KafkaMetric as KafkaMetric
 from .measurable import Measurable as Measurable
 from .metric_config import MetricConfig as MetricConfig
+from .metric_value_provider import MetricValueProvider as MetricValueProvider
 
 __all__ = [
+    "Gauge",
     "KafkaMetric",
     "Measurable",
     "MetricConfig",
+    "MetricValueProvider",
 ]
 
 # BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)

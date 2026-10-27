@@ -49,7 +49,9 @@ from confluent_kafka.common import (
     TopicPartition,
     Uuid,
 )
-from confluent_kafka.common.metrics import KafkaMetric, Measurable, MetricConfig
+from confluent_kafka.common.metrics import (
+    Gauge, KafkaMetric, Measurable, MetricConfig, MetricValueProvider,
+)
 from confluent_kafka.common.record import TimestampType
 
 # --------------------------------------------------------------------------- #
@@ -460,6 +462,10 @@ def test_kafka_metric_config_getter_and_setter() -> None:
 
 def test_placeholders_are_object() -> None:
     assert Cluster is object and MetricConfig is object and Measurable is object
+    assert MetricValueProvider is object and Gauge is object
+    import confluent_kafka.common.metrics as metrics
+
+    assert {"Gauge", "MetricValueProvider", "Measurable", "MetricConfig"} <= set(metrics.__all__)
 
 
 # --------------------------------------------------------------------------- #
