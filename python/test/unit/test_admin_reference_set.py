@@ -36,10 +36,7 @@ from confluent_kafka.admin.alter_configs_result import AlterConfigsResult
 from confluent_kafka.admin.config import Config
 from confluent_kafka.admin.create_delegation_token_options import CreateDelegationTokenOptions
 from confluent_kafka.admin.create_topics_options import CreateTopicsOptions
-from confluent_kafka.admin.create_topics_result import (
-    CreateTopicsResult,
-    _TopicMetadataAndConfig,
-)
+from confluent_kafka.admin.create_topics_result import CreateTopicsResult
 from confluent_kafka.admin.delete_records_options import DeleteRecordsOptions
 from confluent_kafka.admin.delete_topics_result import DeleteTopicsResult
 from confluent_kafka.admin.describe_cluster_result import DescribeClusterResult
@@ -627,15 +624,18 @@ class TestDeleteTopicsResult:
         assert (await _await(result.all())) is None
 
 
+TopicMetadataAndConfig = CreateTopicsResult.TopicMetadataAndConfig
+
+
 class TestCreateTopicsResult:
-    """Shape: futures carrying the private helper ``_TopicMetadataAndConfig``."""
+    """Shape: futures carrying the public nested ``TopicMetadataAndConfig``."""
 
     TOPIC_ID = Uuid(most_sig_bits=3, least_sig_bits=4)
 
     def _result(self, kind: type[Sync] | type[Async]) -> Any:
-        ok = _TopicMetadataAndConfig(topic_id=self.TOPIC_ID, num_partitions=3,
-                                     replication_factor=2, config=Config(entries=[]))
-        denied = _TopicMetadataAndConfig(exception=TopicAuthorizationError(message="denied"))
+        ok = TopicMetadataAndConfig(topic_id=self.TOPIC_ID, num_partitions=3,
+                                    replication_factor=2, config=Config(entries=[]))
+        denied = TopicMetadataAndConfig(exception=TopicAuthorizationError(message="denied"))
         return CreateTopicsResult._new(futures={"ok": _done(kind, ok),
                                                 "denied": _done(kind, denied)}, kind=kind)
 
@@ -667,15 +667,48 @@ class TestCreateTopicsResult:
         assert str(info.value) == "Topic missing was not part of the createTopics request"
 
     def test_topic_metadata_and_config_forms(self) -> None:
-        failed = _TopicMetadataAndConfig(exception=TopicAuthorizationError(message="d"))
+        failed = TopicMetadataAndConfig(exception=TopicAuthorizationError(message="d"))
         assert failed._topic_id == Uuid.ZERO_UUID
         assert failed._num_partitions == -1
         assert failed._replication_factor == -1
         with pytest.raises(IllegalArgumentError) as info:
-            _TopicMetadataAndConfig(topic_id=self.TOPIC_ID)  # type: ignore[call-overload]
+            TopicMetadataAndConfig(topic_id=self.TOPIC_ID)  # type: ignore[call-overload]
         assert str(info.value) == (
             "TopicMetadataAndConfig() takes one of (topic_id, num_partitions, "
             "replication_factor, config), (exception); got (topic_id)")
+
+    def test_topic_metadata_and_config_is_public_and_nested(self) -> None:
+        # Java's public static nested class, with its two public constructors and
+        # its four getters, which throw the error it was built with.
+        assert TopicMetadataAndConfig.__qualname__ == "CreateTopicsResult.TopicMetadataAndConfig"
+        assert TopicMetadataAndConfig.__module__ == "confluent_kafka.admin.create_topics_result"
+        ok = TopicMetadataAndConfig(topic_id=self.TOPIC_ID, num_partitions=3,
+                                    replication_factor=2, config=Config(entries=[]))
+        assert (ok.topic_id(), ok.num_partitions(), ok.replication_factor(), ok.config()) == (
+            self.TOPIC_ID, 3, 2, Config(entries=[]))
+        error = TopicAuthorizationError(message="denied")
+        failed = TopicMetadataAndConfig(exception=error)
+        for getter in (failed.topic_id, failed.num_partitions, failed.replication_factor,
+                       failed.config):
+            with pytest.raises(TopicAuthorizationError) as info:
+                getter()
+            assert info.value is error
+
+    def test_topic_metadata_and_config_positional_calls_raise_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            TopicMetadataAndConfig(self.TOPIC_ID, 3, 2, Config(entries=[]))  # type: ignore[call-overload]
+        with pytest.raises(TypeError):
+            TopicMetadataAndConfig(TopicAuthorizationError(message="d"))  # type: ignore[call-overload]
+
+    def test_the_mock_completes_with_the_public_class(self) -> None:
+        from confluent_kafka.admin import MockAdminClient, NewTopic
+
+        client = MockAdminClient.create().num_brokers(num_brokers=1).build()
+        result = client.create_topics(new_topics=[NewTopic(name="t", num_partitions=2,
+                                                            replication_factor=1)])
+        holder = result._futures["t"].get()
+        assert type(holder) is TopicMetadataAndConfig
+        assert holder.num_partitions() == 2
 
     async def test_async(self) -> None:
         result = self._result(Async)
