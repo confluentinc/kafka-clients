@@ -280,6 +280,12 @@ async fn test_sasl_ssl_wrong_credentials() {
             || msg.to_lowercase().contains("sasl"),
         "error should indicate an authentication failure, got: {msg}"
     );
+    // The broker rejects the password with SASL_AUTHENTICATION_FAILED, which Java
+    // raises as `SaslAuthenticationException`, not the base class.
+    assert!(
+        err.is_sasl_authentication_error(),
+        "a rejected password is a SaslAuthenticationError, got: {err:?}"
+    );
 
     // Best-effort close (it may itself error on the unauthenticated connection).
     let _ = consumer.close().await;

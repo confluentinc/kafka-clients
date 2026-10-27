@@ -21,7 +21,7 @@
 use std::io;
 
 use crate::common::Node;
-use crate::common::network::auth_io_error;
+use crate::common::network::authentication_io_error;
 use crate::common::utils::Time;
 
 use super::ClientRequest;
@@ -145,17 +145,11 @@ impl NetworkClientUtils {
             if let Some(auth_error) = client.authentication_error(node) {
                 // Java rethrows `client.authenticationException(node)` verbatim
                 // (`NetworkClientUtils.java:86-87`), so the *class* must survive the
-                // hop. The crate's carrier for that is `auth_io_error`, whose typed
-                // `AuthenticationError` payload `is_authentication_error` recognises —
-                // classification is driven by the payload, NOT by the `io::ErrorKind`.
-                //
-                // `client.authentication_error` now hands over the typed error, so the
-                // subclass reaches this line; the `io::Result` return type declared by
-                // this function (and consumed by `Sender::await_node_ready`) can only
-                // carry one payload type, so it flattens to the base class here. The
-                // bare `message()` is passed, never `Display`, so the caller rebuilding
-                // the typed error does not double-prefix the class name (finding 231).
-                return (responses, Err(auth_io_error(auth_error.message())));
+                // hop. The crate's carrier for that is `authentication_io_error`,
+                // which stores the typed error itself — subclass included — and
+                // which `is_authentication_error` recognises: classification is
+                // driven by the payload, NOT by the `io::ErrorKind`.
+                return (responses, Err(authentication_io_error(auth_error)));
             }
             attempt_start_time = time.milliseconds();
         }
@@ -236,9 +230,8 @@ impl NetworkClientUtils {
     #[doc(alias = "org.apache.kafka.clients.NetworkClientUtils#maybeThrowAuthFailure")]
     pub fn maybe_return_auth_failure<C: KafkaClient>(client: &C, node: &Node) -> io::Result<()> {
         if let Some(err) = client.authentication_error(node) {
-            // Same carrier as `await_ready` above, and the same flattening for the
-            // same reason.
-            Err(auth_io_error(err.message()))
+            // Same carrier as `await_ready` above.
+            Err(authentication_io_error(err))
         } else {
             Ok(())
         }
