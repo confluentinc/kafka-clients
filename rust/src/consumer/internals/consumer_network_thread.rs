@@ -578,12 +578,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // not safe to advance reconciliation when auto-commit is
         // enabled (Java's `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`).
         //
-        // Failures are logged and swallowed, matching Java's
-        // surrounding-runOnce `try { ... } catch (Throwable e) { log }`.
+        // Failures are swallowed, matching Java's surrounding-runOnce
+        // `try { ... } catch (Throwable e) { log }`: the loop goes on. A
+        // listener-callback or commit failure has already been logged at
+        // ERROR by the membership manager as "Reconciliation failed" (Java's
+        // single line, from the reconciliation future's `whenComplete`), so
+        // this is only a DEBUG follow-up, as in the AsyncPoll caller
+        // (`log_async_poll_reconcile_error`).
         if let Some(membership) = self.membership.as_ref()
-            && let Err(e) = membership.reconcile(current_time_ms, false).await
+            && let Err(e) = membership.reconcile(current_time_ms, false)
         {
-            log::warn!("Membership reconcile failed: {}", e);
+            log::debug!("Reconciliation failed, continuing: {e}");
         }
 
         // ──── Phase 2.6: poll after-membership managers (offsets,
@@ -4804,5 +4809,92 @@ mod tests {
             .expect("the lookup must succeed");
         let end_offset = offsets.get(&tp).expect("entry for t1-0").as_ref().expect("an offset");
         assert_eq!(7, end_offset.offset());
+    }
+
+    /// Audit finding C2-05, end to end through `run_once` on a multi-thread
+    /// runtime: an `AsyncPoll` event processed in Phase 1 (Java's
+    /// `process(AsyncPollEvent)` -> `maybeReconcile(true)`) and the per-pass
+    /// Phase 2.5 `reconcile(now, false)` (Java's
+    /// `AbstractMembershipManager.poll` -> `maybeReconcile(false)`) must start
+    /// ONE reconciliation for one target assignment, so the app side runs
+    /// `onPartitionsAssigned` once. Java runs both on the network thread, so
+    /// the `reconciliationInProgress` check and mark never interleave.
+    ///
+    /// Each trial uses a fresh member owning `t-0` that receives the add-only
+    /// target `{t-0, t-1}` with auto-commit disabled — the only shape in which
+    /// the Phase 2.5 caller gets past the KAFKA-20106 gate. Before the fix the
+    /// AsyncPoll reconcile ran on a `tokio::spawn`ed continuation that could
+    /// race Phase 2.5 on another worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_once_starts_one_reconciliation_per_assignment_with_async_poll() {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        const TRIALS: usize = 200;
+        let mut double_starts = 0usize;
+        let mut first_failing_trial: Option<usize> = None;
+        for trial in 0..TRIALS {
+            let (mut thread, membership, _subs, tx, mut bg_rx) = make_thread_with_member_in_group();
+            let topic_id = crate::common::Uuid::random_uuid();
+            membership
+                .abstract_mm
+                .inner
+                .lock()
+                .unwrap()
+                .assigned_topic_names_cache
+                .insert(topic_id, "t".to_string());
+            let mut new_assignment = std::collections::HashMap::new();
+            new_assignment.insert(topic_id, vec![0, 1]);
+            membership.abstract_mm.process_assignment_received(new_assignment).unwrap();
+            assert_eq!(membership.state(), MemberState::Reconciling, "trial {trial}");
+
+            let now_ms = thread.time.milliseconds();
+            let state = Arc::new(AsyncPollState::new());
+            tx.send(ApplicationEventEnvelope {
+                event: ApplicationEvent::AsyncPoll {
+                    deadline_ms: now_ms + 100,
+                    poll_time_ms: now_ms,
+                    state: Arc::clone(&state),
+                },
+                enqueued_ms: now_ms,
+            })
+            .expect("send ok");
+
+            tokio::time::timeout(Duration::from_secs(10), thread.run_once())
+                .await
+                .expect("run_once must return");
+            // Let the spawned AsyncPoll continuation finish (it fails at the
+            // missing OffsetsRequestManager, after the reconcile step), then
+            // run another pass.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !state.is_complete() && std::time::Instant::now() < deadline {
+                tokio::task::yield_now().await;
+            }
+            assert!(state.is_complete(), "trial {trial}: the AsyncPoll continuation must complete");
+            tokio::time::timeout(Duration::from_secs(10), thread.run_once())
+                .await
+                .expect("run_once must return");
+
+            // Keep the events alive (their ack senders) while counting.
+            let mut events = Vec::new();
+            while let Ok(env) = bg_rx.try_recv() {
+                events.push(env.event);
+            }
+            let assigned = events
+                .iter()
+                .filter(|event| matches!(event, BackgroundEvent::PartitionsAssigned { .. }))
+                .count();
+            assert!(assigned >= 1, "trial {trial}: the assignment must start a reconciliation");
+            if assigned > 1 {
+                double_starts += 1;
+                first_failing_trial.get_or_insert(trial);
+            }
+        }
+        assert_eq!(
+            double_starts, 0,
+            "C2-05: {double_starts}/{TRIALS} trials enqueued more than one PartitionsAssigned event (so \
+             onPartitionsAssigned would run more than once) for ONE target assignment; first at trial \
+             {first_failing_trial:?}. Java's maybeReconcile runs only on the network thread."
+        );
     }
 }
