@@ -38,7 +38,7 @@ through the error registry (`_errors.from_ffi_error` / `class_for_ffi_id`), `Non
 
 | Class | Patterns |
 |---|---|
-| `AbstractOptions` | Java `abstract`: `__init__` raises `TypeError("AbstractOptions is an abstract class; use one of its subclasses")` when the class is itself, else sets Java's field initializers; no keyword constructor. `timeoutMs()` / `timeoutMs(Integer)`: one method, two stubs, `-> Self`; the argument defaults to `MISSING` (left out, it reads) and is nullable, so `timeout_ms=None` sets null. |
+| `AbstractOptions` | Java `abstract`: `__init__` raises `TypeError("AbstractOptions cannot be constructed directly; use one of its subclasses")` when the class is itself, else sets Java's field initializers; no keyword constructor. `timeoutMs()` / `timeoutMs(Integer)`: one method, two stubs, `-> Self`; the argument defaults to `MISSING` (left out, it reads) and is nullable, so `timeout_ms=None` sets null. |
 | `DeleteRecordsOptions` | Only the inherited `timeoutMs`: keyword constructor `(*, timeout_ms)`, nothing else. |
 | `CreateTopicsOptions` | Re-declared `timeoutMs` (repeated with the class's own return type). Setter and getter with different names (`validate_only` / `should_validate_only`, `retry_on_quota_violation` / `should_retry_on_quota_violation`): the setter has a required keyword. |
 | `DescribeTopicsOptions` | One-name setter + getter pairs with a non-nullable argument (`include_authorized_operations`, `partition_size_limit_per_response`): runtime default `MISSING` = read (left out), a `None` raises `TypeError` (a primitive: Java cannot pass null); stubs `(self) -> T` and `(self, *, x: T) -> Class`. Starting values `False` and `2000`. Re-declared `timeoutMs`. |
