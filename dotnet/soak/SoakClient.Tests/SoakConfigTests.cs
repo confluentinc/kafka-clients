@@ -144,6 +144,41 @@ public sealed class SoakConfigTests
     }
 
     [Fact]
+    public void SharedConnectionKeysStayWithTheProducer()
+    {
+        var conf = Conf(
+            ("metadata.recovery.strategy", "none"),
+            ("metadata.recovery.rebootstrap.trigger.ms", "60000"),
+            ("socket.connection.setup.timeout.ms", "1000"),
+            ("socket.connection.setup.timeout.max.ms", "5000"));
+
+        (Dictionary<string, string> kept, IReadOnlyList<string> routed) =
+            SoakConfig.RouteSharedConfig(conf, SoakConfig.ProducerConfigKeys, SoakConfig.ConsumerConfigKeys);
+
+        Assert.Empty(routed);
+        Assert.Equal(conf.Count, kept.Count);
+        foreach (KeyValuePair<string, string> entry in conf)
+        {
+            Assert.Equal(entry.Value, kept[entry.Key]);
+        }
+
+        SoakConfig.ValidateConfig(kept, SoakConfig.ProducerConfigKeys, "producer");
+    }
+
+    [Theory]
+    [InlineData("config.providers")]
+    [InlineData("enable.metrics.push")]
+    [InlineData("partition.assignment.strategy")]
+    [InlineData("security.providers")]
+    public void ValidateRejectsKeysTheConsumerNoLongerDefines(string key)
+    {
+        ArgumentException ex = Assert.Throws<ArgumentException>(
+            () => SoakConfig.ValidateConfig(Conf((key, "x")), SoakConfig.ConsumerConfigKeys, "consumer"));
+
+        Assert.StartsWith($"unknown consumer configuration key(s): {key}. ", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RouteSharedConfigKeepsKeysUnknownToBoth()
     {
         (Dictionary<string, string> kept, IReadOnlyList<string> routed) = SoakConfig.RouteSharedConfig(
