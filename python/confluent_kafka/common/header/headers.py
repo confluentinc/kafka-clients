@@ -220,25 +220,16 @@ class Headers:
 
     def __copy__(self) -> Headers:
         # A shallow copy, of the same class and state: new headers holding
-        # the same Header objects, with the same read-only state.
+        # the same Header objects, with the same read-only state. Python's
+        # default would share the list, so a change to one would change both.
+        # Nothing else is defined for `pickle` or `deepcopy`: Java's
+        # `RecordHeaders` is not `Serializable` (CLAUDE.md, Python Binding
+        # Conventions, Types).
         copied = type(self).__new__(type(self))
         state = _state(self)
         state["_headers"] = tuple(self._headers)
         _set_state(copied, state)
         return copied
-
-    def __getstate__(self) -> dict[str, Any]:
-        """``pickle`` and ``deepcopy`` keep the class and its state, the
-        read-only state included, each header pickling its value as bytes:
-        ``RecordDeserializationError`` carries a ``Headers`` and rebuilds from
-        its constructor arguments (CLAUDE.md, Python Binding Conventions,
-        Errors). Java's ``RecordHeaders`` is not ``Serializable``."""
-        state = _state(self)
-        state["_headers"] = tuple(self._headers)
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        _set_state(self, state)
 
     def _pairs(self) -> tuple[tuple[str, Any], ...]:
         """The ``(key, value)`` pairs the native send path reads: each value
