@@ -1213,8 +1213,11 @@ impl ApplicationEventProcessor {
     /// Pumps the membership/fetch state machine. Mirrors Java's
     /// processing phase-for-phase:
     ///
-    /// 1. `maybeReconcile(true)` on the membership manager (Rust is
-    ///    async; spawned task awaits).
+    /// 1. `maybeReconcile(true)` on the membership manager, run inline on
+    ///    the bg task before this method returns (Java runs it on the
+    ///    network thread during `processApplicationEvents`), then
+    ///    `markReconciliationCheckComplete`. Steps 2-4 run on a spawned
+    ///    task because step 3 awaits the `updateFetchPositions` result.
     /// 2. If commit manager present, `updateTimerAndMaybeCommit(pollTimeMs)`.
     /// 3. If heartbeat present: `maybeUpdatePatternSubscription`,
     ///    `onConsumerPoll`, `resetPollTimer(pollTimeMs)`.
@@ -1250,9 +1253,6 @@ impl ApplicationEventProcessor {
         //      `onSubscriptionUpdated` still fires before the next
         //      heartbeat — semantically equivalent for the steady-state
         //      consumer.
-        // The bg-side commit-7 wiring will eventually fold this back
-        // into the processor's loop with the rest of the membership
-        // state machine.
         let has_heartbeat_with_commit = {
             let rm_guard = match request_managers.lock() {
                 Ok(g) => g,
@@ -1264,65 +1264,84 @@ impl ApplicationEventProcessor {
             self.maybe_update_pattern_subscription();
         }
 
-        tokio::spawn(async move {
-            // --- Step 1: maybeReconcile(true). ---
-            // Acquire a ref to the membership manager outside the lock.
-            let membership_arc = {
-                let rm_guard = match request_managers.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                rm_guard
-                    .consumer_heartbeat
-                    .as_ref()
-                    .map(|hrm| Arc::clone(hrm.membership_manager()))
+        // --- Step 1: maybeReconcile(true). ---
+        //
+        // Runs HERE, on the bg task during the Phase 1 event drain, not in
+        // the spawned task below — Java's `process(AsyncPollEvent)` runs
+        // `maybeReconcile(true)` on the network thread, and `reconcile` must
+        // only be called from the bg task (its in-progress check and mark
+        // are separate lock scopes; a second concurrent driver could start
+        // the same reconciliation twice — audit finding C2-05). The
+        // `RequestManagers` guard is dropped before `reconcile` runs.
+        let membership_arc = {
+            let rm_guard = match request_managers.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
             };
-            if let Some(mm) = &membership_arc {
-                // Java's `maybeReconcile(true)` is sync (void). Rust's
-                // `reconcile(...)` is the Phase-41 NON-blocking driver: it
-                // drives one reconciliation step and returns immediately even
-                // while a rebalance-listener callback OR the pre-rebalance
-                // auto-commit (Milestone-12 divergence fix, PR #176) is still
-                // pending — the member simply stays `RECONCILING` and a later
-                // bg-loop iteration `try_recv`s the stored callback ack / commit
-                // result (see `consumer-threading.md` §31 / §41 and
-                // `ConsumerMembershipManager::PendingReconcile::AwaitingCommit`).
-                // It NEVER blocks the bg loop on an ack or on the commit. The
-                // `.await` here is just the async-fn call boundary, not a wait;
-                // sequencing-wise it still mirrors Java's "check pending
-                // reconciliations before moving on to update positions", and —
-                // crucially — `mark_reconciliation_check_complete()` below now
-                // fires WHILE the auto-commit is still in flight, matching Java
-                // `ApplicationEventProcessor.java:732-736`, so the app-thread
-                // `poll()` keeps returning records from RETAINED partitions
-                // during a slow commit instead of stalling until it resolves.
-                //
-                // Pass `can_commit = true`: this is the poll-time entry
-                // point, before any new fetching starts (Java
-                // `ApplicationEventProcessor.process(AsyncPollEvent)`
-                // line 715-718). At this site any pending offsets can
-                // be safely flushed via the commit manager's
-                // auto-commit-before-rebalance path inside
-                // `maybeReconcile`, so Java passes `true` to permit
-                // reconciliation that may commit. The per-iteration
-                // `entries()` walk passes `false` because that path
-                // cannot guarantee a safe commit point.
-                if let Err(err) = mm.reconcile(poll_time_ms, true).await
-                    && !is_ignorable_async_poll_error(&err)
-                {
-                    state.complete_with_error(err);
-                    return;
-                }
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        if let Some(mm) = &membership_arc {
+            // Java's `maybeReconcile(true)` is sync (void), and so is Rust's
+            // `reconcile(...)`: it drives one reconciliation step and
+            // returns immediately even while a rebalance-listener callback OR
+            // the pre-rebalance auto-commit (Milestone-12 divergence fix,
+            // PR #176) is still pending — the member simply stays
+            // `RECONCILING` and a later bg-loop iteration `try_recv`s the
+            // stored callback ack / commit result (see
+            // `consumer-threading.md` §31 / §41 and
+            // `ConsumerMembershipManager::PendingReconcile::AwaitingCommit`).
+            // So `mark_reconciliation_check_complete()` below fires WHILE the
+            // auto-commit is still in flight, matching Java
+            // `ApplicationEventProcessor.process(AsyncPollEvent)`, and the
+            // app-thread `poll()` keeps returning records from RETAINED
+            // partitions during a slow commit instead of stalling until it
+            // resolves.
+            //
+            // Pass `can_commit = true`: this is the poll-time entry
+            // point, before any new fetching starts (Java
+            // `ApplicationEventProcessor.process(AsyncPollEvent)`). At this
+            // site any pending offsets can be safely flushed via the commit
+            // manager's auto-commit-before-rebalance path inside
+            // `maybeReconcile`, so Java passes `true` to permit
+            // reconciliation that may commit. The per-iteration
+            // `entries()` walk passes `false` because that path
+            // cannot guarantee a safe commit point.
+            let had_pending_reconcile = mm.has_pending_reconcile();
+            let mut result = mm.reconcile(poll_time_ms, true);
+            // If that call only resumed a pending leg (a listener ack or the
+            // pre-rebalance commit that had resolved) and the chain ended
+            // there, run `maybeReconcile(true)` once more. Java processes the
+            // `ConsumerRebalanceListenerCallbackCompletedEvent` (whose
+            // `whenComplete` continuation ends the old reconciliation) before
+            // the next `AsyncPollEvent`, so that event's `maybeReconcile(true)`
+            // already sees the finished reconciliation and starts the next
+            // one at once. Rust resumes the leg inside `reconcile` itself, so
+            // without this second call the next reconciliation would wait for
+            // the following poll.
+            if result.is_ok() && had_pending_reconcile && !mm.has_pending_reconcile() {
+                result = mm.reconcile(poll_time_ms, true);
             }
+            if let Err(err) = result
+                && !is_ignorable_async_poll_error(&err)
+            {
+                state.complete_with_error(err);
+                return;
+            }
+        }
+        drop(membership_arc);
 
-            // AK 4.3.1 (KAFKA-20106): we completed checking pending
-            // reconciliations (commits triggered, revoked partitions marked
-            // to prevent fetching) so the application-thread poll loop can
-            // safely continue progress now (fetching). Java:
-            // `event.markReconciliationCheckComplete()` immediately after
-            // the `maybeReconcile(true)` call.
-            state.mark_reconciliation_check_complete();
+        // AK 4.3.1 (KAFKA-20106): we completed checking pending
+        // reconciliations (commits triggered, revoked partitions marked
+        // to prevent fetching) so the application-thread poll loop can
+        // safely continue progress now (fetching). Java:
+        // `event.markReconciliationCheckComplete()` immediately after
+        // the `maybeReconcile(true)` call.
+        state.mark_reconciliation_check_complete();
 
+        tokio::spawn(async move {
             // --- Step 2: commit manager auto-commit + heartbeat onPoll. ---
             // Java guards step-2 work on `commitRequestManager.isPresent()`.
             {
@@ -1371,11 +1390,6 @@ impl ApplicationEventProcessor {
                     }
                 }
             }
-            // `membership_arc` is consumed in step 1; nothing more to do
-            // with it here. Step 2 acquires its own access via the
-            // `RequestManagers` lock.
-            drop(membership_arc);
-
             // --- Step 3: updateFetchPositions → createFetchRequests. ---
             let update_rx = {
                 let mut rm_guard = match request_managers.lock() {
@@ -4248,5 +4262,276 @@ mod tests {
                  background loop, so it waits for the network poll timeout; Java sends it in the runOnce that \
                  processes the AsyncPollEvent",
             );
+    }
+
+    /// Replaces the fixture's commit, heartbeat and membership managers with
+    /// ones built from one `enable.auto.commit=false` config, wired as
+    /// `AsyncKafkaConsumer::new` wires them, with a background-event receiver
+    /// the test holds (it plays the app side).
+    fn install_membership_without_auto_commit(
+        fx: &Fixture,
+    ) -> (
+        Arc<ConsumerMembershipManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
+    ) {
+        let config = ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            enable_auto_commit: false,
+            ..ConsumerConfig::defaults()
+        };
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            Arc::clone(&fx.metadata),
+            Arc::clone(&fx.subscriptions),
+            "test-group",
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+            0,
+        ));
+        let (bg_tx, bg_rx) = mpsc::unbounded_channel();
+        let bg_handler = Arc::new(BackgroundEventHandler::new(bg_tx));
+        let mm = Arc::new(ConsumerMembershipManager::new(
+            "test-group",
+            None,
+            None,
+            30_000,
+            None,
+            Arc::clone(&fx.subscriptions),
+            Some(Arc::clone(&commit)),
+            Arc::clone(&fx.metadata),
+            Arc::clone(&bg_handler),
+            config.enable_auto_commit,
+            None,
+            Arc::new(crate::common::utils::SystemTime),
+        ));
+        let hrm = ConsumerHeartbeatRequestManager::new(
+            0,
+            &config,
+            Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")),
+            Arc::clone(&fx.subscriptions),
+            Arc::clone(&mm),
+            bg_handler,
+        );
+        let mut rm = fx.request_managers.lock().unwrap();
+        rm.commit = Some(commit);
+        rm.consumer_heartbeat = Some(hrm);
+        (mm, bg_rx)
+    }
+
+    // -------------------------------------------------------------------
+    // Audit finding C2-05: one target assignment runs ONE
+    // `onPartitionsAssigned`.
+    //
+    // Java runs `AbstractMembershipManager.maybeReconcile` only on the
+    // network thread: `process(AsyncPollEvent)` calls `maybeReconcile(true)`
+    // during `processApplicationEvents`, and `AbstractMembershipManager.poll`
+    // calls `maybeReconcile(false)` when the request managers are polled
+    // later in the same `runOnce`. So the second call always observes the
+    // first one's `markReconciliationInProgress()` and one assignment
+    // enqueues one `PartitionsAssignedEvent`.
+    // -------------------------------------------------------------------
+
+    /// The AsyncPoll reconcile step runs inside `process(AsyncPoll)`, on the
+    /// bg task, before it returns — not on the spawned continuation — and the
+    /// bg loop's per-pass `reconcile(now, false)` (Phase 2.5) that follows
+    /// does not start the same reconciliation a second time.
+    ///
+    /// Shape: `enable.auto.commit=false` (commit manager and membership both
+    /// built from it, as `AsyncKafkaConsumer::new` wires them) and an
+    /// add-only assignment — the only case where the Phase-2.5 caller
+    /// gets past the KAFKA-20106 gate and could start a reconciliation too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_reconciles_before_process_returns_and_bg_pass_does_not_reconcile_again() {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        let fx = setup_processor_with_fetch(true, true);
+        let (mm, mut bg_rx) = install_membership_without_auto_commit(&fx);
+
+        // A new, add-only target assignment (nothing owned, so nothing
+        // revoked).
+        mm.transition_to_joining().unwrap();
+        let topic_id = crate::common::Uuid::random_uuid();
+        mm.abstract_mm
+            .inner
+            .lock()
+            .unwrap()
+            .assigned_topic_names_cache
+            .insert(topic_id, "t1".to_string());
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0, 1]);
+        mm.abstract_mm.process_assignment_received(new_assignment).unwrap();
+        assert_eq!(mm.state(), MemberState::Reconciling);
+
+        let poll_time_ms = 12_345;
+        let mut processor = fx.processor;
+        let state = Arc::new(super::super::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: poll_time_ms + 100,
+            poll_time_ms,
+            state: Arc::clone(&state),
+        });
+
+        // No yield yet: on this current-thread runtime the spawned
+        // continuation has not run, so everything below was done by
+        // `process(...)` itself, as Java's `process(AsyncPollEvent)` does on
+        // the network thread.
+        // Drained events are kept alive: dropping a `PartitionsAssigned`
+        // event drops its ack sender, which the next reconcile pass would
+        // observe as "receiver dropped".
+        let mut drained = Vec::new();
+        let mut drain =
+            |rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>| {
+                while let Ok(env) = rx.try_recv() {
+                    drained.push(env.event);
+                }
+                drained
+                    .iter()
+                    .filter(|event| matches!(event, BackgroundEvent::PartitionsAssigned { .. }))
+                    .count()
+            };
+        assert!(
+            mm.abstract_mm.inner.lock().unwrap().reconciliation_in_progress,
+            "process(AsyncPoll) must run maybeReconcile(true) before it returns (Java runs it on the network \
+             thread inside process(AsyncPollEvent)), so the reconciliation is already in progress"
+        );
+        assert!(
+            state.is_reconciliation_check_complete(),
+            "Java marks the reconciliation check complete right after maybeReconcile(true), inside \
+             process(AsyncPollEvent)"
+        );
+        assert_eq!(
+            drain(&mut bg_rx),
+            1,
+            "the PartitionsAssigned event must already be queued when process(AsyncPoll) returns"
+        );
+
+        // The bg loop's per-pass reconcile (run_once Phase 2.5, Java's
+        // `AbstractMembershipManager.poll` -> `maybeReconcile(false)`), then
+        // let the spawned continuation run, then another pass.
+        mm.reconcile(poll_time_ms, false).unwrap();
+        settle().await;
+        mm.reconcile(poll_time_ms, false).unwrap();
+
+        assert_eq!(
+            drain(&mut bg_rx),
+            1,
+            "one target assignment must enqueue exactly one PartitionsAssigned event (one \
+             onPartitionsAssigned run); Java's maybeReconcile runs only on the network thread, so the \
+             reconciliationInProgress check and mark cannot interleave"
+        );
+        assert_eq!(mm.state(), MemberState::Reconciling, "still waiting for the listener ack");
+    }
+
+    /// When the AsyncPoll reconcile only resumes a pending leg and that leg
+    /// ends the old reconciliation, the same `process(AsyncPoll)` starts the
+    /// next one. Java processes the `ConsumerRebalanceListenerCallbackCompletedEvent`
+    /// (its `whenComplete` ends the old reconciliation) before the next
+    /// `AsyncPollEvent`, whose `maybeReconcile(true)` then starts the new
+    /// reconciliation at once.
+    ///
+    /// Shape (Java `testLeaveGroupDuringReconciliationThenRejoin`-like): the
+    /// member leaves and rejoins while its `onPartitionsAssigned` ack is still
+    /// pending, receives a new target, and then the old ack arrives. Resuming
+    /// the old leg aborts it ("the member has re-joined the group"), leaving
+    /// the member RECONCILING with the new target and no reconciliation in
+    /// progress.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_starts_next_reconciliation_after_resuming_a_finished_leg() {
+        use crate::consumer::internals::MemberState;
+        use crate::consumer::internals::events::BackgroundEvent;
+
+        let fx = setup_processor_with_fetch(true, true);
+        let (mm, mut bg_rx) = install_membership_without_auto_commit(&fx);
+        fx.subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_with_topics(HashSet::from(["t1".to_string()]), None)
+            .unwrap();
+        mm.transition_to_joining().unwrap();
+        let topic_id = crate::common::Uuid::random_uuid();
+        mm.abstract_mm
+            .inner
+            .lock()
+            .unwrap()
+            .assigned_topic_names_cache
+            .insert(topic_id, "t1".to_string());
+        mm.abstract_mm
+            .process_assignment_received(HashMap::from([(topic_id, vec![0])]))
+            .unwrap();
+
+        let mut processor = fx.processor;
+        let poll = |processor: &mut ApplicationEventProcessor, poll_time_ms: i64| {
+            let state = Arc::new(super::super::AsyncPollState::new());
+            processor.process(ApplicationEvent::AsyncPoll {
+                deadline_ms: poll_time_ms + 100,
+                poll_time_ms,
+                state: Arc::clone(&state),
+            });
+            state
+        };
+        let assigned_events =
+            |rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>| {
+                let mut acks = Vec::new();
+                while let Ok(env) = rx.try_recv() {
+                    if let BackgroundEvent::PartitionsAssigned { assigned_partitions, ack, .. } = env.event {
+                        acks.push((assigned_partitions, ack));
+                    }
+                }
+                acks
+            };
+
+        // Poll #1 starts the first reconciliation; its ack stays pending.
+        let _first_poll = poll(&mut processor, 1_000);
+        let mut first = assigned_events(&mut bg_rx);
+        assert_eq!(first.len(), 1, "poll #1 must start the first reconciliation");
+        let (_, first_ack) = first.pop().unwrap();
+
+        // Leave and rejoin while that ack is pending; a new target arrives.
+        let _leave = mm.leave_group(0).unwrap();
+        assert_eq!(mm.state(), MemberState::Leaving);
+        mm.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        mm.abstract_mm.on_subscription_updated();
+        mm.abstract_mm.on_consumer_poll(mm.join_group_epoch()).unwrap();
+        assert_eq!(mm.state(), MemberState::Joining);
+        // Leaving cleared the topic-name cache; the fixture has no metadata
+        // for `t1`, so seed the name again for the new target.
+        mm.abstract_mm
+            .inner
+            .lock()
+            .unwrap()
+            .assigned_topic_names_cache
+            .insert(topic_id, "t1".to_string());
+        mm.abstract_mm
+            .process_assignment_received(HashMap::from([(topic_id, vec![0, 1])]))
+            .unwrap();
+        assert_eq!(mm.state(), MemberState::Reconciling);
+
+        // The old ack arrives, then the next poll's AsyncPoll.
+        first_ack.send(Ok(())).unwrap();
+        let second_poll = poll(&mut processor, 2_000);
+        let second = assigned_events(&mut bg_rx);
+        assert_eq!(
+            second.len(),
+            1,
+            "the AsyncPoll that resumed (and aborted) the old reconciliation must start the next one in the \
+             same process(AsyncPollEvent), as Java's maybeReconcile(true) does after the callback-completed \
+             event; got {} PartitionsAssigned events",
+            second.len()
+        );
+        let mut partitions = second[0].0.clone();
+        partitions.sort_by_key(|tp| tp.partition());
+        assert_eq!(
+            partitions,
+            vec![TopicPartition::new("t1", 0), TopicPartition::new("t1", 1)],
+            "the new reconciliation must target the new assignment"
+        );
+        assert!(
+            second_poll.error().is_none(),
+            "no reconcile error expected: {:?}",
+            second_poll.error()
+        );
+        assert!(second_poll.is_reconciliation_check_complete());
     }
 }
