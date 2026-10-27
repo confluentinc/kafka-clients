@@ -24,7 +24,7 @@ the double only to make a call fail, the port runs against an unreachable bootst
 
 Per class (`clients/admin`, `common.*`):
 
-  AdminClientConfigTest | 1 ported now, 1 skipped | testInvalidMetadataRecoveryStrategy here; testDefaultMetadataRecoveryStrategy skipped (AdminClientConfig is not generated, the value cannot be read)
+  AdminClientConfigTest | 1 ported now, 1 skipped | testInvalidMetadataRecoveryStrategy here; testDefaultMetadataRecoveryStrategy skipped (AdminClientConfig is translated for its constants only, its ConfigDef parsing and getString are not generated, so the parsed value cannot be read; core: admin_client_config.rs test_default_metadata_recovery_strategy)
   AdminClientTestUtils / AdminClientUnitTestEnv / FakeForwardingAdmin | no tests | Java test doubles
   MockAdminClientTest (4.4 test jar) | skipped | all four test describeStreamsGroups (Streams, not generated); the mock itself is covered by test_mock_admin_client.py
   RaftVoterEndpointTest, 15 tests | skipped | RaftVoterEndpoint belongs to the Raft quorum RPCs, not generated
@@ -48,7 +48,8 @@ Per class (`clients/admin`, `common.*`):
   TopicCollectionTest | ported before | test_admin_common_types.py
   common.acl: AclBindingTest, AclOperationTest, AclPermissionTypeTest, ResourcePatternFilterTest, ResourcePatternTest | ported before | test_admin_common_types.py
   common.resource.ResourceTypeTest; common.config.ConfigResourceTest | ported before | test_admin_common_types.py
-  common.config: AbstractConfigTest, ConfigDefTest, ConfigTransformerTest, SaslConfigsTest, provider/* | skipped | config classes are not translated (CLAUDE.md, Not translated); not added by the admin family
+  common.config: AbstractConfigTest, ConfigDefTest, ConfigTransformerTest, provider/* | skipped | AbstractConfig, ConfigDef, ConfigTransformer and the config providers are not translated (the ConfigDef machinery, CLAUDE.md Scope); ConfigDefTest's parseType cases are in test_config.py
+  common.config: SaslConfigsTest | see test_config_class_ports.py
   common.security: JaasContextTest, SaslExtensionsTest, auth/*, authenticator/*, kerberos/*, oauthbearer/*, plain/*, scram/*, ssl/* | skipped | not classes the admin family added; admin has no SASL (decision log)
   (no common.quota test directory) | none | ClientQuota* have no Java test; smoke tests in test_admin_common_types.py
   admin/internals/*Test (AbortTransactionHandler, AdminApiDriver, AdminBootstrapAddresses, AdminFetchMetricsManager, AdminMetadataManager, AllBrokersStrategy(+Integration), AlterConsumerGroupOffsetsHandler, CoordinatorStrategy, DeleteConsumerGroupOffsetsHandler, DeleteConsumerGroupsHandler, DeleteGroupsHandler, DeleteRecordsHandler, DeleteShareGroupsHandler, DescribeConsumerGroupsHandler, DescribeProducersHandler, DescribeTransactionsHandler, FenceProducersHandler, ListConsumerGroupOffsetsHandler, ListOffsetsHandler, ListTransactionsHandler, PartitionLeaderStrategy(+Integration), RemoveMembersFromConsumerGroupHandler) | skipped | package `internals`: not public, not generated, driven only through the core; translated in rust/src/admin/internals/*.rs
@@ -376,7 +377,8 @@ from confluent_kafka.admin import (
     FeatureUpdate,
     ListGroupsOptions,
 )
-from confluent_kafka.common import ClientQuotaEntity, ClientQuotaFilterComponent, KafkaError
+from confluent_kafka.common.quota import ClientQuotaEntity, ClientQuotaFilterComponent
+from confluent_kafka.common import KafkaError
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import BootstrapResolutionError, InvalidTopicError

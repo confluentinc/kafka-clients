@@ -688,6 +688,15 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "",
         &[&[], &[("String", "s")]],
     ),
+    // Java's `IndexOutOfBoundsException`, which a mock's `List.get` / `subList` throws.
+    // Its `(int index)` constructor, which builds its own message from the index, is
+    // left out: the translated code never calls it. The core models no id for it.
+    (
+        "java.lang.IndexOutOfBoundsException",
+        "java.lang.RuntimeException",
+        "",
+        &[&[], &[("String", "s")]],
+    ),
     // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
     // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
 ];
@@ -706,6 +715,7 @@ const MIXED_PACKAGES: &[&str] = &[
     "confluent_kafka",
     "confluent_kafka.common",
     "confluent_kafka.common.config",
+    "confluent_kafka.common.metrics",
     "confluent_kafka.consumer",
     "confluent_kafka.producer",
 ];
@@ -731,6 +741,10 @@ struct ClassInfo {
     py_module: String,
     java: JavaClass,
     is_jdk: bool,
+    /// The instance fields of the class or an ancestor whose declared type
+    /// Java's serialization refuses, as `(field, type)`: such an error does
+    /// not pickle or deep-copy (CLAUDE.md, Python Binding Conventions, Errors).
+    unserializable: Vec<(String, String)>,
 }
 
 impl ClassInfo {
@@ -837,6 +851,7 @@ fn jdk_class(fqn: &str, parent: &str, ctors: &[JdkCtor]) -> JavaClass {
         factories: Vec::new(),
         enums: Vec::new(),
         singletons: Vec::new(),
+        to_string: None,
     }
 }
 
@@ -899,6 +914,7 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
                 py_module: "confluent_kafka".to_string(),
                 java: jdk_class(fqn, parent, ctors),
                 is_jdk: true,
+                unserializable: Vec::new(),
             },
         );
     }
@@ -964,6 +980,7 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
                 py_module: py_module_for(&jc.package),
                 java: jc,
                 is_jdk: false,
+                unserializable: Vec::new(),
             },
         );
     }
@@ -983,7 +1000,264 @@ fn build_graph(repo_root: &Path) -> anyhow::Result<BTreeMap<String, ClassInfo>> 
     // 5. Fail-closed universe check: every in-scope Java exception class is
     //    accounted for, and the abstract set is Java's `abstract` modifier.
     validate_exception_scan(repo_root, &classes)?;
+
+    // 6. The fields Java's serialization refuses, read from the Java sources.
+    let fqns: Vec<String> = classes.keys().cloned().collect();
+    for fqn in &fqns {
+        let found = unserializable_fields(repo_root, &classes, fqn)?;
+        classes.get_mut(fqn).expect("listed").unserializable = found;
+    }
     Ok(classes)
+}
+
+// ---------------------------------------------------------------------------
+// Java serialization of the fields
+// ---------------------------------------------------------------------------
+
+/// Whether Java's serialization writes a JDK type a field may be declared as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum JdkSer {
+    Yes,
+    /// A collection interface: its implementations are `Serializable`, so it is
+    /// when its elements are.
+    WhenElementsAre,
+    No,
+}
+
+/// The JDK field types the generator knows; any other stops generation.
+fn jdk_field_type(fqn: &str) -> Option<JdkSer> {
+    Some(match fqn {
+        "java.lang.String"
+        | "java.lang.Integer"
+        | "java.lang.Long"
+        | "java.lang.Short"
+        | "java.lang.Byte"
+        | "java.lang.Double"
+        | "java.lang.Float"
+        | "java.lang.Boolean"
+        | "java.lang.Character" => JdkSer::Yes,
+        "java.util.Collection" | "java.util.List" | "java.util.Set" | "java.util.Map" => JdkSer::WhenElementsAre,
+        "java.nio.ByteBuffer" | "java.util.Optional" => JdkSer::No,
+        _ => return None,
+    })
+}
+
+/// Whether a JDK supertype of a Kafka type makes it `Serializable`; `None` for
+/// one the generator does not know.
+fn jdk_supertype(fqn: &str) -> Option<bool> {
+    match fqn {
+        "java.io.Serializable" => Some(true),
+        "java.lang.Object"
+        | "java.lang.Comparable"
+        | "java.lang.Iterable"
+        | "java.lang.AutoCloseable"
+        | "java.io.Closeable"
+        | "java.lang.Cloneable"
+        | "java.lang.Runnable" => Some(false),
+        _ => None,
+    }
+}
+
+/// Where a simple type name is resolved: a Java source's package, imports and
+/// nested enums.
+struct TypeScope<'a> {
+    package: &'a str,
+    imports: &'a BTreeMap<String, String>,
+    nested_enums: Vec<&'a str>,
+}
+
+impl TypeScope<'_> {
+    fn resolve(&self, repo_root: &Path, simple: &str) -> Option<String> {
+        if simple.starts_with("java.") || simple.starts_with("org.") {
+            return Some(simple.to_string());
+        }
+        if let Some(fqn) = self.imports.get(simple) {
+            return Some(fqn.clone());
+        }
+        let same_package = format!("{}.{simple}", self.package);
+        if java_path(repo_root, &same_package).is_file() {
+            return Some(same_package);
+        }
+        let lang = format!("java.lang.{simple}");
+        (jdk_field_type(&lang).is_some() || jdk_supertype(&lang).is_some()).then_some(lang)
+    }
+}
+
+/// `A<B, C<D>>` -> `["B", "C<D>"]`: the top-level type arguments.
+fn type_arguments(ty: &str) -> Vec<String> {
+    let (Some(a), Some(b)) = (ty.find('<'), ty.rfind('>')) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, a + 1);
+    for (i, c) in ty.char_indices().take(b).skip(a + 1) {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(ty[start..i].trim().to_string());
+                start = i + 1;
+            },
+            _ => {},
+        }
+    }
+    out.push(ty[start..b].trim().to_string());
+    out
+}
+
+/// Whether Java's serialization writes a field declared as `ty` in `scope`:
+/// a primitive, a nested enum, a JDK type of [`jdk_field_type`] (a collection
+/// when its elements are), or a Kafka type whose source is an enum or
+/// implements `Serializable`, directly or through a supertype.
+fn field_type_serializable(repo_root: &Path, scope: &TypeScope<'_>, ty: &str, at: &str) -> anyhow::Result<bool> {
+    let ty = ty.trim();
+    let ty = ty
+        .strip_prefix("? extends ")
+        .or_else(|| ty.strip_prefix("? super "))
+        .unwrap_or(ty);
+    if let Some(element) = ty.strip_suffix("[]") {
+        return field_type_serializable(repo_root, scope, element, at);
+    }
+    if is_primitive(ty) {
+        return Ok(true);
+    }
+    let base = base_type(ty);
+    if scope.nested_enums.contains(&base) {
+        return Ok(true);
+    }
+    let fqn = scope.resolve(repo_root, base).ok_or_else(|| {
+        anyhow::anyhow!("error hierarchy: {at}: cannot resolve the type `{ty}` to decide whether Java serializes it")
+    })?;
+    if fqn.starts_with("org.apache.kafka.") {
+        return kafka_type_serializable(repo_root, &fqn, &mut BTreeSet::new(), at);
+    }
+    match jdk_field_type(&fqn) {
+        Some(JdkSer::Yes) => Ok(true),
+        Some(JdkSer::No) => Ok(false),
+        Some(JdkSer::WhenElementsAre) => {
+            for argument in type_arguments(ty) {
+                if !field_type_serializable(repo_root, scope, &argument, at)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+        None => anyhow::bail!(
+            "error hierarchy: {at}: the JDK type `{fqn}` is not in the generator's table of field types \
+             (`jdk_field_type`); decide whether Java serializes it and add it"
+        ),
+    }
+}
+
+/// Whether the Kafka type `fqn` is `Serializable`: an enum, or a class or
+/// interface with `Serializable` among its supertypes.
+fn kafka_type_serializable(repo_root: &Path, fqn: &str, seen: &mut BTreeSet<String>, at: &str) -> anyhow::Result<bool> {
+    if !seen.insert(fqn.to_string()) {
+        return Ok(false);
+    }
+    let path = java_path(repo_root, fqn);
+    let raw =
+        fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("error hierarchy: {at}: {}: {e}", path.display()))?;
+    let src = java_parse::strip_comments(&raw);
+    let simple = fqn.rsplit('.').next().unwrap();
+    let mut header = None;
+    for kind in ["class", "interface", "enum", "record"] {
+        let needle = format!("{kind} {simple}");
+        let found = src.match_indices(&needle).find(|(i, _)| {
+            let after = src[i + needle.len()..].chars().next();
+            let before = src[..*i].chars().next_back();
+            !after.is_some_and(|c| c.is_alphanumeric() || c == '_') && !before.is_some_and(|c| c.is_alphanumeric())
+        });
+        if let Some((i, _)) = found {
+            let end = src[i..].find('{').map(|e| i + e).unwrap_or(src.len());
+            header = Some((kind, src[i + needle.len()..end].to_string()));
+            break;
+        }
+    }
+    let (kind, rest) = header.ok_or_else(|| anyhow::anyhow!("error hierarchy: {at}: no declaration of `{fqn}`"))?;
+    if kind == "enum" {
+        return Ok(true);
+    }
+    let package = src
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("package ")
+                .map(|p| p.trim_end_matches(';').trim().to_string())
+        })
+        .unwrap_or_default();
+    let imports: BTreeMap<String, String> = src
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("import "))
+        .filter(|l| !l.starts_with("static "))
+        .map(|l| l.trim_end_matches(';').trim())
+        .map(|l| (l.rsplit('.').next().unwrap().to_string(), l.to_string()))
+        .collect();
+    let scope = TypeScope { package: &package, imports: &imports, nested_enums: Vec::new() };
+    // Drop the type parameters and arguments, then read `extends` / `implements`.
+    let mut plain = String::new();
+    let mut depth = 0usize;
+    for c in rest.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => plain.push(c),
+            _ => {},
+        }
+    }
+    let supertypes: Vec<&str> = plain
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty() && !matches!(*w, "extends" | "implements" | "permits"))
+        .collect();
+    for supertype in supertypes {
+        let resolved = scope.resolve(repo_root, supertype).ok_or_else(|| {
+            anyhow::anyhow!("error hierarchy: {at}: cannot resolve `{supertype}`, a supertype of `{fqn}`")
+        })?;
+        let serializable = if resolved.starts_with("org.apache.kafka.") {
+            kafka_type_serializable(repo_root, &resolved, seen, at)?
+        } else {
+            jdk_supertype(&resolved).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "error hierarchy: {at}: `{fqn}` extends the JDK type `{resolved}`, which the generator's \
+                     table of supertypes (`jdk_supertype`) does not know"
+                )
+            })?
+        };
+        if serializable {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The instance fields of `fqn` and its ancestors that Java's serialization
+/// refuses, ancestors first.
+fn unserializable_fields(
+    repo_root: &Path,
+    classes: &BTreeMap<String, ClassInfo>,
+    fqn: &str,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut chain = Vec::new();
+    let mut cur = fqn.to_string();
+    while let Some(info) = classes.get(&cur) {
+        chain.push(info);
+        cur = info.parent_fqn.clone();
+    }
+    let mut out = Vec::new();
+    for info in chain.iter().rev().filter(|i| !i.is_jdk) {
+        let scope = TypeScope {
+            package: &info.java.package,
+            imports: &info.java.imports,
+            nested_enums: info.java.enums.iter().map(|e| e.name.as_str()).collect(),
+        };
+        for f in info.java.fields.iter().filter(|f| !f.is_static && !f.is_transient) {
+            let at = format!("`{}.{}`", info.java_fqn, f.name);
+            if !field_type_serializable(repo_root, &scope, &f.ty, &at)? {
+                out.push((f.name.clone(), f.ty.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,6 +1333,99 @@ fn compatible(arg: &Option<String>, param_ty: &str) -> bool {
         || (matches!(p, "Collection" | "Iterable") && matches!(a, "Set" | "List" | "Collection"))
         || (p == "long" && a == "int")
         || (p == "double" && matches!(a, "int" | "long"))
+}
+
+/// A `toString()` override's `return` expression, a `+` chain of
+/// `getClass().getName()` (first), string literals, the class's own declared
+/// instance `fields` and no-argument calls on one of them, as Python: the whole
+/// text (the class as its Python path), the text after the class name and its
+/// `": "`, which `str()` gives (CLAUDE.md, Python Binding Conventions, Errors),
+/// and the fields read. Any other part (`super.toString()`, `this.method()`, a
+/// static call, a constant, a number) stops generation.
+fn translate_to_string(fqn: &str, expr: &str, fields: &[String]) -> anyhow::Result<(String, String, Vec<String>)> {
+    let parts = split_plus(expr);
+    let bad = |what: &str| anyhow::anyhow!("{fqn}.toString(): unsupported {what} in `{expr}`");
+    let field_of = |s: &str| -> Option<String> {
+        let name = s.strip_prefix("this.").unwrap_or(s);
+        fields.iter().any(|f| f == name).then(|| name.to_string())
+    };
+    let mut py = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let part = part.trim();
+        let code = if part == "getClass().getName()" {
+            if i != 0 {
+                return Err(bad("class name not first"));
+            }
+            "type(self).__module__ + \".\" + type(self).__qualname__".to_string()
+        } else if part.starts_with('"') && part.ends_with('"') && part.len() >= 2 {
+            // A Java escape would need translating: not a translated form.
+            if part.contains('\\') {
+                return Err(bad(&format!("escaped literal `{part}`")));
+            }
+            py_str_literal(&part[1..part.len() - 1])
+        } else if let Some(call) = part.strip_suffix("()") {
+            let (target, method) = call.rsplit_once('.').ok_or_else(|| bad(&format!("call `{part}`")))?;
+            let field = field_of(target).ok_or_else(|| bad(&format!("call `{part}` (not on a field)")))?;
+            if method.is_empty() || !method.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Err(bad(&format!("call `{part}`")));
+            }
+            read.push(attr_name(&field));
+            // Java dereferences the field: a `None` is the Types row's `TypeError`.
+            format!(
+                "java_str(_throwable.non_null(self.{}, \"{}\").{}())",
+                attr_name(&field),
+                snake(&field),
+                snake(method)
+            )
+        } else if let Some(field) = field_of(part) {
+            read.push(attr_name(&field));
+            format!("java_str(self.{})", attr_name(&field))
+        } else {
+            return Err(bad(&format!("part `{part}`")));
+        };
+        py.push(code);
+    }
+    let whole = py.join(" + ");
+    // `str()`: what follows `getClass().getName() + ": ..."`.
+    let second = parts.get(1).map(|p| p.trim()).unwrap_or_default();
+    if parts.first().map(|p| p.trim()) != Some("getClass().getName()") || !second.starts_with("\": ") {
+        return Err(bad("form (not `getClass().getName() + \": ...\"`)"));
+    }
+    let mut after = vec![py_str_literal(&second[3..second.len() - 1])];
+    after.extend(py[2..].iter().cloned());
+    read.dedup();
+    Ok((whole, after.join(" + "), read))
+}
+
+/// Split `s` at its top-level `+` signs, outside literals and parentheses.
+fn split_plus(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let (mut out, mut depth, mut start, mut i) = (Vec::new(), 0i32, 0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            },
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'+' if depth == 0 => {
+                out.push(s[start..i].to_string());
+                start = i + 1;
+            },
+            _ => {},
+        }
+        i += 1;
+    }
+    out.push(s[start..].to_string());
+    out
 }
 
 fn py_str_literal(s: &str) -> String {
@@ -1836,10 +2203,10 @@ fn import_source(name: &str) -> Option<(&'static str, &'static str)> {
     Some(match name {
         "TopicPartition" => ("confluent_kafka.common.topic_partition", "TopicPartition"),
         "OffsetAndMetadata" => ("confluent_kafka.consumer.offset_and_metadata", "OffsetAndMetadata"),
-        "KafkaMetric" => ("confluent_kafka.common.kafka_metric", "KafkaMetric"),
-        "TimestampType" => ("confluent_kafka.common.timestamp_type", "TimestampType"),
-        "Header" => ("confluent_kafka.common.header", "Header"),
-        "Headers" => ("confluent_kafka.common.headers", "Headers"),
+        "KafkaMetric" => ("confluent_kafka.common.metrics.kafka_metric", "KafkaMetric"),
+        "TimestampType" => ("confluent_kafka.common.record.timestamp_type", "TimestampType"),
+        "Header" => ("confluent_kafka.common.header.header", "Header"),
+        "Headers" => ("confluent_kafka.common.header.headers", "Headers"),
         "Iterable" => ("collections.abc", "Iterable"),
         "Mapping" => ("collections.abc", "Mapping"),
         "Sequence" => ("collections.abc", "Sequence"),
@@ -1968,12 +2335,15 @@ fn py_base(g: &Graph, info: &ClassInfo) -> String {
         // `TimeoutException` subclasses `builtins.TimeoutError`, and
         // `IllegalArgumentException` `ValueError` and `RuntimeError`, in that order:
         // Python's class for a bad argument value, and Java's `RuntimeException` chain
-        // (CLAUDE.md, Types); `UnsupportedOperationException` subclasses
+        // (CLAUDE.md, Types); `IndexOutOfBoundsException` `IndexError` and
+        // `RuntimeError`, in that order; `UnsupportedOperationException` subclasses
         // `NotImplementedError`.
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
         } else if info.java_fqn == "java.lang.IllegalArgumentException" {
             "ValueError, RuntimeError".into()
+        } else if info.java_fqn == "java.lang.IndexOutOfBoundsException" {
+            "IndexError, RuntimeError".into()
         } else if info.java_fqn == "java.lang.UnsupportedOperationException" {
             // `NotImplementedError` subclasses `RuntimeError`, so Java's chain is kept.
             "NotImplementedError".into()
@@ -2075,6 +2445,15 @@ fn branch_code(g: &Graph, info: &ClassInfo, form: &PyForm, indent: &str) -> Vec<
             .get(&attr)
             .map(|v| v.expr.clone())
             .unwrap_or_else(|| java_default_value(&ty).to_string());
+        // A Java `double` / `float` field holds a floating value whatever number
+        // it was given, so `str()` prints `9.0` as Java does (as
+        // `ClientQuotaAlteration.Op` keeps a float).
+        let ident = !value.is_empty() && value.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let value = match ty.as_str() {
+            "double" | "float" if ident && value != "None" => format!("float({value})"),
+            "Double" | "Float" if ident && value != "None" => format!("None if {value} is None else float({value})"),
+            _ => value,
+        };
         lines.push(format!("{indent}self.{attr} = {value}"));
     }
     lines
@@ -2472,6 +2851,82 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         getter_sigs.push(format!("    def {name}(self) -> {ret}: ..."));
     }
     emit_factories(info.java.getters.len(), &mut body, &mut getter_sigs);
+    if let Some(expr) = &info.java.to_string {
+        let fields: Vec<String> = info
+            .java
+            .fields
+            .iter()
+            .filter(|f| !f.is_static)
+            .map(|f| f.name.clone())
+            .collect();
+        let (whole, after, read) = translate_to_string(&info.java_fqn, expr, &fields)?;
+        // An error built without its payload (`_throwable.new`'s message-only
+        // fallback) prints as before the override: its message.
+        let has = read
+            .iter()
+            .map(|a| format!("hasattr(self, \"{a}\")"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let guard = if read.is_empty() { "True".to_string() } else { has };
+        body.push(String::new());
+        body.push("    def _java_to_string(self) -> str | None:".into());
+        body.push(
+            "        \"\"\"Java's ``toString()`` override, with the Python class path\n        \
+             (``_throwable.to_string`` prefers it); ``None`` without the payload.\"\"\""
+                .into(),
+        );
+        body.push(format!("        if not ({guard}):\n            return None"));
+        body.push(format!("        return ({whole})"));
+        body.push(String::new());
+        body.push("    def __str__(self) -> str:".into());
+        body.push("        \"\"\"Java's ``toString()`` override's text after the class name (Errors).\"\"\"".into());
+        body.push(format!(
+            "        if not ({guard}):\n            return _throwable.message_text(self)"
+        ));
+        body.push(format!("        return ({after})"));
+    }
+    if !info.unserializable.is_empty() {
+        if is_root_class(info) {
+            anyhow::bail!(
+                "error hierarchy: `{}`: a root class with fields Java cannot serialize",
+                info.java_fqn
+            );
+        }
+        let java_simple = info.java_fqn.rsplit('.').next().unwrap();
+        let fields = info
+            .unserializable
+            .iter()
+            .map(|(f, ty)| format!("``{f}`` (``{}``)", base_type(ty)))
+            .collect::<Vec<_>>();
+        let listed = match fields.as_slice() {
+            [one] => one.clone(),
+            [init @ .., last] => format!("{} and {last}", init.join(", ")),
+            [] => unreachable!(),
+        };
+        let verb = if fields.len() == 1 { "is" } else { "are" };
+        let doc = format!(
+            "Refused, as Java's serialization of ``{java_simple}`` throws ``NotSerializableException``: {listed} \
+             {verb} not ``Serializable`` (CLAUDE.md, Python Binding Conventions, Errors)."
+        );
+        let wrapped: Vec<String> = wrap_doc(&doc, &" ".repeat(11)).lines().map(|l| l[3..].to_string()).collect();
+        body.push(String::new());
+        body.push("    def __reduce__(self) -> str | tuple[Any, ...]:".into());
+        body.push(format!("        \"\"\"{}", wrapped.join("\n").trim_start()) + "\"\"\"");
+        body.push("        raise TypeError(".into());
+        body.push(format!(
+            "            \"{py_name} cannot be pickled or deep-copied, as Java's \""
+        ));
+        body.push(format!("            \"{java_simple} cannot be serialized\")"));
+        body.push(String::new());
+        body.push(format!("    def __copy__(self) -> {py_name}:"));
+        body.push(
+            "        \"\"\"``copy.copy``: a rebuild from the same constructor arguments, which it\n        \
+             shares, with the cause, the notes and the attributes a caller added.\"\"\""
+                .into(),
+        );
+        body.push("        return _throwable.shallow_copy(self)".into());
+        used.insert("Any".into());
+    }
     if is_root_class(info) {
         body.push(String::new());
         body.push("    def __str__(self) -> str:".into());
@@ -2590,7 +3045,7 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         l.contains("TimestampType.") && !l.starts_with("def ") && !l.contains("-> ")
     });
     if runtime_timestamp {
-        pkg_block.push("from confluent_kafka.common.timestamp_type import TimestampType".into());
+        pkg_block.push("from confluent_kafka.common.record.timestamp_type import TimestampType".into());
     }
     if !is_root_class(info) {
         let parent = &g.classes[&info.parent_fqn];
@@ -2656,6 +3111,10 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
         }
     }
     sbody.extend(getter_sigs);
+    if !info.unserializable.is_empty() {
+        sbody.push("    def __reduce__(self) -> str | tuple[Any, ...]: ...".into());
+        sbody.push(format!("    def __copy__(self) -> {py_name}: ..."));
+    }
     if is_root_class(info) {
         sbody.push("    def __str__(self) -> str: ...".into());
         sbody.push("    def __reduce__(self) -> str | tuple[Any, ...]: ...".into());
@@ -3239,6 +3698,40 @@ fn parse_ffi_enum_ids(repo_root: &Path) -> anyhow::Result<BTreeMap<String, i32>>
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_translates_a_to_string_override() {
+        let fields = vec!["metric".to_string(), "value".to_string(), "bound".to_string()];
+        let expr = "getClass().getName() + \": '\" + metric.metricName() + \"' violated quota. Actual: \" + value + \", Threshold: \" + bound";
+        let (whole, after, read) = translate_to_string("x.QuotaViolationException", expr, &fields).unwrap();
+        assert_eq!(
+            whole,
+            "type(self).__module__ + \".\" + type(self).__qualname__ + \": '\" + java_str(_throwable.non_null(self._metric, \"metric\").metric_name()) + \"' violated quota. Actual: \" + java_str(self._value) + \", Threshold: \" + java_str(self._bound)"
+        );
+        assert_eq!(
+            after,
+            "\"'\" + java_str(_throwable.non_null(self._metric, \"metric\").metric_name()) + \"' violated quota. Actual: \" + java_str(self._value) + \", Threshold: \" + java_str(self._bound)"
+        );
+        assert_eq!(read, vec!["_metric", "_value", "_bound"]);
+        // Every form outside the translated ones stops generation.
+        for part in [
+            "super.toString()",
+            "this.describe()",
+            "Utils.name()",
+            "MAX_SIZE",
+            "42",
+            "name",
+            "format(a)",
+            r#""a\"b""#,
+            r#""a\nb""#,
+            r#""a\\b""#,
+        ] {
+            let expr = format!("getClass().getName() + \": \" + {part}");
+            let err = translate_to_string("x.E", &expr, &fields).unwrap_err().to_string();
+            assert!(err.contains("unsupported"), "{part}: {err}");
+        }
+        assert!(translate_to_string("x.E", "metric + \": x\"", &fields).is_err());
+    }
+
     fn repo_root() -> PathBuf {
         // rust/xtask/ is a workspace member; the repo root is two levels up.
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3316,10 +3809,11 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 166 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins
-        // (NoSuchElementException, ExecutionException; NullPointerException is Python's
-        // TypeError, and UnsupportedOperationException has the id LOCAL_UNSUPPORTED_OPERATION).
-        assert_eq!(classes.len(), 174);
+        // 166 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins
+        // (NoSuchElementException, ExecutionException, IndexOutOfBoundsException;
+        // NullPointerException is Python's TypeError, and UnsupportedOperationException
+        // has the id LOCAL_UNSUPPORTED_OPERATION).
+        assert_eq!(classes.len(), 175);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 167, "166 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
@@ -3344,6 +3838,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
         assert_eq!(base("java.lang.IllegalArgumentException"), "ValueError, RuntimeError");
+        assert_eq!(base("java.lang.IndexOutOfBoundsException"), "IndexError, RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"
@@ -3537,6 +4032,104 @@ mod tests {
             }
             assert_eq!(m.decorated, rejects, "{}", info.java_fqn);
         }
+    }
+
+    #[test]
+    fn only_an_error_with_a_field_java_cannot_serialize_refuses_pickling() {
+        let classes = build_graph(&repo_root()).unwrap();
+        let refusing: BTreeMap<&str, Vec<(String, String)>> = classes
+            .values()
+            .filter(|i| !i.unserializable.is_empty())
+            .map(|i| (i.java_fqn.as_str(), i.unserializable.clone()))
+            .collect();
+        let pair = |f: &str, t: &str| (f.to_string(), t.to_string());
+        let expected = BTreeMap::from([
+            (
+                "org.apache.kafka.common.errors.RecordDeserializationException",
+                vec![
+                    pair("keyBuffer", "ByteBuffer"),
+                    pair("valueBuffer", "ByteBuffer"),
+                    pair("headers", "Headers"),
+                ],
+            ),
+            (
+                "org.apache.kafka.common.metrics.QuotaViolationException",
+                vec![pair("metric", "KafkaMetric")],
+            ),
+        ]);
+        assert_eq!(refusing, expected);
+        // The other errors with fields keep them through `pickle`, as Java's
+        // serialization writes them.
+        for fqn in [
+            "org.apache.kafka.clients.consumer.LogTruncationException",
+            "org.apache.kafka.clients.consumer.NoOffsetForPartitionException",
+            "org.apache.kafka.common.errors.TopicAuthorizationException",
+            "org.apache.kafka.common.errors.RecordTooLargeException",
+            "org.apache.kafka.common.requests.CorrelationIdMismatchException",
+        ] {
+            let info = &classes[fqn];
+            assert!(info.java.fields.iter().any(|f| !f.is_static), "{fqn} has fields");
+            assert!(info.unserializable.is_empty(), "{fqn}");
+        }
+    }
+
+    #[test]
+    fn field_types_follow_java_serialization() {
+        let root = repo_root();
+        let imports: BTreeMap<String, String> = [
+            ("TopicPartition", "org.apache.kafka.common.TopicPartition"),
+            ("OffsetAndMetadata", "org.apache.kafka.clients.consumer.OffsetAndMetadata"),
+            ("TimestampType", "org.apache.kafka.common.record.TimestampType"),
+            ("KafkaMetric", "org.apache.kafka.common.metrics.KafkaMetric"),
+            ("Headers", "org.apache.kafka.common.header.Headers"),
+            ("ByteBuffer", "java.nio.ByteBuffer"),
+            ("UUID", "java.util.UUID"),
+            ("Set", "java.util.Set"),
+            ("Map", "java.util.Map"),
+            ("List", "java.util.List"),
+            ("Collection", "java.util.Collection"),
+            ("Optional", "java.util.Optional"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let scope = TypeScope {
+            package: "org.apache.kafka.common.errors",
+            imports: &imports,
+            nested_enums: vec!["Origin"],
+        };
+        let ser = |ty: &str| field_type_serializable(&root, &scope, ty, "test");
+        for ty in [
+            "int",
+            "long[]",
+            "String",
+            "Long",
+            "Origin",
+            "TimestampType",
+            "TopicPartition",
+            "Set<String>",
+            "Map<TopicPartition, OffsetAndMetadata>",
+            "Map<String, List<TopicPartition>>",
+            "Collection<? extends TopicPartition>",
+        ] {
+            assert!(ser(ty).unwrap(), "{ty} is Serializable");
+        }
+        for ty in [
+            "ByteBuffer",
+            "Headers",
+            "KafkaMetric",
+            "List<KafkaMetric>",
+            "Map<TopicPartition, Headers>",
+            "Optional<String>",
+        ] {
+            assert!(!ser(ty).unwrap(), "{ty} is not Serializable");
+        }
+        let unknown = ser("UUID").unwrap_err().to_string();
+        assert!(
+            unknown.contains("`java.util.UUID` is not in the generator's table"),
+            "{unknown}"
+        );
+        assert!(ser("NoSuchType").is_err());
     }
 
     #[test]

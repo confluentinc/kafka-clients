@@ -83,10 +83,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.create_delegation_token_result import CreateDelegationTokenResult
     from confluent_kafka.admin.create_partitions_result import CreatePartitionsResult
-    from confluent_kafka.admin.create_topics_result import (
-        CreateTopicsResult,
-        _TopicMetadataAndConfig,
-    )
+    from confluent_kafka.admin.create_topics_result import CreateTopicsResult
     from confluent_kafka.admin.delete_acls_result import DeleteAclsResult
     from confluent_kafka.admin.delete_consumer_group_offsets_result import (
         DeleteConsumerGroupOffsetsResult,
@@ -161,17 +158,16 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credentials_description import (
         UserScramCredentialsDescription,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import (
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
-        DelegationToken,
-        KafkaPrincipal,
-        Uuid,
     )
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.security.token.delegation import DelegationToken
+    from confluent_kafka.common.security.auth import KafkaPrincipal
+    from confluent_kafka.common import Uuid
+    from confluent_kafka.common.acl.acl_operation import AclOperation
     from confluent_kafka.common.config.config_resource import ConfigResource
     from confluent_kafka.common.election_type import ElectionType
     from confluent_kafka.common.node import Node
@@ -468,7 +464,7 @@ def optional_node_from_tuple(raw: tuple[int, str, int, str | None] | None) -> No
 def acl_operations_from_codes(codes: list[int] | None) -> set[AclOperation] | None:
     """Java's ``AdminUtils.validAclOperations`` result: ``None`` when the broker did not
     report the operations (Java's ``null``), else the operations of the codes."""
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.acl.acl_operation import AclOperation
 
     return None if codes is None else {AclOperation.from_code(code=code) for code in codes}
 
@@ -501,6 +497,10 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
             raise TypeError("new_topics must not contain a NewTopic with a None name")
         configs = topic.configs()
         assignments = topic.replicas_assignments()
+        if assignments is not None and any(v is None for v in assignments.values()):
+            # Java's convertToCreatableTopic stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_topics must not contain a NewTopic with a None replica assignment")
         spec.append((
             topic.name(), topic.num_partitions(), topic.replication_factor(),
             None if configs is None else list(configs.items()),
@@ -547,6 +547,18 @@ def create_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoo
         kind, loop, native.futures("values"))
 
     def refine(topic: str, accessor: str) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+        if topic is None:
+            # A null topic is never in the request, and cannot cross the FFI: the
+            # future the core's accessor gives a topic not in the request
+            # (exception 4).
+            from confluent_kafka.illegal_argument_error import IllegalArgumentError
+
+            failed: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+            failed.complete_with_error(IllegalArgumentError(
+                message="Topic None was not part of the createTopics request"))
+            if kind is Async:
+                return AsyncKafkaFuture._of_impl(failed, loop)
+            return KafkaFuture._of_impl(failed)
         source = wrap(kind, loop, native.future(accessor, topic,
                                                 _CREATE_TOPICS_REFINEMENTS[accessor]))
         key_future = futures.get(topic)
@@ -790,15 +802,13 @@ def _acl_binding_filter_args(acl_filter: AclBindingFilter) -> tuple[Any, ...]:
 
 def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
     """``acl_binding_to_py``'s seven-tuple as an ``AclBinding``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntry,
         AclBinding,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePattern,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePattern, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBinding(
@@ -812,15 +822,13 @@ def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
 
 def _to_acl_binding_filter(raw: tuple[Any, ...]) -> AclBindingFilter:
     """``acl_binding_filter_to_py``'s seven-tuple as an ``AclBindingFilter``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntryFilter,
         AclBindingFilter,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePatternFilter,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePatternFilter, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBindingFilter(
@@ -1088,9 +1096,16 @@ def create_partitions_args(new_partitions: Mapping[str, NewPartitions]) -> tuple
     """``Admin_create_partitions(h, rows, options)``'s arguments: each entry as
     ``(topic, totalCount(), assignments() or None)`` (``None`` is Java's
     ``increaseTo(int)``, an empty list ``increaseTo(int, List.of())``)."""
-    return ([(topic, element(partitions, "new_partitions").total_count(),
-              partitions.assignments())
-             for topic, partitions in new_partitions.items()],)
+    rows = []
+    for topic, partitions in new_partitions.items():
+        total = element(partitions, "new_partitions").total_count()
+        assignments = partitions.assignments()
+        if assignments is not None and any(a is None for a in assignments):
+            # Java's CreatePartitionsRequest stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_partitions must not contain a NewPartitions with a None assignment")
+        rows.append((topic, total, assignments))
+    return (rows,)
 
 
 def create_partitions_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
@@ -1134,7 +1149,7 @@ def _principal_args(principal: KafkaPrincipal) -> tuple[str, str]:
 
 def _to_kafka_principal(raw: tuple[str, str, bool]) -> KafkaPrincipal:
     """``kafka_principal_to_py``'s ``(principal_type, name, token_authenticated)``."""
-    from confluent_kafka.common import KafkaPrincipal
+    from confluent_kafka.common.security.auth import KafkaPrincipal
 
     principal_type, name, token_authenticated = raw
     return KafkaPrincipal(principal_type=principal_type, name=name,
@@ -1147,7 +1162,7 @@ def _to_delegation_token(raw: tuple[Any, ...]) -> DelegationToken:
     ``KafkaAdminClient`` builds it (``new TokenInformation(tokenId, owner,
     tokenRequester, renewers, issue, max, expiry)``); the class computes the base64
     form itself."""
-    from confluent_kafka.common import DelegationToken, TokenInformation
+    from confluent_kafka.common.security.token.delegation import DelegationToken, TokenInformation
 
     (token_id, owner, requester, renewers, issue_timestamp, expiry_timestamp,
      max_timestamp, hmac, _hmac_base64) = raw
@@ -1731,8 +1746,14 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
     private ``_match_is_null``, decision log 25) specified, an empty one default,
     else exact."""
     components: list[tuple[str, int, str | None]] = []
-    for component in quota_filter.components():
-        match = component.match()
+    # Java's DescribeClientQuotasRequest.Builder dereferences the components and
+    # each component: a None the FFI cannot carry is reported here (Types;
+    # exception 4).
+    filter_components = quota_filter.components()
+    if filter_components is None:
+        raise TypeError("ClientQuotaFilter.components must not be None")
+    for component in filter_components:
+        match = element(component, "ClientQuotaFilter.components").match()
         if component._match_is_null:
             components.append((component.entity_type(), _MATCH_TYPE_SPECIFIED, None))
         elif match is None:
@@ -1744,7 +1765,7 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
 
 def _to_client_quota_entity(pairs: Iterable[tuple[str, str | None]]) -> ClientQuotaEntity:
     """``client_quota_entity_to_py``'s ``(entity_type, name or None)`` pairs."""
-    from confluent_kafka.common import ClientQuotaEntity
+    from confluent_kafka.common.quota import ClientQuotaEntity
 
     return ClientQuotaEntity(entries=dict(pairs))
 
@@ -1770,8 +1791,22 @@ def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration]) -> tuple[
     """``Admin_alter_client_quotas(h, entries, options)``'s plain arguments: each
     alteration as ``(entity, ops)``, the entity's ``(type, name or None)`` pairs and
     the ops' ``(key, value or None)``, ``None`` removing the quota."""
-    rows = [(list(element(entry, "entries").entity().entries().items()),
-             [(op.key(), op.value()) for op in entry.ops()]) for entry in entries]
+    rows = []
+    for entry in entries:
+        # Java's AlterClientQuotasRequest.Builder dereferences, in this order, the
+        # entry, its entity, the entity's entries, its ops and each op: a None the
+        # FFI cannot carry is reported here (Types; exception 4).
+        entity = element(entry, "entries").entity()
+        if entity is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None entity")
+        entity_entries = entity.entries()
+        if entity_entries is None:
+            raise TypeError("entries must not contain a ClientQuotaEntity with a None entries")
+        ops = entry.ops()
+        if ops is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None ops")
+        rows.append((list(entity_entries.items()),
+                     [(element(op, "ClientQuotaAlteration.ops").key(), op.value()) for op in ops]))
     return (rows,)
 
 

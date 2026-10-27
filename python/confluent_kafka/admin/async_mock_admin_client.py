@@ -194,11 +194,9 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credential_alteration import (
         UserScramCredentialAlteration,
     )
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import ClientQuotaAlteration, ClientQuotaFilter
     from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
-        ClientQuotaAlteration,
-        ClientQuotaFilter,
         ElectionType,
         Node,
         TopicCollection,
@@ -229,7 +227,7 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """
 
         def build(self) -> AsyncMockAdminClient:
-            """The mock built from this builder's fields (``IndexError`` with no
+            """The mock built from this builder's fields (``IndexOutOfBoundsError`` with no
             broker, as Java's ``brokers.get(0)``)."""
             return AsyncMockAdminClient._new(**self._build_args())
 
@@ -715,13 +713,21 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         self, *,
         options: ListPartitionReassignmentsOptions,
     ) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition] | None,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Async]: ...
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
             options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`MockAdminClient.list_partition_reassignments`."""
-        if partitions is MISSING:  # Java's listPartitionReassignments(options): Optional.empty()
+        # Java's listPartitionReassignments(options), and its (Optional<Set>, options)
+        # with Optional.empty(): every partition.
+        if partitions is MISSING or (partitions is None and options is not MISSING):
             return self._list_partition_reassignments(None)
         _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
         return self._list_partition_reassignments(partitions)

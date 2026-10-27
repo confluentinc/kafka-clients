@@ -70,12 +70,12 @@ COUNTS: list[tuple[str, str, str, int]] = (
         ("common/node.py", "Node", "__init__", 3),
         ("common/topic_id_partition.py", "TopicIdPartition", "__init__", 2),
         ("common/topic_partition_info.py", "TopicPartitionInfo", "__init__", 2),
-        ("common/kafka_principal.py", "KafkaPrincipal", "__init__", 2),
-        ("common/token_information.py", "TokenInformation", "__init__", 2),
+        ("common/security/auth/kafka_principal.py", "KafkaPrincipal", "__init__", 2),
+        ("common/security/token/delegation/token_information.py", "TokenInformation", "__init__", 2),
         ("consumer/consumer_records.py", "ConsumerRecords", "records", 2),
         # RecordHeaders' (), (Header[]) and (Iterable<Header>); Headers.add's two.
-        ("common/headers.py", "Headers", "__init__", 3),
-        ("common/headers.py", "Headers", "add", 2),
+        ("common/header/headers.py", "Headers", "__init__", 3),
+        ("common/header/headers.py", "Headers", "add", 2),
     ]
 )
 

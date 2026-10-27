@@ -29,6 +29,7 @@ import copy
 import importlib
 import pickle
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -40,11 +41,15 @@ from confluent_kafka import (
     ExecutionError,
     IllegalArgumentError,
     IllegalStateError,
+    IndexOutOfBoundsError,
     NoSuchElementError,
     UnsupportedOperationError,
 )
 from confluent_kafka import TimeoutError as RootTimeoutError
 from confluent_kafka import _errors as errmod
+from confluent_kafka import _throwable
+from confluent_kafka.common import KafkaFuture
+from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka._error_registry import ERRORS
 from confluent_kafka._errors import (
     class_for_ffi_id,
@@ -53,15 +58,10 @@ from confluent_kafka._errors import (
     from_ffi_error,
     to_ffi_id,
 )
-from confluent_kafka.common import (
-    Headers,
-    InvalidRecordError,
-    KafkaError,
-    KafkaMetric,
-    MetricName,
-    TimestampType,
-    TopicPartition,
-)
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common import InvalidRecordError, KafkaError, MetricName, TopicPartition
+from confluent_kafka.common.metrics import KafkaMetric
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import (
     AuthenticationError,
@@ -150,6 +150,7 @@ _JDK: dict[str, tuple[type[BaseException], ...]] = {
     "java.util.concurrent.TimeoutException": (builtins.TimeoutError,),
     "java.util.concurrent.ExecutionException": (Exception,),
     "java.util.NoSuchElementException": (RuntimeError,),
+    "java.lang.IndexOutOfBoundsException": (IndexError, RuntimeError),
     "java.lang.UnsupportedOperationException": (NotImplementedError,),
 }
 
@@ -214,12 +215,13 @@ def test_every_python_error_class_is_a_java_class() -> None:
     defined = walk(KafkaError)
     for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
                  RootTimeoutError, NoSuchElementError, ExecutionError,
-                 UnsupportedOperationError):
+                 UnsupportedOperationError, IndexOutOfBoundsError):
         defined |= walk(root)
     assert defined == set(error_classes())
     expected = set(_bridge().values()) | {
         "org.apache.kafka.common.KafkaException",
         "java.util.NoSuchElementException",
+        "java.lang.IndexOutOfBoundsException",
         "java.util.concurrent.ExecutionException",
         "java.lang.UnsupportedOperationException",
         "org.apache.kafka.common.errors.RetriableException",
@@ -229,7 +231,7 @@ def test_every_python_error_class_is_a_java_class() -> None:
         "org.apache.kafka.clients.consumer.InvalidOffsetException",
     }
     assert set(_BY_JAVA) == expected
-    assert len(_BY_JAVA) == 174
+    assert len(_BY_JAVA) == 175
 
 
 def test_only_an_exception_suffix_becomes_error() -> None:
@@ -266,14 +268,16 @@ def test_each_error_lives_in_the_module_of_its_java_package() -> None:
 def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
     assert sorted(confluent_kafka.__all__) == sorted([
         "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
-        "IllegalStateError", "NoSuchElementError", "TimeoutError", "UnsupportedOperationError"])
+        "IllegalStateError", "IndexOutOfBoundsError", "NoSuchElementError", "TimeoutError",
+        "UnsupportedOperationError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
     # A Java built-in Python has a builtin for subclasses that builtin (CLAUDE.md, Types).
     assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert IndexOutOfBoundsError.__bases__ == (IndexError, RuntimeError)
     assert issubclass(UnsupportedOperationError, RuntimeError)
     assert not issubclass(UnsupportedOperationError, KafkaError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                NoSuchElementError, UnsupportedOperationError):
+                NoSuchElementError, UnsupportedOperationError, IndexOutOfBoundsError):
         assert issubclass(cls, RuntimeError)
         assert not issubclass(cls, KafkaError)
     # ExecutionException is checked: an Exception, not a RuntimeError.
@@ -335,6 +339,8 @@ def test_built_ins_the_core_does_not_model_have_no_id() -> None:
     # UnsupportedOperationError has the core's LOCAL_UNSUPPORTED_OPERATION id
     # (test_unsupported_operation_error_is_java_unsupported_operation_exception).
     assert not hasattr(NoSuchElementError, "_ffi_id")
+    assert not hasattr(IndexOutOfBoundsError, "_ffi_id")
+    assert to_ffi_id(IndexOutOfBoundsError(message="x")) == -1
     assert to_ffi_id(NoSuchElementError(message="x")) == -1
     assert not hasattr(ExecutionError, "_ffi_id")
     assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
@@ -500,14 +506,61 @@ def test_payload_getters_return_javas_defaults() -> None:
     assert (c.request_correlation_id(), c.response_correlation_id()) == (1, 2)
 
 
-def test_quota_violation_has_no_message() -> None:
+_QUOTA_TEXT = ("'MetricName [name=rate, group=producer, description=, tags={}]' violated "
+               "quota. Actual: 9.5, Threshold: 5.0")
+_QUOTA_TO_STRING = "confluent_kafka.common.metrics.QuotaViolationError: " + _QUOTA_TEXT
+
+
+def _quota_violation() -> QuotaViolationError:
     metric = KafkaMetric._snapshot(name="rate", group="producer", value=9.5)
-    e = QuotaViolationError(metric=metric, value=9.5, bound=5.0)
-    assert e.metric() is metric
+    return QuotaViolationError(metric=metric, value=9.5, bound=5.0)
+
+
+def test_quota_violation_uses_java_to_string_override() -> None:
+    # QuotaViolationException.toString(): getClass().getName() + ": '" +
+    # metric.metricName() + "' violated quota. Actual: " + value + ", Threshold: " + bound.
+    # Its getMessage() stays null; str() is the override's text after the class name.
+    e = _quota_violation()
     assert (e.value(), e.bound()) == (9.5, 5.0)
-    assert str(e) == ""
-    assert metric.metric_name() == MetricName(name="rate", group="producer", description="",
-                                              tags={})
+    assert e.metric().metric_name() == MetricName(name="rate", group="producer",
+                                                  description="", tags={})
+    assert str(e) == _QUOTA_TEXT
+    assert _throwable.java_message(e) is None
+    assert _throwable.to_string(e) == _QUOTA_TO_STRING
+    # The override dereferences metric (Java's NPE): Types' TypeError.
+    with pytest.raises(TypeError) as none:
+        str(QuotaViolationError(metric=None, value=1.0, bound=2.0))  # type: ignore[arg-type]
+    assert str(none.value) == "metric must not be None"
+
+
+def test_quota_violation_stores_java_doubles() -> None:
+    # Java's value and bound are double: an int prints as 9.0 / 5.0.
+    metric = KafkaMetric._snapshot(name="rate", group="producer", value=9)
+    e = QuotaViolationError(metric=metric, value=9, bound=5)
+    assert (e.value(), e.bound()) == (9.0, 5.0)
+    assert type(e.value()) is float and type(e.bound()) is float
+    assert str(e).endswith("violated quota. Actual: 9.0, Threshold: 5.0")
+
+
+def test_quota_violation_without_its_payload_prints_its_message() -> None:
+    # _throwable.new's message-only fallback has no metric: str() and toString()
+    # print the message, as before the override.
+    e = _throwable.new(QuotaViolationError, "over")
+    assert str(e) == "over"
+    assert _throwable.to_string(e) == "confluent_kafka.common.metrics.QuotaViolationError: over"
+
+
+def test_quota_violation_to_string_where_java_uses_it() -> None:
+    # Throwable(Throwable cause) takes cause.toString() as its message, and so does
+    # ExecutionException.
+    q = _quota_violation()
+    wrapped = KafkaError(cause=q)
+    assert str(wrapped) == _QUOTA_TO_STRING and wrapped.__cause__ is q
+    impl: _KafkaFutureImpl[None] = _KafkaFutureImpl()
+    impl.complete_with_error(q)
+    with pytest.raises(ExecutionError) as info:
+        KafkaFuture._of_impl(impl).get()
+    assert str(info.value) == _QUOTA_TO_STRING and info.value.__cause__ is q
 
 
 def test_interrupt_error_has_no_interrupted_exception_cause() -> None:
@@ -690,10 +743,8 @@ def test_singletons() -> None:
     ConfigError(name="a", value=1, message="bad"),
     IllegalStateError(message="root"),
     NoOffsetForPartitionError(partition=_TP),
-    RecordDeserializationError(
-        origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY, partition=_TP,
-        offset=1, timestamp=2, timestamp_type=TimestampType.CREATE_TIME, key_buffer=b"k",
-        value_buffer=None, headers=(), message="m", cause=ValueError("c")),
+    LogTruncationError(message="m", fetch_offsets={_TP: 3},
+                       divergent_offsets={_TP: OffsetAndMetadata(offset=2)}),
 ])
 def test_copy_and_pickle_rebuild_from_the_constructor_arguments(error: BaseException) -> None:
     for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
@@ -767,12 +818,12 @@ def test_from_ffi_error_chains_the_core_cause(monkeypatch: pytest.MonkeyPatch) -
     assert from_ffi_error(0, cause=explicit).__cause__ is explicit
 
 
-@pytest.mark.parametrize("outer", [UnknownServerError, RecordDeserializationError])
+@pytest.mark.parametrize("outer", [UnknownServerError, LogTruncationError])
 def test_copy_and_pickle_keep_the_core_cause(monkeypatch: pytest.MonkeyPatch,
                                               outer: type[BaseException]) -> None:
     # The core's cause is set after construction, so the constructor arguments
-    # do not carry it. RecordDeserializationError is built without its
-    # constructor (the core reports no record), the other path of __reduce__.
+    # do not carry it. LogTruncationError is built without its constructor
+    # (the core reports no offsets), the other path of __reduce__.
     monkeypatch.setattr(errmod, "_lib", _fake_lib(
         outer._ffi_id,  # type: ignore[attr-defined]
         "outer", source={1: (TopicAuthorizationError._ffi_id, "inner")}))
@@ -830,14 +881,137 @@ def test_from_ffi_error_quota_violation(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_from_ffi_error_keeps_the_message_when_java_needs_more(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    # A RecordDeserializationError the core reports without its record: no Java
+    # A LogTruncationError the core reports without its offsets: no Java
     # constructor takes a message alone, so only the message is kept.
-    monkeypatch.setattr(errmod, "_lib", _fake_lib(RecordDeserializationError._ffi_id,
-                                                  "bad record"))
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(LogTruncationError._ffi_id,
+                                                  "truncated"))
+    err = from_ffi_error(0)
+    assert type(err) is LogTruncationError and str(err) == "truncated"
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is LogTruncationError and str(clone) == "truncated"
+
+
+# ----------------------------------------------------------------------------
+# An error Java cannot serialize does not pickle or deep-copy
+# ----------------------------------------------------------------------------
+
+_RDE_REFUSED = ("RecordDeserializationError cannot be pickled or deep-copied, as Java's "
+                "RecordDeserializationException cannot be serialized")
+_QUOTA_REFUSED = ("QuotaViolationError cannot be pickled or deep-copied, as Java's "
+                  "QuotaViolationException cannot be serialized")
+
+
+def _record_deserialization_error() -> RecordDeserializationError:
+    return RecordDeserializationError(
+        origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY, partition=_TP,
+        offset=1, timestamp=2, timestamp_type=TimestampType.CREATE_TIME,
+        key_buffer=b"k", value_buffer=None, headers=[("h", b"v")], message="m",
+        cause=ValueError("c"))
+
+
+@pytest.mark.parametrize("make,refused", [
+    # RecordDeserializationException's keyBuffer / valueBuffer (ByteBuffer) and
+    # headers (Headers) are not Serializable; nor is QuotaViolationException's
+    # metric (KafkaMetric).
+    (_record_deserialization_error, _RDE_REFUSED),
+    (_quota_violation, _QUOTA_REFUSED),
+])
+def test_an_error_java_cannot_serialize_refuses_pickle_and_deepcopy(
+        make: Callable[[], BaseException], refused: str) -> None:
+    error = make()
+    error.add_note("a note")
+    error.extra = 1  # type: ignore[attr-defined]
+    with pytest.raises(TypeError) as pickled:
+        pickle.dumps(error)
+    assert str(pickled.value) == refused
+    with pytest.raises(TypeError) as deep:
+        copy.deepcopy(error)
+    assert str(deep.value) == refused
+    # copy.copy rebuilds from the same arguments, which it shares.
+    shallow = copy.copy(error)
+    assert type(shallow) is type(error) and shallow is not error
+    assert str(shallow) == str(error) and shallow.args == error.args
+    assert shallow.__notes__ == ["a note"] and shallow.extra == 1  # type: ignore[attr-defined]
+    if isinstance(error, RecordDeserializationError):
+        assert isinstance(shallow, RecordDeserializationError)
+        assert shallow.__cause__ is error.__cause__
+        assert shallow.headers() == error.headers()
+        assert bytes(shallow.key_buffer() or b"") == b"k"
+    else:
+        assert isinstance(error, QuotaViolationError) and isinstance(shallow, QuotaViolationError)
+        assert shallow.metric() is error.metric()
+        assert (shallow.value(), shallow.bound()) == (9.5, 5.0)
+
+
+def test_a_core_record_deserialization_error_refuses_pickle_and_deepcopy(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Built without its constructor (no payload reported), it still refuses:
+    # Java's class cannot be serialized whatever it holds.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        RecordDeserializationError._ffi_id, "bad record",
+        source={1: (TopicAuthorizationError._ffi_id, "inner")}))
     err = from_ffi_error(0)
     assert type(err) is RecordDeserializationError and str(err) == "bad record"
-    clone = pickle.loads(pickle.dumps(err))
-    assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
+    for refuse in (pickle.dumps, copy.deepcopy):
+        with pytest.raises(TypeError) as refused:
+            refuse(err)
+        assert str(refused.value) == _RDE_REFUSED
+    shallow = copy.copy(err)
+    assert type(shallow) is RecordDeserializationError and str(shallow) == "bad record"
+    assert shallow.__cause__ is err.__cause__
+    assert type(shallow.__cause__) is TopicAuthorizationError
+
+
+_RDE_PAYLOAD: dict[str, Any] = {
+    "origin": "VALUE", "topic_partition": ("t", 0), "offset": 7, "timestamp": 1234,
+    "timestamp_type": 1, "key_buffer": b"k", "value_buffer": None,
+    "headers": [("h", b"v"), ("n", None)],
+}
+
+
+def test_a_core_record_deserialization_error_carries_its_payload(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The C extension reads the record_deserialization view: Java's getters
+    # answer the record the core failed on; the cause is the core's source.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        RecordDeserializationError._ffi_id, "bad record", _RDE_PAYLOAD,
+        source={1: (TopicAuthorizationError._ffi_id, "inner")}))
+    err = from_ffi_error(0)
+    assert type(err) is RecordDeserializationError and str(err) == "bad record"
+    assert err.origin() is RecordDeserializationError.DeserializationExceptionOrigin.VALUE
+    assert err.topic_partition() == _TP
+    assert (err.offset(), err.timestamp()) == (7, 1234)
+    assert err.timestamp_type() is TimestampType.LOG_APPEND_TIME
+    assert bytes(err.key_buffer() or b"") == b"k" and err.value_buffer() is None
+    assert [(h.key(), None if h.value() is None else bytes(h.value()))  # type: ignore[arg-type]
+            for h in err.headers()] == [("h", b"v"), ("n", None)]
+    assert type(err.__cause__) is TopicAuthorizationError
+    for refuse in (pickle.dumps, copy.deepcopy):
+        with pytest.raises(TypeError) as refused:
+            refuse(err)
+        assert str(refused.value) == _RDE_REFUSED
+    # A borrowed error (an admin result's, a delivery callback's) is built the same way.
+    borrowed = from_borrowed_ffi_error((RecordDeserializationError._ffi_id, "bad record",
+                                        False, False, _RDE_PAYLOAD, False, None))
+    assert type(borrowed) is RecordDeserializationError
+    assert borrowed.offset() == 7 and borrowed.topic_partition() == _TP
+
+
+# ----------------------------------------------------------------------------
+# Notes travel with copy and pickle, as on Python's own exceptions
+# ----------------------------------------------------------------------------
+
+
+def test_copy_and_pickle_keep_the_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+    built = TopicAuthorizationError(unauthorized_topics={"t"})
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(LogTruncationError._ffi_id, "truncated"))
+    core = from_ffi_error(0)
+    for error in (built, core):
+        error.add_note("first")
+        error.add_note("second")
+        for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
+            assert type(clone) is type(error) and str(clone) == str(error)
+            assert clone.__notes__ == ["first", "second"]
 
 
 def test_a_core_correlation_id_mismatch_reads_unknown_ids(
@@ -955,6 +1129,7 @@ def test_unsupported_operation_error_is_a_not_implemented_error() -> None:
     # does not provide; NotImplementedError subclasses RuntimeError, so Java's
     # RuntimeException chain is kept.
     assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert IndexOutOfBoundsError.__bases__ == (IndexError, RuntimeError)
     assert issubclass(UnsupportedOperationError, RuntimeError)
     assert not issubclass(UnsupportedOperationError, KafkaError)
     for caught in (NotImplementedError, RuntimeError):

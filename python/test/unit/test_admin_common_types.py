@@ -38,35 +38,40 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AccessControlEntryFilter,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
+)
+from confluent_kafka.common import (
     ClassicGroupState,
-    ClientQuotaAlteration,
-    ClientQuotaEntity,
-    ClientQuotaFilter,
-    ClientQuotaFilterComponent,
-    DelegationToken,
     ElectionType,
     GroupState,
     GroupType,
     IsolationLevel,
-    KafkaPrincipal,
     Node,
-    PatternType,
-    ResourcePattern,
-    ResourcePatternFilter,
-    ResourceType,
-    TokenInformation,
     TopicCollection,
     TopicPartition,
     TopicPartitionInfo,
     TopicPartitionReplica,
     Uuid,
+)
+from confluent_kafka.common.quota import (
+    ClientQuotaAlteration,
+    ClientQuotaEntity,
+    ClientQuotaFilter,
+    ClientQuotaFilterComponent,
+)
+from confluent_kafka.common.security.token.delegation import DelegationToken, TokenInformation
+from confluent_kafka.common.security.auth import KafkaPrincipal
+from confluent_kafka.common.resource import (
+    PatternType,
+    ResourcePattern,
+    ResourcePatternFilter,
+    ResourceType,
 )
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.consumer import OffsetAndMetadata

@@ -119,6 +119,8 @@ if TYPE_CHECKING:
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
+    from .async_callback import AsyncCallback
+    from .callback import Callback
     from .producer_record import ProducerRecord
 
 __all__ = ["AsyncProducer"]
@@ -128,14 +130,6 @@ V = TypeVar("V")
 R = TypeVar("R")
 
 _LOG = logging.getLogger("confluent_kafka.producer")
-
-class _AsyncCallback(Protocol):
-    """The ``send()`` callback of the asyncio producer: Java's ``Callback``,
-    which by rule 3 may also be an ``async def``, awaited on the record's
-    event loop."""
-
-    def __call__(self, *, metadata: RecordMetadata, exception: Exception | None,
-                 **kwargs: Any) -> Awaitable[None] | None: ...
 
 # The producers (by id) whose ``async def`` send() callback the current task
 # awaits, Java's ``Thread.currentThread() == this.ioThread``: the C API waits
@@ -263,7 +257,7 @@ class _AsyncRecord(AsyncRecordFuture, _FutureState[RecordMetadata]):
     def _impl(self) -> _AsyncRecord:  # type: ignore[override]
         return self
 
-    def __init__(self, producer: AsyncProducer[Any, Any], callback: _AsyncCallback | None,
+    def __init__(self, producer: AsyncProducer[Any, Any], callback: Callback | AsyncCallback | None,
                  topic: str, partition: int | None, loop: asyncio.AbstractEventLoop) -> None:
         # The future (AsyncKafkaFuture's slots; _native is the class attribute).
         self._inner = None
@@ -787,10 +781,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     @overload
     async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
     @overload
-    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+    async def send(self, *, record: ProducerRecord[K, V], callback: Callback | AsyncCallback | None
                    ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = MISSING
+                   callback: Callback | AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for the record to reach
         the producer, without blocking the loop, and raises what
@@ -812,7 +806,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         the future's ``then_apply`` functions and ``when_complete`` actions run
         on the event loop, once the record's callback has returned. The
         ``callback`` runs on the event loop, before the future completes, and
-        must not block it. By rule 3 it may be an ``async def``: it is then
+        must not block it. By rule 3 it may be an :class:`AsyncCallback` (an
+        ``async def``): it is then
         awaited in a task on the loop before the future completes, the loop's
         later callbacks waiting for it, and ``flush()``,
         ``commit_transaction()``, ``abort_transaction()`` and ``close()`` wait

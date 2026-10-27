@@ -48,6 +48,8 @@ class DeleteRecordsResult(Generic[KindT]):
     def __init__(
             self, *,
             futures: Mapping[TopicPartition, KafkaFuture[DeletedRecords] | AsyncKafkaFuture[DeletedRecords]]) -> None:
+        if futures is None:
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -59,7 +61,7 @@ class DeleteRecordsResult(Generic[KindT]):
         """The clients' builder: Java's public ``DeleteRecordsResult(futures)`` with the
         client kind set by the caller."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

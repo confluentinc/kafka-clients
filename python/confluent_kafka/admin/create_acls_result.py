@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Generic
 from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.acl import AclBinding
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateAclsResult"]
@@ -51,7 +51,7 @@ class CreateAclsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> CreateAclsResult[Any]:
         """Java's package-private ``CreateAclsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

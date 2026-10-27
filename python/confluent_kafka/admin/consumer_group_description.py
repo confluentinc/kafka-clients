@@ -27,12 +27,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from confluent_kafka._args import copy_of
 from confluent_kafka._java import java_str
 
 from ._values import frozen
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclOperation, GroupState, GroupType, Node
+    from confluent_kafka.common.acl import AclOperation
+    from confluent_kafka.common import GroupState, GroupType, Node
 
     from .member_description import MemberDescription
 
@@ -58,7 +60,7 @@ class ConsumerGroupDescription:
         self._group_id = "" if group_id is None else group_id
         self._is_simple_consumer_group = is_simple_consumer_group
         self._members: tuple[MemberDescription, ...] = (
-            () if members is None else tuple(members))
+            () if members is None else copy_of(members, "members"))
         self._partition_assignor = "" if partition_assignor is None else partition_assignor
         self._type = type
         self._group_state = group_state

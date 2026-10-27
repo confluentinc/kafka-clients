@@ -14,8 +14,8 @@
 
 """``confluent_kafka.admin``: Java's ``org.apache.kafka.clients.admin``.
 
-The admin client, its options and results, and the value classes and enums its
-calls take and return (CLAUDE.md, Python Binding Conventions, Modules). Users
+The admin client, its options and results, the value classes and enums its
+calls take and return, and the constants of ``AdminClientConfig`` (CLAUDE.md, Python Binding Conventions, Modules). Users
 import from this module, never from the files.
 
 Imports are grouped by kind, one section each, so that each kind can be
@@ -28,6 +28,7 @@ __all__: list[str] = []
 
 # BEGIN VALUE CLASSES AND ENUMS
 from .abort_transaction_spec import AbortTransactionSpec as AbortTransactionSpec
+from .admin_client_config import AdminClientConfig as AdminClientConfig
 from .alter_config_op import AlterConfigOp as AlterConfigOp
 from .classic_group_description import ClassicGroupDescription as ClassicGroupDescription
 from .config import Config as Config
@@ -76,6 +77,7 @@ from .user_scram_credentials_description import (
 
 __all__ += [
     "AbortTransactionSpec",
+    "AdminClientConfig",
     "AlterConfigOp",
     "ClassicGroupDescription",
     "Config",

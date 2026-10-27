@@ -52,8 +52,8 @@ class KafkaConsumer(Consumer[K, V]):
     cluster. It also interacts with the broker to allow groups of consumers to
     load balance consumption using consumer groups (``group.protocol=consumer``,
     KIP-848). The consumer is not thread-safe: a call while another thread is
-    inside it raises ``ConcurrentModificationError``, ``wakeup()`` excepted.
-    Failure to close the consumer after use will leak its resources.
+    inside it raises ``ConcurrentModificationError``, ``wakeup()`` and
+    ``metrics()`` excepted, as Java leaves both outside ``acquire()``. Failure to close the consumer after use will leak its resources.
 
     Java: ``org.apache.kafka.clients.consumer.KafkaConsumer<K, V>``.
     """

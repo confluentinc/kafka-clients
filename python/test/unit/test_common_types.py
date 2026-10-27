@@ -41,18 +41,18 @@ from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
 from confluent_kafka.common import (
     Cluster,
-    KafkaMetric,
-    Measurable,
     Metric,
-    MetricConfig,
     MetricName,
     Node,
     PartitionInfo,
-    TimestampType,
     TopicIdPartition,
     TopicPartition,
     Uuid,
 )
+from confluent_kafka.common.metrics import (
+    Gauge, KafkaMetric, Measurable, MetricConfig, MetricValueProvider,
+)
+from confluent_kafka.common.record import TimestampType
 
 # --------------------------------------------------------------------------- #
 # Uuid: UuidTest
@@ -462,6 +462,10 @@ def test_kafka_metric_config_getter_and_setter() -> None:
 
 def test_placeholders_are_object() -> None:
     assert Cluster is object and MetricConfig is object and Measurable is object
+    assert MetricValueProvider is object and Gauge is object
+    import confluent_kafka.common.metrics as metrics
+
+    assert {"Gauge", "MetricValueProvider", "Measurable", "MetricConfig"} <= set(metrics.__all__)
 
 
 # --------------------------------------------------------------------------- #
@@ -503,4 +507,20 @@ def test_topic_partition_of_is_what_the_constructor_builds() -> None:
     (TopicPartition(topic="t", partition=0), "t-0"),
 ])
 def test_java_str_is_string_value_of(value: object, text: str) -> None:
+    assert java_str(value) == text
+
+
+# Double.toString as specified since JDK 19: the shortest decimal that reads back
+# as the value, or, when that has one digit, the closest one of one or two digits.
+# JDK 17 prints 1.0E-323, 1.0E-322, 1.58E-322, 9.999999999999999E22 and
+# 6.693900000000001E20 for five of these.
+@pytest.mark.parametrize("value,text", [
+    (5e-324, "4.9E-324"), (-5e-324, "-4.9E-324"), (1e-323, "9.9E-324"),
+    (2.5e-323, "2.5E-323"), (5e-323, "4.9E-323"), (9e-323, "8.9E-323"),
+    (1e-322, "9.9E-323"), (1.6e-322, "1.6E-322"),
+    (2.2250738585072014e-308, "2.2250738585072014E-308"),
+    (1.7976931348623157e308, "1.7976931348623157E308"),
+    (1e23, "1.0E23"), (6.6939e20, "6.6939E20"), (2e22, "2.0E22"),
+])
+def test_java_str_prints_a_double_as_double_to_string(value: float, text: str) -> None:
     assert java_str(value) == text

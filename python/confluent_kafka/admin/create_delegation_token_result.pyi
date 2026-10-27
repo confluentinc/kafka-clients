@@ -17,8 +17,8 @@
 from typing import Generic, overload
 
 from confluent_kafka.admin._futures import Async, KindT, Sync
-from confluent_kafka.common import DelegationToken
 from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
+from confluent_kafka.common.security.token.delegation import DelegationToken
 
 __all__ = ["CreateDelegationTokenResult"]
 

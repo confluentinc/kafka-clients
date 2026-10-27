@@ -48,9 +48,10 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from confluent_kafka._args import MISSING
 from confluent_kafka._kwargs import require_kwargs
 from confluent_kafka.common.errors.producer_fenced_error import ProducerFencedError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.serialization import bytes_serializer
+from confluent_kafka.common.serialization._supply import reject_async_serde
 from confluent_kafka.common.topic_partition import TopicPartition
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
@@ -138,8 +139,10 @@ class MockProducerCore(Generic[K, V]):
         self._partitioner = partitioner
         if key_serializer is not None:
             require_kwargs(key_serializer, "key_serializer")
+            reject_async_serde(key_serializer, "key_serializer")
         if value_serializer is not None:
             require_kwargs(value_serializer, "value_serializer")
+            reject_async_serde(value_serializer, "value_serializer")
         self._key_serializer: Serializer[Any] = (
             bytes_serializer() if key_serializer is None else key_serializer)
         self._value_serializer: Serializer[Any] = (

@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from confluent_kafka.common.metric_name import MetricName
     from confluent_kafka.common.partition_info import PartitionInfo
 
+    from .async_consumer_rebalance_listener import AsyncConsumerRebalanceListener
     from .close_options import CloseOptions
     from .consumer_rebalance_listener import ConsumerRebalanceListener
     from .consumer_record import ConsumerRecord
@@ -184,7 +185,7 @@ class MockConsumerCore(Generic[K, V]):
         self._beginning_offsets: dict[TopicPartition, int] = {}
         self._end_offsets: dict[TopicPartition, int] = {}
         self._duration_reset_offsets: dict[TopicPartition, int] = {}
-        self._poll_tasks: deque[Callable[[], None]] = deque()
+        self._poll_tasks: deque[Callable[[], object]] = deque()
         self._poll_tasks_lock = threading.RLock()
         self._poll_exception: KafkaError | None = None
         self._offsets_exception: KafkaError | None = None
@@ -219,12 +220,12 @@ class MockConsumerCore(Generic[K, V]):
             new_list, added, removed = self._rebalance_begin(new_assignment)
             listener = self._subscriptions.rebalance_listener()
             if removed and listener is not None:
-                _no_coroutine(listener.on_partitions_revoked(set(removed)),  # type: ignore[func-returns-value]
+                _no_coroutine(listener.on_partitions_revoked(set(removed)),
                               "rebalance listener")
             self._subscriptions.assign_from_subscribed(new_list)
             listener = self._subscriptions.rebalance_listener()
             if listener is not None:
-                _no_coroutine(listener.on_partitions_assigned(set(added)),  # type: ignore[func-returns-value]
+                _no_coroutine(listener.on_partitions_assigned(set(added)),
                               "rebalance listener")
 
     async def _a_rebalance(self, new_assignment: Iterable[TopicPartition]) -> None:
@@ -236,14 +237,14 @@ class MockConsumerCore(Generic[K, V]):
             previous, self._lock.owner = self._lock.owner, _current_task()
         try:
             if removed and listener is not None:
-                result = listener.on_partitions_revoked(set(removed))  # type: ignore[func-returns-value]
+                result = listener.on_partitions_revoked(set(removed))
                 if inspect.isawaitable(result):
                     await result
             with self._lock:
                 self._subscriptions.assign_from_subscribed(new_list)
                 listener = self._subscriptions.rebalance_listener()
             if listener is not None:
-                result = listener.on_partitions_assigned(set(added))  # type: ignore[func-returns-value]
+                result = listener.on_partitions_assigned(set(added))
                 if inspect.isawaitable(result):
                     await result
         finally:
@@ -319,6 +320,10 @@ class MockConsumerCore(Generic[K, V]):
         """Java's private ``subscribe(SubscriptionPattern, Optional)``, after the
         listener's null check."""
         listener = _mock_listener(callback)
+        if pattern is not None and pattern.pattern() is None:
+            # Java's pattern.toString().isEmpty(): toString() returns the null
+            # pattern, which isEmpty() dereferences (Types).
+            raise TypeError("SubscriptionPattern.pattern must not be None")
         if pattern is None or str(pattern) == "":
             raise IllegalArgumentError(
                 message="Topic pattern cannot be " + ("None" if pattern is None else "empty"))
@@ -342,56 +347,84 @@ class MockConsumerCore(Generic[K, V]):
 
     def _c_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
         with self._lock:
-            self._ensure_not_closed()
-            # Java's mock stores the Duration as given, a null one included.
-            self._last_poll_timeout = None if timeout is None else _seconds(timeout)
+            self._poll_start(timeout)
             # Lock around the task, so a task may schedule the next one.
             with self._poll_tasks_lock:
                 task = self._poll_tasks.popleft() if self._poll_tasks else None
                 if task is not None:
-                    task()
-            if self._wakeup_requested:
-                self._wakeup_requested = False
-                raise WakeupError()
-            if self._poll_exception is not None:
-                exception, self._poll_exception = self._poll_exception, None
-                raise exception
-            # Handle seeks that need to wait for a poll() call to be processed.
-            for tp in self._subscriptions.assigned_partitions():
-                if not self._subscriptions.has_valid_position(tp):
-                    self._update_fetch_position(tp)
-            # Update the consumed offset.
-            results: dict[TopicPartition, list[ConsumerRecord[K, V]]] = {}
-            next_offset_and_metadata: dict[TopicPartition, OffsetAndMetadata] = {}
-            num_poll_records = 0
-            for tp in list(self._records):
+                    _no_coroutine(task(), "poll task")
+            return self._poll_rest()
+
+    async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
+        """Async ``poll``: a poll task may be ``async def``; it is awaited with
+        the locks released and the monitor held for this task meanwhile
+        (``_Monitor``), as ``_a_rebalance`` awaits the listener."""
+        with self._lock:
+            self._poll_start(timeout)
+            # Lock around the task, so a task may schedule the next one.
+            with self._poll_tasks_lock:
+                task = self._poll_tasks.popleft() if self._poll_tasks else None
+                result = task() if task is not None else None
+            if not inspect.isawaitable(result):
+                return self._poll_rest()
+            previous, self._lock.owner = self._lock.owner, _current_task()
+        try:
+            await result
+        finally:
+            self._lock.owner = previous
+        with self._lock:
+            return self._poll_rest()
+
+    def _poll_start(self, timeout: Duration) -> None:
+        """``poll``'s first steps, before the poll task."""
+        self._ensure_not_closed()
+        # Java's mock stores the Duration as given, a null one included.
+        self._last_poll_timeout = None if timeout is None else _seconds(timeout)
+
+    def _poll_rest(self) -> ConsumerRecords[K, V]:
+        """``poll`` after the poll task, under the mock's lock."""
+        if self._wakeup_requested:
+            self._wakeup_requested = False
+            raise WakeupError()
+        if self._poll_exception is not None:
+            exception, self._poll_exception = self._poll_exception, None
+            raise exception
+        # Handle seeks that need to wait for a poll() call to be processed.
+        for tp in self._subscriptions.assigned_partitions():
+            if not self._subscriptions.has_valid_position(tp):
+                self._update_fetch_position(tp)
+        # Update the consumed offset.
+        results: dict[TopicPartition, list[ConsumerRecord[K, V]]] = {}
+        next_offset_and_metadata: dict[TopicPartition, OffsetAndMetadata] = {}
+        num_poll_records = 0
+        for tp in list(self._records):
+            if num_poll_records >= self._max_poll_records:
+                break
+            recs = self._records[tp]
+            if self._subscriptions.is_paused(tp) or not self._subscriptions.is_assigned(tp):
+                continue
+            index = 0
+            while index < len(recs):
                 if num_poll_records >= self._max_poll_records:
                     break
-                recs = self._records[tp]
-                if self._subscriptions.is_paused(tp) or not self._subscriptions.is_assigned(tp):
-                    continue
-                index = 0
-                while index < len(recs):
-                    if num_poll_records >= self._max_poll_records:
-                        break
-                    position = self._fetch_position(tp).offset
-                    rec = recs[index]
-                    beginning = self._beginning_offsets.get(tp)
-                    if beginning is not None and beginning > position:
-                        raise OffsetOutOfRangeError(offset_out_of_range_partitions={tp: position})
-                    if rec.offset() >= position:
-                        results.setdefault(tp, []).append(rec)
-                        self._subscriptions.set_position(
-                            tp, FetchPosition(rec.offset() + 1, rec.leader_epoch()))
-                        next_offset_and_metadata[tp] = OffsetAndMetadata(
-                            offset=rec.offset() + 1, leader_epoch=rec.leader_epoch(), metadata="")
-                        num_poll_records += 1
-                        del recs[index]
-                    else:
-                        index += 1
-                if not recs:
-                    del self._records[tp]
-            return ConsumerRecords(records=results, next_offsets=next_offset_and_metadata)
+                position = self._fetch_position(tp).offset
+                rec = recs[index]
+                beginning = self._beginning_offsets.get(tp)
+                if beginning is not None and beginning > position:
+                    raise OffsetOutOfRangeError(offset_out_of_range_partitions={tp: position})
+                if rec.offset() >= position:
+                    results.setdefault(tp, []).append(rec)
+                    self._subscriptions.set_position(
+                        tp, FetchPosition(rec.offset() + 1, rec.leader_epoch()))
+                    next_offset_and_metadata[tp] = OffsetAndMetadata(
+                        offset=rec.offset() + 1, leader_epoch=rec.leader_epoch(), metadata="")
+                    num_poll_records += 1
+                    del recs[index]
+                else:
+                    index += 1
+            if not recs:
+                del self._records[tp]
+        return ConsumerRecords(records=results, next_offsets=next_offset_and_metadata)
 
     def _fetch_position(self, tp: TopicPartition) -> FetchPosition:
         position = self._subscriptions.position(tp)
@@ -583,25 +616,27 @@ class MockConsumerCore(Generic[K, V]):
 
     def _c_close(self, option: CloseOptions) -> None:
         """Java's ``close()`` / ``close(CloseOptions)``, both of which only mark
-        the mock closed, a null ``option`` included (it is never read); the
-        callbacks it holds are released (Threads and callbacks)."""
+        the mock closed, a null ``option`` included (it is never read): the
+        listener and the scheduled poll tasks are kept, so ``rebalance()`` after
+        ``close()`` still runs the listener, as on Java's mock."""
         with self._lock:
             self._mock_closed = True
-            self._subscriptions.release_rebalance_listener()
-            with self._poll_tasks_lock:
-                self._poll_tasks.clear()
 
     def _c_wakeup(self) -> None:
         self._wakeup_requested = True
 
     # ---- the async peer's waiting methods: the same body ----------------------
+    # The async peer takes either listener form; the body stores it as Java's
+    # does and awaits what its methods return (``_a_rebalance``).
     async def _a_subscribe_topics(self, topics: Iterable[str],
-                                  callback: ConsumerRebalanceListener) -> None:
-        self._c_subscribe_topics(topics, callback)
+                                  callback: ConsumerRebalanceListener
+                                  | AsyncConsumerRebalanceListener) -> None:
+        self._c_subscribe_topics(topics, cast("ConsumerRebalanceListener", callback))
 
     async def _a_subscribe_pattern(self, pattern: SubscriptionPattern,
-                                   callback: ConsumerRebalanceListener) -> None:
-        self._c_subscribe_pattern(pattern, callback)
+                                   callback: ConsumerRebalanceListener
+                                   | AsyncConsumerRebalanceListener) -> None:
+        self._c_subscribe_pattern(pattern, cast("ConsumerRebalanceListener", callback))
 
     async def _a_assign(self, partitions: Iterable[TopicPartition]) -> None:
         self._c_assign(partitions)
@@ -609,8 +644,6 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_unsubscribe(self) -> None:
         self._c_unsubscribe()
 
-    async def _a_poll(self, timeout: Duration) -> ConsumerRecords[K, V]:
-        return self._c_poll(timeout)
 
     async def _a_commit(self, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                         timeout: Duration = MISSING) -> None:
@@ -753,7 +786,12 @@ class MockConsumerCore(Generic[K, V]):
     def schedule_poll_task(self, *, task: Callable[[], None]) -> None:
         """Schedule a task to be executed during a ``poll()``. One enqueued task
         will be executed per ``poll()`` invocation. You can use this repeatedly
-        to mock out multiple responses to poll invocations."""
+        to mock out multiple responses to poll invocations. A task that returns
+        a coroutine (an ``async def`` one) makes ``poll()`` raise ``TypeError``:
+        only ``AsyncMockConsumer`` awaits one."""
+        self._schedule_poll_task(task)
+
+    def _schedule_poll_task(self, task: Callable[[], object]) -> None:
         with self._lock, self._poll_tasks_lock:
             self._poll_tasks.append(task)
 

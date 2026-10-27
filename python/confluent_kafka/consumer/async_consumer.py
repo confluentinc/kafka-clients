@@ -25,7 +25,9 @@ point it calls has a ``_cb`` completion form in the FFI header:
 (``assignment()``, ``subscription()``, ``metrics()``, ``paused()``,
 ``group_metadata()``, ``wakeup()``). A waiting method awaits the entry point's
 ``_cb`` form, running the queued callbacks on the event loop; the listener runs
-there and may be ``async def``.
+there and may be ``async def``. ``AsyncMockConsumer`` supplies the private hooks
+the methods call, doing what Java's mock does; a note that holds only for
+``AsyncKafkaConsumer`` says so.
 
 By rule 3 ``AsyncKafkaConsumer`` is bound to one event loop
 (``_async.LoopBinding``), as ``AsyncKafkaProducer`` and ``AsyncKafkaAdminClient``
@@ -69,6 +71,8 @@ if TYPE_CHECKING:
     from confluent_kafka.common.topic_partition import TopicPartition
 
     from ._poll import Deserialized
+    from .async_consumer_rebalance_listener import AsyncConsumerRebalanceListener
+    from .async_offset_commit_callback import AsyncOffsetCommitCallback
     from .consumer_group_metadata import ConsumerGroupMetadata
     from .consumer_rebalance_listener import ConsumerRebalanceListener
     from .consumer_records import ConsumerRecords
@@ -84,22 +88,14 @@ V = TypeVar("V")
 _R = TypeVar("_R")
 
 
-class _AsyncOffsetCommitCallback(Protocol):
-    """The ``async def`` form of ``OffsetCommitCallback`` (rule 3), awaited on
-    the event loop: Java's ``onComplete`` parameters, keyword-only, plus
-    ``**kwargs``."""
-
-    def __call__(self, *, offsets: dict[TopicPartition, OffsetAndMetadata] | None,
-                 exception: Exception | None, **kwargs: Any) -> Awaitable[None]: ...
-
-
 class AsyncConsumer(Generic[K, V], _ConsumerState):
     """The asyncio peer of the ``Consumer`` interface.
 
     Construct an ``AsyncKafkaConsumer`` or ``AsyncMockConsumer``; an async
     context manager whose exit closes. The async classes follow the sync
     thread rule per event loop: a call while another task is inside the
-    consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted.
+    consumer raises ``ConcurrentModificationError``, ``wakeup()`` and
+    ``metrics()`` excepted, as Java leaves both outside ``acquire()``.
     """
 
     def __init__(self) -> None:
@@ -123,23 +119,31 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def subscribe(self, *, topics: Iterable[str]) -> None: ...
     @overload
     async def subscribe(self, *, topics: Iterable[str],
-                        callback: ConsumerRebalanceListener) -> None: ...
+                        callback: ConsumerRebalanceListener
+                        | AsyncConsumerRebalanceListener) -> None: ...
     @overload
     async def subscribe(self, *, pattern: SubscriptionPattern,
-                        callback: ConsumerRebalanceListener) -> None: ...
+                        callback: ConsumerRebalanceListener
+                        | AsyncConsumerRebalanceListener) -> None: ...
     @overload
     async def subscribe(self, *, pattern: SubscriptionPattern) -> None: ...
 
     @java_forms(*SUBSCRIBE_FORMS)
     async def subscribe(self, *, topics: Iterable[str] = MISSING,
                         pattern: SubscriptionPattern = MISSING,
-                        callback: ConsumerRebalanceListener = MISSING) -> None:
-        """See :meth:`Consumer.subscribe`. The listener's methods may be
-        ``async def``; they are awaited on the event loop. A call a listener
-        makes back into the consumer (``await consumer.commit()``, ``seek()``,
-        ``position()``, …) runs synchronously through the core's
-        ``ConsumerHandle``'s plain entry points, inside the call delivering the
-        listener, so it blocks the event loop for its duration."""
+                        callback: ConsumerRebalanceListener
+                        | AsyncConsumerRebalanceListener = MISSING) -> None:
+        """See :meth:`Consumer.subscribe`. The listener is a
+        :class:`ConsumerRebalanceListener` or, by rule 3, an
+        :class:`AsyncConsumerRebalanceListener`, whose methods are ``async def``
+        and are awaited on the event loop; a plain listener's methods run on the
+        event loop too and must not block it. On
+        ``AsyncKafkaConsumer`` a call a listener makes back into the consumer
+        (``await consumer.commit()``, ``seek()``, ``position()``, …) runs
+        synchronously through the core's ``ConsumerHandle``'s plain entry
+        points, inside the call delivering the listener, so it blocks the event
+        loop for its duration; on ``AsyncMockConsumer`` it runs as any other
+        call."""
         if topics is not MISSING:
             await self._a_subscribe_topics(topics, callback)
         else:
@@ -175,33 +179,35 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def commit_nowait(self) -> None: ...
     @overload
     async def commit_nowait(self, *, callback: OffsetCommitCallback
-                            | _AsyncOffsetCommitCallback | None) -> None: ...
+                            | AsyncOffsetCommitCallback | None) -> None: ...
     @overload
     async def commit_nowait(self, *, offsets: Mapping[TopicPartition, OffsetAndMetadata],
                             callback: OffsetCommitCallback
-                            | _AsyncOffsetCommitCallback | None) -> None: ...
+                            | AsyncOffsetCommitCallback | None) -> None: ...
 
     @java_forms(*COMMIT_NOWAIT_FORMS)
     async def commit_nowait(self, *,
                             offsets: Mapping[TopicPartition, OffsetAndMetadata] = MISSING,
                             callback: OffsetCommitCallback
-                            | _AsyncOffsetCommitCallback | None = MISSING) -> None:
+                            | AsyncOffsetCommitCallback | None = MISSING) -> None:
         """See :meth:`Consumer.commit_nowait` (Java's ``commitAsync``).
 
         It is ``async def`` because its entry point,
         ``kafka_consumer_Consumer_commit_async``, completes through its ``_cb``
         form: like Java's ``commitAsync``, which first runs the queued commit
         callbacks and then waits for the background thread to take the offsets
-        to commit (``offsetsReady``), the call waits until the commit is sent,
-        not for its result, which goes to the callback inside a later call on
-        this consumer. A failure of the call itself (``InvalidGroupIdError``, a
-        timeout waiting for the offsets, the exception of a queued commit
-        callback it runs) is raised from it, as Java's ``commitAsync`` throws
-        it. As in Java, it delivers no rebalance listener callback and raises
-        no background error: those are delivered only by ``poll()`` and
-        ``unsubscribe()``.
+        to commit (``offsetsReady``), on ``AsyncKafkaConsumer`` the call waits
+        until the commit is sent, not for its result, which goes to the callback
+        inside a later call on this consumer. A failure of the call itself
+        (``InvalidGroupIdError``, a timeout waiting for the offsets, the
+        exception of a queued commit callback it runs) is raised from it, as
+        Java's ``commitAsync`` throws it. As in Java, it delivers no rebalance
+        listener callback and raises no background error: those are delivered
+        only by ``poll()`` and ``unsubscribe()``.
 
-        The callback may be ``async def``: it is awaited on the event loop,
+        A plain callback runs on the event loop and must not block it. By rule 3
+        the callback may be an :class:`AsyncOffsetCommitCallback` (an ``async
+        def``): it is awaited on the event loop,
         inside the call that delivers it (``poll()``, ``commit()``,
         ``commit_nowait()``, ``close()``, …), which returns only after it ended.
         Callbacks still start one at a time in the order the commits complete,
@@ -213,17 +219,18 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         ``TypeError``. ``AsyncMockConsumer`` awaits it inside this call, as
         Java's mock runs the callback inside ``commitAsync``.
 
-        Called from inside a callback this consumer delivers, it commits through
-        the core's ``ConsumerHandle`` and first runs the commit callbacks queued
-        behind the running one, inside this call, as Java's ``commitAsync``
-        does; it blocks the event loop meanwhile, so an ``async def`` callback
-        among them is scheduled there and awaited after this call returns, by
-        the call delivering the outer callback, and the callbacks after it may
-        start before it ends (*deviation*: Java runs it to its end inside this
-        call): the delivering call raises its exception once it ended, wrapped
-        as that call wraps a callback's; a ``poll()`` returns its records first,
-        and its next awaited call raises it. ``await commit()`` from inside a
-        callback does the same."""
+        On ``AsyncKafkaConsumer``, called from inside a callback this consumer
+        delivers, it commits through the core's ``ConsumerHandle`` and first
+        runs the commit callbacks queued behind the running one, inside this
+        call, as Java's ``commitAsync`` does; it blocks the event loop
+        meanwhile, so an ``async def`` callback among them is scheduled there
+        and awaited after this call returns, by the call delivering the outer
+        callback, and the callbacks after it may start before it ends
+        (*deviation*: Java runs it to its end inside this call): the delivering
+        call raises its exception once it ended, wrapped as that call wraps a
+        callback's; a ``poll()`` returns its records first, and its next awaited
+        call raises it. ``await commit()`` from inside a callback does the
+        same."""
         await self._a_commit_nowait(offsets, callback)
 
     @overload
@@ -366,7 +373,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     # ---- the FFI implementations of the waiting calls ------------------------
     async def _a_subscribe_topics(self, topics: Iterable[str],
-                                  callback: ConsumerRebalanceListener) -> None:
+                                  callback: ConsumerRebalanceListener
+                                  | AsyncConsumerRebalanceListener) -> None:
         reject_str("topics", topics)  # the shape check precedes the others
         listener = self._subscribe_listener(callback)
         self._check_not_null("subscribe_topics", topics)
@@ -379,9 +387,14 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
             raise
 
     async def _a_subscribe_pattern(self, pattern: SubscriptionPattern,
-                                   callback: ConsumerRebalanceListener) -> None:
+                                   callback: ConsumerRebalanceListener
+                                   | AsyncConsumerRebalanceListener) -> None:
         listener = self._subscribe_listener(callback)
         self._check_not_null("subscribe_pattern", pattern)
+        if pattern.pattern() is None:
+            # Java's subscriptionPattern.pattern().isEmpty() dereferences it; the FFI
+            # cannot carry it (Types; exception 4).
+            raise TypeError("SubscriptionPattern.pattern must not be None")
         previous, self._listener = self._listener, listener
         try:
             await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(), listener))

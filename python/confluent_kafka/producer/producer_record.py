@@ -38,8 +38,8 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
 
 from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.common.header import Header
-from confluent_kafka.common.headers import Headers, _taken
+from confluent_kafka.common.header.header import Header
+from confluent_kafka.common.header.headers import Headers, _taken
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
