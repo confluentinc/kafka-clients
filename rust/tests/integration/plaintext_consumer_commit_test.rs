@@ -786,7 +786,7 @@ async fn test_async_consumer_commit_specified_offsets() {
         3
     );
     let committed_tp1 = consumer.committed(std::slice::from_ref(&tp1)).await.expect("committed tp1");
-    assert!(!committed_tp1.contains_key(&tp1), "tp1 should not be committed yet");
+    assert_eq!(committed_tp1.get(&tp1), Some(&None), "tp1 should not be committed yet");
 
     // Positions should not change.
     assert_eq!(consumer.position(&tp).await.expect("position tp"), pos1);
@@ -956,8 +956,9 @@ async fn test_async_consumer_position_and_commit() {
         .committed(std::slice::from_ref(&unassigned))
         .await
         .expect("committed should succeed");
-    assert!(
-        !committed.contains_key(&unassigned),
+    assert_eq!(
+        committed.get(&unassigned),
+        Some(&None),
         "unassigned tp should have no committed offset"
     );
 

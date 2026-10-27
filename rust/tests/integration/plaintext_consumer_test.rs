@@ -1613,7 +1613,7 @@ async fn test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commi
     consumer2.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     let committed = consumer2.committed(std::slice::from_ref(&tp)).await.expect("committed");
     assert_eq!(
-        None,
+        Some(&None),
         committed.get(&tp),
         "unsubscribe() should not commit offsets even when auto-commit is enabled"
     );
