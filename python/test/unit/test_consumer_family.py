@@ -116,7 +116,9 @@ def test_members_keep_javas_declaration_order() -> None:
     assert public_methods(AsyncKafkaConsumer) == []
     assert ["rebalance", "lose_partitions"] + public_methods(MockConsumerCore) == MOCK_METHODS
     assert public_methods(MockConsumer) == ["rebalance", "lose_partitions"]
-    assert public_methods(AsyncMockConsumer) == ["rebalance", "lose_partitions"]
+    # The async mock repeats schedule_poll_task, which takes an async def task too.
+    assert public_methods(AsyncMockConsumer) == ["rebalance", "lose_partitions",
+                                                 "schedule_poll_task"]
 
 
 def test_async_def_iff_java_waits() -> None:
@@ -160,7 +162,8 @@ def test_module_exports() -> None:
     assert "CommitCallback" not in consumer_module.__all__
     assert not hasattr(consumer_module, "CommitCallback")
     for name in ("Consumer", "KafkaConsumer", "MockConsumer", "AsyncConsumer",
-                 "AsyncKafkaConsumer", "AsyncMockConsumer", "ConsumerRebalanceListener"):
+                 "AsyncKafkaConsumer", "AsyncMockConsumer", "ConsumerRebalanceListener",
+                 "AsyncConsumerRebalanceListener", "AsyncOffsetCommitCallback"):
         assert name in consumer_module.__all__
 
 

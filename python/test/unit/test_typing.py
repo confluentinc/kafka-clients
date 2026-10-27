@@ -362,6 +362,30 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.commit_nowait(callback=async_callback), None)
         await am.lose_partitions(partitions_lost=[tp])
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
+        # The asyncio forms of the callback interfaces (rule 3).
+        from confluent_kafka.consumer import (
+            AsyncConsumerRebalanceListener, AsyncOffsetCommitCallback,
+        )
+
+        typed_callback: AsyncOffsetCommitCallback = async_callback
+        assert_type(await ac.commit_nowait(callback=typed_callback), None)
+
+        class Listener(AsyncConsumerRebalanceListener):
+            async def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+            async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+        await ac.subscribe(topics=["t"], callback=Listener())
+        await am.subscribe(topics=["t"], callback=Listener())
+        kc.subscribe(topics=["t"], callback=Listener())  # type: ignore[call-overload]
+
+        async def async_task() -> None:
+            pass
+
+        am.schedule_poll_task(task=async_task)
+        mc.schedule_poll_task(task=async_task)  # type: ignore[arg-type]
 
     del _async
 
@@ -479,6 +503,10 @@ def _producer_family_types(p: object = None) -> None:
                                    callback=async_callback), AsyncKafkaFuture[RecordMetadata])
         kp.send(record=ProducerRecord(topic="t", value="v"),  # type: ignore[call-overload]
                 callback=async_callback)
+        from confluent_kafka.producer import AsyncCallback
+
+        typed_send_callback: AsyncCallback = async_callback
+        await ap.send(record=ProducerRecord(topic="t", value="v"), callback=typed_send_callback)
 
     del _async
 
