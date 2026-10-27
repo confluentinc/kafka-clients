@@ -609,17 +609,23 @@ def jaas_field(jaas_config, name):
     ``username="k"``, ``username = "k"``, ``username='k'`` and bare
     ``username=k``. Returns ``None`` only when the field is genuinely absent.
 
-    This mirrors the Rust parser (``SaslConfig::parse_jaas_option``) byte for
-    byte so the client and this validator never disagree: the key is recognized
-    only at an **option start** (beginning of string or after whitespace), quoted
-    regions are skipped wholesale **honoring backslash escapes**, and the value
-    may be double-quoted, single-quoted, or bare. A ``name=`` sequence that lives
-    inside another option's quoted value is therefore never mistaken for the
-    option (e.g. ``password="username=x" username="right"`` resolves ``username``
-    to ``right``, not ``x``) — a regex ``search`` did make that mistake and let a
-    missing-username config pass the fast-fail. The returned value is the raw
-    inner content between the quotes (escapes are honored for boundary detection
-    but not expanded), matching the Rust parser.
+    This finds a field the way the Rust parser (``SaslConfigs::parse_jaas_option``)
+    does, so the client and this validator agree on whether a field is present:
+    the key is recognized only at an **option start** (beginning of string or
+    after whitespace), quoted regions are skipped wholesale **honoring backslash
+    escapes**, the value may be double-quoted, single-quoted, or bare, and a
+    quoted value that a raw line break cuts short is malformed, so the field
+    counts as absent (Java's ``StreamTokenizer`` ends a quoted string there and
+    ``JaasConfig`` rejects the config). A ``name=`` sequence that lives inside
+    another option's quoted value is therefore never mistaken for the option
+    (e.g. ``password="username=x" username="right"`` resolves ``username`` to
+    ``right``, not ``x``) — a regex ``search`` did make that mistake and let a
+    missing-username config pass the fast-fail.
+
+    The returned value is the raw inner content between the quotes: escapes are
+    honored for boundary detection but not expanded. That differs from the Rust
+    parser, which decodes them as Java does, and does not matter here, since
+    this validator only checks that a field is present and never forwards it.
 
     A hand-rolled scanner (rather than a regex) is required precisely because a
     regex cannot skip escaped quotes / balanced quoting the way the Rust lexer
@@ -639,6 +645,8 @@ def jaas_field(jaas_config, name):
                 continue
             if s[i] == quote:
                 return i + 1
+            if s[i] in '\r\n':
+                return i
             i += 1
         return i
 
@@ -669,6 +677,8 @@ def jaas_field(jaas_config, name):
                             continue
                         if s[k] == quote:
                             return s[start:k]
+                        if s[k] in '\r\n':
+                            return None
                         k += 1
                     return None  # unterminated quote — malformed
                 # Bare value: read until whitespace or ';'.

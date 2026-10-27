@@ -151,6 +151,19 @@ pub trait TransportLayer: Send + Sync {
     #[doc(alias = "org.apache.kafka.common.network.TransportLayer#removeInterestOps")]
     fn remove_interest_ops(&mut self, ops: InterestOps);
 
+    /// The interest operations currently set with [`add_interest_ops`](Self::add_interest_ops)
+    /// and [`remove_interest_ops`](Self::remove_interest_ops): Java's
+    /// `transportLayer.selectionKey().interestOps()`.
+    ///
+    /// The selector derives a ready channel's interest from its state (a
+    /// queued send, a completed receive), not from these. For a channel that
+    /// is still authenticating it reads `OP_WRITE` from here: the SASL
+    /// authenticator sets it while it has output the socket did not take yet
+    /// and clears it once that is written, as Java's
+    /// `flushNetOutBufferAndUpdateInterestOps` does, so that the selector
+    /// resumes the write on write readiness.
+    fn interest_ops(&self) -> InterestOps;
+
     /// Returns `true` if this channel is muted (not interested in read operations).
     #[doc(alias = "org.apache.kafka.common.network.TransportLayer#isMute")]
     fn is_mute(&self) -> bool;

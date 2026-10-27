@@ -43,7 +43,7 @@ use super::Receive;
 use super::Selectable;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
-use super::{is_authentication_error, is_invalid_receive_error};
+use super::{authentication_error_message, is_invalid_receive_error};
 
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -756,6 +756,18 @@ impl Selector {
             // (finish_connect transition, and/or the post-handshake ready
             // transition — order preserved relative to the original code).
             let mut push_connected: u8 = 0;
+            // Whether the channel's interest may have flipped: it finished
+            // re-authenticating (from the handshake's reads to its queued
+            // send), or an authentication step left output the socket did not
+            // take, which wants write readiness.
+            let mut interest_may_have_changed = false;
+            // A channel takes at most one completed receive per poll, and a
+            // re-authenticating channel's `prepare` may read a response to an
+            // earlier request, which is handed out below. Java's single
+            // `pollSelectionKeys` pass per poll visits a channel once; this
+            // poll can visit it twice (the buffered pass, then pass 1), so a
+            // channel that already completed a receive waits for the next poll.
+            let has_completed_receive = self.has_completed_receive(channel_id);
             // Assigned once below (the early `return` path never reads it).
             let reauth_receive: Option<NetworkReceive>;
             {
@@ -770,18 +782,43 @@ impl Selector {
                 }
 
                 let was_ready = channel.ready();
-                if channel.is_connected() && !channel.ready() {
+                let reauthenticating = channel.successful_authentications() > 0;
+                if channel.is_connected() && !channel.ready() && !(reauthenticating && has_completed_receive) {
                     channel.prepare().await?;
+                    interest_may_have_changed |= !channel.ready();
                 }
 
-                // Signal the post-handshake (TLS/SASL) ready transition so poll()
-                // exits and handle_initiate_api_version_requests fires without
-                // waiting for an external event.
                 if !was_ready && channel.ready() {
-                    push_connected += 1;
+                    let is_reauthentication = channel.successful_authentications() > 1;
+                    kafka_debug!(
+                        self.log_context,
+                        "Successfully {}authenticated with {}",
+                        if is_reauthentication { "re-" } else { "" },
+                        channel.socket_description()
+                    );
+                    // Signal the post-handshake (TLS/SASL) ready transition so
+                    // poll() exits and handle_initiate_api_version_requests fires
+                    // without waiting for an external event. Not after a
+                    // re-authentication: the connection was ready before, and
+                    // reporting it as connected again would make the network
+                    // client fetch its API versions anew. Java reports a channel
+                    // as connected once, when its socket connects.
+                    if is_reauthentication {
+                        interest_may_have_changed = true;
+                    } else {
+                        push_connected += 1;
+                    }
                 }
 
-                reauth_receive = channel.poll_response_received_during_reauthentication();
+                reauth_receive = if has_completed_receive {
+                    None
+                } else {
+                    channel.poll_response_received_during_reauthentication()
+                };
+            }
+            if interest_may_have_changed {
+                let key = self.intern_id(channel_id);
+                self.mark_interest_dirty(&key);
             }
 
             // Apply the captured bookkeeping now that the channel borrow is gone.
@@ -815,13 +852,16 @@ impl Selector {
         }
 
         if let Err(e) = result {
-            let desc = if let Some(channel) = self.channels.get(channel_id) {
-                format!("{} (channelId={})", channel.socket_description(), channel.id())
+            let (desc, is_reauthentication) = if let Some(channel) = self.channels.get(channel_id) {
+                (
+                    format!("{} (channelId={})", channel.socket_description(), channel.id()),
+                    channel.successful_authentications() > 0,
+                )
             } else {
-                format!("unknown (channelId={channel_id})")
+                (format!("unknown (channelId={channel_id})"), false)
             };
 
-            let (level, message) = channel_error_log(&desc, &e);
+            let (level, message) = channel_error_log(&desc, &e, is_reauthentication);
             log::log!(level, "{}{}", self.log_context.prefix(), message);
 
             self.close_channel_internal(channel_id, CloseMode::Graceful).await;
@@ -849,12 +889,10 @@ impl Selector {
             return;
         }
 
-        let results: Vec<ChannelWriteResult> = futures_util::future::join_all(
-            extracted
-                .iter_mut()
-                .map(|(_, channel)| do_channel_write(channel, current_time_nanos)),
-        )
-        .await;
+        let time = Arc::clone(&self.time);
+        let results: Vec<ChannelWriteResult> =
+            futures_util::future::join_all(extracted.iter_mut().map(|(_, channel)| do_channel_write(channel, &*time)))
+                .await;
 
         for ((id, channel), result) in extracted.into_iter().zip(results) {
             self.channels.insert(id.clone(), channel);
@@ -869,14 +907,23 @@ impl Selector {
                 self.completed_sends.push(send);
             }
 
+            // The channel stopped being ready to re-authenticate: its interest
+            // flipped from its queued send to the handshake's reads.
+            if result.reauthentication_began {
+                self.mark_interest_dirty(&id);
+            }
+
             if let Some((error, send_failed)) = result.error {
-                let desc = if let Some(ch) = self.channels.get(&id) {
-                    format!("{} (channelId={})", ch.socket_description(), ch.id())
+                let (desc, is_reauthentication) = if let Some(ch) = self.channels.get(&id) {
+                    (
+                        format!("{} (channelId={})", ch.socket_description(), ch.id()),
+                        ch.successful_authentications() > 0,
+                    )
                 } else {
-                    format!("unknown (channelId={id})")
+                    (format!("unknown (channelId={id})"), false)
                 };
 
-                let (level, message) = channel_error_log(&desc, &error);
+                let (level, message) = channel_error_log(&desc, &error, is_reauthentication);
                 log::log!(level, "{}{}", self.log_context.prefix(), message);
 
                 let close_mode = if send_failed {
@@ -1878,20 +1925,27 @@ impl Selectable for Selector {
 /// Routed by typed payload, not by [`io::ErrorKind`], as Java routes by
 /// `instanceof`:
 ///
-///   - an authentication failure logs "Failed authentication" (Java: INFO,
-///     `:622`; this client logs it at ERROR, left as it was);
-///   - an invalid receive logs "Unexpected error" at WARN (`:625`). Java gets
-///     there because `InvalidReceiveException` is a `KafkaException`, not an
-///     `IOException`, and it is the one such payload the receive path raises
-///     here, so the `else` of the Java chain reduces to it. At DEBUG, as it
-///     was, a size header the client refuses left no trace: the client closed,
-///     reconnected and refetched with nothing in the logs;
+///   - an authentication failure logs Java's "Failed authentication with
+///     <desc> (<message>)", or "Failed re-authentication ..." when the channel
+///     had authenticated before (`:614-623`). Like Java's `e.getMessage()` it
+///     prints the error's message, not its class. Java logs it at INFO; this
+///     client logs it at ERROR, left as it was;
+///   - an invalid receive, or any other error of a Kafka class, logs
+///     "Unexpected error" at WARN (`:625`). Java gets there because neither is
+///     an `IOException`: `InvalidReceiveException` is a `KafkaException`, and
+///     the other such payload is a `SaslAuthenticate` error whose class is not
+///     an `AuthenticationException` (`UnknownServerException`, say), which the
+///     authenticator raises as Java's `error.exception(errMsg)` does. At DEBUG,
+///     as it was, a size header the client refuses left no trace: the client
+///     closed, reconnected and refetched with nothing in the logs;
 ///   - everything else (reset, broken pipe, EOF, a failed TLS handshake) is an
 ///     I/O disconnect, DEBUG (`:612`), as the error is retriable.
-fn channel_error_log(desc: &str, e: &io::Error) -> (log::Level, String) {
-    if is_authentication_error(e) {
-        (log::Level::Error, format!("Failed authentication with {desc} ({e})"))
-    } else if is_invalid_receive_error(e) {
+fn channel_error_log(desc: &str, e: &io::Error, is_reauthentication: bool) -> (log::Level, String) {
+    let is_kafka_class_error = e.get_ref().is_some_and(|inner| inner.is::<crate::common::Error>());
+    if let Some(message) = authentication_error_message(e) {
+        let re = if is_reauthentication { "re-" } else { "" };
+        (log::Level::Error, format!("Failed {re}authentication with {desc} ({message})"))
+    } else if is_invalid_receive_error(e) || is_kafka_class_error {
         (
             log::Level::Warn,
             format!("Unexpected error from {desc}; closing connection: {e}"),
@@ -1906,30 +1960,58 @@ struct ChannelWriteResult {
     bytes_written: usize,
     completed_send: Option<NetworkSend>,
     error: Option<(io::Error, bool)>,
+    /// The channel began re-authenticating instead of writing.
+    reauthentication_began: bool,
+}
+
+impl ChannelWriteResult {
+    fn nothing_written() -> Self {
+        ChannelWriteResult {
+            bytes_written: 0,
+            completed_send: None,
+            error: None,
+            reauthentication_began: false,
+        }
+    }
 }
 
 /// Standalone write I/O on a single extracted channel — no Selector state access.
-async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: i64) -> ChannelWriteResult {
+///
+/// Translated from `Selector.attemptWrite`: a channel whose session is due for
+/// re-authentication re-authenticates instead of writing, and its send stays
+/// queued until it is ready again. The clock is read only for a channel that
+/// has a re-authentication time, and when the check is made, as Java's
+/// `nowNanos` is the time `select()` returned rather than when `poll()` began.
+async fn do_channel_write(channel: &mut KafkaChannel, time: &dyn Time) -> ChannelWriteResult {
     if !channel.has_send() || !channel.ready() {
-        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+        return ChannelWriteResult::nothing_written();
     }
 
-    let should_write = match channel.maybe_begin_client_reauthentication(|| current_time_nanos) {
-        Ok(reauth) => !reauth,
-        Err(e) => {
-            return ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, false)) };
+    match channel.maybe_begin_client_reauthentication(|| time.nanoseconds()).await {
+        Ok(false) => {},
+        Ok(true) => {
+            return ChannelWriteResult { reauthentication_began: true, ..ChannelWriteResult::nothing_written() };
         },
-    };
-    if !should_write {
-        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+        Err(e) => {
+            // Java's `attemptWrite` sets `sendFailed` for any error from it,
+            // `maybeBeginClientReauthentication` included, so the channel is
+            // closed NOTIFY_ONLY: nothing more is read from it. The receive it
+            // had in progress now belongs to the authenticator, so a graceful
+            // close would read from the middle of a frame.
+            return ChannelWriteResult { error: Some((e, true)), ..ChannelWriteResult::nothing_written() };
+        },
     }
 
     match channel.write_concurrent().await {
         Ok(bytes) => {
             let send = channel.maybe_complete_send();
-            ChannelWriteResult { bytes_written: bytes, completed_send: send, error: None }
+            ChannelWriteResult {
+                bytes_written: bytes,
+                completed_send: send,
+                ..ChannelWriteResult::nothing_written()
+            }
         },
-        Err(e) => ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, true)) },
+        Err(e) => ChannelWriteResult { error: Some((e, true)), ..ChannelWriteResult::nothing_written() },
     }
 }
 
@@ -2732,6 +2814,408 @@ mod tests {
         selector.close().await;
     }
 
+    /// An authenticator that, while re-authenticating, sets a response to an
+    /// earlier request aside on every step, as a SASL authenticator does when
+    /// in-flight responses keep arriving before the handshake's, and completes
+    /// on its second step.
+    struct ParkingAuthenticator {
+        source: String,
+        complete: bool,
+        reauthenticating: bool,
+        reauthentication_steps: usize,
+        parked: std::collections::VecDeque<NetworkReceive>,
+    }
+
+    impl crate::common::network::Authenticator for ParkingAuthenticator {
+        fn authenticate<'a>(
+            &'a mut self,
+            _transport: &'a mut (dyn crate::common::network::TransportLayer + Send),
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
+            if self.reauthenticating {
+                self.parked
+                    .push_back(NetworkReceive::with_source_buffer(&self.source, vec![1, 2, 3]));
+                self.reauthentication_steps += 1;
+                self.complete = self.reauthentication_steps == 2;
+            } else {
+                self.complete = true;
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn complete(&self) -> bool {
+            self.complete
+        }
+
+        fn reauthenticate<'a>(
+            &'a mut self,
+            _reauthentication_context: crate::common::network::ReauthenticationContext,
+            _transport: &'a mut (dyn crate::common::network::TransportLayer + Send),
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
+            self.reauthenticating = true;
+            self.complete = false;
+            Box::pin(async { Ok(()) })
+        }
+
+        fn client_session_reauthentication_time_nanos(&self) -> Option<i64> {
+            Some(0)
+        }
+
+        fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
+            self.parked.pop_front()
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// A channel takes at most one completed receive per poll. Java's single
+    /// pass over the selected keys visits a re-authenticating channel once per
+    /// `poll()`, handing out at most one response set aside by its
+    /// authenticator. This poll can visit a channel twice (the buffered pass,
+    /// then pass 1): the second visit must not read and hand out another, which
+    /// would panic with "Attempting to add second completed receive".
+    ///
+    /// When it finishes re-authenticating, the channel is ready again but not
+    /// reported as connected: Java reports a channel as connected once, when its
+    /// socket connects (`Selector.java:530-533`), and reporting it again would
+    /// make the network client fetch its API versions anew.
+    #[tokio::test]
+    async fn test_reauthenticating_channel_takes_one_completed_receive_per_poll() {
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", server.port())).await.unwrap();
+        let mut channel = KafkaChannel::new(
+            "0",
+            Box::new(crate::common::network::PlaintextTransportLayer::new(stream)),
+            Box::new(ParkingAuthenticator {
+                source: "0".to_string(),
+                complete: false,
+                reauthenticating: false,
+                reauthentication_steps: 0,
+                parked: std::collections::VecDeque::new(),
+            }),
+            BUFFER_SIZE,
+            Box::new(crate::common::network::DefaultChannelMetadataRegistry::new()),
+        );
+        channel.prepare().await.unwrap();
+        assert!(channel.ready());
+        assert!(channel.maybe_begin_client_reauthentication(|| 0).await.unwrap());
+        let key: Arc<str> = Arc::from("0");
+        selector.channels.insert(Arc::clone(&key), channel);
+        selector.register_arming(&key);
+
+        selector.poll_channel_reads("0", false, 0).await;
+        selector.poll_channel_reads("0", false, 0).await;
+        assert_eq!(selector.completed_receives.len(), 1);
+        assert!(selector.channels.contains_key("0"), "the channel stays open");
+
+        assert!(!selector.channels["0"].ready());
+
+        // The next poll hands out the next one, in the step that completes the
+        // re-authentication.
+        selector.clear().await;
+        selector.poll_channel_reads("0", false, 0).await;
+        assert_eq!(selector.completed_receives.len(), 1);
+        let channel = &selector.channels["0"];
+        assert!(channel.ready());
+        assert_eq!(channel.successful_authentications(), 2);
+        assert!(
+            selector.connected().is_empty(),
+            "a re-authenticated channel is not connected again"
+        );
+        selector.close().await;
+    }
+
+    /// Holds a transport's writes back until the test opens it, as a full
+    /// socket send buffer does while the broker is not reading.
+    #[derive(Default)]
+    struct WriteGate {
+        open: AtomicBool,
+        /// The waker the selector registered for write readiness while closed.
+        waker: StdMutex<Option<std::task::Waker>>,
+    }
+
+    impl WriteGate {
+        fn closed(&self) -> bool {
+            !self.open.load(Ordering::SeqCst)
+        }
+
+        /// The socket drains: writes go through again, and the selector is
+        /// told the channel is writable.
+        fn open(&self) {
+            self.open.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// A plaintext transport that, once connected, takes nothing while its
+    /// [`WriteGate`] is closed: the synchronous write would block, the
+    /// asynchronous one never completes, and the socket is not writable.
+    struct GatedTransportLayer {
+        inner: PlaintextTransportLayer,
+        gate: Arc<WriteGate>,
+    }
+
+    impl GatedTransportLayer {
+        fn held_back(&self) -> bool {
+            self.inner.is_connected() && self.gate.closed()
+        }
+    }
+
+    impl TransportLayer for GatedTransportLayer {
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.peer_addr()
+        }
+        fn ready(&self) -> bool {
+            self.inner.ready()
+        }
+        fn finish_connect(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<bool>> + Send + '_>> {
+            self.inner.finish_connect()
+        }
+        fn disconnect(&mut self) {
+            self.inner.disconnect()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn handshake(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.handshake()
+        }
+        fn add_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.add_interest_ops(ops)
+        }
+        fn remove_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.remove_interest_ops(ops)
+        }
+        fn interest_ops(&self) -> InterestOps {
+            self.inner.interest_ops()
+        }
+        fn is_mute(&self) -> bool {
+            self.inner.is_mute()
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            self.inner.has_bytes_buffered()
+        }
+        fn has_pending_writes(&self) -> bool {
+            self.inner.has_pending_writes()
+        }
+        fn is_open(&self) -> bool {
+            self.inner.is_open()
+        }
+        fn close(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.close()
+        }
+        fn read<'a>(
+            &'a mut self,
+            dst: &'a mut [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            self.inner.read(dst)
+        }
+        fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            self.inner.try_read(dst)
+        }
+        fn supports_try_read(&self) -> bool {
+            self.inner.supports_try_read()
+        }
+        fn write<'a>(
+            &'a mut self,
+            src: &'a [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.write(src)
+        }
+        fn readable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.readable()
+        }
+        fn writable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.writable()
+        }
+        fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            self.inner.poll_readable(cx)
+        }
+        fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            if self.held_back() {
+                *self.gate.waker.lock().unwrap() = Some(cx.waker().clone());
+                // The test may have opened the gate meanwhile.
+                if self.gate.closed() {
+                    return std::task::Poll::Pending;
+                }
+            }
+            self.inner.poll_writable(cx)
+        }
+        fn write_vectored<'a>(
+            &'a mut self,
+            srcs: &'a [io::IoSlice<'a>],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.write_vectored(srcs)
+        }
+        fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            if self.held_back() {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            self.inner.try_write_vectored(srcs)
+        }
+    }
+
+    /// Builds what `SaslChannelBuilder` builds for SASL_PLAINTEXT, the real
+    /// `SaslClientAuthenticator` over a plaintext transport, with the
+    /// transport behind a [`WriteGate`].
+    struct GatedSaslChannelBuilder {
+        gate: Arc<WriteGate>,
+    }
+
+    impl ChannelBuilder for GatedSaslChannelBuilder {
+        fn build_channel(
+            &self,
+            id: &str,
+            stream: tokio::net::TcpStream,
+            peer_host: &str,
+            max_receive_size: i32,
+            metadata_registry: Box<dyn ChannelMetadataRegistry>,
+        ) -> io::Result<KafkaChannel> {
+            let transport_layer = Box::new(GatedTransportLayer {
+                inner: PlaintextTransportLayer::new(stream),
+                gate: Arc::clone(&self.gate),
+            });
+            let authenticator = Box::new(crate::common::security::authenticator::SaslClientAuthenticator::new(
+                "PLAIN",
+                "alice",
+                "secret",
+                id,
+                peer_host,
+                "test-client",
+                Arc::new(SystemTime),
+                LogContext::empty(),
+            ));
+            Ok(KafkaChannel::new(
+                id,
+                transport_layer,
+                authenticator,
+                max_receive_size,
+                metadata_registry,
+            ))
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// Java's SASL client writes to a non-blocking channel: a request the
+    /// socket does not take stays in `netOutBuffer` with `OP_WRITE` set, the
+    /// selector selects the channel for write, and the next `prepare()` writes
+    /// the rest (`SaslClientAuthenticator.flushNetOutBufferAndUpdateInterestOps`,
+    /// `Selector.pollSelectionKeys`). This runs that through `Selector::poll`,
+    /// with the real `SaslClientAuthenticator` against the fake broker, over a
+    /// transport that takes nothing until the test opens it.
+    ///
+    /// While the transport takes nothing, the channel is armed for write and
+    /// polls return on time. Once the transport drains, the write readiness
+    /// wakes the selector and the channel authenticates. Without the write
+    /// interest nothing would wake it: the broker has received nothing, so it
+    /// sends nothing to read either.
+    #[tokio::test]
+    async fn test_sasl_request_the_socket_does_not_take_arms_the_channel_for_write() {
+        use std::time::Duration;
+
+        let broker = crate::test_fake_broker::FakeBroker::start("cluster", "topic").await;
+        let gate = Arc::new(WriteGate::default());
+        let channel_builder = Box::new(GatedSaslChannelBuilder { gate: Arc::clone(&gate) });
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
+        let addr: SocketAddr = broker.bootstrap().parse().unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
+
+        // The connection completes, and the authenticator's first request
+        // (ApiVersions) is held back, with `OP_WRITE` set.
+        let mut polls = 0;
+        while !selector
+            .channels
+            .get_mut("0")
+            .is_some_and(|channel| channel.transport_layer().interest_ops().contains(InterestOps::OP_WRITE))
+        {
+            assert!(polls < 50, "the first SASL request was never held back");
+            selector.poll(10).await.unwrap();
+            polls += 1;
+        }
+        let channel = &selector.channels["0"];
+        assert!(channel.is_connected());
+        assert!(!channel.ready());
+        assert!(channel.has_pending_writes(), "the held-back request is a pending write");
+
+        // Each poll returns on time and leaves the channel armed for write.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), selector.poll(50))
+                .await
+                .expect("a poll must not wait for the socket")
+                .unwrap();
+            assert!(selector.arming["0"].armed_write, "the channel is armed for write");
+            assert!(!selector.is_channel_ready("0"));
+        }
+        assert!(selector.channels.contains_key("0"), "the channel stays open");
+
+        gate.open();
+        wait_for_channel_ready(&mut selector, "0").await;
+        assert_eq!(broker.sasl_authentications(), 1);
+        let channel = selector.channels.get_mut("0").unwrap();
+        assert_eq!(channel.successful_authentications(), 1);
+        assert!(!channel.has_pending_writes());
+        assert!(!channel.transport_layer().interest_ops().contains(InterestOps::OP_WRITE));
+        selector.close().await;
+    }
+
+    /// Only the channels pass 1 processed are re-armed after a pass by
+    /// default. The buffered-read pass also runs `prepare()` on a channel, and
+    /// a step there that leaves output the socket did not take must mark the
+    /// channel's interest dirty, or the next wait never arms it for write.
+    /// This visits the channel as that pass does and re-arms with nothing
+    /// processed.
+    #[tokio::test]
+    async fn test_prepare_outside_pass_one_still_arms_the_channel_for_write() {
+        let broker = crate::test_fake_broker::FakeBroker::start("cluster", "topic").await;
+        let gate = Arc::new(WriteGate::default());
+        let builder = GatedSaslChannelBuilder { gate: Arc::clone(&gate) };
+        let mut selector = create_selector().await;
+        let stream = tokio::net::TcpStream::connect(broker.bootstrap()).await.unwrap();
+        let channel = builder
+            .build_channel(
+                "0",
+                stream,
+                "localhost",
+                BUFFER_SIZE,
+                Box::new(crate::common::network::DefaultChannelMetadataRegistry::new()),
+            )
+            .unwrap();
+        let key: Arc<str> = Arc::from("0");
+        selector.channels.insert(Arc::clone(&key), channel);
+        selector.register_arming(&key);
+        // Registration marks a new channel dirty; start from a clean set.
+        selector.interest_dirty.clear();
+
+        selector.poll_channel_reads("0", false, 0).await;
+        assert!(!selector.channels["0"].ready());
+        assert!(selector.channels["0"].has_pending_writes());
+
+        let mut ready = FxHashSet::default();
+        selector.arm_rearm_set(&[], &mut ready);
+        assert!(
+            selector.arming["0"].armed_write,
+            "a channel holding back authentication output is armed for write"
+        );
+        selector.close().await;
+    }
+
     struct FailingChannelBuilder;
 
     impl ChannelBuilder for FailingChannelBuilder {
@@ -3418,6 +3902,9 @@ mod tests {
         }
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.inner.remove_interest_ops(ops)
+        }
+        fn interest_ops(&self) -> InterestOps {
+            self.inner.interest_ops()
         }
         fn is_mute(&self) -> bool {
             self.inner.is_mute()
@@ -4219,7 +4706,7 @@ mod tests {
                  InvalidReceiveError: Invalid receive (size = -1)"
                     .to_string()
             ),
-            channel_error_log(desc, &invalid)
+            channel_error_log(desc, &invalid, false)
         );
 
         let reset = io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer (os error 104)");
@@ -4229,17 +4716,45 @@ mod tests {
                 "Connection with 127.0.0.1:9092 (channelId=0) disconnected: Connection reset by peer (os error 104)"
                     .to_string()
             ),
-            channel_error_log(desc, &reset)
+            channel_error_log(desc, &reset, false)
         );
 
+        // Java prints `e.getMessage()`, the message without the class name, and
+        // says "re-authentication" once the channel has authenticated before.
         let auth = auth_io_error("bad credentials");
         assert_eq!(
             (
                 log::Level::Error,
-                "Failed authentication with 127.0.0.1:9092 (channelId=0) (AuthenticationError: bad credentials)"
+                "Failed authentication with 127.0.0.1:9092 (channelId=0) (bad credentials)".to_string()
+            ),
+            channel_error_log(desc, &auth, false)
+        );
+        let sasl = crate::common::network::authentication_io_error(crate::common::Error::SaslAuthentication(
+            crate::common::errors::SaslAuthenticationError::new("Authentication failed: Invalid username or password"),
+        ));
+        assert_eq!(
+            (
+                log::Level::Error,
+                "Failed re-authentication with 127.0.0.1:9092 (channelId=0) \
+                 (Authentication failed: Invalid username or password)"
                     .to_string()
             ),
-            channel_error_log(desc, &auth)
+            channel_error_log(desc, &sasl, true)
+        );
+
+        // A `SaslAuthenticate` error whose class is not an authentication error
+        // is neither an `IOException` nor an `AuthenticationException` in Java.
+        let unknown_server = io::Error::other(crate::common::Error::UnknownServer(
+            crate::common::errors::UnknownServerError::new("broker trouble"),
+        ));
+        assert_eq!(
+            (
+                log::Level::Warn,
+                "Unexpected error from 127.0.0.1:9092 (channelId=0); closing connection: \
+                 UnknownServerError: broker trouble"
+                    .to_string()
+            ),
+            channel_error_log(desc, &unknown_server, false)
         );
     }
 }
