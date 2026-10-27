@@ -176,7 +176,9 @@ pub unsafe extern "C" fn kafka_common_GroupState__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name()`: a static string, never freed.
+/// `name()`: Java's `Enum.name()`, the constant name (`PREPARING_REBALANCE`), as a
+/// static string, never freed. The text `parse` reads (`PreparingRebalance`) is
+/// `toString()`'s.
 ///
 /// # Safety
 ///
@@ -238,7 +240,8 @@ pub unsafe extern "C" fn kafka_common_GroupState_group_states_for_type(
     box_list(elements, None)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// `toString()`: the text the broker sends and `parse` reads (`PreparingRebalance`), as
+/// an owned string freed with `kafka_string_destroy`.
 ///
 /// # Safety
 ///
@@ -324,6 +327,36 @@ mod tests {
             let s = kafka_common_GroupState_to_string(kafka_common_GroupState_not_ready());
             assert_eq!(CStr::from_ptr(s).to_str().unwrap(), GroupState::NotReady.to_string());
             kafka_string_destroy(s);
+        }
+    }
+
+    /// New test, no Java original: `_name` is Java's `Enum.name()` and
+    /// `_to_string` Java's `toString()`, the text `_parse` reads back; the
+    /// constant name with an underscore does not parse.
+    #[test]
+    fn name_is_the_constant_and_to_string_the_java_text() {
+        // SAFETY: Test code: the singletons are never freed, the names `_name` returns are owned
+        // by the static `NAMES`, each string `_to_string` returns is destroyed once, after it is
+        // read and parsed back, and the `CStr` literals outlive the calls reading them.
+        unsafe {
+            for (handle, name, text) in [
+                (
+                    kafka_common_GroupState_preparing_rebalance(),
+                    "PREPARING_REBALANCE",
+                    "PreparingRebalance",
+                ),
+                (kafka_common_GroupState_not_ready(), "NOT_READY", "NotReady"),
+            ] {
+                assert_eq!(CStr::from_ptr(kafka_common_GroupState_name(handle)).to_str().unwrap(), name);
+                let s = kafka_common_GroupState_to_string(handle);
+                assert_eq!(CStr::from_ptr(s).to_str().unwrap(), text);
+                assert_eq!(kafka_common_GroupState_parse(s), handle);
+                kafka_string_destroy(s);
+            }
+            assert_eq!(
+                kafka_common_GroupState_parse(c"NOT_READY".as_ptr()),
+                kafka_common_GroupState_unknown()
+            );
         }
     }
 }

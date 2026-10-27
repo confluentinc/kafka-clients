@@ -542,7 +542,7 @@ impl ChaosHarness {
         let delete_started = std::time::Instant::now();
 
         self.admin
-            .delete_topics(confluent_kafka::common::TopicCollection::of_topic_names(vec![
+            .delete_topics_with_topic_collection(confluent_kafka::common::TopicCollection::of_topic_names(vec![
                 topic.to_string(),
             ]))
             .all()

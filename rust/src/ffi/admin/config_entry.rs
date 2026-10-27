@@ -660,7 +660,7 @@ struct ConfigEntryOptionsBuilderInner {
     is_sensitive: Option<bool>,
     is_read_only: Option<bool>,
     synonyms: Option<Vec<ConfigSynonym>>,
-    config_type: Option<ConfigType>,
+    config_type: Option<Option<ConfigType>>,
     documentation: Option<Option<String>>,
 }
 
@@ -835,22 +835,29 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
     unsafe { builder_mut(self_) }.synonyms = Some(unsafe { list_config_synonyms(synonyms) });
 }
 
-/// `set_config_type(config_type)`: Java's `type`.
+/// `set_config_type(config_type)`: Java's `type`, `NULL` for Java's `null`
+/// (the type a `createTopics` entry carries).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `config_type` a type singleton.
+/// time, and `config_type` null or a type singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
     self_: *mut kafka_admin_ConfigEntryOptionsBuilder_t,
     config_type: *const kafka_admin_ConfigEntry_ConfigType_t,
 ) {
+    let config_type = if config_type.is_null() {
+        None
+    } else {
+        // SAFETY: `config_type` is non-null (checked above) and, per this function's `# Safety`, a
+        // type singleton, which only this module returns, as `config_type_value_of` requires.
+        Some(unsafe { config_type_value_of(config_type) })
+    };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
-    // uses at the same time, kept alive for this call, as `builder_mut` requires, and `config_type`
-    // a type singleton, which only this module returns, as `config_type_value_of` requires.
-    unsafe { builder_mut(self_) }.config_type = Some(unsafe { config_type_value_of(config_type) });
+    // uses at the same time, kept alive for this call, as `builder_mut` requires.
+    unsafe { builder_mut(self_) }.config_type = Some(config_type);
 }
 
 /// `set_documentation(documentation)`: Java's `documentation`, `NULL` for
@@ -1155,7 +1162,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
     box_list(elements, Some(destroy_config_synonym_element))
 }
 
-/// `type()`: a borrowed type singleton.
+/// `type()`: a borrowed type singleton, or `NULL` for Java's `null` type,
+/// which the entries of a `createTopics` result carry
+/// (`kafka_admin_CreateTopicsResult_config`).
 ///
 /// # Safety
 ///
@@ -1167,7 +1176,9 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
 ) -> *const kafka_admin_ConfigEntry_ConfigType_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid config-entry handle, kept alive
     // for this call, as `config_entry_ref` requires.
-    config_type_singleton(unsafe { config_entry_ref(self_) }.r#type())
+    unsafe { config_entry_ref(self_) }
+        .r#type()
+        .map_or(std::ptr::null(), config_type_singleton)
 }
 
 /// `documentation()`: a borrowed string valid as long as the entry, never
@@ -1360,7 +1371,7 @@ mod tests {
                 .set_is_sensitive(true)
                 .set_is_read_only(true)
                 .set_synonyms(vec![synonym.clone()])
-                .set_config_type(ConfigType::Long)
+                .set_config_type(Some(ConfigType::Long))
                 .set_documentation(Some("docs".to_string()))
                 .build()
                 .unwrap();
@@ -1412,6 +1423,44 @@ mod tests {
             kafka_admin_ConfigEntry_ConfigSynonym_destroy(ptr::null_mut());
             kafka_admin_ConfigEntryOptions_destroy(ptr::null_mut());
             kafka_admin_ConfigEntryOptionsBuilder_destroy(ptr::null_mut());
+        }
+    }
+
+    /// New test, no Java original: Java's `type()` is `null` for the entries
+    /// of a `createTopics` result (`KafkaAdminClient.java:1992-2002`). A NULL
+    /// type set through the builder reaches the entry as `None`, after an
+    /// earlier non-null one, and the getter hands it back as NULL.
+    #[test]
+    fn config_entry_type_is_null_for_an_entry_without_type() {
+        // SAFETY: Test code: `builder` is the owned handle
+        // `kafka_admin_ConfigEntryOptionsBuilder_new` returned, used only on this thread and
+        // destroyed once, after its build; `err` is a valid slot pointing at null and stays null;
+        // `options` is the owned options the build returned, destroyed once after
+        // `kafka_admin_ConfigEntry_with_options` copied it; `entry` is the owned handle that call
+        // returned, destroyed once, last; `s` is an owned string, read while alive and freed once.
+        unsafe {
+            let builder = kafka_admin_ConfigEntryOptionsBuilder_new();
+            kafka_admin_ConfigEntryOptionsBuilder_set_name(builder, c"compression.type".as_ptr());
+            kafka_admin_ConfigEntryOptionsBuilder_set_value(builder, c"producer".as_ptr());
+            kafka_admin_ConfigEntryOptionsBuilder_set_config_type(builder, kafka_admin_ConfigEntry_ConfigType_long());
+            kafka_admin_ConfigEntryOptionsBuilder_set_config_type(builder, ptr::null());
+            let mut err = ptr::null_mut();
+            let options = kafka_admin_ConfigEntryOptionsBuilder_build(builder, &mut err);
+            assert!(err.is_null());
+            kafka_admin_ConfigEntryOptionsBuilder_destroy(builder);
+            assert_eq!(config_entry_options_ref(options).config_type, None);
+            let entry = kafka_admin_ConfigEntry_with_options(options);
+            kafka_admin_ConfigEntryOptions_destroy(options);
+            assert_eq!(config_entry_ref(entry).r#type(), None);
+            assert!(kafka_admin_ConfigEntry_type(entry).is_null());
+            let s = kafka_admin_ConfigEntry_to_string(entry);
+            assert_eq!(
+                CStr::from_ptr(s).to_str().unwrap(),
+                "ConfigEntry(name=compression.type, value=producer, source=UNKNOWN, isSensitive=false, \
+                 isReadOnly=false, synonyms=[], type=null, documentation=null)"
+            );
+            kafka_string_destroy(s);
+            kafka_admin_ConfigEntry_destroy(entry);
         }
     }
 }
