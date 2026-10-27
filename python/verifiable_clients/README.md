@@ -29,6 +29,11 @@ after building and installing the dev extras itself.
 
 ## Running the system tests
 
+These steps were tested with the system tests of Kafka 4.3.1 (tag `4.3.1`,
+commit `26b251a451`). From Kafka 4.4 the `VerifiableConsumer` service also
+passes `--close-timeout` (apache/kafka#22461), which both the Python and the
+Rust tools accept; the 4.4 tests have not been run yet.
+
 The ducker-ak nodes are Ubuntu 22.04 (Python 3.10) on the host's architecture,
 so the tools run on a Linux build of the library and of the extension, made in
 an Ubuntu 22.04 container from the repository root:

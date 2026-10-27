@@ -40,8 +40,8 @@ from verifiable_consumer import (VerifiableConsumer, arg_parser, create_from_arg
 from confluent_kafka import IllegalArgumentError, UnsupportedOperationError
 from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.errors import FencedInstanceIdError, WakeupError
-from confluent_kafka.consumer import (ConsumerRecord, ConsumerRecords, MockConsumer,
-                                      OffsetAndMetadata)
+from confluent_kafka.consumer import (CloseOptions, ConsumerRecord, ConsumerRecords,
+                                      MockConsumer, OffsetAndMetadata)
 
 TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TP0 = TopicPartition(topic="t", partition=0)
@@ -54,9 +54,9 @@ def _no_startup_wait(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _verifiable(consumer: Any = None, *, max_messages: int = -1, verbose: bool = False,
-                use_auto_commit: bool = False) -> VerifiableConsumer:
+                use_auto_commit: bool = False, close_timeout_ms: int = 30000) -> VerifiableConsumer:
     return VerifiableConsumer(consumer or MockConsumer(offset_reset_strategy="earliest"), "t",
-                              max_messages, use_auto_commit, False, verbose)
+                              max_messages, use_auto_commit, False, verbose, close_timeout_ms)
 
 
 def _record(tp: TopicPartition, offset: int, key: str | None = None,
@@ -360,14 +360,61 @@ def test_run_logs_any_other_error_and_still_shuts_down(
     assert mock.closed()
 
 
+class _FakeClock:
+    """The ``time`` functions ``run()`` uses, on a scripted monotonic clock:
+    comparing the events' wall-clock timestamps instead would race the tool's
+    timer, which starts just before ``startup_complete`` is stamped."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0)
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+
 def test_run_keeps_startup_visible_for_the_minimum(monkeypatch: pytest.MonkeyPatch,
                                                    capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(verifiable_consumer, "MIN_STARTUP_VISIBLE_SECONDS", 0.3)
+    monkeypatch.setattr(verifiable_consumer, "MIN_STARTUP_VISIBLE_SECONDS", 3.0)
+    clock = _FakeClock(100.0, 100.5)
+    monkeypatch.setattr(verifiable_consumer, "time", clock)
     mock: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
     mock.schedule_poll_task(task=mock.wakeup)
     _verifiable(mock).run()
-    startup, shutdown = _lines(capsys)
-    assert shutdown["timestamp"] - startup["timestamp"] >= 300
+    assert clock.sleeps == [2.5]
+    assert [line["name"] for line in _lines(capsys)] == ["startup_complete", "shutdown_complete"]
+
+
+def test_run_does_not_wait_once_the_minimum_has_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verifiable_consumer, "MIN_STARTUP_VISIBLE_SECONDS", 3.0)
+    clock = _FakeClock(100.0, 103.5)
+    monkeypatch.setattr(verifiable_consumer, "time", clock)
+    mock: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
+    mock.schedule_poll_task(task=mock.wakeup)
+    _verifiable(mock).run()
+    assert clock.sleeps == []
+
+
+def test_run_closes_with_the_close_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Java's consumer.close(CloseOptions.timeout(Duration.ofMillis(closeTimeoutMs))).
+    options: list[CloseOptions] = []
+    close = MockConsumer.close
+
+    def recording_close(self: MockConsumer[str, str], *, option: CloseOptions) -> None:
+        options.append(option)
+        close(self, option=option)
+
+    monkeypatch.setattr(MockConsumer, "close", recording_close)
+    mock: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
+    mock.schedule_poll_task(task=mock.wakeup)
+    _verifiable(mock, close_timeout_ms=15000).run()
+    (option,) = options
+    assert option.timeout() == 15.0
+    assert option.group_membership_operation() == CloseOptions.GroupMembershipOperation.DEFAULT
+    assert mock.closed()
 
 
 def test_close_announces_the_shutdown_and_wakes_the_consumer(
@@ -430,6 +477,20 @@ def test_parse_args_consumer_protocol() -> None:
         "group.protocol": "CONSUMER", "group.remote.assignor": "uniform",
         "session.timeout.ms": "30000", "group.id": "g", "group.instance.id": "inst-1",
         "bootstrap.servers": "b", "enable.auto.commit": True, "auto.offset.reset": "latest"}
+
+
+def test_parse_args_close_timeout() -> None:
+    # Kafka 4.4's system tests always pass it; it is not a consumer config.
+    res, props = _parse(*MINIMAL)
+    assert res.close_timeout == 30000
+    res, props_with_timeout = _parse(*MINIMAL, "--close-timeout", "15000")
+    assert res.close_timeout == 15000
+    assert props_with_timeout == props
+
+
+def test_parse_args_close_timeout_must_be_an_integer() -> None:
+    assert _parse_error(*MINIMAL, "--close-timeout", "15s") == (
+        "argument --close-timeout: invalid int value: '15s'")
 
 
 def test_parse_args_consumer_protocol_ignores_the_assignment_strategy() -> None:
@@ -498,10 +559,12 @@ def test_parse_args_unknown_group_protocol() -> None:
 def test_create_from_args_builds_a_kafka_consumer() -> None:
     consumer = create_from_args(arg_parser(), [
         "--bootstrap-server", "localhost:1", "--topic", "t", "--group-id", "g",
-        "--group-protocol", "consumer", "--max-messages", "4", "--verbose"])
+        "--group-protocol", "consumer", "--max-messages", "4", "--verbose",
+        "--close-timeout", "15000"])
     try:
         assert (consumer.topic, consumer.max_messages, consumer.verbose,
-                consumer.use_auto_commit, consumer.use_async_commit) == ("t", 4, True, False, False)
+                consumer.use_auto_commit, consumer.use_async_commit,
+                consumer.close_timeout_ms) == ("t", 4, True, False, False, 15000)
     finally:
         consumer.consumer.close()
 

@@ -56,8 +56,9 @@ from confluent_kafka import IllegalArgumentError
 from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import FencedInstanceIdError, WakeupError
 from confluent_kafka.common.serialization import string_deserializer
-from confluent_kafka.consumer import (Consumer, ConsumerRebalanceListener, ConsumerRecord,
-                                      ConsumerRecords, KafkaConsumer, OffsetAndMetadata)
+from confluent_kafka.consumer import (CloseOptions, Consumer, ConsumerRebalanceListener,
+                                      ConsumerRecord, ConsumerRecords, KafkaConsumer,
+                                      OffsetAndMetadata)
 
 __all__ = ["VerifiableConsumer", "arg_parser", "create_from_args", "main"]
 
@@ -157,7 +158,8 @@ class VerifiableConsumer(ConsumerRebalanceListener):
     ConsumerRebalanceListener``."""
 
     def __init__(self, consumer: Consumer[str, str], topic: str, max_messages: int,
-                 use_auto_commit: bool, use_async_commit: bool, verbose: bool) -> None:
+                 use_auto_commit: bool, use_async_commit: bool, verbose: bool,
+                 close_timeout_ms: int) -> None:
         # Java also takes the PrintStream to print to, always System.out.
         self.consumer = consumer
         self.topic = topic
@@ -166,6 +168,7 @@ class VerifiableConsumer(ConsumerRebalanceListener):
         self.verbose = verbose
         self.max_messages = max_messages
         self.consumed_messages = 0
+        self.close_timeout_ms = close_timeout_ms
 
     def has_message_limit(self) -> bool:
         return self.max_messages >= 0
@@ -267,7 +270,8 @@ class VerifiableConsumer(ConsumerRebalanceListener):
             # it is logged here and the shutdown still announced, as by the
             # Rust tool.
             try:
-                self.consumer.close()
+                self.consumer.close(option=CloseOptions.timeout(
+                    timeout=timedelta(milliseconds=self.close_timeout_ms)))
             except Exception:
                 _LOG.exception("Error closing consumer: ")
             remaining = MIN_STARTUP_VISIBLE_SECONDS - (time.monotonic() - started)
@@ -328,6 +332,10 @@ def arg_parser() -> ArgumentParser:
                         help="Enable to log individual consumed records")
     parser.add_argument("--enable-autocommit", action="store_true", dest="use_auto_commit",
                         help="Enable offset auto-commit on consumer")
+    parser.add_argument(
+        "--close-timeout", type=int, default=30000, dest="close_timeout",
+        metavar="CLOSE-TIMEOUT-MS",
+        help="Timeout in milliseconds for closing the consumer (default: %(default)s)")
     parser.add_argument(
         "--reset-policy", default="earliest", dest="reset_policy", metavar="RESET-POLICY",
         help="Set reset policy (must be either 'earliest', 'latest', or 'none')")
@@ -400,7 +408,7 @@ def create_from_args(parser: ArgumentParser, args: list[str]) -> VerifiableConsu
         configs=props, key_deserializer=string_deserializer(),
         value_deserializer=string_deserializer())
     return VerifiableConsumer(consumer, res.topic, res.max_messages, res.use_auto_commit,
-                              False, res.verbose)
+                              False, res.verbose, res.close_timeout)
 
 
 def main(args: list[str]) -> int:

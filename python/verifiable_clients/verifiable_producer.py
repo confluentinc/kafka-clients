@@ -324,8 +324,10 @@ def main(args: list[str]) -> int:
             # Print a summary
             stop_ms = now_millis()
             elapsed_ms = stop_ms - start_ms
-            # Java divides by zero here when start and stop fall in one
-            # millisecond, which JSON cannot carry; that run reports 0.
+            # When start and stop fall in one millisecond Java's division
+            # gives Infinity (NaN with nothing acked), which Jackson prints as
+            # the string "Infinity". Reporting 0.0 instead is this tool's
+            # choice: the system tests never read avg_throughput.
             avg_throughput = 1000 * (producer.num_acked / elapsed_ms) if elapsed_ms else 0.0
             print_json(tool_data(producer.num_sent, producer.num_acked, producer.throughput,
                                  avg_throughput))
