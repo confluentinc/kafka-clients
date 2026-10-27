@@ -16,7 +16,8 @@
 //! manager. Composes [`super::AbstractMembershipManager`]
 //! and supplies the Consumer-specific configuration (group instance
 //! ID, server assignor, rack ID), and the §31 reconcile pipeline
-//! (which is async because it `.await`s rebalance-listener callbacks).
+//! (synchronous: it enqueues rebalance-listener callbacks and parks on
+//! their acks across background-loop iterations instead of awaiting them).
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager`.
@@ -722,14 +723,33 @@ impl ConsumerMembershipManager {
         Ok(())
     }
 
-    /// Reconcile the target assignment per §31. Async because it
-    /// `.await`s the rebalance-listener oneshot acks.
+    /// Reconcile the target assignment per §31.
+    ///
+    /// Synchronous, like Java's `void maybeReconcile(boolean)`: it never
+    /// waits. A rebalance-listener callback or the pre-rebalance auto-commit
+    /// that is still pending is stored as a [`PendingReconcile`] leg, and a
+    /// later call `try_recv`s it and resumes the chain
+    /// (`drive_pending_reconcile`), as Java's `whenComplete` continuations
+    /// resume on the network thread.
+    ///
+    /// **Must only be called from the background task.** Java runs
+    /// `maybeReconcile` only on the network thread: from
+    /// `AbstractMembershipManager.poll` (`canCommit = false`, the bg loop's
+    /// Phase 2.5) and from `ApplicationEventProcessor.process(AsyncPollEvent)`
+    /// (`canCommit = true`, `process_async_poll`, run during the bg loop's
+    /// Phase 1 event drain). That confinement is what keeps the
+    /// `reconciliation_in_progress` check (step 1) and
+    /// `mark_reconciliation_in_progress()` (step 6) race-free: they are
+    /// separate lock scopes, so two concurrent callers could both pass the
+    /// check and each start a reconciliation, enqueuing two
+    /// `PartitionsAssigned` events (two `onPartitionsAssigned` runs) for one
+    /// assignment.
     ///
     /// Pre-condition: state is `RECONCILING`.
     ///
     /// Behavior mirrors Java's `maybeReconcile(boolean canCommit)` +
-    /// `revokeAndAssign(...)` chain, but linearised because we have
-    /// `async/await` instead of `CompletableFuture::whenComplete`.
+    /// `revokeAndAssign(...)` chain, with the `CompletableFuture::whenComplete`
+    /// continuations translated as explicit resumable steps.
     ///
     /// `can_commit` mirrors Java's parameter: it controls whether
     /// reconciliation can proceed when auto-commit is enabled or there are
@@ -751,7 +771,7 @@ impl ConsumerMembershipManager {
     ///
     /// Java: `maybeReconcile(boolean canCommit)`
     /// (`AbstractMembershipManager.java:875`).
-    pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
+    pub(crate) fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
         // Phase 41b: if a reconcile rebalance callback is already in
         // flight, drive it non-blockingly instead of starting a new
         // reconciliation. The loop is NOT frozen on the ack: we `try_recv`
@@ -760,7 +780,7 @@ impl ConsumerMembershipManager {
         // ack is pending the member stays RECONCILING
         // (`reconciliation_in_progress = true`).
         if self.has_pending_reconcile() {
-            return self.drive_pending_reconcile(current_time_ms).await;
+            return self.drive_pending_reconcile(current_time_ms);
         }
 
         // 1. State / progress checks.
@@ -988,7 +1008,6 @@ impl ConsumerMembershipManager {
             revoked,
             current_time_ms,
         )
-        .await
     }
 
     /// Log the auto-commit-before-rebalance result. Mirrors Java's
@@ -1028,7 +1047,7 @@ impl ConsumerMembershipManager {
     /// The commit-result logging happens at the call site BEFORE this method
     /// (Java logs in the same `whenComplete`, on both branches, then runs the
     /// abort check + `revokeAndAssign` unconditionally — [`Self::log_commit_result`]).
-    async fn continue_after_commit(
+    fn continue_after_commit(
         &self,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
@@ -1093,17 +1112,14 @@ impl ConsumerMembershipManager {
             },
             // No revoked partitions OR no listener — the revoke callback is
             // a completed no-op, so proceed straight to step 10.
-            None => {
-                self.continue_after_revoke(
-                    Ok(()),
-                    resolved,
-                    resolved_assignment,
-                    assigned_topic_partitions,
-                    added,
-                    current_time_ms,
-                )
-                .await
-            },
+            None => self.continue_after_revoke(
+                Ok(()),
+                resolved,
+                resolved_assignment,
+                assigned_topic_partitions,
+                added,
+                current_time_ms,
+            ),
         }
     }
 
@@ -1131,6 +1147,11 @@ impl ConsumerMembershipManager {
     /// the broker to kick the member out after the reconciliation commit
     /// timeout, giving a RECONCILING -> FENCED transition. Only the flag is
     /// cleared.
+    ///
+    /// This is the one place a reconciliation failure is logged at ERROR as
+    /// "Reconciliation failed", as in Java's chain; both `reconcile` callers
+    /// (`process_async_poll` and the network thread's Phase 2.5) only add a
+    /// DEBUG follow-up.
     fn fail_reconciliation(&self, err: Error) -> Error {
         log::error!("Reconciliation failed: {err}");
         self.abstract_mm.mark_reconciliation_completed();
@@ -1142,7 +1163,7 @@ impl ConsumerMembershipManager {
     /// Lock-free: reads the [`Self::pending_reconcile_flag`] atomic only.
     /// This is the steady-state `reconcile` entry check — no mutex lock when
     /// no rebalance is in flight (Perf Contract item 1).
-    fn has_pending_reconcile(&self) -> bool {
+    pub(crate) fn has_pending_reconcile(&self) -> bool {
         self.pending_reconcile_flag.load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -1397,9 +1418,10 @@ impl ConsumerMembershipManager {
     /// `current_time_ms` is the live bg-loop iteration time, used for the
     /// resumed steps (assign-callback enqueue, `reset_auto_commit_timer`),
     /// mirroring Java's `whenComplete` running at completion time.
-    async fn drive_pending_reconcile(&self, current_time_ms: i64) -> Result<(), Error> {
-        // Pop the pending state out under the lock (so the lock is never
-        // held across the resumed `.await`), then `try_recv`. If the ack is
+    fn drive_pending_reconcile(&self, current_time_ms: i64) -> Result<(), Error> {
+        // Pop the pending state out under the lock (so the lock is not held
+        // while the resumed continuation re-locks it via `store_pending`),
+        // then `try_recv`. If the ack is
         // not ready, put it back and return.
         let pending = {
             let mut guard = match self.pending_reconcile.lock() {
@@ -1441,7 +1463,6 @@ impl ConsumerMembershipManager {
                             revoked,
                             current_time_ms,
                         )
-                        .await
                     },
                     Err(oneshot::error::TryRecvError::Empty) => {
                         // Commit still in flight — put the leg back and return
@@ -1473,7 +1494,6 @@ impl ConsumerMembershipManager {
                             revoked,
                             current_time_ms,
                         )
-                        .await
                     },
                 }
             },
@@ -1494,9 +1514,10 @@ impl ConsumerMembershipManager {
                                 // Java: member stays RECONCILING after a
                                 // callback failure; surface the error so the
                                 // bg task can observe it (Java's
-                                // `revocationResult.completeExceptionally`).
-                                self.abstract_mm.mark_reconciliation_completed();
-                                return Err(e);
+                                // `revocationResult.completeExceptionally`),
+                                // and log "Reconciliation failed." in the
+                                // chain, whichever caller resumed it.
+                                return Err(self.fail_reconciliation(e));
                             },
                         };
                         self.continue_after_revoke(
@@ -1507,7 +1528,6 @@ impl ConsumerMembershipManager {
                             added,
                             current_time_ms,
                         )
-                        .await
                     },
                     Err(oneshot::error::TryRecvError::Empty) => {
                         // Ack not ready — keep waiting (loop continues).
@@ -1523,10 +1543,9 @@ impl ConsumerMembershipManager {
                     },
                     Err(oneshot::error::TryRecvError::Closed) => {
                         // App side dropped the receiver before responding.
-                        self.abstract_mm.mark_reconciliation_completed();
-                        Err(Error::local_illegal_state(
+                        Err(self.fail_reconciliation(Error::local_illegal_state(
                             "Rebalance listener ack receiver dropped before completion",
-                        ))
+                        )))
                     },
                 }
             },
@@ -1557,12 +1576,9 @@ impl ConsumerMembershipManager {
                     });
                     Ok(())
                 },
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    self.abstract_mm.mark_reconciliation_completed();
-                    Err(Error::local_illegal_state(
-                        "Rebalance listener ack receiver dropped before completion",
-                    ))
-                },
+                Err(oneshot::error::TryRecvError::Closed) => Err(self.fail_reconciliation(Error::local_illegal_state(
+                    "Rebalance listener ack receiver dropped before completion",
+                ))),
             },
         }
     }
@@ -1581,7 +1597,7 @@ impl ConsumerMembershipManager {
     /// runs `on_partitions_assigned` if a listener exists, then completes
     /// the ack — resuming at [`Self::continue_after_assign`]. This
     /// guarantees `consumer.assignment()` changes only within `poll()`.
-    async fn continue_after_revoke(
+    fn continue_after_revoke(
         &self,
         revoke_result: Result<(), Error>,
         resolved: Vec<(Uuid, String, Vec<i32>)>,
@@ -1675,9 +1691,10 @@ impl ConsumerMembershipManager {
                 // Per COMMENTS.1.md fix #2: surface listener failure so the
                 // caller (Phase 10 bg task) can observe it. Java's
                 // CompletableFuture chain propagates the error via
-                // `reconciliationResult.whenComplete(error, ...)`.
-                self.abstract_mm.mark_reconciliation_completed();
-                return Err(e);
+                // `reconciliationResult.whenComplete(error, ...)`, which logs
+                // "Reconciliation failed." and marks the reconciliation
+                // completed.
+                return Err(self.fail_reconciliation(e));
             },
         }
 
@@ -1736,7 +1753,7 @@ impl ConsumerMembershipManager {
     #[cfg(test)]
     pub(crate) async fn reconcile_drive_to_completion(&self, can_commit: bool) -> Result<(), Error> {
         for _ in 0..10_000 {
-            self.reconcile(0, can_commit).await?;
+            self.reconcile(0, can_commit)?;
             if !self.has_pending_reconcile() {
                 return Ok(());
             }
@@ -2177,20 +2194,18 @@ impl ConsumerMembershipManager {
     }
 }
 
-/// `RequestManager` impl. `poll` performs a best-effort metadata
-/// resolution but does NOT drive reconcile from here (reconcile is
-/// async; the bg task will drive it via a dedicated path).
+/// `RequestManager` impl. `poll` does NOT drive reconcile from here: the
+/// membership manager is `Arc`-shared and skipped by `entries()`, so the bg
+/// task calls `reconcile(now, false)` explicitly (`run_once` Phase 2.5).
 ///
 /// Java: `AbstractMembershipManager.poll(long currentTimeMs)` calls
 /// `maybeReconcile(false)` and returns `EMPTY`. Our split: the bg task
-/// (Phase 10) is responsible for `.await`ing `reconcile()` — `poll` here
-/// is a sync hook that just returns the empty result, mirroring Java's
-/// "it never returns requests to send itself" semantics.
+/// calls `reconcile()` — `poll` here is a hook that just returns the empty
+/// result, mirroring Java's "it never returns requests to send itself"
+/// semantics.
 impl RequestManager for ConsumerMembershipManager {
     fn poll(&mut self, _current_time_ms: i64) -> PollResult {
-        // Sync poll: cannot await reconcile here. Phase 10 wires the
-        // bg task to invoke `reconcile().await` when state is
-        // RECONCILING.
+        // The bg task's `run_once` Phase 2.5 calls `reconcile()` instead.
         PollResult::empty()
     }
 }
@@ -2789,7 +2804,7 @@ mod tests {
 
         // First reconcile enqueues PartitionsAssigned and stores the
         // pending ack — it does NOT block.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         let env = rx.recv().await.expect("event");
         let (ack, assigned_partitions, added_partitions) = match env.event {
             BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
@@ -2802,7 +2817,7 @@ mod tests {
         // pending: each call returns promptly (NOT frozen) and the state
         // stays RECONCILING (does NOT advance).
         for _ in 0..5 {
-            mgr.reconcile(0, true).await.unwrap();
+            mgr.reconcile(0, true).unwrap();
             assert_eq!(
                 mgr.state(),
                 MemberState::Reconciling,
@@ -2816,7 +2831,7 @@ mod tests {
         let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
         mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
         ack.send(Ok(())).unwrap();
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert_eq!(
             mgr.state(),
             MemberState::Acknowledging,
@@ -2853,7 +2868,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
         // can_commit=false MUST short-circuit (auto-commit gate).
-        mgr.reconcile(0, false).await.unwrap();
+        mgr.reconcile(0, false).unwrap();
 
         // No callback event was emitted, and the state stayed in
         // RECONCILING.
@@ -3500,7 +3515,7 @@ mod tests {
     /// tests that want to observe the parked reconcile state without a
     /// concurrent driver loop.
     async fn reconcile_once(mgr: &ConsumerMembershipManager, can_commit: bool) -> Result<(), Error> {
-        mgr.reconcile(0, can_commit).await
+        mgr.reconcile(0, can_commit)
     }
 
     /// Receive a heartbeat response carrying the given target assignment,
@@ -3820,7 +3835,7 @@ mod tests {
         receive_assignment(&mgr, topic_id, vec![0, 1]);
         assert_eq!(mgr.state(), MemberState::Stable);
         // A reconcile call is a no-op (target == current); no event emitted.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "no reconciliation should be triggered for an identical assignment",
@@ -3858,7 +3873,7 @@ mod tests {
         // But AK 4.3.1 (KAFKA-20106) enqueues a PartitionsAssigned event even
         // with no listener (the app must apply the assignment within poll).
         // The reconcile parks on it; simulate the app applying + acking.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
         match env.event {
             BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
@@ -3869,7 +3884,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         // Drive again to consume the ack and advance the reconciliation.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "no further events after the assignment ack",
@@ -3908,7 +3923,7 @@ mod tests {
         // revocation completes. With no listener registered, the §31
         // revoke handshake short-circuits — but AK 4.3.1 still enqueues a
         // PartitionsAssigned event (empty), which the app applies + acks.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
         match env.event {
             BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
@@ -3918,7 +3933,7 @@ mod tests {
             },
             other => panic!("unexpected event: {other:?}"),
         }
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
@@ -4009,8 +4024,8 @@ mod tests {
     }
 
     // ── Milestone-12 divergence fix (PR #176): pre-rebalance auto-commit is
-    // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and the
-    // AsyncPoll task marks reconciliation-check-complete, letting `poll()`
+    // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and
+    // `process(AsyncPoll)` marks reconciliation-check-complete, letting `poll()`
     // return RETAINED-partition records) WHILE the commit is still in flight,
     // matching Java `ApplicationEventProcessor.java:732-736`. ───────────────
 
@@ -4046,7 +4061,7 @@ mod tests {
 
         // Single reconcile: triggers the commit, parks on `AwaitingCommit`,
         // returns immediately (does NOT await the commit).
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
 
         assert!(has_pending_reconcile_for_test(&mgr), "reconcile must park on a pending leg");
         assert!(
@@ -4107,7 +4122,7 @@ mod tests {
         // First (deterministic, single-task) reconcile parks on the commit:
         // AwaitingCommit stored, and — crucially — NO revoke callback has been
         // enqueued yet (it is gated behind the commit).
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(pending_reconcile_is_awaiting_commit(&mgr));
         assert!(
             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
@@ -4182,7 +4197,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
         // Park on the commit deterministically.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(pending_reconcile_is_awaiting_commit(&mgr));
 
         let mgr = Arc::new(mgr);
@@ -4247,7 +4262,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
         // Park on the commit (single task, no concurrent driver).
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(pending_reconcile_is_awaiting_commit(&mgr));
         assert!(reconciliation_in_progress(&mgr));
 
@@ -4334,7 +4349,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
         // No callback emitted on the re-ack (same resolvable partitions).
         // Java reconciles from the background path here (`maybeReconcile(false)`).
-        mgr.reconcile(0, false).await.unwrap();
+        mgr.reconcile(0, false).unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
             "no callback should fire for the same resolvable assignment",
@@ -4651,7 +4666,7 @@ mod tests {
         // resolvable subset equals the current assignment so the member
         // just acks. topic2 stays awaiting + a metadata update is
         // requested.
-        mgr.reconcile(0, true).await.unwrap();
+        mgr.reconcile(0, true).unwrap();
         assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         assert!(mgr.abstract_mm.metadata.metadata_arc().update_requested());
@@ -4707,7 +4722,7 @@ mod tests {
 
         // First reconcile from the background task acks the resolvable fragment, no need to wait for
         // consumer.poll.
-        mgr.reconcile(0, false).await.unwrap();
+        mgr.reconcile(0, false).unwrap();
         assert_eq!(MemberState::Acknowledging, mgr.state());
 
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
@@ -4718,9 +4733,9 @@ mod tests {
         // Until a new target arrives or new metadata resolves topicId2, further reconciles from either
         // path must stay in RECONCILING - no redundant acks.
         for _ in 0..5 {
-            mgr.reconcile(0, false).await.unwrap();
+            mgr.reconcile(0, false).unwrap();
             assert_eq!(MemberState::Reconciling, mgr.state());
-            mgr.reconcile(0, true).await.unwrap();
+            mgr.reconcile(0, true).unwrap();
             assert_eq!(MemberState::Reconciling, mgr.state());
         }
         // The value the redundant acks used to change: the local epoch is the
@@ -5935,7 +5950,7 @@ mod tests {
         .unwrap();
         // Drive the parked reconcile so the exceptional ack clears the pending
         // state (continue_after_assign observes the callback error and returns).
-        let _ = mgr.reconcile(0, true).await;
+        let _ = mgr.reconcile(0, true);
         assert!(!has_pending_reconcile_for_test(&mgr));
 
         // Complete the leave and rejoin.
@@ -7089,11 +7104,13 @@ mod tests {
     // (`CommitRequestManager.maybeAutoCommitSyncBeforeRebalance`) is sent in
     // the same iteration, and its `whenComplete` continuation runs inside
     // `client.poll` when the response is read. Rust runs the same
-    // `reconcile(.., true)` from the `tokio::spawn`ed AsyncPoll task, after
-    // the loop has already polled the commit manager and while it is parked in
-    // its network poll; the loop parks on the `Notify` production wires into
-    // `CommitRequestManager::set_completion_notify`, so a queued request or a
-    // resolved commit that does not poke it waits for the poll timeout
+    // `reconcile(.., true)` on the bg task during the Phase 1 event drain,
+    // before the commit manager's Phase 2 poll, so the queued request is sent
+    // in the same `run_once` too; the wake on enqueue is defensive (it only
+    // stores a permit). The commit result, by contrast, is resolved by a
+    // spawned retry driver while the loop is parked on the `Notify` production
+    // wires into `CommitRequestManager::set_completion_notify`, so a resolved
+    // commit that does not poke it waits for the poll timeout
     // (`MAX_POLL_TIMEOUT_MS`, 5 s) or an unrelated wake.
 
     /// A member that owns `topic1-0` with a consumed offset and receives an
@@ -7123,15 +7140,16 @@ mod tests {
         (Arc::new(mgr), notify)
     }
 
-    /// The pre-rebalance auto-commit queued from the AsyncPoll task must wake
-    /// the background loop, so it is sent at once as Java sends it.
+    /// The pre-rebalance auto-commit queued by the AsyncPoll reconcile pokes
+    /// the background loop. The AsyncPoll reconcile runs on the bg task before
+    /// the commit manager's poll, so the request is sent in the same
+    /// `run_once` anyway; this pins the defensive wake.
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_before_rebalance_queued_from_async_poll_wakes_background_task() {
         let (mgr, notify) = member_revoking_with_consumed_offset();
-        // As `process_async_poll` does: `reconcile(poll_time_ms, true)` on a
-        // spawned task.
+        // The call `process_async_poll` makes: `reconcile(poll_time_ms, true)`.
         let m = Arc::clone(&mgr);
-        tokio::spawn(async move { m.reconcile(0, true).await })
+        tokio::spawn(async move { m.reconcile(0, true) })
             .await
             .expect("reconcile task")
             .expect("reconcile");
@@ -7144,9 +7162,8 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
             .await
             .expect(
-                "queuing the pre-rebalance OffsetCommit from the spawned AsyncPoll task did not wake the background \
-             loop, so the request waits for the network poll timeout; Java sends it in the runOnce that \
-             processes the AsyncPollEvent",
+                "queuing the pre-rebalance OffsetCommit from the AsyncPoll reconcile did not poke the background \
+             loop (the defensive wake on enqueue)",
             );
     }
 
@@ -7158,7 +7175,7 @@ mod tests {
     async fn auto_commit_before_rebalance_completion_wakes_background_task() {
         let (mgr, notify) = member_revoking_with_consumed_offset();
         let m = Arc::clone(&mgr);
-        tokio::spawn(async move { m.reconcile(0, true).await })
+        tokio::spawn(async move { m.reconcile(0, true) })
             .await
             .expect("reconcile task")
             .expect("reconcile");
