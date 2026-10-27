@@ -34,8 +34,8 @@ constants, the private nested ``TopicMetadata`` is :class:`_TopicMetadata`,
 ``_CoordinatorKey`` and ``_ConsumerProtocol``, ``System.currentTimeMillis()`` is
 :func:`_current_time_millis`. JDK
 behaviour the mock's bodies rely on is kept: ``List.get`` out of range raises
-``IndexError`` with Java's ``IndexOutOfBoundsException`` message, ``List.subList``
-checks its range as Java does, ``Integer.parseInt`` raises ``IllegalArgumentError``
+the root ``IndexOutOfBoundsError`` with Java's ``IndexOutOfBoundsException`` message,
+``List.subList`` checks its range as Java does, ``Integer.parseInt`` raises ``IllegalArgumentError``
 (``NumberFormatException``), and a ``null`` the mock itself looks up and dereferences
 (Java's ``NullPointerException``) raises ``IllegalStateError`` naming the state the
 mock lacks, or ``TypeError`` for an option left ``None``. Java's ``UnsupportedOperationException``
@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, overload
 from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka.admin._conversions import element, non_null
 from confluent_kafka.illegal_state_error import IllegalStateError
+from confluent_kafka.index_out_of_bounds_error import IndexOutOfBoundsError
 from confluent_kafka._java import java_str, parse_int
 from confluent_kafka.admin._futures import Async, Sync
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
@@ -233,15 +234,15 @@ class _CopiesList(list[_T]):
 
 
 def _get(items: Sequence[_T], index: int) -> _T:
-    """Java's ``List.get(index)``: ``IndexError`` with the ``IndexOutOfBoundsException``
+    """Java's ``List.get(index)``: ``IndexOutOfBoundsError`` with the ``IndexOutOfBoundsException``
     message of the Java list behind ``items`` for an index out of range, a negative one
     included: ``Collections.nCopies`` / ``singletonList``'s (``"Index: -1, Size: 1"``)
     for a :class:`_CopiesList`, else ``ArrayList``'s (``"Index -1 out of bounds for
     length 1"``)."""
     if not 0 <= index < len(items):
         if isinstance(items, _CopiesList):
-            raise IndexError(f"Index: {index}, Size: {len(items)}")
-        raise IndexError(f"Index {index} out of bounds for length {len(items)}")
+            raise IndexOutOfBoundsError(message=f"Index: {index}, Size: {len(items)}")
+        raise IndexOutOfBoundsError(message=f"Index {index} out of bounds for length {len(items)}")
     return items[index]
 
 
@@ -256,9 +257,9 @@ def _sub_list(items: list[_T], from_index: int, to_index: int) -> list[_T]:
     """Java's ``List.subList(fromIndex, toIndex)`` with its range check
     (``AbstractList.subListRangeCheck``); a copy, as nothing else holds the list."""
     if from_index < 0:
-        raise IndexError(f"fromIndex = {from_index}")
+        raise IndexOutOfBoundsError(message=f"fromIndex = {from_index}")
     if to_index > len(items):
-        raise IndexError(f"toIndex = {to_index}")
+        raise IndexOutOfBoundsError(message=f"toIndex = {to_index}")
     if from_index > to_index:
         raise IllegalArgumentError(message=f"fromIndex({from_index}) > toIndex({to_index})")
     return items[from_index:to_index]
@@ -440,7 +441,7 @@ class MockAdminClientBuilderCore:
         return self
 
     def controller(self, *, index: int) -> Self:
-        """Java's ``brokers.get(index)``: ``IndexError`` for an index out of range."""
+        """Java's ``brokers.get(index)``: ``IndexOutOfBoundsError`` for an index out of range."""
         self._controller = _get(self._brokers, index)
         return self
 
@@ -714,7 +715,7 @@ class MockAdminClientCore:
             return list(self._brokers)
 
     def broker(self, *, index: int) -> Node:
-        """The broker at ``index`` (``IndexError`` when out of range)."""
+        """The broker at ``index`` (``IndexOutOfBoundsError`` when out of range)."""
         with self._lock:
             return _get(self._brokers, index)
 
@@ -1276,7 +1277,7 @@ class MockAdminClientCore:
     def _create_delegation_token(self, options: CreateDelegationTokenOptions
                                  ) -> CreateDelegationTokenResult[Any]:
         """A token owned by the first renewer, every renewer of the ``User`` type;
-        ``options.renewers().get(0)`` on no renewer raises ``IndexError`` with the
+        ``options.renewers().get(0)`` on no renewer raises ``IndexOutOfBoundsError`` with the
         message of the options' default ``LinkedList``, ``"Index: 0, Size: 0"``.
 
         *(deviation: when the user sets an empty renewers list, Java's
@@ -1311,7 +1312,7 @@ class MockAdminClientCore:
                                                             kind=self._kind)
             token_id = java_str(Uuid.random_uuid())
             if not renewers:  # LinkedList.get(0)
-                raise IndexError("Index: 0, Size: 0")
+                raise IndexOutOfBoundsError(message="Index: 0, Size: 0")
             token_info = TokenInformation(
                 token_id=token_id, owner=renewers[0], renewers=renewers,
                 issue_timestamp=_current_time_millis(),

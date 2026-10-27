@@ -193,6 +193,7 @@ ERRORS: tuple[tuple[str, str, str], ...] = (
     ("confluent_kafka.execution_error", "ExecutionError", "java.util.concurrent.ExecutionException"),
     ("confluent_kafka.illegal_argument_error", "IllegalArgumentError", "java.lang.IllegalArgumentException"),
     ("confluent_kafka.illegal_state_error", "IllegalStateError", "java.lang.IllegalStateException"),
+    ("confluent_kafka.index_out_of_bounds_error", "IndexOutOfBoundsError", "java.lang.IndexOutOfBoundsException"),
     ("confluent_kafka.no_such_element_error", "NoSuchElementError", "java.util.NoSuchElementException"),
     ("confluent_kafka.producer.buffer_exhausted_error", "BufferExhaustedError", "org.apache.kafka.clients.producer.BufferExhaustedException"),
     ("confluent_kafka.timeout_error", "TimeoutError", "java.util.concurrent.TimeoutException"),

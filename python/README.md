@@ -48,7 +48,7 @@ from confluent_kafka.common.serialization import (
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
     TimeoutError, NoSuchElementError, ExecutionError, UnsupportedOperationError,
-    Duration,
+    IndexOutOfBoundsError, Duration,
 )
 ```
 
@@ -293,8 +293,8 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`) live at the
-package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
+`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`,
+`IndexOutOfBoundsError`) live at the package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
 which the mocks raise for what Java's mocks do not implement
 (`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"), and the
 client's core for what this client does not support yet; it is not a `KafkaError`, so

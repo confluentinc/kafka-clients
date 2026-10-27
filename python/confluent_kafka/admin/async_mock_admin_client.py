@@ -227,7 +227,7 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         """
 
         def build(self) -> AsyncMockAdminClient:
-            """The mock built from this builder's fields (``IndexError`` with no
+            """The mock built from this builder's fields (``IndexOutOfBoundsError`` with no
             broker, as Java's ``brokers.get(0)``)."""
             return AsyncMockAdminClient._new(**self._build_args())
 

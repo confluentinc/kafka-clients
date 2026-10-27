@@ -252,7 +252,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
         """
 
         def build(self) -> MockAdminClient:
-            """The mock built from this builder's fields (``IndexError`` with no
+            """The mock built from this builder's fields (``IndexOutOfBoundsError`` with no
             broker, as Java's ``brokers.get(0)``)."""
             return MockAdminClient._new(**self._build_args())
 
@@ -543,7 +543,7 @@ class MockAdminClient(MockAdminClientCore, Admin):
         """Create a token owned by the first of ``options.renewers()``, issued now, its
         maximum timestamp ``options.max_lifetime_ms()``, its HMAC its id's bytes; a
         renewer not of the ``User`` type fails the future with
-        ``InvalidPrincipalTypeError``, and no renewer raises ``IndexError``, as
+        ``InvalidPrincipalTypeError``, and no renewer raises ``IndexOutOfBoundsError``, as
         Java's mock (``options.owner()`` is ignored)."""
         return self._create_delegation_token(
             _conversions.options_or_new(options, CreateDelegationTokenOptions))

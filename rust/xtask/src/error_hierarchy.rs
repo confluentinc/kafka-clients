@@ -688,6 +688,15 @@ const JDK_BUILTINS: &[(&str, &str, &str, &[JdkCtor])] = &[
         "",
         &[&[], &[("String", "s")]],
     ),
+    // Java's `IndexOutOfBoundsException`, which a mock's `List.get` / `subList` throws.
+    // Its `(int index)` constructor, which builds its own message from the index, is
+    // left out: the translated code never calls it. The core models no id for it.
+    (
+        "java.lang.IndexOutOfBoundsException",
+        "java.lang.RuntimeException",
+        "",
+        &[&[], &[("String", "s")]],
+    ),
     // `java.lang.NullPointerException` has no class: a `null` argument Java rejects
     // raises Python's own `TypeError` (CLAUDE.md, Python Binding Conventions, Types).
 ];
@@ -2326,12 +2335,15 @@ fn py_base(g: &Graph, info: &ClassInfo) -> String {
         // `TimeoutException` subclasses `builtins.TimeoutError`, and
         // `IllegalArgumentException` `ValueError` and `RuntimeError`, in that order:
         // Python's class for a bad argument value, and Java's `RuntimeException` chain
-        // (CLAUDE.md, Types); `UnsupportedOperationException` subclasses
+        // (CLAUDE.md, Types); `IndexOutOfBoundsException` `IndexError` and
+        // `RuntimeError`, in that order; `UnsupportedOperationException` subclasses
         // `NotImplementedError`.
         if info.java_fqn == "java.util.concurrent.TimeoutException" {
             "builtins.TimeoutError".into()
         } else if info.java_fqn == "java.lang.IllegalArgumentException" {
             "ValueError, RuntimeError".into()
+        } else if info.java_fqn == "java.lang.IndexOutOfBoundsException" {
+            "IndexError, RuntimeError".into()
         } else if info.java_fqn == "java.lang.UnsupportedOperationException" {
             // `NotImplementedError` subclasses `RuntimeError`, so Java's chain is kept.
             "NotImplementedError".into()
@@ -3797,10 +3809,11 @@ mod tests {
     #[test]
     fn graph_builds_and_cross_checks() {
         let classes = build_graph(&repo_root()).expect("graph must build and cross-check");
-        // 166 FFI ids (one class each) + 5 abstract + KafkaException + 2 id-less built-ins
-        // (NoSuchElementException, ExecutionException; NullPointerException is Python's
-        // TypeError, and UnsupportedOperationException has the id LOCAL_UNSUPPORTED_OPERATION).
-        assert_eq!(classes.len(), 174);
+        // 166 FFI ids (one class each) + 5 abstract + KafkaException + 3 id-less built-ins
+        // (NoSuchElementException, ExecutionException, IndexOutOfBoundsException;
+        // NullPointerException is Python's TypeError, and UnsupportedOperationException
+        // has the id LOCAL_UNSUPPORTED_OPERATION).
+        assert_eq!(classes.len(), 175);
         assert_eq!(classes.values().filter(|c| c.is_abstract).count(), 5);
         let with_id = classes.values().filter(|c| c.ffi_id.is_some()).count();
         assert_eq!(with_id, 167, "166 bridge classes plus the base's UNKNOWN_SERVER_ERROR");
@@ -3825,6 +3838,7 @@ mod tests {
         assert_eq!(base("java.util.concurrent.ExecutionException"), "Exception");
         assert_eq!(base("java.util.NoSuchElementException"), "RuntimeError");
         assert_eq!(base("java.lang.IllegalArgumentException"), "ValueError, RuntimeError");
+        assert_eq!(base("java.lang.IndexOutOfBoundsException"), "IndexError, RuntimeError");
         assert_eq!(
             base("org.apache.kafka.common.requests.CorrelationIdMismatchException"),
             "IllegalStateError"
