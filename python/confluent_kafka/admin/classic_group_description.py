@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, overload
 
-from confluent_kafka._args import MISSING
+from confluent_kafka._args import MISSING, copy_of
 
 from confluent_kafka._java import java_str
 
@@ -95,7 +95,7 @@ class ClassicGroupDescription:
         self._protocol = protocol
         self._protocol_data = "" if protocol_data is None else protocol_data
         self._members: tuple[MemberDescription, ...] = (
-            () if members is None else tuple(members))
+            () if members is None else copy_of(members, "members"))
         self._state = state
         self._coordinator = coordinator
         self._authorized_operations: frozenset[AclOperation] | None = (
@@ -136,6 +136,9 @@ class ClassicGroupDescription:
 
     def is_simple_consumer_group(self) -> bool:
         """If the group is a simple consumer group or not."""
+        if self._protocol is None:
+            # Java's protocol.isEmpty() dereferences it (Types).
+            raise TypeError("protocol must not be None")
         return self._protocol == ""
 
     def members(self) -> list[MemberDescription]:

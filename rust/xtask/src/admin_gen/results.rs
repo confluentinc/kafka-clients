@@ -1772,7 +1772,9 @@ impl Renderer<'_> {
         } else {
             p.clone()
         };
-        if f.optional {
+        // A copy keeps a `None` as `None`, as Java's constructor stores a null
+        // (CLAUDE.md, Python Binding Conventions, Class family).
+        if f.optional || value != p {
             format!("{target}._{} = None if {p} is None else {value}", f.py)
         } else {
             format!("{target}._{} = {value}", f.py)
@@ -1891,13 +1893,32 @@ impl Renderer<'_> {
         if !paras.is_empty() || !fields.is_empty() {
             body.push(docstring(8, &paras, &fields));
         }
-        for (p, f) in self.r.ctor.clone() {
-            let field = self.field(&f);
-            body.push(format!("        {}", self.store("self", &p, &field)));
-        }
         let [f] = self.r.fields.as_slice() else {
             return Err(self.st("a public constructor with several fields".into()));
         };
+        // The kind is read from the futures, so they are required: the one
+        // constructor that does not store a `None` (Class family).
+        let (f_py, f_optional) = (f.py.clone(), f.optional);
+        let mut guarded = None;
+        if !f_optional {
+            let ctor = self.r.ctor.clone();
+            if let Some((p, _)) = ctor.iter().find(|(_, g)| self.field(g).py == f_py) {
+                let p = snake(&p.name);
+                body.push(format!(
+                    "        if {p} is None:\n            raise TypeError(\"{p} must not be None\")"
+                ));
+                guarded = Some(p);
+            }
+        }
+        for (p, f) in self.r.ctor.clone() {
+            let field = self.field(&f);
+            let mut store = self.store("self", &p, &field);
+            if let Some(g) = &guarded {
+                store = store.replace(&format!("None if {g} is None else "), "");
+            }
+            body.push(format!("        {store}"));
+        }
+        let f = &self.r.fields[0];
         let futures = if f.ty.is_map() {
             format!("self._{}.values()", f.py)
         } else {
@@ -2228,8 +2249,9 @@ impl Renderer<'_> {
         let params = self.nested_params(n, false)?;
         s.push_str(&py_def(8, "__init__", &params, "None", false));
         for (f, t) in &n.fields {
+            // A copy keeps a `None` as `None`, as Java stores a null (Class family).
             let v = if matches!(t.name.as_str(), "List" | "Collection") {
-                format!("list({})", snake(f))
+                format!("None if {0} is None else list({0})", snake(f))
             } else {
                 snake(f)
             };
@@ -3105,7 +3127,10 @@ mod tests {
             ),
             "{py}"
         );
-        assert!(py.contains("result._futures = dict(futures)"), "{py}");
+        assert!(
+            py.contains("result._futures = None if futures is None else dict(futures)"),
+            "{py}"
+        );
         assert!(!pyi.contains("| None"), "{pyi}");
     }
 

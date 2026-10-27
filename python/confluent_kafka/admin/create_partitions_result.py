@@ -50,7 +50,7 @@ class CreatePartitionsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> CreatePartitionsResult[Any]:
         """Java's package-private ``CreatePartitionsResult(values)``."""
         result = cls.__new__(cls)
-        result._values = dict(values)
+        result._values = None if values is None else dict(values)
         result._kind = kind
         return result
 

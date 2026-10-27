@@ -84,12 +84,18 @@ class TokenInformation:
         return self._owner
 
     def owner_as_string(self) -> str:
+        if self._owner is None:
+            # Java's owner.toString() dereferences it (Types).
+            raise TypeError("owner must not be None")
         return str(self._owner)
 
     def token_requester(self) -> KafkaPrincipal:
         return self._token_requester
 
     def token_requester_as_string(self) -> str:
+        if self._token_requester is None:
+            # Java's tokenRequester.toString() dereferences it (Types).
+            raise TypeError("token_requester must not be None")
         return str(self._token_requester)
 
     def renewers(self) -> list[KafkaPrincipal]:

@@ -51,6 +51,8 @@ class AlterClientQuotasResult(Generic[KindT]):
 
         :param futures: maps entity to its alteration result
         """
+        if futures is None:
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -64,7 +66,7 @@ class AlterClientQuotasResult(Generic[KindT]):
         :param futures: maps entity to its alteration result
         """
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 
