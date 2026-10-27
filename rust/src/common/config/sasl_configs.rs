@@ -33,6 +33,8 @@
 //! - `SASL_CLIENT_CALLBACK_HANDLER_CLASS` — No pluggable callback handlers
 //! - `SASL_LOGIN_CLASS` — No pluggable login implementations
 
+use std::borrow::Cow;
+
 use crate::common::Error;
 use crate::common::config::abstract_config::ValuesReader;
 use crate::common::config::config_def::{
@@ -174,13 +176,16 @@ impl SaslConfigs {
     /// `serviceName=` / `foo.username=` when searching for `name=` / `username=`
     /// (the char before the substring is a letter / `.`, not whitespace).
     ///
-    /// The returned slice is the raw inner content between the quotes: `\`-escapes
-    /// are honored for **boundary** detection (an escaped quote neither ends the
-    /// value nor misaligns later options) but are not expanded, since the value is
-    /// borrowed from `jaas` rather than owned.
+    /// A quoted value has its `\`-escapes decoded as Java's `StreamTokenizer`
+    /// decodes them inside a string constant (see [`Self::decode_quoted_escapes`]),
+    /// so `password="b\\a\"ck"` yields `b\a"ck` as in Java; an escaped quote
+    /// neither ends the value nor misaligns later options. A bare value is
+    /// returned as written: Java's tokenizer decodes escapes only in quoted
+    /// strings.
     ///
-    /// Returns a reference into the original `jaas` string if found, `None` otherwise.
-    fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<&'a str> {
+    /// Returns the value borrowed from `jaas` when there is nothing to decode,
+    /// an owned copy otherwise, and `None` if the option is absent.
+    fn parse_jaas_option<'a>(jaas: &'a str, key: &str) -> Option<Cow<'a, str>> {
         let bytes = jaas.as_bytes();
         let n = bytes.len();
 
@@ -250,7 +255,7 @@ impl SaslConfigs {
                                 continue;
                             }
                             if bytes[k] == quote {
-                                return Some(&jaas[value_start..k]);
+                                return Some(SaslConfigs::decode_quoted_escapes(&jaas[value_start..k]));
                             }
                             k += 1;
                         }
@@ -263,7 +268,7 @@ impl SaslConfigs {
                         .find(|ch: char| ch.is_ascii_whitespace() || ch == ';')
                         .map(|e| j + e)
                         .unwrap_or(n);
-                    return Some(&jaas[j..value_end]);
+                    return Some(Cow::Borrowed(&jaas[j..value_end]));
                 }
             }
 
@@ -273,11 +278,72 @@ impl SaslConfigs {
         None
     }
 
+    /// Decodes the backslash escapes of a quoted JAAS option value.
+    ///
+    /// Java parses `sasl.jaas.config` with a `java.io.StreamTokenizer`
+    /// (`JaasConfig.java:52-58`), which, as its documentation says, recognizes
+    /// "the usual escape sequences" in a string constant and converts each to
+    /// the character it stands for:
+    ///
+    /// - `\a`, `\b`, `\f`, `\n`, `\r`, `\t` and `\v` are the control
+    ///   characters U+0007, U+0008, U+000C, U+000A, U+000D, U+0009 and U+000B;
+    /// - `\` followed by one to three octal digits is the character with that
+    ///   code, three digits being read only when the first is `0` to `3`, so
+    ///   the code stays below 256;
+    /// - `\` followed by any other character is that character, so `\\`,
+    ///   `\"` and `\'` are a backslash and the two quotes.
+    ///
+    /// A value without a backslash is returned borrowed.
+    fn decode_quoted_escapes(raw: &str) -> Cow<'_, str> {
+        if !raw.contains('\\') {
+            return Cow::Borrowed(raw);
+        }
+        let mut decoded = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                decoded.push(c);
+                continue;
+            }
+            // The scanner ends a quoted value only on an unescaped quote, so a
+            // backslash is always followed by the character it escapes.
+            let Some(escaped) = chars.next() else {
+                break;
+            };
+            match escaped {
+                'a' => decoded.push('\u{7}'),
+                'b' => decoded.push('\u{8}'),
+                'f' => decoded.push('\u{c}'),
+                'n' => decoded.push('\n'),
+                'r' => decoded.push('\r'),
+                't' => decoded.push('\t'),
+                'v' => decoded.push('\u{b}'),
+                '0'..='7' => {
+                    let mut code = escaped as u32 - '0' as u32;
+                    if let Some(second) = chars.peek().and_then(|c| c.to_digit(8)) {
+                        chars.next();
+                        code = code * 8 + second;
+                        if escaped <= '3'
+                            && let Some(third) = chars.peek().and_then(|c| c.to_digit(8))
+                        {
+                            chars.next();
+                            code = code * 8 + third;
+                        }
+                    }
+                    // At most 0o377, a Latin-1 code point.
+                    decoded.extend(char::from_u32(code));
+                },
+                other => decoded.push(other),
+            }
+        }
+        Cow::Owned(decoded)
+    }
+
     /// Resolve the effective username, checking the `username` field first,
     /// then parsing from `jaas_config` if present.
-    pub(crate) fn resolve_username(&self) -> Option<&str> {
+    pub(crate) fn resolve_username(&self) -> Option<Cow<'_, str>> {
         if let Some(ref u) = self.username {
-            return Some(u.as_str());
+            return Some(Cow::Borrowed(u.as_str()));
         }
         if let Some(ref jaas) = self.jaas_config {
             return SaslConfigs::parse_jaas_option(jaas.value(), "username");
@@ -290,9 +356,9 @@ impl SaslConfigs {
     ///
     /// Returns the **plaintext**: the authenticator must send it, just as
     /// Java's `PlainLoginModule` yields a plain `String`. Never log the result.
-    pub(crate) fn resolve_password(&self) -> Option<&str> {
+    pub(crate) fn resolve_password(&self) -> Option<Cow<'_, str>> {
         if let Some(ref p) = self.password {
-            return Some(p.value());
+            return Some(Cow::Borrowed(p.value()));
         }
         if let Some(ref jaas) = self.jaas_config {
             return SaslConfigs::parse_jaas_option(jaas.value(), "password");
@@ -528,13 +594,13 @@ mod tests {
     #[test]
     fn test_resolve_username_from_direct_field() {
         let config = SaslConfigs { username: Some("alice".to_owned()), ..SaslConfigs::default() };
-        assert_eq!(config.resolve_username(), Some("alice"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
     }
 
     #[test]
     fn test_resolve_password_from_direct_field() {
         let config = SaslConfigs { password: Some(Password::new("secret")), ..SaslConfigs::default() };
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -546,7 +612,7 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
     }
 
     #[test]
@@ -558,7 +624,7 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -572,15 +638,15 @@ mod tests {
             password: Some(Password::new("direct_pass")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("direct_user"));
-        assert_eq!(config.resolve_password(), Some("direct_pass"));
+        assert_eq!(config.resolve_username().as_deref(), Some("direct_user"));
+        assert_eq!(config.resolve_password().as_deref(), Some("direct_pass"));
     }
 
     #[test]
     fn test_resolve_from_empty_config() {
         let config = SaslConfigs::default();
-        assert_eq!(config.resolve_username(), None);
-        assert_eq!(config.resolve_password(), None);
+        assert_eq!(config.resolve_username().as_deref(), None);
+        assert_eq!(config.resolve_password().as_deref(), None);
     }
 
     #[test]
@@ -589,8 +655,8 @@ mod tests {
             jaas_config: Some(Password::new("PlainLoginModule required username=alice password=secret;")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -599,8 +665,8 @@ mod tests {
             jaas_config: Some(Password::new("PlainLoginModule required username=\"alice\";")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), None);
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), None);
     }
 
     #[test]
@@ -612,14 +678,14 @@ mod tests {
         // The first quote for username opens, and the next quote is in " password=" —
         // so we get "alice password=" as the value up to the next quote.
         // This is technically malformed input; we just get whatever is between quotes.
-        assert_eq!(config.resolve_username(), Some("alice password="));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice password="));
     }
 
     #[test]
     fn test_jaas_config_empty_string() {
         let config = SaslConfigs { jaas_config: Some(Password::new("")), ..SaslConfigs::default() };
-        assert_eq!(config.resolve_username(), None);
-        assert_eq!(config.resolve_password(), None);
+        assert_eq!(config.resolve_username().as_deref(), None);
+        assert_eq!(config.resolve_password().as_deref(), None);
     }
 
     #[test]
@@ -628,8 +694,8 @@ mod tests {
             jaas_config: Some(Password::new("PlainLoginModule required;")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), None);
-        assert_eq!(config.resolve_password(), None);
+        assert_eq!(config.resolve_username().as_deref(), None);
+        assert_eq!(config.resolve_password().as_deref(), None);
     }
 
     #[test]
@@ -640,8 +706,8 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("bob"));
-        assert_eq!(config.resolve_password(), Some("pass123"));
+        assert_eq!(config.resolve_username().as_deref(), Some("bob"));
+        assert_eq!(config.resolve_password().as_deref(), Some("pass123"));
     }
 
     #[test]
@@ -653,7 +719,7 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("right"));
+        assert_eq!(config.resolve_username().as_deref(), Some("right"));
     }
 
     #[test]
@@ -665,8 +731,8 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -675,8 +741,8 @@ mod tests {
             jaas_config: Some(Password::new("PlainLoginModule required username='alice' password='secret';")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -687,8 +753,8 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -697,8 +763,8 @@ mod tests {
             jaas_config: Some(Password::new("PlainLoginModule required username = alice password = secret;")),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("alice"));
-        assert_eq!(config.resolve_password(), Some("secret"));
+        assert_eq!(config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(config.resolve_password().as_deref(), Some("secret"));
     }
 
     #[test]
@@ -713,8 +779,8 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("right"));
-        assert_eq!(config.resolve_password(), Some("pass"));
+        assert_eq!(config.resolve_username().as_deref(), Some("right"));
+        assert_eq!(config.resolve_password().as_deref(), Some("pass"));
     }
 
     #[test]
@@ -740,8 +806,8 @@ mod tests {
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("right"));
-        assert_eq!(config.resolve_password(), Some("username=x"));
+        assert_eq!(config.resolve_username().as_deref(), Some("right"));
+        assert_eq!(config.resolve_password().as_deref(), Some("username=x"));
     }
 
     #[test]
@@ -749,16 +815,65 @@ mod tests {
         // An escaped quote inside a quoted value must not terminate the value
         // (which would truncate it) nor misalign the scan of later options. The
         // password value here contains a `\"`; `username` after it must still
-        // resolve to `right`, and the password slice must include the whole
-        // escaped run (raw, not expanded).
+        // resolve to `right`, and the password is the decoded `a"b`.
         let config = SaslConfigs {
             jaas_config: Some(Password::new(
                 "PlainLoginModule required password=\"a\\\"b\" username=\"right\";",
             )),
             ..SaslConfigs::default()
         };
-        assert_eq!(config.resolve_username(), Some("right"));
-        assert_eq!(config.resolve_password(), Some("a\\\"b"));
+        assert_eq!(config.resolve_username().as_deref(), Some("right"));
+        assert_eq!(config.resolve_password().as_deref(), Some("a\"b"));
+    }
+
+    fn jaas_password(value: &str) -> Option<String> {
+        let config = SaslConfigs {
+            jaas_config: Some(Password::new(format!(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password={value};"
+            ))),
+            ..SaslConfigs::default()
+        };
+        config.resolve_password().map(Cow::into_owned)
+    }
+
+    /// Quoted values decode their escapes as Java's `JaasConfig` does. Each
+    /// expected value is what `new JaasConfig("KafkaClient", jaas)` returns for
+    /// the `password` option on Kafka 4.4.0, printed code point by code point.
+    #[test]
+    fn test_jaas_config_quoted_value_escapes_are_decoded_like_java() {
+        let cases: &[(&str, &str)] = &[
+            // A backslash and a double quote, escaped as Java requires.
+            (r#""b\\a\"ck""#, "b\\a\"ck"),
+            // An escaped single quote inside single quotes.
+            (r"'it\'s'", "it's"),
+            // The control-character escapes.
+            (r#""\a\b\f\n\r\t\v""#, "\u{7}\u{8}\u{c}\n\r\t\u{b}"),
+            // Octal escapes take three digits only when the first is 0 to 3
+            // (`\477` is `\47` then `7`), stop at a non-octal digit (`\08` is
+            // NUL then `8`), and any other escaped character is itself (`\8`,
+            // `\q`).
+            (r#""\101\0\477\8\q\08\377\400""#, "A\u{0}'78q\u{0}8\u{ff} 0"),
+            (r#""tab\there""#, "tab\there"),
+            // A non-ASCII character, plain and escaped.
+            (r#""é\é""#, "éé"),
+            // A Windows path written with doubled backslashes.
+            (r#""C:\\temp\\x""#, "C:\\temp\\x"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(jaas_password(value).as_deref(), Some(*expected), "password={value}");
+        }
+    }
+
+    /// A value without a backslash is not copied.
+    #[test]
+    fn test_jaas_config_value_without_escapes_is_borrowed() {
+        let jaas = "PlainLoginModule required username=\"alice\" password='secret';";
+        for key in ["username", "password"] {
+            assert!(
+                matches!(SaslConfigs::parse_jaas_option(jaas, key), Some(Cow::Borrowed(_))),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -805,8 +920,8 @@ mod tests {
         assert!(!pretty.contains("PlainLoginModule"), "{pretty}");
 
         // The authenticator still receives the plaintext.
-        assert_eq!(config.resolve_username(), Some("direct-user"));
-        assert_eq!(config.resolve_password(), Some("direct-S3cr3t-Pa55"));
+        assert_eq!(config.resolve_username().as_deref(), Some("direct-user"));
+        assert_eq!(config.resolve_password().as_deref(), Some("direct-S3cr3t-Pa55"));
 
         // Credentials carried only by the JAAS string are hidden as well, and
         // still resolve to plaintext.
@@ -815,7 +930,7 @@ mod tests {
         assert!(!rendered.contains("jaas-S3cr3t-Pa55"), "{rendered}");
         assert!(!rendered.contains("jaas-user"), "{rendered}");
         assert!(rendered.contains("jaas_config: Some([hidden])"), "{rendered}");
-        assert_eq!(jaas_only.resolve_username(), Some("jaas-user"));
-        assert_eq!(jaas_only.resolve_password(), Some("jaas-S3cr3t-Pa55"));
+        assert_eq!(jaas_only.resolve_username().as_deref(), Some("jaas-user"));
+        assert_eq!(jaas_only.resolve_password().as_deref(), Some("jaas-S3cr3t-Pa55"));
     }
 }

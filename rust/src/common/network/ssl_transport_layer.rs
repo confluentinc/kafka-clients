@@ -47,8 +47,10 @@
 //! Closed
 //! ```
 
-use super::auth_io_error;
+use super::authentication_io_error;
 use super::{InterestOps, TransportLayer};
+use crate::common::Error;
+use crate::common::errors::SslAuthenticationError;
 
 use std::future::Future;
 use std::io;
@@ -59,6 +61,20 @@ use std::pin::Pin;
 use rustls::pki_types::ServerName;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+
+/// A rejected TLS handshake, or a failure in the TLS 1.3 post-handshake window,
+/// raised as Java's `SslAuthenticationException` (`SslTransportLayer.java:595,
+/// :901`): an `AuthenticationException`, so the client stops instead of
+/// reconnecting, and its own class, so the application can tell a rejected
+/// certificate from rejected SASL credentials.
+///
+/// Java's messages are `"SSL handshake failed"` and `"Failed to process
+/// post-handshake messages"`, with the `SSLException` as the cause. Here the
+/// TLS library's reason follows the message instead, so it reaches the logs and
+/// the application without walking a cause chain.
+fn ssl_authentication_io_error(message: String) -> io::Error {
+    authentication_io_error(Error::SslAuthentication(SslAuthenticationError::new(message)))
+}
 
 /// Maximum number of plaintext bytes coalesced into rustls per `write_vectored`/
 /// `write` call. Caps the amount of CPU work spent encrypting ahead of a TCP
@@ -186,7 +202,7 @@ impl SslTransportLayer {
         if c.post_handshake {
             // Java also moves to HANDSHAKE_FAILED here, so the window closes.
             c.post_handshake = false;
-            auth_io_error(format!("Failed to process post-handshake messages: {e}"))
+            ssl_authentication_io_error(format!("Failed to process post-handshake messages: {e}"))
         } else {
             io::Error::other(format!("TLS error: {e}"))
         }
@@ -366,7 +382,7 @@ impl TransportLayer for SslTransportLayer {
                     // connection is already dead, so a flush error changes nothing
                     // we report.
                     let _ = Self::flush_tls(&boxed.tcp, &mut boxed.conn);
-                    return Err(auth_io_error(format!("TLS handshake failed: {e}")));
+                    return Err(ssl_authentication_io_error(format!("TLS handshake failed: {e}")));
                 }
             }
         })
@@ -1432,6 +1448,12 @@ pub(crate) mod tests {
         assert!(
             err.to_string().contains("TLS handshake failed"),
             "error message should carry the TLS handshake prefix, got: {err}"
+        );
+        // Java's class, `SslAuthenticationException`, not the base class.
+        let error = crate::common::network::authentication_error(&err).expect("typed payload");
+        assert!(
+            matches!(error, crate::common::Error::SslAuthentication(_)),
+            "a rejected certificate is an SslAuthenticationError, got: {error:?}"
         );
 
         let _ = transport.close().await;

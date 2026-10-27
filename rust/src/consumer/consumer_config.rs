@@ -1854,8 +1854,8 @@ mod tests {
         );
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.mechanism, "PLAIN");
-        assert_eq!(c.sasl_config.resolve_username(), Some("alice"));
-        assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
+        assert_eq!(c.sasl_config.resolve_username().as_deref(), Some("alice"));
+        assert_eq!(c.sasl_config.resolve_password().as_deref(), Some("secret"));
     }
 
     /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
@@ -1952,7 +1952,7 @@ mod tests {
         let c = ConsumerConfig::new(&props).unwrap();
 
         // The secrets did reach the config; they are only hidden from `Debug`.
-        assert_eq!(c.sasl_config.resolve_password(), Some("jaas-S3cr3t"));
+        assert_eq!(c.sasl_config.resolve_password().as_deref(), Some("jaas-S3cr3t"));
         assert_eq!(
             c.ssl_config.keystore_key.as_ref().map(Password::value),
             Some("KEYSTORE-KEY-PEM")
