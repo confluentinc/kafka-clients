@@ -85,6 +85,9 @@ class AclOperation(IntEnum):
     def from_string(*, str: str) -> AclOperation:  # noqa: A002 - Java's name
         """Parse the given string as an ACL operation: the ``AclOperation``, or
         ``UNKNOWN`` if the string could not be matched."""
+        if str is None:
+            # Java's ``str.toUpperCase(Locale.ROOT)`` dereferences it (Types).
+            raise TypeError("str must not be None")
         member = AclOperation.__members__.get(str.upper())
         return AclOperation.UNKNOWN if member is None else member
 

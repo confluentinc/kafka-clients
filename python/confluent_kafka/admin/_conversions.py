@@ -543,6 +543,18 @@ def create_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoo
         kind, loop, native.futures("values"))
 
     def refine(topic: str, accessor: str) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+        if topic is None:
+            # A null topic is never in the request, and cannot cross the FFI: the
+            # future the core's accessor gives a topic not in the request
+            # (exception 4).
+            from confluent_kafka.illegal_argument_error import IllegalArgumentError
+
+            failed: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+            failed.complete_with_error(IllegalArgumentError(
+                message="Topic None was not part of the createTopics request"))
+            if kind is Async:
+                return AsyncKafkaFuture._of_impl(failed, loop)
+            return KafkaFuture._of_impl(failed)
         source = wrap(kind, loop, native.future(accessor, topic,
                                                 _CREATE_TOPICS_REFINEMENTS[accessor]))
         key_future = futures.get(topic)

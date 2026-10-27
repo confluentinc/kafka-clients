@@ -93,22 +93,24 @@ class ResourcePatternFilter:
 
     def matches(self, *, pattern: ResourcePattern) -> bool:
         """``True`` if this filter matches the given pattern."""
+        # ``pattern`` is dereferenced only where Java's does (``ANY.matches(None)``
+        # is ``True``); there a ``None`` raises Java's NPE as ``TypeError`` (Types).
         if (self._resource_type is not ResourceType.ANY
-                and self._resource_type != pattern.resource_type()):
+                and self._resource_type != _given(pattern).resource_type()):
             return False
         if (self._pattern_type is not PatternType.ANY and self._pattern_type is not PatternType.MATCH
-                and self._pattern_type != pattern.pattern_type()):
+                and self._pattern_type != _given(pattern).pattern_type()):
             return False
         if self._name is None:
             return True
-        if self._pattern_type is PatternType.ANY or self._pattern_type == pattern.pattern_type():
-            return self._name == pattern.name()
-        if pattern.pattern_type() is PatternType.LITERAL:
-            return self._name == pattern.name() or pattern.name() == _WILDCARD_RESOURCE
-        if pattern.pattern_type() is PatternType.PREFIXED:
-            return self._name.startswith(pattern.name())
+        if self._pattern_type is PatternType.ANY or self._pattern_type == _given(pattern).pattern_type():
+            return self._name == _given(pattern).name()
+        if _given(pattern).pattern_type() is PatternType.LITERAL:
+            return self._name == _given(pattern).name() or _given(pattern).name() == _WILDCARD_RESOURCE
+        if _given(pattern).pattern_type() is PatternType.PREFIXED:
+            return self._name.startswith(_given(pattern).name())
         raise IllegalArgumentError(
-            message="Unsupported PatternType: " + java_str(pattern.pattern_type()))
+            message="Unsupported PatternType: " + java_str(_given(pattern).pattern_type()))
 
     def matches_at_most_one(self) -> bool:
         """``True`` if this filter could only match one pattern. In other
@@ -150,3 +152,10 @@ class ResourcePatternFilter:
 
 ResourcePatternFilter.ANY = ResourcePatternFilter(
     resource_type=ResourceType.ANY, name=None, pattern_type=PatternType.ANY)
+
+
+def _given(pattern: ResourcePattern | None) -> ResourcePattern:
+    """``pattern``, which Java dereferences here."""
+    if pattern is None:
+        raise TypeError("pattern must not be None")
+    return pattern

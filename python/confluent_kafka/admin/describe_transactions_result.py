@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
+from confluent_kafka._java import java_str
 from confluent_kafka.admin._futures import Async, KindT, Sync
 from confluent_kafka.admin._internals import _CoordinatorKey
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -74,7 +75,7 @@ class DescribeTransactionsResult(Generic[KindT]):
         future = self._futures.get(key)
         if future is None:
             raise IllegalArgumentError(
-                message="TransactionalId " + "`" + transactional_id
+                message="TransactionalId " + "`" + java_str(transactional_id)
                 + "` was not included in the request")
         return future
 

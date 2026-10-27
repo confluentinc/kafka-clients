@@ -539,6 +539,10 @@ class Consumer(Generic[K, V], _ConsumerState):
                              callback: ConsumerRebalanceListener) -> None:
         listener = self._subscribe_listener(callback)
         self._check_not_null("subscribe_pattern", pattern)
+        if pattern.pattern() is None:
+            # Java's subscriptionPattern.pattern().isEmpty() dereferences it; the FFI
+            # cannot carry it (Types; exception 4).
+            raise TypeError("SubscriptionPattern.pattern must not be None")
         previous, self._listener = self._listener, listener
         try:
             self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), listener))
