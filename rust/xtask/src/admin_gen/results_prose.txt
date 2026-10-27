@@ -12,9 +12,10 @@ is no ``Set``, so ``listings()`` yields a ``list``; ``Map::keySet`` yields a ``s
 === CreateTopicsResult module
 Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new`` builds
 it (CLAUDE.md, Python Binding Conventions, Class family). Its futures carry Java's
-public nested ``TopicMetadataAndConfig``, which no public signature reaches, so it is
-the private helper ``_TopicMetadataAndConfig`` (decision log, entry 6); the public
-methods are ``then_apply`` views of those futures (Futures). The package-private
+public nested ``TopicMetadataAndConfig``, the nested class
+``CreateTopicsResult.TopicMetadataAndConfig`` with Java's two constructors and four
+getters (Scope; Idiom translations); the public methods are ``then_apply`` views of
+those futures (Futures). The package-private
 constant ``UNKNOWN`` is ``_UNKNOWN``. On a result the client builds
 (``_of_client``), the futures are the core's per-topic ``values()`` futures and
 ``config`` / ``topic_id`` / ``num_partitions`` / ``replication_factor`` return the

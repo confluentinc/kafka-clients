@@ -739,10 +739,7 @@ class MockAdminClientCore:
     # ---- The Admin methods' bodies, in Admin's declaration order --------------
 
     def _create_topics(self, new_topics: Iterable[NewTopic]) -> CreateTopicsResult[Any]:
-        from confluent_kafka.admin.create_topics_result import (
-            CreateTopicsResult,
-            _TopicMetadataAndConfig,
-        )
+        from confluent_kafka.admin.create_topics_result import CreateTopicsResult
         from confluent_kafka.common import TopicPartitionInfo, Uuid
         from confluent_kafka.common.errors.invalid_replication_factor_error import (
             InvalidReplicationFactorError,
@@ -750,7 +747,8 @@ class MockAdminClientCore:
         from confluent_kafka.common.errors.topic_exists_error import TopicExistsError
 
         with self._lock:
-            create_topic_result: dict[str, KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]] = {}
+            create_topic_result: dict[str, KafkaFuture[CreateTopicsResult.TopicMetadataAndConfig]
+                                      | AsyncKafkaFuture[CreateTopicsResult.TopicMetadataAndConfig]] = {}
             non_null(new_topics, "new_topics")  # for (NewTopic newTopic : newTopics)
             if self._timeout_next_requests > 0:
                 for new_topic in new_topics:
@@ -794,7 +792,7 @@ class MockAdminClientCore:
                 configs = new_topic.configs()
                 self._all_topics[topic_name] = _TopicMetadata(topic_id, False, partitions,
                                                               log_dirs, configs)
-                create_topic_result[topic_name] = self._done(_TopicMetadataAndConfig(
+                create_topic_result[topic_name] = self._done(CreateTopicsResult.TopicMetadataAndConfig(
                     topic_id=topic_id, num_partitions=number_of_partitions,
                     replication_factor=replication_factor,
                     config=_config(configs if configs is not None else {})))

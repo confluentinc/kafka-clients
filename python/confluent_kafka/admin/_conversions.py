@@ -83,10 +83,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.create_delegation_token_result import CreateDelegationTokenResult
     from confluent_kafka.admin.create_partitions_result import CreatePartitionsResult
-    from confluent_kafka.admin.create_topics_result import (
-        CreateTopicsResult,
-        _TopicMetadataAndConfig,
-    )
+    from confluent_kafka.admin.create_topics_result import CreateTopicsResult
     from confluent_kafka.admin.delete_acls_result import DeleteAclsResult
     from confluent_kafka.admin.delete_consumer_group_offsets_result import (
         DeleteConsumerGroupOffsetsResult,

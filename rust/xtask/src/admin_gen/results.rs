@@ -576,7 +576,8 @@ struct ResultClass {
     factories: Vec<(String, JParam, Vec<String>)>,
     methods: Vec<Method>,
     nested: Vec<Nested>,
-    /// `CreateTopicsResult.TopicMetadataAndConfig`: a private nested holder.
+    /// `CreateTopicsResult.TopicMetadataAndConfig`: the nested holder of the
+    /// per-topic futures' values.
     holder: Option<String>,
     /// The admin method that returns the class (from the class Javadoc).
     admin_method: String,
@@ -878,8 +879,9 @@ fn analyze_nested(raw: &str, outer: &JClass, name: &str) -> Result<Nested, Strin
     })
 }
 
-/// Recognize `CreateTopicsResult.TopicMetadataAndConfig`, the one private
-/// nested holder: its two constructors, `ensureSuccess` and the getters.
+/// Recognize `CreateTopicsResult.TopicMetadataAndConfig`, the one nested holder
+/// of the per-key futures' values: its two constructors, `ensureSuccess` and the
+/// getters.
 fn check_holder(raw: &str, outer: &JClass, name: &str) -> Result<(), String> {
     let src = nested_source(raw, &outer.package, name).ok_or(format!("nested class `{name}` not found"))?;
     let class = parse_java_class(&src).map_err(|e| format!("nested `{name}`: {e}"))?;
@@ -2085,7 +2087,8 @@ impl Renderer<'_> {
                 let (p, g) = (snake(param), snake(getter));
                 format!(
                     "        if self._refine is not None:\n            return self._refine({p}, \"{g}\")\n        return \
-                     self._future_of({p}).then_apply(function=_{holder}.{g})"
+                     self._future_of({p}).then_apply(function={cls}.{holder}.{g})",
+                    cls = self.r.class.name
                 )
             },
             Pat::EitherAllOf { first, second } => {
@@ -2381,6 +2384,10 @@ impl Renderer<'_> {
 
         let mut py_members: Vec<String> = Vec::new();
         let mut pyi_members: Vec<String> = Vec::new();
+        if let Some(h) = self.r.holder.clone() {
+            py_members.push(HOLDER_PY.replace("{H}", &h));
+            pyi_members.push(HOLDER_PYI.replace("{H}", &h));
+        }
         for n in self.r.nested.clone() {
             py_members.push(self.nested_py(&n)?);
             pyi_members.push(format!("{}\n", self.nested_pyi(&n)?));
@@ -2469,9 +2476,9 @@ impl Renderer<'_> {
         // Module-level items.
         let mut py_items = String::new();
         let mut pyi_items = String::new();
-        if let Some(h) = self.r.holder.clone() {
-            py_items.push_str(&HOLDER_PY.replace("{H}", &h));
-            pyi_items.push_str(&HOLDER_PYI.replace("{H}", &h));
+        if self.r.holder.is_some() {
+            py_items.push_str(HOLDER_CONST_PY);
+            pyi_items.push_str(HOLDER_CONST_PYI);
             for (m, n) in [
                 ("confluent_kafka.admin.config", "Config"),
                 ("confluent_kafka.common", "Uuid"),
@@ -2718,78 +2725,81 @@ const ALL_BY_KEY: &str = "        all_future: _KafkaFutureImpl[{R}] = (
         {F}.when_complete(action=action)
         return self._kind._FUTURE._of_impl(all_future)";
 
-/// `CreateTopicsResult.TopicMetadataAndConfig` and `UNKNOWN` (decision log 6:
-/// a private helper, as no public signature reaches it).
-const HOLDER_PY: &str = r#"
+/// `CreateTopicsResult`'s package-private `UNKNOWN`, a module constant.
+const HOLDER_CONST_PY: &str = r#"
 # Java's package-private ``static final int UNKNOWN = -1``.
 _UNKNOWN = -1
-
-
-class _{H}:
-    """Java's ``CreateTopicsResult.{H}``: a topic's metadata and
-    configs, or the error that replaced them (private: no public signature reaches
-    it)."""
-
-    __slots__ = ("_exception", "_topic_id", "_num_partitions", "_replication_factor",
-                 "_config")
-
-    @java_forms(
-        Form("topic_id", "num_partitions", "replication_factor", "config"),
-        Form("exception"),
-        name="{H}",
-    )
-    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
-                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
-                 exception: ApiError | None = MISSING) -> None:
-        if exception is MISSING:
-            self._exception: ApiError | None = None
-            self._topic_id = topic_id
-            self._num_partitions = num_partitions
-            self._replication_factor = replication_factor
-            self._config = config
-            return
-        from confluent_kafka.common import Uuid
-
-        self._exception = exception
-        self._topic_id = Uuid.ZERO_UUID
-        self._num_partitions = _UNKNOWN
-        self._replication_factor = _UNKNOWN
-        self._config = None
-
-    def topic_id(self) -> Uuid | None:
-        self._ensure_success()
-        return self._topic_id
-
-    def num_partitions(self) -> int | None:
-        self._ensure_success()
-        return self._num_partitions
-
-    def replication_factor(self) -> int | None:
-        self._ensure_success()
-        return self._replication_factor
-
-    def config(self) -> Config | None:
-        self._ensure_success()
-        return self._config
-
-    def _ensure_success(self) -> None:
-        if self._exception is not None:
-            raise self._exception
 "#;
 
-const HOLDER_PYI: &str = "_UNKNOWN: int
+const HOLDER_CONST_PYI: &str = "_UNKNOWN: int
 
-class _{H}:
-    @overload
-    def __init__(self, *, topic_id: Uuid, num_partitions: int, replication_factor: int,
-                 config: Config) -> None: ...
-    @overload
-    def __init__(self, *, exception: ApiError) -> None: ...
-    def topic_id(self) -> Uuid: ...
-    def num_partitions(self) -> int: ...
-    def replication_factor(self) -> int: ...
-    def config(self) -> Config: ...
+";
 
+/// `CreateTopicsResult.TopicMetadataAndConfig`: Java's public nested class, a
+/// nested class of the result (CLAUDE.md, Python Binding Conventions, Scope).
+const HOLDER_PY: &str = r#"    class {H}:
+        """A topic's metadata and configs, or the error that replaced them.
+
+        Java: ``org.apache.kafka.clients.admin.CreateTopicsResult.{H}``.
+        """
+
+        __slots__ = ("_exception", "_topic_id", "_num_partitions", "_replication_factor",
+                     "_config")
+
+        @java_forms(
+            Form("topic_id", "num_partitions", "replication_factor", "config"),
+            Form("exception"),
+            name="{H}",
+        )
+        def __init__(self, *, topic_id: Uuid | None = MISSING,
+                     num_partitions: int | None = MISSING,
+                     replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                     exception: ApiError | None = MISSING) -> None:
+            if exception is MISSING:
+                self._exception: ApiError | None = None
+                self._topic_id = topic_id
+                self._num_partitions = num_partitions
+                self._replication_factor = replication_factor
+                self._config = config
+                return
+            from confluent_kafka.common import Uuid
+
+            self._exception = exception
+            self._topic_id = Uuid.ZERO_UUID
+            self._num_partitions = _UNKNOWN
+            self._replication_factor = _UNKNOWN
+            self._config = None
+
+        def topic_id(self) -> Uuid | None:
+            self._ensure_success()
+            return self._topic_id
+
+        def num_partitions(self) -> int | None:
+            self._ensure_success()
+            return self._num_partitions
+
+        def replication_factor(self) -> int | None:
+            self._ensure_success()
+            return self._replication_factor
+
+        def config(self) -> Config | None:
+            self._ensure_success()
+            return self._config
+
+        def _ensure_success(self) -> None:
+            if self._exception is not None:
+                raise self._exception"#;
+
+const HOLDER_PYI: &str = "    class {H}:
+        @overload
+        def __init__(self, *, topic_id: Uuid, num_partitions: int, replication_factor: int,
+                     config: Config) -> None: ...
+        @overload
+        def __init__(self, *, exception: ApiError) -> None: ...
+        def topic_id(self) -> Uuid: ...
+        def num_partitions(self) -> int: ...
+        def replication_factor(self) -> int: ...
+        def config(self) -> Config: ...
 ";
 
 // ---------------------------------------------------------------------------
@@ -2823,7 +2833,7 @@ fn render_source(raw: &str, prose: &Prose, admin: &BTreeMap<String, String>) -> 
         .map(|n| (n.name.clone(), format!("{}.{}", r.class.name, n.name)))
         .collect();
     if let Some(h) = &r.holder {
-        nested.insert(h.clone(), format!("_{h}"));
+        nested.insert(h.clone(), format!("{}.{h}", r.class.name));
     }
     let mut renderer = Renderer {
         r: &r,
