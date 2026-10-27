@@ -1147,6 +1147,10 @@ impl ConsumerMembershipManager {
     /// the broker to kick the member out after the reconciliation commit
     /// timeout, giving a RECONCILING -> FENCED transition. Only the flag is
     /// cleared.
+    ///
+    /// This is the one place a reconciliation failure is logged as
+    /// "Reconciliation failed", as in Java's chain; `process_async_poll` does
+    /// not log it again.
     fn fail_reconciliation(&self, err: Error) -> Error {
         log::error!("Reconciliation failed: {err}");
         self.abstract_mm.mark_reconciliation_completed();
@@ -1509,9 +1513,10 @@ impl ConsumerMembershipManager {
                                 // Java: member stays RECONCILING after a
                                 // callback failure; surface the error so the
                                 // bg task can observe it (Java's
-                                // `revocationResult.completeExceptionally`).
-                                self.abstract_mm.mark_reconciliation_completed();
-                                return Err(e);
+                                // `revocationResult.completeExceptionally`),
+                                // and log "Reconciliation failed." in the
+                                // chain, whichever caller resumed it.
+                                return Err(self.fail_reconciliation(e));
                             },
                         };
                         self.continue_after_revoke(
@@ -1537,10 +1542,9 @@ impl ConsumerMembershipManager {
                     },
                     Err(oneshot::error::TryRecvError::Closed) => {
                         // App side dropped the receiver before responding.
-                        self.abstract_mm.mark_reconciliation_completed();
-                        Err(Error::local_illegal_state(
+                        Err(self.fail_reconciliation(Error::local_illegal_state(
                             "Rebalance listener ack receiver dropped before completion",
-                        ))
+                        )))
                     },
                 }
             },
@@ -1571,12 +1575,9 @@ impl ConsumerMembershipManager {
                     });
                     Ok(())
                 },
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    self.abstract_mm.mark_reconciliation_completed();
-                    Err(Error::local_illegal_state(
-                        "Rebalance listener ack receiver dropped before completion",
-                    ))
-                },
+                Err(oneshot::error::TryRecvError::Closed) => Err(self.fail_reconciliation(Error::local_illegal_state(
+                    "Rebalance listener ack receiver dropped before completion",
+                ))),
             },
         }
     }
@@ -1689,9 +1690,10 @@ impl ConsumerMembershipManager {
                 // Per COMMENTS.1.md fix #2: surface listener failure so the
                 // caller (Phase 10 bg task) can observe it. Java's
                 // CompletableFuture chain propagates the error via
-                // `reconciliationResult.whenComplete(error, ...)`.
-                self.abstract_mm.mark_reconciliation_completed();
-                return Err(e);
+                // `reconciliationResult.whenComplete(error, ...)`, which logs
+                // "Reconciliation failed." and marks the reconciliation
+                // completed.
+                return Err(self.fail_reconciliation(e));
             },
         }
 
