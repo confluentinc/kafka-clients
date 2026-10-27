@@ -68,7 +68,7 @@ pub enum kafka_common_acl_AclOperation_e {
     kafka_common_acl_AclOperation_TWO_PHASE_COMMIT,
 }
 
-/// One static instance per value, indexed by [`kafka_common_acl_AclOperation_e`].
+/// One static instance per value, indexed by `kafka_common_acl_AclOperation_e`.
 static VARIANTS: [AclOperation; 16] = [
     AclOperation::Unknown,
     AclOperation::Any,
@@ -133,6 +133,10 @@ pub(crate) unsafe fn value_of(value: *const kafka_common_acl_AclOperation_t) -> 
 }
 
 /// `AclOperation.UNKNOWN`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_unknown() -> *const kafka_common_acl_AclOperation_t {
@@ -140,6 +144,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_unknown() -> *const kafka_common
 }
 
 /// `AclOperation.ANY`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_any() -> *const kafka_common_acl_AclOperation_t {
@@ -147,6 +155,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_any() -> *const kafka_common_acl
 }
 
 /// `AclOperation.ALL`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_all() -> *const kafka_common_acl_AclOperation_t {
@@ -154,6 +166,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_all() -> *const kafka_common_acl
 }
 
 /// `AclOperation.READ`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_read() -> *const kafka_common_acl_AclOperation_t {
@@ -161,6 +177,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_read() -> *const kafka_common_ac
 }
 
 /// `AclOperation.WRITE`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_write() -> *const kafka_common_acl_AclOperation_t {
@@ -168,6 +188,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_write() -> *const kafka_common_a
 }
 
 /// `AclOperation.CREATE`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_create() -> *const kafka_common_acl_AclOperation_t {
@@ -175,6 +199,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_create() -> *const kafka_common_
 }
 
 /// `AclOperation.DELETE`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_delete() -> *const kafka_common_acl_AclOperation_t {
@@ -182,6 +210,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_delete() -> *const kafka_common_
 }
 
 /// `AclOperation.ALTER`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_alter() -> *const kafka_common_acl_AclOperation_t {
@@ -189,6 +221,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_alter() -> *const kafka_common_a
 }
 
 /// `AclOperation.DESCRIBE`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe() -> *const kafka_common_acl_AclOperation_t {
@@ -196,6 +232,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_describe() -> *const kafka_commo
 }
 
 /// `AclOperation.CLUSTER_ACTION`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_cluster_action() -> *const kafka_common_acl_AclOperation_t {
@@ -203,6 +243,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_cluster_action() -> *const kafka
 }
 
 /// `AclOperation.DESCRIBE_CONFIGS`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe_configs() -> *const kafka_common_acl_AclOperation_t {
@@ -210,6 +254,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_describe_configs() -> *const kaf
 }
 
 /// `AclOperation.ALTER_CONFIGS`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_alter_configs() -> *const kafka_common_acl_AclOperation_t {
@@ -217,6 +265,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_alter_configs() -> *const kafka_
 }
 
 /// `AclOperation.IDEMPOTENT_WRITE`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_idempotent_write() -> *const kafka_common_acl_AclOperation_t {
@@ -224,6 +276,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_idempotent_write() -> *const kaf
 }
 
 /// `AclOperation.CREATE_TOKENS`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_create_tokens() -> *const kafka_common_acl_AclOperation_t {
@@ -231,6 +287,10 @@ pub extern "C" fn kafka_common_acl_AclOperation_create_tokens() -> *const kafka_
 }
 
 /// `AclOperation.DESCRIBE_TOKENS`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_describe_tokens() -> *const kafka_common_acl_AclOperation_t {
@@ -238,13 +298,17 @@ pub extern "C" fn kafka_common_acl_AclOperation_describe_tokens() -> *const kafk
 }
 
 /// `AclOperation.TWO_PHASE_COMMIT`.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_two_phase_commit() -> *const kafka_common_acl_AclOperation_t {
     singleton(AclOperation::TwoPhaseCommit)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_acl_AclOperation_UNKNOWN`.
 ///
@@ -261,10 +325,11 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `code()`: the wire-protocol byte.
+/// Returns the code of this operation.
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
+/// # Returns
+///
+/// The code, or -1 for a Rust panic caught at the FFI boundary, which is no code of this enum.
 ///
 /// # Safety
 ///
@@ -277,9 +342,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_code(self_: *const kafka_
     unsafe { value_of(self_) }.code()
 }
 
-/// `AclOperation.values()`: an owned list of the borrowed singletons in
-/// declaration order, freed with `kafka_List_destroy` (the elements are
-/// never freed).
+/// Returns all operations, in declaration order.
+///
+/// # Safety
+///
+/// The returned list is owned, freed with `kafka_List_destroy`; its elements are the
+/// borrowed singletons, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_values() -> *mut kafka_List_t {
@@ -290,8 +358,15 @@ pub extern "C" fn kafka_common_acl_AclOperation_values() -> *mut kafka_List_t {
     box_list(elements, None)
 }
 
-/// `fromCode(byte code)`: the singleton for a wire-protocol byte, `UNKNOWN`
-/// for one this client does not know.
+/// Return the AclOperation with the provided code or `UNKNOWN` if one cannot be found.
+///
+/// # Parameters
+///
+/// - `code` - The wire-protocol code.
+///
+/// # Returns
+///
+/// The singleton, a static never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclOperation_from_code(code: i8) -> *const kafka_common_acl_AclOperation_t {
@@ -300,6 +375,14 @@ pub extern "C" fn kafka_common_acl_AclOperation_from_code(code: i8) -> *const ka
 
 /// `fromString(String)`: the singleton named by `str` (Java's constant name),
 /// `UNKNOWN` for any other string.
+///
+/// # Parameters
+///
+/// - `str` - The string to parse.
+///
+/// # Returns
+///
+/// The AclOperation, or UNKNOWN if the string could not be matched.
 ///
 /// # Safety
 ///
@@ -315,7 +398,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_from_string(
     singleton(AclOperation::from_string(&unsafe { c_str_to_string(str) }))
 }
 
-/// `isUnknown()`: whether this is the `UNKNOWN` value.
+/// Returns 1 if this operation is UNKNOWN, else 0.
 ///
 /// # Safety
 ///
@@ -328,12 +411,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclOperation_is_unknown(self_: *const 
     i8::from(unsafe { value_of(self_) }.is_unknown())
 }
 
-/// `toString()`: Java's constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the constant's name.
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclOperation_to_string(

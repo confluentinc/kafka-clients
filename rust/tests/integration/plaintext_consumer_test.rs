@@ -61,10 +61,10 @@
 //!   → `test_async_consumer_position_with_error_connection_respects_wakeup`
 //! - `testAsyncConsumerOffsetRelatedWhenTimeoutZero`
 //!   → `test_async_consumer_offset_related_when_timeout_zero`
-//! - `testAsyncConsumeCoordinatorFailover` (line 180)
+//! - `testAsyncConsumeCoordinatorFailover`
 //!   → `test_async_consume_coordinator_failover` (Phase 16; dedicated
 //!   `Type::Kraft` cluster, stops the group coordinator)
-//! - `testAsyncConsumerCloseOnBrokerShutdown` (line 214)
+//! - `testAsyncConsumerCloseOnBrokerShutdown`
 //!   → `test_async_consumer_close_on_broker_shutdown` (Phase 16; dedicated
 //!   single-broker `Type::Kraft` cluster, stops the broker)
 //! - `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance` (4.4,
@@ -461,7 +461,7 @@ fn current_time_ms() -> i64 {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncConsumerHeaders` (line 251 / 257).
+/// Translates Java's `testAsyncConsumerHeaders`.
 /// Produces one record with three ordered headers, then assigns + seeks
 /// to 0, consumes it, and asserts the headers survive the round-trip with
 /// their insertion order preserved.
@@ -528,7 +528,7 @@ async fn test_async_consumer_headers() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionPauseAndResume` (line 519).
+/// Translates Java's `testAsyncConsumerPartitionPauseAndResume`.
 /// Standalone pause/resume on an assigned partition (NOT the in-callback
 /// reentrancy case, which is the Issue-8 gap). Consume 5, pause, produce 5
 /// more, poll returns empty, resume, consume the next 5.
@@ -565,8 +565,8 @@ async fn test_async_consumer_partition_pause_and_resume() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPauseStateNotPreservedByRebalance`
-/// (line 810). After a rebalance the pause state is lost and the position
+/// Translates Java's `testAsyncConsumerPauseStateNotPreservedByRebalance`.
+/// After a rebalance the pause state is lost and the position
 /// is reset, so consumption resumes from the beginning of the partition.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
@@ -606,16 +606,16 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionsFor` (line 389).
+/// Translates Java's `testAsyncConsumerPartitionsFor`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_partitions_for() {
     let mut ctx = TestContext::new(cluster_config_kip848()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_partitions_for");
 
-    // Java: `cluster.createTopic(TOPIC, 2, BROKER_COUNT)` and
-    // `cluster.createTopic("part-test", numParts, 1)`
-    // (`PlaintextConsumerTest.java:470-471`).
+    // Java's org.apache.kafka.clients.consumer.PlaintextConsumerTest#testPartitionsFor:
+    // `cluster.createTopic(TOPIC, 2, BROKER_COUNT)` and
+    // `cluster.createTopic("part-test", numParts, 1)`.
     let part_test = ctx.topic("part-test");
     create_test_topic(&ctx, &topic, 2, BROKER_COUNT).await;
     create_test_topic(&ctx, &part_test, 2, 1).await;
@@ -627,7 +627,7 @@ async fn test_async_consumer_partitions_for() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionsForAutoCreate` (line 415).
+/// Translates Java's `testAsyncConsumerPartitionsForAutoCreate`.
 /// The first `partitions_for` for a nonexistent topic triggers broker
 /// auto-create (enabled by default); poll until non-empty.
 #[tokio::test(flavor = "multi_thread")]
@@ -656,7 +656,7 @@ async fn test_async_consumer_partitions_for_auto_create() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPartitionsForInvalidTopic` (PlaintextConsumerTest.java:513).
+/// Translates Java's `PlaintextConsumerTest#testAsyncConsumerPartitionsForInvalidTopic`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_partitions_for_invalid_topic() {
     let ctx = TestContext::new(cluster_config_kip848()).await;
@@ -667,9 +667,10 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .partitions_for(";3# ads,{234")
         .await
         .expect_err("partitions_for on an invalid topic should fail");
-    // Java: `assertThrows(InvalidTopicException.class, ...)`, raised by
-    // TopicMetadataRequestManager.java:260 as
-    // `new InvalidTopicException("Topic '" + topic + "' is invalid")`.
+    // Java: `assertThrows(InvalidTopicException.class, ...)`, raised as
+    // `new InvalidTopicException("Topic '" + topic + "' is invalid")` by
+    // `TopicMetadataRequestState#handleTopicMetadataResponse`, nested in
+    // org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager.
     assert!(
         matches!(err, Error::InvalidTopic(_)),
         "expected Error::InvalidTopic, got: {err:?}"
@@ -679,7 +680,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerListTopics` (line 770).
+/// Translates Java's `testAsyncConsumerListTopics`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_list_topics() {
     let mut ctx = TestContext::new(cluster_config_kip848()).await;
@@ -727,7 +728,7 @@ async fn test_async_consumer_list_topics() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerSeek` (line 460).
+/// Translates Java's `testAsyncConsumerSeek`.
 /// Covers seekToEnd → position==total, seekToBeginning → position==0, and
 /// seek(mid) → position==mid, with consumption verification.
 ///
@@ -783,7 +784,7 @@ const SEEK_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CONSUMER_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Translates Java's
-/// `testAsyncConsumerSeekThrowsIllegalStateIfPartitionsNotAssigned` (line 1199).
+/// `testAsyncConsumerSeekThrowsIllegalStateIfPartitionsNotAssigned`.
 /// `seek_to_end` on an unassigned partition raises IllegalState with the
 /// EXACT Java message.
 #[tokio::test(flavor = "multi_thread")]
@@ -817,9 +818,9 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
     .await;
 }
 
-/// Translates Java's `testAsyncConsumerConsumeMessagesWithLogAppendTime`
-/// (line 735). Creates the topic with `message.timestamp.type=LogAppendTime`
-/// (2 partitions, RF 2, `PlaintextConsumerTest.java:818`); asserts
+/// Translates Java's `testAsyncConsumerConsumeMessagesWithLogAppendTime`.
+/// Creates the topic with `message.timestamp.type=LogAppendTime`
+/// (2 partitions, RF 2, `PlaintextConsumerTest#testConsumeMessagesWithLogAppendTime`); asserts
 /// `timestamp_type == LogAppendTime` and the broker-stamped timestamp is in
 /// `[startTime, now]` widened by a clock-skew slack (see
 /// `CLOCK_SKEW_SLACK_MS` below).
@@ -923,7 +924,7 @@ async fn test_async_consumer_consume_messages_with_log_append_time() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerEndOffsets` (line 1376).
+/// Translates Java's `testAsyncConsumerEndOffsets`.
 /// Produces N records, subscribes, awaits the 2-partition assignment, then
 /// asserts `end_offsets([TP]) == N`.
 ///
@@ -964,7 +965,7 @@ async fn test_async_consumer_end_offsets() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerFetchOffsetsForTime` (line 1422).
+/// Translates Java's `testAsyncConsumerFetchOffsetsForTime`.
 /// Produces 100 records per partition with timestamp == sequence number,
 /// then `offsets_for_times` for ts 0 (partition 0) and ts 20 (partition 1);
 /// asserts offset/timestamp/leader_epoch. Also asserts negative target time
@@ -977,9 +978,9 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let tp1 = TopicPartition::new(topic.clone(), 1);
     let group_id = ctx.group_id("g_offsets_for_time");
 
-    // Java: `cluster.createTopic(TOPIC, 2, BROKER_COUNT)`
-    // (`PlaintextConsumerTest.java:1503`) — an EMPTY topic, so offset 0 on
-    // each partition is a real `ts==0` record.
+    // Java's org.apache.kafka.clients.consumer.PlaintextConsumerTest#testFetchOffsetsForTime:
+    // `cluster.createTopic(TOPIC, 2, BROKER_COUNT)` — an EMPTY topic, so offset 0
+    // on each partition is a real `ts==0` record.
     create_test_topic(&ctx, &topic, 2, BROKER_COUNT).await;
     let producer = build_producer(&ctx);
     // partition 0: key/val/timestamp == sequence number; partition 1: same.
@@ -1008,16 +1009,18 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     let search = HashMap::from([(tp0.clone(), 0i64), (tp1.clone(), 20i64)]);
     let offsets = consumer.offsets_for_times(search).await.expect("offsets_for_times");
 
-    // `offsets_for_times` returns `HashMap<TopicPartition,
-    // OffsetAndTimestamp>` — a missing key means "no offset"; a present key
-    // carries the resolved offset directly (no nested Option, unlike Java's
-    // null-valued map entries).
-    let r0 = offsets.get(&tp0).expect("offset present for ts 0 on partition 0");
+    let r0 = offsets
+        .get(&tp0)
+        .and_then(Option::as_ref)
+        .expect("offset present for ts 0 on partition 0");
     assert_eq!(r0.offset(), base0, "first record at-or-after ts 0 is the base offset");
     assert_eq!(r0.timestamp(), 0);
     assert_eq!(r0.leader_epoch(), Some(0));
 
-    let r1 = offsets.get(&tp1).expect("offset present for ts 20 on partition 1");
+    let r1 = offsets
+        .get(&tp1)
+        .and_then(Option::as_ref)
+        .expect("offset present for ts 20 on partition 1");
     assert_eq!(r1.offset(), base1 + 20, "first record at-or-after ts 20 is base+20");
     assert_eq!(r1.timestamp(), 20);
     assert_eq!(r1.leader_epoch(), Some(0));
@@ -1025,7 +1028,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerConsumingWithNullGroupId` (line 1224).
+/// Translates Java's `testAsyncConsumerConsumingWithNullGroupId`.
 /// Three groupless consumers consume from earliest / latest / explicit
 /// offset; asserts record counts and that commit/committed raise
 /// InvalidGroupId for groupless consumers.
@@ -1113,8 +1116,8 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     assert_eq!(num_records3, 2, "consumer3 should consume from offset 1 (2 records)");
 }
 
-/// Translates Java's `testAsyncConsumerNullGroupIdNotSupportedIfCommitting`
-/// (line 1303). A groupless consumer's `commit_sync` raises InvalidGroupId
+/// Translates Java's `testAsyncConsumerNullGroupIdNotSupportedIfCommitting`.
+/// A groupless consumer's `commit_sync` raises InvalidGroupId
 /// with the EXACT Java message.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_null_group_id_not_supported_if_committing() {
@@ -1143,7 +1146,7 @@ async fn test_async_consumer_null_group_id_not_supported_if_committing() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPositionRespectsTimeout` (line 1467).
+/// Translates Java's `testAsyncConsumerPositionRespectsTimeout`.
 /// `position` for a partition that doesn't exist times out after the
 /// user-supplied timeout.
 #[tokio::test(flavor = "multi_thread")]
@@ -1167,7 +1170,7 @@ async fn test_async_consumer_position_respects_timeout() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerPositionRespectsWakeup` (line 1491).
+/// Translates Java's `testAsyncConsumerPositionRespectsWakeup`.
 /// A concurrent `wakeup()` interrupts a blocking `position` (§11).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_position_respects_wakeup() {
@@ -1180,8 +1183,8 @@ async fn test_async_consumer_position_respects_wakeup() {
     create_topic(consumer.as_mut(), &topic, 2).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
-    // Java: `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`
-    // (`PlaintextConsumerTest.java:1501-1504`). Java's `Consumer` reference is
+    // Java's org.apache.kafka.clients.consumer.PlaintextConsumerTest#testPositionRespectsWakeup:
+    // `CompletableFuture.runAsync(() -> { sleep(1s); consumer.wakeup(); })`. Java's `Consumer` reference is
     // freely shareable across threads. The Rust equivalent obtains a
     // `Clone + Send + Sync` `ConsumerHandle` BEFORE the `&mut` borrow taken
     // by `position_with_timeout`, then fires `wakeup()` from a spawned task —
@@ -1201,7 +1204,7 @@ async fn test_async_consumer_position_respects_wakeup() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerPositionWithErrorConnectionRespectsWakeup` (line 1523).
+/// `testAsyncConsumerPositionWithErrorConnectionRespectsWakeup`.
 /// With an unreachable bootstrap, `wakeup()` still interrupts a blocking
 /// `position`.
 #[tokio::test(flavor = "multi_thread")]
@@ -1229,7 +1232,8 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     let tp = TopicPartition::new(topic, 15);
     consumer.assign(vec![tp.clone()]).await.expect("assign");
 
-    // Java (`PlaintextConsumerTest.java:1535-1538`): a cross-thread
+    // Java's org.apache.kafka.clients.consumer.PlaintextConsumerTest#testPositionWithErrorConnectionRespectsWakeup:
+    // a cross-thread
     // `wakeup()` interrupts a blocking `position` even when the bootstrap
     // is unreachable. Obtain the shareable handle before the `&mut` borrow.
     let handle = consumer.handle();
@@ -1246,8 +1250,8 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translates Java's `testAsyncConsumerOffsetRelatedWhenTimeoutZero`
-/// (line 1627). Zero-timeout offset queries return immediately:
+/// Translates Java's `testAsyncConsumerOffsetRelatedWhenTimeoutZero`.
+/// Zero-timeout offset queries return immediately:
 /// beginning/end offsets empty; offsets_for_times has the key with a
 /// `None` value.
 #[tokio::test(flavor = "multi_thread")]
@@ -1276,15 +1280,12 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
         .offsets_for_times_with_timeout(HashMap::from([(tp.clone(), 0i64)]), Duration::ZERO)
         .await
         .expect("offsets_for_times(ZERO)");
-    // Translation deviation: Java's zero-timeout arm returns a map of
-    // size 1 with the key mapped to `null` (no offset yet). Rust's
-    // `OffsetAndTimestamp` is not nullable, so the zero-timeout arm omits
-    // the key entirely (`async_kafka_consumer.rs:3413-3428`). The user
-    // observes "no data yet" via the absent key rather than a null value —
-    // an equivalent, documented contract reduction.
-    assert!(
-        !result3.contains_key(&tp),
-        "offsets_for_times with zero timeout should not resolve an offset (key absent in Rust)"
+    // Java: `assertEquals(1, result3.size())` and `assertNull(result3.get(tp))`.
+    assert_eq!(result3.len(), 1, "offsets_for_times with zero timeout: {result3:?}");
+    assert_eq!(
+        result3.get(&tp),
+        Some(&None),
+        "offsets_for_times with zero timeout should not resolve an offset"
     );
 
     consumer.close().await.expect("consumer close");
@@ -1293,7 +1294,7 @@ async fn test_async_consumer_offset_related_when_timeout_zero() {
 // ── Broker fault injection (Phase 16) ─────────────────────────────────
 
 /// The class-level `@ClusterTestDefaults(serverProperties = ...)` of
-/// `PlaintextConsumerTest` (`PlaintextConsumerTest.java:120-129`), plus the
+/// `PlaintextConsumerTest`, plus the
 /// KIP-848 opt-in the rest of this file's clusters carry.
 fn plaintext_consumer_test_defaults() -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -1342,8 +1343,8 @@ impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
 /// Java's `TestUtils.waitForCondition` default bound.
 const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(15);
 
-/// Translates `ClientsTestUtils.awaitRebalance(consumer, listener)`
-/// (`ClientsTestUtils.java:325`): `poll(100ms)` until `callsToAssigned`
+/// Translates `ClientsTestUtils#awaitRebalance`, called as
+/// `awaitRebalance(consumer, listener)`: `poll(100ms)` until `callsToAssigned`
 /// advances, within `waitForCondition`'s default 15 s.
 async fn await_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
     let num_reassignments = listener.calls_to_assigned();
@@ -1391,8 +1392,8 @@ impl OffsetCommitCallback for RetryCommitCallback {
     }
 }
 
-/// Translates `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer,
-/// Optional.empty())` (`ClientsTestUtils.java:309`): `commitAsync(callback)`,
+/// Translates `ClientsTestUtils#sendAndAwaitAsyncCommit`, called as
+/// `sendAndAwaitAsyncCommit(consumer, Optional.empty())`: `commitAsync(callback)`,
 /// `poll(100ms)` until the callback completes (15 s), then assert no error.
 async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
     let callback = RetryCommitCallback::default();
@@ -1419,8 +1420,8 @@ async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
     assert!(error.is_none(), "async commit failed: {error:?}");
 }
 
-/// Translates `ClientsTestUtils.ensureNoRebalance(consumer, listener)`
-/// (`ClientsTestUtils.java:336`).
+/// Translates `ClientsTestUtils#ensureNoRebalance`, called as
+/// `ensureNoRebalance(consumer, listener)`.
 async fn ensure_no_rebalance(consumer: &mut BytesConsumer, listener: &TestConsumerReassignmentListener) {
     // The best way to verify that the current membership is still active is
     // to commit offsets. This would fail if the group had rebalanced.
@@ -1429,12 +1430,11 @@ async fn ensure_no_rebalance(consumer: &mut BytesConsumer, listener: &TestConsum
     assert_eq!(initial_revoke_calls, listener.calls_to_revoked());
 }
 
-/// Translates `testAsyncConsumeCoordinatorFailover`
-/// (`PlaintextConsumerTest.java:180`, body
-/// `BaseConsumerTestcase.testCoordinatorFailover`, `ClientsTestUtils.java:422`)
-/// on the class shape: `Type.KRAFT`, `BROKER_COUNT` = 3 brokers, the
-/// `@ClusterTestDefaults` broker properties — as a dedicated cluster with an
-/// isolated controller, since the test stops a broker.
+/// Translates `PlaintextConsumerTest#testAsyncConsumeCoordinatorFailover` (body
+/// `ClientsTestUtils.BaseConsumerTestcase#testCoordinatorFailover`) on the class
+/// shape: `Type.KRAFT`, `BROKER_COUNT` = 3 brokers, the `@ClusterTestDefaults`
+/// broker properties — as a dedicated cluster with an isolated controller, since
+/// the test stops a broker.
 ///
 /// The consumer joins, then the broker leading the single `__consumer_offsets`
 /// partition (the group coordinator) is shut down; the consumer must find the
@@ -1506,12 +1506,12 @@ async fn test_async_consume_coordinator_failover() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates `testAsyncConsumerCloseOnBrokerShutdown`
-/// (`PlaintextConsumerTest.java:214`, body `testConsumerCloseOnBrokerShutdown`
-/// :223) on its `@ClusterTest(brokers = 1, ...)` shape — the class defaults
-/// merged with the method's `serverProperties` (offsets topic 1 partition /
-/// RF 1, transaction log RF 1 / min ISR 1) — as a dedicated `Type.KRAFT`
-/// cluster with an isolated controller.
+/// Translates `PlaintextConsumerTest#testAsyncConsumerCloseOnBrokerShutdown` (body
+/// `PlaintextConsumerTest#testConsumerCloseOnBrokerShutdown`) on its
+/// `@ClusterTest(brokers = 1, ...)` shape — the class defaults merged with the
+/// method's `serverProperties` (offsets topic 1 partition / RF 1, transaction log
+/// RF 1 / min ISR 1) — as a dedicated `Type.KRAFT` cluster with an isolated
+/// controller.
 ///
 /// After the consumer has polled once, the only broker is shut down; one more
 /// poll must not fail, and `close()` must return within 5 s instead of
@@ -1613,15 +1613,15 @@ async fn test_async_consumer_unsubscribe_does_not_commit_offsets_with_auto_commi
     consumer2.subscribe_with_topics(vec![topic.clone()]).await.expect("subscribe");
     let committed = consumer2.committed(std::slice::from_ref(&tp)).await.expect("committed");
     assert_eq!(
-        None,
+        Some(&None),
         committed.get(&tp),
         "unsubscribe() should not commit offsets even when auto-commit is enabled"
     );
     consumer2.close().await.expect("consumer2 close");
 }
 
-/// Translates Java's `testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance`
-/// (`PlaintextConsumerTest.java:1816`, added by 45c4bdc48a).
+/// Translates Java's `PlaintextConsumerTest#testAsyncStaticMemberCloseWithLeaveGroupTriggersRebalance`
+/// (added by 45c4bdc48a).
 ///
 /// Tests that when a static member closes with
 /// [`GroupMembershipOperation::LeaveGroup`], the other members in the group

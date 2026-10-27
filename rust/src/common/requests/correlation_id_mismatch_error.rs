@@ -24,8 +24,7 @@ use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource}
 /// expected value from the request header.
 ///
 /// Corresponds to Java's `CorrelationIdMismatchException`, raised by
-/// `AbstractResponse.parseResponse(ByteBuffer, RequestHeader)`
-/// (`AbstractResponse.java:105`).
+/// `AbstractResponse#parseResponse(ByteBuffer,RequestHeader)`.
 ///
 /// Java `extends` chain:
 ///    `CorrelationIdMismatchException` -> `java.lang.IllegalStateException`
@@ -64,9 +63,8 @@ impl CorrelationIdMismatchError {
     /// Carries a [`CorrelationIdMismatchError`] across an [`io::Result`] boundary,
     /// as the payload of an [`io::Error`].
     ///
-    /// `AbstractResponse.parseResponse` *throws* the exception
-    /// (`AbstractResponse.java:105`) and `NetworkClient.parseResponse` catches it by
-    /// **type** (`NetworkClient.java:922`). This crate's response readers report
+    /// `AbstractResponse#parseResponse(ByteBuffer,RequestHeader)` *throws* the exception
+    /// and `NetworkClient#parseResponse` catches it by **type**. This crate's response readers report
     /// through [`io::Error`], whose [`io::ErrorKind`] cannot express "the
     /// correlation ids disagreed" — so the typed value travels inside the payload
     /// and the caller recovers it with [`Self::correlation_id_mismatch`], mirroring
@@ -81,7 +79,7 @@ impl CorrelationIdMismatchError {
 
     /// Recovers the [`CorrelationIdMismatchError`] `e` carries, if any — the Rust
     /// equivalent of Java's `catch (CorrelationIdMismatchException e)` in
-    /// `NetworkClient.parseResponse` (`NetworkClient.java:922`).
+    /// `NetworkClient#parseResponse`.
     ///
     /// Returns the whole payload rather than its message because the `catch` clause
     /// reads [`response_correlation_id`](CorrelationIdMismatchError::response_correlation_id)
@@ -142,8 +140,8 @@ impl ErrorMessage for CorrelationIdMismatchError {
 // `UNKNOWN_SERVER_ERROR` — the trait default.
 impl ErrorCode for CorrelationIdMismatchError {}
 
-// `CorrelationIdMismatchException extends IllegalStateException`
-// (`CorrelationIdMismatchException.java:23`), a `java.lang` runtime exception
+// `org.apache.kafka.common.requests.CorrelationIdMismatchException extends
+// IllegalStateException`, a `java.lang` runtime exception
 // sitting BESIDE `KafkaException`, not below it. So every Kafka hierarchy
 // predicate is false, and only the class itself and its JDK parent answer `true`.
 impl ErrorHierarchy for CorrelationIdMismatchError {

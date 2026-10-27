@@ -342,9 +342,9 @@ static void test_mock_admin_create_close_destroy(void) {
     fixture_destroy(&f);
 }
 
-/* Java's MockAdminClient.Builder throws for a zero broker count (build()
- * reads brokers.get(0), MockAdminClient.java:212) and for a negative one
- * (numBrokers calls brokers.subList(0, n), :154), rather than yielding a mock.
+/* Java's `org.apache.kafka.clients.admin.MockAdminClient.Builder` throws for a zero
+ * broker count (`Builder#build` reads brokers.get(0)) and for a negative one
+ * (`Builder#numBrokers` calls brokers.subList(0, n)), rather than yielding a mock.
  * The C setter and `_build` store the Builder's error, with the JDK's
  * message, in out_err and return NULL. */
 static void test_mock_admin_rejects_zero_brokers(void) {
@@ -1777,7 +1777,7 @@ static void test_mock_admin_delete_topics_by_ids(void) {
 
 /* Java's `deleteTopics(Collection<String>)` and `(Collection<String>,
  * DeleteTopicsOptions)` wrap the names in `TopicCollection.ofTopicNames`
- * (`Admin.java:214-230`): each `_with_string_slice` form deletes the named
+ * (`Admin#deleteTopics(Collection)` and `Admin#deleteTopics(Collection,DeleteTopicsOptions)`): each `_with_string_slice` form deletes the named
  * topic and returns a result keyed by name. */
 static void test_mock_admin_delete_topics_with_string_slice(void) {
     for (int with_options = 0; with_options <= 1; with_options++) {
@@ -3167,7 +3167,7 @@ static void test_mock_admin_list_offsets_earliest_and_latest(void) {
 
 /* `OffsetSpec.forTimestamp(ts)` is its own variant, distinct from the
  * singletons, and the mock refuses it as unsupported with Java's message
- * "Not implement yet" (sic — MockAdminClient.java:1233). */
+ * "Not implement yet" (sic — `org.apache.kafka.clients.admin.MockAdminClient#listOffsets`). */
 static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
@@ -3273,8 +3273,8 @@ static const kafka_admin_GroupListing_t *find_group_listing(const kafka_List_t *
 }
 
 /* The mock lists every group that has a GROUP config, building each listing
- * as CONSUMER / "consumer" / STABLE (MockAdminClient.java:730). `errors()`
- * is empty: the mock never reports a per-broker failure. */
+ * as CONSUMER / "consumer" / STABLE
+ * (`org.apache.kafka.clients.admin.MockAdminClient#listGroups`). `errors()` is empty: the mock never reports a per-broker failure. */
 static void test_mock_admin_list_groups_reports_seeded_groups(void) {
     fixture_t f;
     fixture_init(&f, 1);
@@ -3542,7 +3542,9 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
  * invalid-offset sentinel — is seedable. Listing then has to build an
  * `OffsetAndMetadata` from it, which Java rejects with
  * IllegalArgumentException("Invalid negative offset")
- * (MockAdminClient.java:756, OffsetAndMetadata.java:49-50); the Rust mock
+ * (`org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroupOffsets`,
+ * `org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)`);
+ * the Rust mock
  * fails the group's future rather than panicking, and the handle stays
  * usable: overwriting the bad offset makes the same call succeed. */
 static void test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seeded_offset(void) {
@@ -4885,7 +4887,8 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
 
 /* An out-of-range level fails every feature's future with the mock's
  * `invalidUpdateVersion` message — an InvalidRequestException wrapping the
- * InvalidUpdateVersionException's text (MockAdminClient.java:1333,1354); an UNKNOWN upgrade type is
+ * InvalidUpdateVersionException's text
+ * (`org.apache.kafka.clients.admin.MockAdminClient#updateFeatures`); an UNKNOWN upgrade type is
  * rejected the same way; `FeatureUpdate`'s constructor refuses a level
  * below 1 with an UPGRADE type (Java's IllegalArgumentException); an empty
  * batch is accepted by the mock and yields an empty result. */

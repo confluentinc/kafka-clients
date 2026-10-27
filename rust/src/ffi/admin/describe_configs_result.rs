@@ -75,16 +75,21 @@ fn box_configs(configs: HashMap<ConfigResource, Config>) -> *mut kafka_Map_t {
     )
 }
 
-/// `DescribeConfigsResult.values()`: an owned map, sorted by the resource's
-/// `toString()`, of owned `kafka_common_config_ConfigResource_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` whose `get` delivers a
-/// `kafka_admin_Config_t *` owned by the future. Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from resources to futures which can be used to check the status of the
+/// configuration for each resource.
+///
+/// # Returns
+///
+/// A map, sorted by the resource's `toString()`, of owned `kafka_common_config_ConfigResource_t *`
+/// keys (compared by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *` whose `get`
+/// delivers a `kafka_admin_Config_t *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
@@ -109,15 +114,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_values(
     )
 }
 
-/// `DescribeConfigsResult.all()`: an owned future whose `get` delivers a
-/// `kafka_Map_t *` owned by the future, of `kafka_common_config_ConfigResource_t *`
-/// keys (sorted by `toString()`, compared by value in `kafka_Map_get`) to
-/// `kafka_admin_Config_t *`; the future fails when any description failed.
-/// Freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the config descriptions succeed.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_Map_t *` owned by the future, of
+/// `kafka_common_config_ConfigResource_t *` keys (sorted by `toString()`, compared by value in
+/// `kafka_Map_get`) to `kafka_admin_Config_t *`; the future fails when any description failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
@@ -138,12 +147,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_all(
     }
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -164,7 +173,7 @@ mod tests {
     };
     use crate::ffi::util::{kafka_Map_destroy, kafka_Map_get, kafka_Map_put, kafka_Map_size};
 
-    /// A null key in a map keyed by value equals only a null key: the
+    /// A `NULL` key in a map keyed by value equals only a `NULL` key: the
     /// config-resource comparison, which reads both keys, never sees it.
     #[test]
     fn a_null_key_beside_a_config_resource_key_is_never_compared() {

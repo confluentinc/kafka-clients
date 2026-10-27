@@ -13,23 +13,18 @@
 // limitations under the License.
 
 //! The result of `Admin::list_groups`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListGroupsResult`.
 
 use crate::admin::GroupListing;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::list_groups`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListGroupsResult`.
-///
-/// Java's constructor takes a single `KafkaFuture<Collection<Object>>` mixing
-/// `GroupListing`s and `Throwable`s and, via `thenApply`, splits it into the
-/// `all`/`valid`/`errors` futures. The Rust port models the mixed collection as
-/// `Vec<Result<GroupListing, Error>>` (a listing is `Ok`, an error is
-/// `Err`) and derives the three views lazily with `then_apply`
-/// — semantically identical (`all` fails with the first error; `valid`/`errors`
-/// never fail).
+// Java's constructor takes a single `KafkaFuture<Collection<Object>>` mixing
+// `GroupListing`s and `Throwable`s and, via `thenApply`, splits it into the
+// `all`/`valid`/`errors` futures. The Rust port models the mixed collection as
+// `Vec<Result<GroupListing, Error>>` (a listing is `Ok`, an error is
+// `Err`) and derives the three views lazily with `then_apply`
+// — semantically identical (`all` fails with the first error; `valid`/`errors`
+// never fail).
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult")]
 pub struct ListGroupsResult {
@@ -43,9 +38,7 @@ impl ListGroupsResult {
         Self { source }
     }
 
-    /// A future yielding either the first error, or the full set of listings.
-    ///
-    /// Mirrors `all()`.
+    /// Returns a future yielding either the first error, or the full set of listings.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<GroupListing>> {
         self.source.then_apply(|results| {
@@ -60,7 +53,13 @@ impl ListGroupsResult {
         })
     }
 
-    /// A future yielding just the valid listings (never fails). Mirrors `valid()`.
+    /// Returns a future which yields just the valid listings.
+    ///
+    /// This future never fails with an error, no matter what happens. Errors are completely
+    /// ignored. If nothing can be fetched, an empty collection is yielded. If there is an error,
+    /// but some results can be returned, this future will yield those partial results. When
+    /// using this future, it is a good idea to also check the errors future so that errors can
+    /// be displayed and handled.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#valid")]
     pub fn valid(&self) -> KafkaFuture<Vec<GroupListing>> {
         self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {
@@ -68,7 +67,13 @@ impl ListGroupsResult {
         })
     }
 
-    /// A future yielding just the errors (never fails). Mirrors `errors()`.
+    /// Returns a future which yields just the errors which occurred.
+    ///
+    /// If this future yields a non-empty collection, it is very likely that elements are missing
+    /// from the [`valid`](Self::valid) set.
+    ///
+    /// This future itself never fails with an error. In the event of an error, this future will
+    /// successfully yield a collection containing at least one error.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsResult#errors")]
     pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source.then_apply(|results: Vec<Result<GroupListing, Error>>| {

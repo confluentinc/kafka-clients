@@ -85,7 +85,7 @@ impl ApiVersionsRequest {
     /// software name and version must match the `SOFTWARE_NAME_VERSION_PATTERN`
     /// regex.
     ///
-    /// Translated from `ApiVersionsRequest.isValid` (`ApiVersionsRequest.java:104-117`).
+    /// Translated from `ApiVersionsRequest#isValid`.
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest#isValid")]
     pub fn is_valid(&self) -> bool {
         if self.version >= 5 {
@@ -216,7 +216,7 @@ impl Builder {
     /// KIP-1242). Provide it together with [`Self::set_node_id`]: a v5 request
     /// with only one of the two is invalid ([`ApiVersionsRequest::is_valid`]).
     ///
-    /// Translated from `ApiVersionsRequest.Builder.setClusterId` (`ApiVersionsRequest.java:59-61`).
+    /// Translated from `ApiVersionsRequest.Builder#setClusterId`.
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder#setClusterId")]
     pub fn set_cluster_id(&mut self, cluster_id: Option<&str>) {
         self.data.set_cluster_id(cluster_id.map(str::to_string));
@@ -225,7 +225,7 @@ impl Builder {
     /// Sets the node id the client expects the broker to have (v5+,
     /// KIP-1242). Provide it together with [`Self::set_cluster_id`].
     ///
-    /// Translated from `ApiVersionsRequest.Builder.setNodeId` (`ApiVersionsRequest.java:63-65`).
+    /// Translated from `ApiVersionsRequest.Builder#setNodeId`.
     #[doc(alias = "org.apache.kafka.common.requests.ApiVersionsRequest$Builder#setNodeId")]
     pub fn set_node_id(&mut self, node_id: i32) {
         self.data.set_node_id(node_id);

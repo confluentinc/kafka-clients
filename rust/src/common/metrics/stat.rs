@@ -20,16 +20,21 @@ use crate::common::metrics::MetricConfig;
 /// A `Stat` is a quantity such as average, max, etc that is computed off the
 /// stream of updates to a sensor.
 ///
-/// `record` takes `&self`: the simple cumulative stats use interior mutability
-/// (atomics) so that recording is lock-free, which is the minimal Rust
-/// equivalent of Java guarding the stat field with the sensor's `synchronized`.
+/// # Translation notes
+///
+/// `record` takes `&self`, so a stat uses interior mutability.
+// The simple cumulative stats use atomics so that recording is lock-free, the
+// minimal Rust equivalent of Java guarding the stat field with the sensor's
+// `synchronized`.
 #[doc(alias = "org.apache.kafka.common.metrics.Stat")]
 pub trait Stat: Send + Sync {
     /// Record the given value.
     ///
-    /// * `config` - The configuration to use for this metric
-    /// * `value` - The value to record
-    /// * `time_ms` - The POSIX time in milliseconds this value occurred
+    /// # Arguments
+    ///
+    /// - `config` - The configuration to use for this metric
+    /// - `value` - The value to record
+    /// - `time_ms` - The POSIX time in milliseconds this value occurred
     #[doc(alias = "org.apache.kafka.common.metrics.Stat#record")]
     fn record(&self, config: &MetricConfig, value: f64, time_ms: i64);
 }

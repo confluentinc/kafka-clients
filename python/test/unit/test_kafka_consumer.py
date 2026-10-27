@@ -1818,8 +1818,9 @@ def test_a_raising_commit_callback_propagates_from_a_commit_inside_a_callback() 
 def test_close_wraps_a_raising_commit_callback(raised: BaseException) -> None:
     # Java's close(): the error of awaitPendingAsyncCommitsAndExecuteCommitCallbacks
     # is kept and thrown as KafkaException("Failed to close kafka consumer", e),
-    # a KafkaException too (AsyncKafkaConsumer.java:1669-1675; unlike poll's
-    # maybeWrapAsKafkaException, which leaves one unwrapped).
+    # a KafkaException too
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean);
+    # unlike poll's maybeWrapAsKafkaException, which leaves one unwrapped).
     events: list[str] = []
     consumer = new_consumer(**{"enable.auto.commit": False})
     consumer.assign(partitions=[TP0])
@@ -1886,7 +1887,7 @@ def test_async_commit_callback_runs_on_the_event_loop() -> None:
 # not raise them again.
 def test_async_commit_nowait_raises_its_own_error_and_close_does_not() -> None:
     # Java's commitAsync waits for its offsets (ConsumerUtils.getResult(
-    # commitEvent.offsetsReady(), ...), AsyncKafkaConsumer.java:1136): on the
+    # commitEvent.offsetsReady(), ...), org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit): on the
     # async consumers commit_nowait is a coroutine, and its error comes out of
     # the await, not out of the call that creates it.
     for cls in (AsyncConsumer, AsyncKafkaConsumer, AsyncMockConsumer):
@@ -2384,7 +2385,7 @@ def test_cancelling_an_async_commit_nowait_leaves_no_wakeup_armed(
     # committed, partitionsFor, listTopics) are woken on cancellation. Any other
     # one never consumes a wakeup (commitAsync waits through
     # ConsumerUtils.getResult without the WakeupTrigger,
-    # AsyncKafkaConsumer.java:1126-1140): waking it would leave the wakeup armed,
+    # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit): waking it would leave the wakeup armed,
     # and the next poll would raise WakeupError although wakeup() was never
     # called. The call is cancelled deterministically while it awaits a
     # coroutine commit callback an empty commit queued, which it delivers first
@@ -2458,13 +2459,13 @@ def test_cancelling_a_call_awaiting_a_coroutine_commit_callback_it_delivered(
     # commitSync run executeCallbacks) and waits for its report; the call is
     # cancelled while the callback runs, and the consumer wakes it. A poll
     # checks for a wakeup after the report (setFetchAction after an empty
-    # collectFetch(), AsyncKafkaConsumer.java:1964-2016, which Java runs also
+    # collectFetch(), org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#pollForFetches, which Java runs also
     # when the poll's timeout has expired) and consumes the wake. That holds
     # for a poll(0), and for a poll cancelled before its deadline whose
     # callback ends after it. commit(offsets={}) does not consume it: its
     # futures are already done, and Java's setActiveTask leaves a wakeup
-    # pending for a done future (AsyncKafkaConsumer.java:1801-1804,
-    # WakeupTrigger.setActiveTask), so the wake stays armed in the core. Either
+    # pending for a done future (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commitSync(Optional,Duration),
+    # WakeupTrigger#setActiveTask), so the wake stays armed in the core. Either
     # way the next poll returns: a wakeup the consumer sent itself never
     # outlives the call that sent it (the next call the core ends with
     # WakeupError for it is submitted again), and the next poll would otherwise
@@ -2617,7 +2618,7 @@ def test_a_wakeup_from_a_commit_callback_of_an_expired_poll_is_raised_by_that_po
     # Java's testWakeupAfterEmptyFetch with no time left: a wakeup() sent while
     # poll(0) runs a commit callback is raised by that poll, since Java's
     # pollForFetches calls setFetchAction after the empty collectFetch()
-    # whatever the remaining time (AsyncKafkaConsumer.java:1964-2016). The
+    # whatever the remaining time (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#pollForFetches). The
     # next poll returns.
     consumer = new_consumer()
     try:
@@ -3172,7 +3173,7 @@ def test_ctrl_c_wakes_only_a_call_java_can_wake(
     # KeyboardInterrupt. The consumer wakes itself first only for a call Java's
     # wakeup() interrupts, here poll, which then ends at once. A call that never
     # consumes a wakeup, such as commitAsync (ConsumerUtils.getResult without
-    # the WakeupTrigger, AsyncKafkaConsumer.java:1126-1140), is not woken: the
+    # the WakeupTrigger, org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit), is not woken: the
     # wakeup would stay armed and the next poll would raise WakeupError.
     wakeups: list[int] = []
     real_wakeup = _lib.Consumer_wakeup
@@ -3381,7 +3382,7 @@ def test_ctrl_c_during_a_poll_returning_records_seeks_them_back(
     # the positions past them, so a commit after Ctrl+C would commit records the
     # user never received: each partition is first sought back to its first
     # fetched record, and the next poll returns them. Java's poll never loses
-    # records the positions moved past (AsyncKafkaConsumer.java:940-960).
+    # records the positions moved past (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#poll).
     consumer = new_consumer()
     try:
         consumer.assign(partitions=[TP0, TP1])
@@ -3469,7 +3470,7 @@ def test_ctrl_c_while_a_poll_deserializes_its_records_seeks_them_back(
     # the core has moved the positions past the whole batch. Each partition is
     # sought back to its first fetched record before KeyboardInterrupt
     # propagates, and the next poll returns them, as when Ctrl+C lands in the
-    # wait (AsyncKafkaConsumer.java:940-960 never loses records the positions
+    # wait (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#poll never loses records the positions
     # moved past).
     consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(
         configs=configs(), value_deserializer=_interrupting_value_deserializer(
@@ -3739,7 +3740,8 @@ def test_the_consumers_own_leftover_wakeup_is_not_raised_inside_a_callback(metho
     # call it woke (Ctrl+C, cancellation; _own_wake_left). Inside a callback a
     # wakeable handle call that meets it is made again, so the user sees no
     # WakeupError they did not ask for. partitions_for and list_topics are
-    # wakeable, as Java's (AsyncKafkaConsumer.java:1324, :1352).
+    # wakeable, as Java's (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#partitionsFor(String,Duration),
+    # #listTopics(Duration)).
     calls: dict[str, Callable[[Any], Any]] = {
         "committed": lambda c: c.committed(partitions={TP0}, timeout=0.3),
         "position": lambda c: c.position(partition=TP0, timeout=0.3),

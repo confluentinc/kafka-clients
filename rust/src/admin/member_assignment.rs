@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! A description of the assignments of a specific group member.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.MemberAssignment`.
 
 use std::collections::HashSet;
 
 use crate::common::TopicPartition;
 
 /// A description of the assignments of a specific group member.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.MemberAssignment`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment")]
 pub struct MemberAssignment {
@@ -32,15 +28,15 @@ pub struct MemberAssignment {
 impl MemberAssignment {
     /// Creates an instance with the specified topic partitions.
     ///
-    /// Mirrors `new MemberAssignment(Set<TopicPartition>)`.
+    /// # Arguments
+    ///
+    /// - `topic_partitions` - List of topic partitions
     #[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment#MemberAssignment")]
     pub fn new(topic_partitions: HashSet<TopicPartition>) -> Self {
         Self { topic_partitions }
     }
 
-    /// The topic partitions assigned to a group member.
-    ///
-    /// Mirrors `topicPartitions()`.
+    /// Returns the topic partitions assigned to a group member.
     #[doc(alias = "org.apache.kafka.clients.admin.MemberAssignment#topicPartitions")]
     pub fn topic_partitions(&self) -> &HashSet<TopicPartition> {
         &self.topic_partitions
@@ -48,8 +44,8 @@ impl MemberAssignment {
 }
 
 impl std::hash::Hash for MemberAssignment {
-    /// Java's `MemberAssignment.hashCode()` hashes `topicPartitions`, a set,
-    /// independently of its order.
+    // Java's `MemberAssignment.hashCode()` hashes `topicPartitions`, a set,
+    // independently of its order.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         crate::common::utils::Utils::hash_unordered(&self.topic_partitions, state);
     }

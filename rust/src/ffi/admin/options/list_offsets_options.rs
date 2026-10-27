@@ -65,21 +65,28 @@ fn boxed(options: ListOffsetsOptions) -> *mut kafka_admin_ListOffsetsOptions_t {
     Box::into_raw(Box::new(options)) as *mut kafka_admin_ListOffsetsOptions_t
 }
 
-/// `new ListOffsetsOptions()`: `READ_UNCOMMITTED`, with the client's default
-/// API timeout. Owned, freed with [`kafka_admin_ListOffsetsOptions_destroy`].
+/// `new ListOffsetsOptions()`: `READ_UNCOMMITTED`, with the client's default API timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ListOffsetsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListOffsetsOptions_new() -> *mut kafka_admin_ListOffsetsOptions_t {
     boxed(ListOffsetsOptions::new())
 }
 
-/// `new ListOffsetsOptions(IsolationLevel isolationLevel)`: owned, freed with
-/// [`kafka_admin_ListOffsetsOptions_destroy`]; `isolation_level` is a
-/// borrowed singleton.
+/// Creates options for `kafka_admin_Admin_list_offsets_with_options` with the given isolation
+/// level.
+///
+/// # Parameters
+///
+/// - `isolation_level` - the isolation level of the offsets to list.
 ///
 /// # Safety
 ///
-/// `isolation_level` must be a `kafka_common_IsolationLevel_t` singleton.
+/// `isolation_level` must be a `kafka_common_IsolationLevel_t` singleton, borrowed for the call.
+/// The handle is owned by the caller, freed with `kafka_admin_ListOffsetsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_with_isolation_level(
@@ -92,8 +99,13 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_with_isolation_level(
     }))
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -111,8 +123,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -128,12 +144,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_timeout_ms(
     unsafe { list_offsets_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `ListOffsetsOptions.isolationLevel()`: the borrowed
-/// `kafka_common_IsolationLevel_t` singleton, never freed.
+/// Returns the isolation level of the offsets to list.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The returned `kafka_common_IsolationLevel_t` is a singleton,
+/// never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsOptions_isolation_level(

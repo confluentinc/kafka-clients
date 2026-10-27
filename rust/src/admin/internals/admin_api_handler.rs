@@ -51,10 +51,10 @@ impl<K: Clone + Eq + Hash, V> ApiResult<K, V> {
     /// Fails every key the request covered with the same error.
     ///
     /// This is what Java does when `handleResponse` throws: `KafkaAdminClient`'s
-    /// `catch (Throwable t)` (`KafkaAdminClient.java:1387-1391`) calls
+    /// `catch (Throwable t)` (in
+    /// `KafkaAdminClient.AdminClientRunnable#handleResponses`) calls
     /// `call.fail(now, t)`, which on the driver path reaches
-    /// `AdminApiDriver.onFailure`'s generic `else` branch
-    /// (`AdminApiDriver.java:303-312`):
+    /// `AdminApiDriver#onFailure`'s generic `else` branch:
     ///
     /// ```java
     /// Map<K, Throwable> errors = spec.keys.stream().collect(Collectors.toMap(

@@ -13,27 +13,21 @@
 // limitations under the License.
 
 //! The result of `Admin::list_transactions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListTransactionsResult`.
 
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
 
 use crate::admin::TransactionListing;
-use crate::common::Error;
-use crate::common::{KafkaFuture, KafkaFutureOps};
+use crate::common::KafkaFuture;
+use crate::common::internals::KafkaFutureImpl;
 
 /// The (top-level) future value: a map from broker id to that broker's listing
 /// future, produced once the broker list is discovered.
 type BrokerFutures = HashMap<i32, KafkaFuture<Vec<TransactionListing>>>;
 
 /// The result of `Admin::list_transactions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsResult`. The
-/// wrapped future completes when the broker list is discovered, yielding a map
-/// from broker id to that broker's per-request future (mirroring Java's
-/// `KafkaFuture<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>>`).
+// The wrapped future completes when the broker list is discovered, yielding a map from broker id
+// to that broker's per-request future (mirroring Java's `KafkaFuture<Map<Integer,
+// KafkaFutureImpl<Collection<TransactionListing>>>>`).
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult")]
 pub struct ListTransactionsResult {
@@ -50,7 +44,10 @@ impl ListTransactionsResult {
     /// Get all transaction listings. If any of the underlying requests fail,
     /// the returned future also fails with the first encountered error.
     ///
-    /// Mirrors `ListTransactionsResult.all`.
+    /// # Returns
+    ///
+    /// A future containing the collection of transaction listings. The future completes when all
+    /// transaction listings are available and fails after any non-retriable error.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<TransactionListing>> {
         self.all_by_broker_id()
@@ -62,7 +59,12 @@ impl ListTransactionsResult {
     /// Get a future returning the per-broker listing futures. Useful for a
     /// partial listing or more granular error details.
     ///
-    /// Mirrors `ListTransactionsResult.byBrokerId`.
+    /// # Returns
+    ///
+    /// A future containing a map of futures by broker which complete individually when their
+    /// respective transaction listings are available. The top-level future returned from this
+    /// method may fail if the admin client is unable to lookup the available brokers in the
+    /// cluster.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#byBrokerId")]
     pub fn by_broker_id(&self) -> KafkaFuture<BrokerFutures> {
         self.future.clone()
@@ -71,74 +73,26 @@ impl ListTransactionsResult {
     /// Get all transaction listings keyed by the broker id currently managing
     /// them. If any underlying request fails, the returned future also fails.
     ///
-    /// Mirrors `ListTransactionsResult.allByBrokerId`.
+    /// # Returns
+    ///
+    /// A future containing a map from the broker ID to the transactions hosted by that broker
+    /// respectively. This future completes when all transaction listings are available and fails
+    /// after any non-retriable error.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsResult#allByBrokerId")]
     pub fn all_by_broker_id(&self) -> KafkaFuture<HashMap<i32, Vec<TransactionListing>>> {
-        KafkaFuture::new(std::sync::Arc::new(AllByBrokerIdFuture { source: self.future.clone() }))
-    }
-}
-
-/// Polls `future` exactly once with a no-op waker, returning its output if it is
-/// immediately ready. Used to synchronously observe an already-completed
-/// [`KafkaFuture`] for [`is_done`](KafkaFutureOps::is_done).
-fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
-    let mut future = Box::pin(future);
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    match future.as_mut().poll(&mut cx) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
-    }
-}
-
-/// A [`KafkaFutureOps`] that flattens the top-level broker-discovery future and
-/// each per-broker future into a single `broker id -> listings` map, failing on
-/// the first error (mirrors `ListTransactionsResult.allByBrokerId`).
-struct AllByBrokerIdFuture {
-    source: KafkaFuture<BrokerFutures>,
-}
-
-impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFuture {
-    fn get(
-        &self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, Error>> + Send + '_>>
-    {
-        Box::pin(async move {
-            let broker_futures = self.source.get().await?;
-            let mut result = HashMap::with_capacity(broker_futures.len());
-            for (broker_id, future) in broker_futures {
-                result.insert(broker_id, future.get().await?);
-            }
-            Ok(result)
-        })
-    }
-
-    fn get_with_timeout(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<HashMap<i32, Vec<TransactionListing>>, Error>> + Send + '_>>
-    {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                Err(_) => Err(Error::local_timeout(format!(
-                    "Timed out waiting for KafkaFuture after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        if !self.source.is_done() {
-            return false;
-        }
-        // The source is done, so its `get()` resolves in a single poll.
-        match poll_once(self.source.get()) {
-            Some(Ok(broker_futures)) => broker_futures.values().all(KafkaFuture::is_done),
-            Some(Err(_)) => true,
-            None => false,
-        }
+        let all = KafkaFutureImpl::new();
+        let completer = all.clone();
+        self.future.on_complete(move |broker_futures| match broker_futures {
+            Err(error) => _ = completer.complete_with_error(error.clone()),
+            Ok(broker_futures) => {
+                let listings = KafkaFuture::join_map(broker_futures.clone().into_iter().collect());
+                listings.on_complete(move |listings| match listings {
+                    Ok(listings) => _ = completer.complete(listings.clone()),
+                    Err(error) => _ = completer.complete_with_error(error.clone()),
+                });
+            },
+        });
+        all.future()
     }
 }
 

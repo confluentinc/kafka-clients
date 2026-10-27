@@ -134,8 +134,8 @@ async fn create_then_list_and_describe_topics<F: AdminBackendFactory>(ctx: &mut 
 
 /// `describeTopics` by name goes through KIP-966 `DescribeTopicPartitions`, as
 /// in Java 4.3.1: the broker always reports the eligible-leader-replica lists
-/// (`KRaftMetadataCache.java:221-222`), so on a healthy topic they are empty
-/// lists, not "unavailable" — the Metadata API, which this client used by name
+/// (`org.apache.kafka.metadata.KRaftMetadataCache#partitionMetadataForDescribeTopicResponse`), so
+/// on a healthy topic they are empty lists, not "unavailable" — the Metadata API, which this client used by name
 /// before, carries no ELR and left them `None`. With
 /// `partition_size_limit_per_response` below the partition count the broker
 /// answers in pages, and the client must follow `NextCursor` to see them all.
@@ -553,8 +553,7 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
 /// sends `increaseTo(3)` with `validateOnly` and then waits for the partition
 /// count to still be 1. Note that Java has **no** `createTopics`-with-validateOnly
 /// non-creation test; the closest is the controller unit test
-/// `ReplicationControlManagerTest.testCreateTopicsWithValidateOnlyFlag`
-/// (`metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java:859`).
+/// `org.apache.kafka.controller.ReplicationControlManagerTest#testCreateTopicsWithValidateOnlyFlag`.
 /// An earlier revision of this comment cited
 /// `PlaintextAdminIntegrationTest.testCreateTopicsWithValidateOnly`, which does
 /// not exist.

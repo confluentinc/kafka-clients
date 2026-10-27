@@ -99,14 +99,19 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeAclsResult_t) -> &'a Resu
     unsafe { result_ref(self_) }
 }
 
-/// `DescribeAclsResult.values()`: the future of the matching ACL bindings,
-/// borrowed from the result handle (valid until it is destroyed, never
-/// passed to `kafka_common_KafkaFuture_destroy`). Its `get` delivers a
+/// Return a future containing the ACLs requested.
+///
+/// # Returns
+///
+/// The future of the matching ACL bindings. Its `get` delivers a
 /// `kafka_List_t *` owned by the future, of `kafka_common_acl_AclBinding_t *`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is borrowed from `self_`, valid until it is destroyed, and is never passed
+/// to `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
@@ -117,11 +122,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
     unsafe { handle(self_) }.result.values
 }
 
-/// Frees a result handle and the future borrowed from it; null is a no-op.
+/// Frees a result handle and the future borrowed from it; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A new topic to be created via `Admin::create_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.NewTopic`.
 
 use crate::common::requests::CreateTopicsRequest;
 use std::collections::BTreeMap;
@@ -22,13 +20,10 @@ use std::collections::BTreeMap;
 use crate::create_topics_request_data::{CreatableReplicaAssignment, CreatableTopic, CreatableTopicConfig};
 
 /// A new topic to be created via `Admin::create_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.NewTopic`.
-///
-/// `replicas_assignments` and `configs` use `BTreeMap` (rather than `HashMap`)
-/// so that conversion to the wire request is deterministically ordered — Java
-/// iterates its `Map` in unspecified order, but a stable order simplifies
-/// wire-byte comparison and testing.
+// `replicas_assignments` and `configs` use `BTreeMap` (rather than `HashMap`)
+// so that conversion to the wire request is deterministically ordered — Java
+// iterates its `Map` in unspecified order, but a stable order simplifies
+// wire-byte comparison and testing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
 pub struct NewTopic {
@@ -42,24 +37,19 @@ pub struct NewTopic {
 }
 
 impl NewTopic {
-    /// A new topic with the specified replication factor and number of
-    /// partitions, either of which optionally defaults to the broker
-    /// configurations for `num.partitions` and `default.replication.factor`
-    /// respectively.
+    /// A new topic that optionally defaults `num_partitions` and `replication_factor` to the
+    /// broker configurations for `num.partitions` and `default.replication.factor` respectively.
     ///
-    /// Translates **both** of Java's first two constructors:
-    /// `NewTopic(String, int, short)` (`NewTopic.java:47`) and
-    /// `NewTopic(String, Optional<Integer>, Optional<Short>)` (`:56`). They
-    /// differ only by the `Optional` wrapper — `:47`'s body is literally
-    /// `this(name, Optional.of(numPartitions), Optional.of(replicationFactor))`
-    /// — so under CLAUDE.md §2 ("in case the difference is **only** Optional
-    /// use Rust's `Option` and a single method name") they are one Rust method
-    /// taking `Option`. Callers of the former pass `Some(..)`.
+    /// # Arguments
     ///
-    /// The surviving group is `{name, num_partitions, replication_factor}` and
-    /// `{name, replicas_assignments}`, whose intersection is `{name}`. No
-    /// constructor takes `name` alone, so under §2 nobody keeps the plain
-    /// `new` and both carry a parameter-name suffix.
+    /// - `name` - the topic name.
+    /// - `num_partitions` - the number of partitions, or `None` for the broker default.
+    /// - `replication_factor` - the replication factor, or `None` for the broker default.
+    ///
+    /// # Translation notes
+    ///
+    /// Translates both `NewTopic(String, int, short)` and
+    /// `NewTopic(String, Optional<Integer>, Optional<Short>)`: callers of the former pass `Some`.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#NewTopic")]
     pub fn with_num_partitions_replication_factor(
         name: impl Into<String>,
@@ -77,9 +67,12 @@ impl NewTopic {
 
     /// A new topic with the specified replica assignment configuration.
     ///
-    /// * `name` - the topic name
-    /// * `replicas_assignments` - a map from partition id to replica ids (i.e.
-    ///   broker ids). The first replica is treated as the preferred leader.
+    /// # Arguments
+    ///
+    /// - `name` - the topic name.
+    /// - `replicas_assignments` - a map from partition id to replica ids (i.e. broker ids).
+    ///   Although not enforced, it is generally a good idea for all partitions to have the same
+    ///   number of replicas. The first replica will be treated as the preferred leader.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#NewTopic")]
     pub fn with_replicas_assignments(name: impl Into<String>, replicas_assignments: BTreeMap<i32, Vec<i32>>) -> Self {
         Self {
@@ -91,39 +84,42 @@ impl NewTopic {
         }
     }
 
-    /// The name of the topic to be created.
+    /// Returns the name of the topic to be created.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// The number of partitions for the new topic or -1 if a replica assignment
+    /// Returns the number of partitions for the new topic or -1 if a replica assignment
     /// has been specified.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#numPartitions")]
     pub fn num_partitions(&self) -> i32 {
         self.num_partitions.unwrap_or(CreateTopicsRequest::NO_NUM_PARTITIONS)
     }
 
-    /// The replication factor for the new topic or -1 if a replica assignment
+    /// Returns the replication factor for the new topic or -1 if a replica assignment
     /// has been specified.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#replicationFactor")]
     pub fn replication_factor(&self) -> i16 {
         self.replication_factor.unwrap_or(CreateTopicsRequest::NO_REPLICATION_FACTOR)
     }
 
-    /// A map from partition id to replica ids (i.e. broker ids) or `None` if the
+    /// Returns a map from partition id to replica ids (i.e. broker ids) or `None` if the
     /// number of partitions and replication factor have been specified instead.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#replicasAssignments")]
     pub fn replicas_assignments(&self) -> Option<&BTreeMap<i32, Vec<i32>>> {
         self.replicas_assignments.as_ref()
     }
 
-    /// Set the configuration to use on the new topic, or `None` for none.
-    /// Returns `self` for chaining, mirroring Java's fluent `configs(...)`.
+    /// Set the configuration to use on the new topic.
     ///
-    /// Java's `configs(Map<String, String>)` stores the map as given
-    /// (`NewTopic.java:115-118`): a `null` map clears configs set earlier, and a
-    /// `null` value is sent to the broker as a null config value.
+    /// # Arguments
+    ///
+    /// - `configs` - The configuration map, or `None` for none.
+    ///
+    /// # Returns
+    ///
+    /// This NewTopic object.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
     pub fn set_configs(mut self, configs: Option<BTreeMap<String, Option<String>>>) -> Self {
@@ -131,8 +127,8 @@ impl NewTopic {
         self
     }
 
-    /// The configuration for the new topic or `None` if no configs were ever
-    /// specified. A value is `None` where Java's map holds `null`.
+    /// Returns the configuration for the new topic or `None` if no configs were ever
+    /// specified.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
     pub fn configs(&self) -> Option<&BTreeMap<String, Option<String>>> {
         self.configs.as_ref()
@@ -140,7 +136,7 @@ impl NewTopic {
 
     /// Converts this new topic to a wire `CreatableTopic`.
     ///
-    /// Mirrors `NewTopic.convertToCreatableTopic`. Used by
+    /// Used by
     /// `KafkaAdminClient::create_topics`.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#convertToCreatableTopic")]
     pub(crate) fn convert_to_creatable_topic(&self) -> CreatableTopic {
@@ -168,7 +164,7 @@ impl NewTopic {
     }
 }
 
-/// Mirrors Java's `toString()` (`NewTopic.java:152-159`): an unset partition
+/// Java's `toString()`: an unset partition
 /// count or replication factor renders as `default`, and the two maps as Java's
 /// `AbstractMap.toString()` renders them (`{0=[1, 2]}`, `{k=v}`), with `null`
 /// for a missing map or config value.
@@ -386,7 +382,7 @@ mod tests {
 
     /// New test, no Java original: a `null` config value, which Java's map
     /// allows, reaches the request as a null `CreatableTopicConfig.value`
-    /// (`NewTopic.java:140-147`) and renders as `null`.
+    /// (`NewTopic#convertToCreatableTopic`) and renders as `null`.
     #[test]
     fn a_null_config_value_is_sent_and_printed_as_null() {
         let topic = NewTopic::with_num_partitions_replication_factor(
@@ -404,7 +400,7 @@ mod tests {
     }
 
     /// New test, no Java original: Java's `configs(null)` clears configs set
-    /// earlier (`NewTopic.java:115-118`), so none are sent.
+    /// earlier (`NewTopic#configs(Map)`), so none are sent.
     #[test]
     fn set_configs_none_clears_the_configs() {
         let topic = NewTopic::with_num_partitions_replication_factor(

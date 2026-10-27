@@ -208,8 +208,8 @@ mod tests {
     ///   _tagged_fields: 0x00
     ///
     /// `assignments` is left unset here, and an unset nullable array is **empty**, not
-    /// null: `FieldSpec.fieldDefault` returns `new <List>(0)` for an array unless the
-    /// spec says `"default": "null"` (`FieldSpec.java:465-475`), and this spec does not.
+    /// null: `FieldSpec#fieldDefault` returns `new <List>(0)` for an array unless the
+    /// spec says `"default": "null"`, and this spec does not.
     /// The explicitly-null encoding is pinned by the sibling test below.
     #[test]
     fn serialize_known_byte_vector_v3() {

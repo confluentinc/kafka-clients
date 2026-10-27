@@ -200,17 +200,16 @@ pub struct Builder {
 }
 
 /// The parameters of Java's
-/// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`
-/// (`MetadataRequest.java:52`).
+/// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`.
 ///
-/// Java's four `Builder` constructors (`:43`, `:48`, `:52`, `:79`) share no
-/// parameter name, so all four of `:52`'s parameters reach its derived name.
+/// Java's four `MetadataRequest.Builder#Builder` constructors share no
+/// parameter name, so all four of this one's parameters reach its derived name.
 /// CLAUDE.md §2 caps that at three and makes this struct the method's *only*
 /// parameter, so every Java parameter lives here. This struct has no Java
 /// counterpart: it exists solely to satisfy that naming rule (DoD #7).
 ///
 /// It deliberately has **no** `Default`. Java's narrowest `Builder(topics,
-/// allowAutoTopicCreation)` (`:79`) does supply the version range
+/// allowAutoTopicCreation)` does supply the version range
 /// (`ApiKeys.METADATA.oldestVersion()`, `latestVersion()`) but takes `topics`
 /// and `allowAutoTopicCreation` from its caller, so those two have no
 /// Java-derived default — and a synthesised `topics` of `None` means *all*
@@ -225,10 +224,10 @@ pub struct MetadataRequestBuilderOptions<'a> {
     /// Java's `allowAutoTopicCreation`.
     pub(crate) allow_auto_topic_creation: bool,
     /// Java's `minVersion`. Starts as `ApiKeys.METADATA.oldestVersion()`, as in
-    /// `:79`.
+    /// `Builder(List<String>, boolean)`.
     pub(crate) min_version: i16,
     /// Java's `maxVersion`. Starts as `ApiKeys.METADATA.latestVersion()`, as in
-    /// `:79`.
+    /// `Builder(List<String>, boolean)`.
     pub(crate) max_version: i16,
 }
 
@@ -322,8 +321,7 @@ impl<'a> MetadataRequestBuilderOptionsBuilder<'a> {
 impl Builder {
     /// Creates a builder from existing data.
     ///
-    /// Corresponds to Java's `MetadataRequest.Builder(MetadataRequestData)`
-    /// (`MetadataRequest.java:43`).
+    /// Corresponds to Java's `MetadataRequest.Builder(MetadataRequestData)`.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_data(data: MetadataRequestData) -> Self {
         Self {
@@ -335,8 +333,7 @@ impl Builder {
 
     /// Creates a builder with the given topics and auto-creation flag.
     ///
-    /// Corresponds to Java's `MetadataRequest.Builder(List<String>, boolean)`
-    /// (`MetadataRequest.java:79`).
+    /// Corresponds to Java's `MetadataRequest.Builder(List<String>, boolean)`.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_topics_allow_auto_topic_creation(topics: Option<&[&str]>, allow_auto_topic_creation: bool) -> Self {
         Self::with_options(
@@ -351,8 +348,7 @@ impl Builder {
     /// Creates a builder targeting a specific version.
     ///
     /// Corresponds to Java's
-    /// `MetadataRequest.Builder(List<String>, boolean, short allowedVersion)`
-    /// (`MetadataRequest.java:48`).
+    /// `MetadataRequest.Builder(List<String>, boolean, short allowedVersion)`.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_topics_allow_auto_topic_creation_version(
         topics: Option<&[&str]>,
@@ -373,8 +369,7 @@ impl Builder {
     /// Creates a builder with the given topics, auto-creation flag, and version range.
     ///
     /// Corresponds to Java's
-    /// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`
-    /// (`MetadataRequest.java:52`).
+    /// `MetadataRequest.Builder(List<String>, boolean, short minVersion, short maxVersion)`.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataRequest$Builder#Builder")]
     pub fn with_options(options: MetadataRequestBuilderOptions<'_>) -> Self {
         let MetadataRequestBuilderOptions { topics, allow_auto_topic_creation, min_version, max_version } = options;
@@ -538,8 +533,7 @@ impl RequestBuilder for Builder {
     }
 }
 
-/// Mirrors Java's `MetadataRequest.Builder.toString()`
-/// (`MetadataRequest.java:146-147`), which returns `data.toString()`.
+/// Mirrors Java's `MetadataRequest.Builder#toString`, which returns `data.toString()`.
 impl std::fmt::Display for Builder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.data)
@@ -713,9 +707,9 @@ mod tests {
     }
 
     /// New test, no Java original: the builder renders as its data, as Java's
-    /// `Builder.toString()` returns `data.toString()` (`MetadataRequest.java:146-147`).
+    /// `MetadataRequest.Builder#toString` returns `data.toString()`.
     /// `NetworkClient` logs it that way when it sends a metadata request
-    /// (`NetworkClient.java:1342`).
+    /// (`NetworkClient.DefaultMetadataUpdater#maybeUpdate(long,Node)`).
     #[test]
     fn test_builder_display_renders_data() {
         let builder = Builder::for_topic_names(&["orders"], false);

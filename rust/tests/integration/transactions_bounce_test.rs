@@ -20,7 +20,7 @@
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testWithGroupMetadata` (line 80) → `test_with_group_metadata`
+//! - `testWithGroupMetadata` → `test_with_group_metadata`
 //!
 //! ## SKIPped
 //!

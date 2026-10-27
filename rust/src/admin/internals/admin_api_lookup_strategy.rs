@@ -52,9 +52,8 @@ impl<K: Clone + Eq + Hash> LookupResult<K> {
     /// Fails every key the lookup request covered with the same error.
     ///
     /// The lookup-stage counterpart of [`ApiResult::failed_all`]: Java's
-    /// `AdminApiDriver.onFailure` generic `else` branch routes a
-    /// `LookupRequestScope` spec to `completeLookupExceptionally(errors)`
-    /// (`AdminApiDriver.java:311`).
+    /// `AdminApiDriver#onFailure` generic `else` branch routes a
+    /// `LookupRequestScope` spec to `completeLookupExceptionally(errors)`.
     ///
     /// [`ApiResult::failed_all`]: super::ApiResult::failed_all
     pub(crate) fn failed_all(keys: &HashSet<K>, error: Error) -> Self {

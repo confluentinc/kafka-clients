@@ -49,14 +49,15 @@ unsafe fn handle<'a>(self_: *const kafka_admin_UpdateFeaturesResult_t) -> &'a Re
     unsafe { result_ref(self_) }
 }
 
-/// `values()`: an owned `kafka_Map_t` (freed with `kafka_Map_destroy`,
-/// which frees its keys and values) of owned `char *` feature names, sorted,
-/// to owned `kafka_common_KafkaFuture_t *` of `Void` (`get` delivers `NULL`
-/// once that feature's update has been applied).
+/// Returns a `kafka_Map_t` of owned `char *` feature names, sorted, to owned `kafka_common_KafkaFuture_t *` of `Void`
+/// (`get` delivers `NULL` once that feature's update has been applied).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees its keys
+/// and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_values(
@@ -69,13 +70,18 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_values(
         .string_keyed_future_map(h.result.values().iter(), |ctx, f| ctx.void_future(f))
 }
 
-/// `all()`: an owned `KafkaFuture<Void>` freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers `NULL` once every
-/// feature update has been applied, or the first failure.
+/// Return a future which succeeds if all the feature updates succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>`; its `get` delivers `NULL` once every feature update has been applied, or
+/// the first failure.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all(
@@ -87,12 +93,12 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

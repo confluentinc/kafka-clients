@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::elect_leaders`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ElectLeadersResult`.
 
 use std::collections::HashMap;
 
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The result of `Admin::elect_leaders`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ElectLeadersResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult")]
 pub struct ElectLeadersResult {
@@ -36,20 +32,16 @@ impl ElectLeadersResult {
         Self { election_future }
     }
 
-    /// Get a future for the topic partitions for which a leader election was
+    /// Returns a future for the topic partitions for which a leader election was
     /// attempted. If the election succeeded then the value for a topic
     /// partition will be `None`; otherwise the election failed and the value
     /// will be `Some(error)`.
-    ///
-    /// Mirrors `partitions()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#partitions")]
     pub fn partitions(&self) -> KafkaFuture<HashMap<TopicPartition, Option<Error>>> {
         self.election_future.clone()
     }
 
-    /// Return a future which succeeds if all the topic elections succeed.
-    ///
-    /// Mirrors `all()`.
+    /// Returns a future which succeeds if all the topic elections succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.ElectLeadersResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         self.election_future

@@ -135,48 +135,81 @@ fn group_type_list(types: &HashSet<GroupType>) -> *mut kafka_List_t {
     )
 }
 
-/// `new ListGroupsOptions()`: no filter, with the client's default API
-/// timeout. Owned, freed with [`kafka_admin_ListGroupsOptions_destroy`].
+/// `new ListGroupsOptions()`: no filter, with the client's default API timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ListGroupsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_new() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::new())
 }
 
-/// `ListGroupsOptions.forConsumerGroups()`: only consumer groups (the
-/// `CLASSIC` and `CONSUMER` types with the empty and `consumer` protocol
-/// types). Owned, freed with [`kafka_admin_ListGroupsOptions_destroy`].
+/// Only consumer groups will be returned by `kafka_admin_Admin_list_groups_with_options`. This
+/// operation sets filters on group type and protocol type which select consumer groups.
+///
+/// # Returns
+///
+/// The new options, with the `CLASSIC` and `CONSUMER` types and the empty and `consumer`
+/// protocol types.
+///
+/// # Safety
+///
+/// The handle is owned by the caller, freed with `kafka_admin_ListGroupsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_consumer_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_consumer_groups())
 }
 
-/// `ListGroupsOptions.forShareGroups()`: only share groups. Owned, freed
-/// with [`kafka_admin_ListGroupsOptions_destroy`].
+/// Only share groups will be returned by `kafka_admin_Admin_list_groups_with_options`. This
+/// operation sets a filter on group type which select share groups.
+///
+/// # Returns
+///
+/// The new options.
+///
+/// # Safety
+///
+/// The handle is owned by the caller, freed with `kafka_admin_ListGroupsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_share_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_share_groups())
 }
 
-/// `ListGroupsOptions.forStreamsGroups()`: only streams groups. Owned, freed
-/// with [`kafka_admin_ListGroupsOptions_destroy`].
+/// Only streams groups will be returned by `kafka_admin_Admin_list_groups_with_options`. This
+/// operation sets a filter on group type which select streams groups.
+///
+/// # Returns
+///
+/// The new options.
+///
+/// # Safety
+///
+/// The handle is owned by the caller, freed with `kafka_admin_ListGroupsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListGroupsOptions_for_streams_groups() -> *mut kafka_admin_ListGroupsOptions_t {
     boxed(ListGroupsOptions::for_streams_groups())
 }
 
-/// `ListGroupsOptions.inGroupStates(Set<GroupState> groupStates)`:
-/// `group_states` is a borrowed `kafka_List_t` of `kafka_common_GroupState_t`
-/// singletons, copied during the call (`NULL` reads as empty: no filter).
+/// If `group_states` is set, only groups in these states will be returned by
+/// `kafka_admin_Admin_list_groups_with_options`. Otherwise, all groups are returned. This
+/// operation is supported by brokers with version 2.6.0 or later.
+///
+/// # Parameters
+///
+/// - `group_states` - a `kafka_List_t` of `kafka_common_GroupState_t` singletons; `NULL` reads as
+///   empty.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
 /// `group_states` must be `NULL` or a valid list, not mutated during the
-/// call, whose elements are group-state singletons.
+/// call, whose elements are group-state singletons. The list is borrowed and copied during the
+/// call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
@@ -193,15 +226,18 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_in_group_states(
     *options = std::mem::take(options).in_group_states(group_states);
 }
 
-/// `ListGroupsOptions.withProtocolTypes(Set<String> protocolTypes)`:
-/// `protocol_types` is a borrowed `kafka_List_t` of `const char *`, copied
-/// during the call (`NULL` reads as empty: no filter).
+/// If protocol types is set, only groups of these protocol types will be returned by
+/// `kafka_admin_Admin_list_groups_with_options`. Otherwise, all groups are returned.
+///
+/// # Parameters
+///
+/// - `protocol_types` - a `kafka_List_t` of `const char *`; `NULL` reads as empty.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
 /// `protocol_types` must be `NULL` or a valid list whose elements are
-/// NUL-terminated strings.
+/// NUL-terminated strings. The list and its strings are borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
@@ -219,15 +255,18 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_protocol_types(
     *options = std::mem::take(options).with_protocol_types(protocol_types);
 }
 
-/// `ListGroupsOptions.withTypes(Set<GroupType> types)`: `types` is a
-/// borrowed `kafka_List_t` of `kafka_common_GroupType_t` singletons, copied
-/// during the call (`NULL` reads as empty: no filter).
+/// If types is set, only groups of these types will be returned by
+/// `kafka_admin_Admin_list_groups_with_options`. Otherwise, all groups are returned.
+///
+/// # Parameters
+///
+/// - `types` - a `kafka_List_t` of `kafka_common_GroupType_t` singletons; `NULL` reads as empty.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
 /// `types` must be `NULL` or a valid list, not mutated during the call,
-/// whose elements are group-type singletons.
+/// whose elements are group-type singletons. The list is borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
@@ -244,8 +283,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_with_types(
     *options = std::mem::take(options).with_types(types);
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -263,13 +307,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `ListGroupsOptions.groupStates()`: an owned `kafka_List_t` of borrowed
-/// `kafka_common_GroupState_t` singletons sorted by name, freed with
-/// `kafka_List_destroy` (the singletons are never freed).
+/// Returns the list of group states that are requested or empty if no states have been
+/// specified, as `kafka_common_GroupState_t` singletons sorted by name.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list is owned by the caller, freed with
+/// `kafka_List_destroy`; the singletons are never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_group_states(
@@ -281,12 +325,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_group_states(
     group_state_list(unsafe { list_groups_options_ref(self_) }.group_states())
 }
 
-/// `ListGroupsOptions.protocolTypes()`: an owned, sorted `kafka_List_t` of
-/// owned `char *`, freed with `kafka_List_destroy`.
+/// Returns the list of protocol types that are requested or empty if no protocol types have
+/// been specified, as a sorted `kafka_List_t` of `char *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list and its strings are owned by the caller, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_protocol_types(
@@ -298,13 +343,13 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_protocol_types(
     sorted_string_list(unsafe { list_groups_options_ref(self_) }.protocol_types())
 }
 
-/// `ListGroupsOptions.types()`: an owned `kafka_List_t` of borrowed
-/// `kafka_common_GroupType_t` singletons sorted by name, freed with
-/// `kafka_List_destroy` (the singletons are never freed).
+/// Returns the list of group types that are requested or empty if no types have been
+/// specified, as `kafka_common_GroupType_t` singletons sorted by name.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list is owned by the caller, freed with
+/// `kafka_List_destroy`; the singletons are never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_types(
@@ -316,8 +361,12 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsOptions_types(
     group_type_list(unsafe { list_groups_options_ref(self_) }.types())
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///

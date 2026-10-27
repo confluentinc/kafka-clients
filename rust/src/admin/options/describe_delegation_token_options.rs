@@ -13,16 +13,10 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_delegation_token`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.DescribeDelegationTokenOptions`.
 
 use crate::common::security::auth::KafkaPrincipal;
 
 /// Options for `Admin::describe_delegation_token`.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.DescribeDelegationTokenOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenOptions")]
 pub struct DescribeDelegationTokenOptions {
@@ -38,12 +32,16 @@ impl DescribeDelegationTokenOptions {
         Self::default()
     }
 
-    /// Sets the owners to describe delegation tokens for.
+    /// If owners is `None`, all the user owned tokens and tokens where user have Describe
+    /// permission will be returned.
     ///
-    /// If owners is `None`, all the user-owned tokens and tokens where the user
-    /// has Describe permission will be returned.
+    /// # Arguments
     ///
-    /// Mirrors `DescribeDelegationTokenOptions.owners`.
+    /// - `owners` - The owners that we want to describe delegation tokens for
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenOptions#owners")]
     pub fn set_owners(mut self, owners: Option<Vec<KafkaPrincipal>>) -> Self {
@@ -51,17 +49,22 @@ impl DescribeDelegationTokenOptions {
         self
     }
 
-    /// The owners to describe delegation tokens for, or `None` for all
-    /// authorized tokens.
-    ///
-    /// Mirrors `DescribeDelegationTokenOptions.owners`.
+    /// Returns the owners to describe delegation tokens for, or `None` for all authorized tokens.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenOptions#owners")]
     pub fn owners(&self) -> Option<&[KafkaPrincipal]> {
         self.owners.as_deref()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -69,8 +72,8 @@ impl DescribeDelegationTokenOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

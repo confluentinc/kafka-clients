@@ -102,8 +102,8 @@ fn test_should_store_field() {
 /// `processId` is a v1+ field and is not marked `"ignorable"`, so writing a non-default
 /// value at v0 must be **rejected**, not silently dropped: Java refuses to encode a
 /// message it cannot represent faithfully
-/// (`FieldSpec.generateNonIgnorableFieldCheck`, `FieldSpec.java:652-665`, gated on
-/// `!field.ignorable()` at `MessageDataGenerator.java:792`).
+/// (`FieldSpec#generateNonIgnorableFieldCheck`, gated on
+/// `!field.ignorable()` in `MessageDataGenerator#generateClassWriter`).
 ///
 /// The check lives on the **write** path only. Java's `generateClassMessageSize` never
 /// emits it, and the Java test likewise sizes nothing — it allocates a fixed 64-byte

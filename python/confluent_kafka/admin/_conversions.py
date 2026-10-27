@@ -371,13 +371,16 @@ def options_or_new(options: _O | None, factory: Callable[[], _O], *, read: bool 
 def any_topic_name(names: Iterable[Any]) -> bool:
     """Whether Java reads ``options`` for these topic names: some name is not
     unrepresentable (``KafkaAdminClient.topicNameIsUnrepresentable``: ``null`` or
-    empty), so ``if (!topics.isEmpty())`` holds (KafkaAdminClient:1905, 2042, 2453)."""
+    empty), so ``if (!topics.isEmpty())`` holds
+    (``org.apache.kafka.clients.admin.KafkaAdminClient#createTopics``,
+    ``#handleDeleteTopicsUsingNames``,
+    ``#handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi``)."""
     return any(name for name in names)
 
 
 def any_topic_id(ids: Iterable[Any]) -> bool:
     """Whether Java's ``handleDeleteTopicsUsingIds`` reads ``options``: some id is not
-    ``Uuid.ZERO_UUID`` (KafkaAdminClient:2058, 2067)."""
+    ``Uuid.ZERO_UUID``."""
     from confluent_kafka.common.uuid import Uuid
 
     return any(topic_id != Uuid.ZERO_UUID for topic_id in ids)
@@ -385,8 +388,7 @@ def any_topic_id(ids: Iterable[Any]) -> bool:
 
 def all_partitions_valid(rows: Iterable[tuple[Any, int]] | None) -> bool:
     """Whether Java's ``listPartitionReassignments`` reads ``options``: it returns
-    early on the first unrepresentable topic or negative partition
-    (KafkaAdminClient:4194-4205)."""
+    early on the first unrepresentable topic or negative partition."""
     return rows is None or all(topic and partition >= 0 for topic, partition in rows)
 
 
@@ -496,8 +498,9 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
     for topic in new_topics:
         element(topic, "new_topics")  # newTopic.name()
         if topic.name() is None:
-            # Java's unrepresentable name (KafkaAdminClient:1895): that topic's future
-            # fails. The FFI cannot carry it: TypeError up front.
+            # Java's unrepresentable name
+            # (``org.apache.kafka.clients.admin.KafkaAdminClient#createTopics``): that
+            # topic's future fails. The FFI cannot carry it: TypeError up front.
             raise TypeError("new_topics must not contain a NewTopic with a None name")
         configs = topic.configs()
         assignments = topic.replicas_assignments()
@@ -561,7 +564,8 @@ def topic_collection_target(topics: Any, rpc: str) -> tuple[bool, list[Any]]:
     ``(False, names)`` for a ``TopicNameCollection`` or a ``Collection<String>``
     (``Admin``'s ``TopicCollection.ofTopicNames(topics)``); any other
     ``TopicCollection`` raises Java's ``IllegalArgumentException``
-    (``KafkaAdminClient.java:1916``, ``:2154``)."""
+    (``org.apache.kafka.clients.admin.KafkaAdminClient#deleteTopics``,
+    ``#describeTopics``)."""
     from confluent_kafka._java import java_str
     from confluent_kafka.common.topic_collection import TopicCollection
     from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -570,10 +574,11 @@ def topic_collection_target(topics: Any, rpc: str) -> tuple[bool, list[Any]]:
         raise IllegalArgumentError(
             message="The TopicCollection: None provided did not match any supported "
             "classes for " + rpc + ".")
-    # A None name is Java's unrepresentable name (KafkaAdminClient:1847), whose
-    # future fails; a None id, Java's NPE (deleteTopics, 2057) or unrepresentable id
-    # (describeTopics, 1851). The FFI carries neither: TypeError up front, before the
-    # options, as Java's loop precedes its options read.
+    # A None name is Java's unrepresentable name
+    # (``org.apache.kafka.clients.admin.KafkaAdminClient#topicNameIsUnrepresentable``),
+    # whose future fails; a None id, Java's NPE (``#handleDeleteTopicsUsingIds``) or
+    # unrepresentable id (``#topicIdIsUnrepresentable``). The FFI carries neither:
+    # TypeError up front, before the options, as Java's loop precedes its options read.
     if not isinstance(topics, TopicCollection):
         reject_str("topics", topics)
         return False, present(topics, "topics")
@@ -1019,8 +1024,8 @@ def _log_dir_descriptions(dirs: Mapping[str, tuple[Any, ...]]) -> dict[str, LogD
     """The extension's ``{log_dir: (error, total_bytes, usable_bytes, replicas,
     is_cordoned)}`` as the broker's ``dict[str, LogDirDescription]``: Java's
     ``new LogDirDescription(error, replicaInfos, totalBytes, usableBytes,
-    isCordoned)`` (``KafkaAdminClient.java:3178``), ``-1`` the core's unknown volume
-    size. A log dir error that is not an ``ApiError`` fails the broker's future."""
+    isCordoned)`` (``org.apache.kafka.clients.admin.KafkaAdminClient#logDirDescriptions``),
+    ``-1`` the core's unknown volume size. A log dir error that is not an ``ApiError`` fails the broker's future."""
     from confluent_kafka.admin.log_dir_description import LogDirDescription
     from confluent_kafka.admin.replica_info import ReplicaInfo
     from confluent_kafka.common.topic_partition import TopicPartition
@@ -1662,7 +1667,7 @@ def alter_consumer_group_offsets_result(native: Any, kind: Kind,
 def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
     """An ``OffsetSpec`` as the extension's ``(is_timestamp, value)``: the timestamp of
     a ``TimestampSpec``, else the wire sentinel of Java's
-    ``KafkaAdminClient.getOffsetFromSpec`` (``KafkaAdminClient.java:5176``), whose
+    ``org.apache.kafka.clients.admin.KafkaAdminClient#getOffsetFromSpec``, whose
     ``instanceof`` chain this follows, any other spec reading as ``latest()``."""
     from confluent_kafka.admin.offset_spec import OffsetSpec
 
@@ -1792,7 +1797,8 @@ def describe_user_scram_credentials_args(users: Iterable[str] | None) -> tuple[A
     if users is not None:
         reject_str("users", users)
     # Java's createRequest skips a null user (``if (user != null)``,
-    # KafkaAdminClient:4473): it is not described.
+    # ``org.apache.kafka.clients.admin.KafkaAdminClient#describeUserScramCredentials``):
+    # it is not described.
     return (None if users is None else [user for user in users if user is not None],)
 
 
@@ -1922,9 +1928,9 @@ def update_features_result(native: Any, kind: Kind, loop: asyncio.AbstractEventL
                            ) -> UpdateFeaturesResult[Any]:
     """The ``UpdateFeaturesResult`` over the C result's per-feature ``values()``
     futures. The core's check of the arguments (``Feature updates can not be null or
-    empty.``, ``Provided feature can not be empty.``), which Java's ``updateFeatures``
-    throws before it makes a call (``KafkaAdminClient.java:4589-4598``), is raised by
-    the extension's call itself."""
+    empty.``, ``Provided feature can not be empty.``), which Java's
+    ``org.apache.kafka.clients.admin.KafkaAdminClient#updateFeatures`` throws before it
+    makes a call, is raised by the extension's call itself."""
     from confluent_kafka.admin.update_features_result import UpdateFeaturesResult
 
     futures = wrap_map(kind, loop, native.futures("values"))

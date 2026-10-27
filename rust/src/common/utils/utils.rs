@@ -156,7 +156,7 @@ impl Utils {
 
     /// Runs an async `close` from synchronous code, for the clients' failed
     /// constructors: Java's constructor `catch` closes what it already built
-    /// with `closeQuietly` (`Utils.java:1143-1152`), but a Rust constructor is
+    /// with `Utils#closeQuietly(AutoCloseable,String,AtomicReference)`, but a Rust constructor is
     /// synchronous while a serde's `close` is async. `close` logs its own
     /// failures, as `closeQuietly` does.
     ///

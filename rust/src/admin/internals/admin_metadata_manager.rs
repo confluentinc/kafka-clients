@@ -301,7 +301,7 @@ impl AdminMetadataManager {
     /// resolution (KIP-909).
     ///
     /// It gates `KafkaAdminClient`'s rebootstrap
-    /// (`MetadataUpdateNodeIdProvider.provide()`, `KafkaAdminClient.java:790-797`).
+    /// (`KafkaAdminClient.MetadataUpdateNodeIdProvider#provide`).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#isBootstrapped")]
     pub(crate) fn is_bootstrapped(&self) -> bool {
         self.inner.lock().unwrap().is_bootstrapped()
@@ -325,9 +325,6 @@ impl AdminMetadataManager {
     /// it is an API error, kept, so that [`is_ready`](Self::is_ready) returns it
     /// until the next successful update; any other error is logged at info
     /// level.
-    ///
-    /// Translated from `AdminMetadataManager.updateFailed`
-    /// (`AdminMetadataManager.java:317-339`).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#updateFailed")]
     pub(crate) fn update_failed(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
@@ -348,8 +345,8 @@ impl AdminMetadataManager {
         }
     }
 
-    /// The warning `updateFailed` adds for a fatal `UnsupportedVersionException`
-    /// (`AdminMetadataManager.java:328-335`), which names the API the remote
+    /// The warning `AdminMetadataManager#updateFailed` adds for a fatal
+    /// `UnsupportedVersionException`, which names the API the remote
     /// node does not support: KIP-919's `DESCRIBE_CLUSTER` for a
     /// `bootstrap.controllers` client, `METADATA` otherwise. `None` for any
     /// other error.
@@ -420,16 +417,16 @@ impl MetadataUpdater for AdminMetadataUpdater {
 
     fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
-        // Java: `maybeFatalException.ifPresent(this::updateFailed)`
-        // (`AdminMetadataManager.java:127`) — stored unconditionally. The
-        // parameter is typed `Optional<AuthenticationException>`, so the
-        // `isFatalException` check inside `updateFailed` is statically
-        // satisfied and never filters anything out. Rust's weaker
-        // `Option<Error>` cannot express that, and the previous `is_fatal_error()`
-        // guard here only passed because `NetworkClient` set a fatal flag by
-        // hand. With fatality derived from the error code, the guard would
-        // silently start dropping authentication failures — so drop the guard
-        // instead, matching Java's control flow.
+        // Java: `maybeFatalException.ifPresent(this::updateFailed)` in
+        // `org.apache.kafka.clients.admin.internals.AdminMetadataManager.AdminMetadataUpdater#handleServerDisconnect`
+        // stores the error unconditionally. The parameter is typed
+        // `Optional<AuthenticationException>`, so the `isFatalException` check
+        // inside `updateFailed` is statically satisfied and never filters anything
+        // out. Rust's weaker `Option<Error>` cannot express that, and the previous
+        // `is_fatal_error()` guard here only passed because `NetworkClient` set a
+        // fatal flag by hand. With fatality derived from the error code, the guard
+        // would silently start dropping authentication failures — so drop the
+        // guard instead, matching Java's control flow.
         if let Some(err) = maybe_auth_error {
             inner.fatal_error = Some(err);
         }
@@ -662,7 +659,7 @@ mod tests {
         assert!(mgr.is_ready().unwrap());
     }
 
-    /// `updateFailed`'s KIP-919 branch (`AdminMetadataManager.java:328-335`): a
+    /// The KIP-919 branch of `AdminMetadataManager#updateFailed`: a
     /// fatal `UnsupportedVersionException` names the API the remote node lacks,
     /// `DESCRIBE_CLUSTER` for a `bootstrap.controllers` client and `METADATA`
     /// otherwise; other errors add no such warning. The fatal error is kept

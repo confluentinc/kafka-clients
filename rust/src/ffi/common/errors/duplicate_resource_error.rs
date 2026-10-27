@@ -45,12 +45,17 @@ impl PayloadClass for DuplicateResourceError {
     }
 }
 
-/// The payload of a `DuplicateResourceException` error, borrowed from the
-/// error handle, or null when the error is another class.
+/// Returns the payload of a `DuplicateResourceException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
@@ -70,11 +75,17 @@ pub unsafe extern "C" fn kafka_common_Error_duplicate_resource(
 }
 
 /// `new DuplicateResourceException(String message)`, with no resource.
-/// Owned, freed with [`kafka_common_DuplicateResourceError_destroy`].
+///
+/// # Parameters
+///
+/// - `message` - the error's message
 ///
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_DuplicateResourceError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_new(
@@ -87,6 +98,11 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_new(
 }
 
 /// `new DuplicateResourceException()` with Java's default message.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_DuplicateResourceError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_DuplicateResourceError_with_default_message()
@@ -96,9 +112,15 @@ pub extern "C" fn kafka_common_DuplicateResourceError_with_default_message()
 
 /// `new DuplicateResourceException(String resource, String message)`.
 ///
+/// # Parameters
+///
+/// - `resource` - the resource that was referred to twice
+/// - `message` - the error's message
+///
 /// # Safety
 ///
-/// `resource` and `message` must be valid NUL-terminated strings.
+/// `resource` and `message` must be valid NUL-terminated strings. The returned handle is owned,
+/// freed with `kafka_common_DuplicateResourceError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource(
@@ -118,13 +140,20 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource(
 }
 
 /// `new DuplicateResourceException(String resource, String message,
-/// Throwable cause)`; `source` is consumed and must not be destroyed by the
-/// caller afterwards.
+/// Throwable cause)`.
+///
+/// # Parameters
+///
+/// - `resource` - the resource that was referred to twice
+/// - `message` - the error's message
+/// - `source` - the error's cause
 ///
 /// # Safety
 ///
 /// `resource` and `message` must be valid NUL-terminated strings and
-/// `source` an owned error handle not yet destroyed.
+/// `source` an owned error handle not yet destroyed; it is consumed, so the caller must not
+/// destroy it afterwards. The returned handle is owned, freed with
+/// `kafka_common_DuplicateResourceError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_source(
@@ -148,12 +177,16 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_with_resource_sourc
     ))
 }
 
-/// `resource()`: borrowed from the handle, or null when no resource was
-/// recorded.
+/// Returns the resource.
+///
+/// # Returns
+///
+/// the (potentially `NULL`) resource that was referred to twice
 ///
 /// # Safety
 ///
-/// `self_` must be a valid duplicate-resource handle.
+/// `self_` must be a valid duplicate-resource handle. The returned string is borrowed, valid until `self_`
+/// is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
@@ -166,11 +199,12 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.text_ptr()
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
@@ -184,11 +218,12 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_message(
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
@@ -202,11 +237,12 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_source(
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid duplicate-resource handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
@@ -219,12 +255,12 @@ pub unsafe extern "C" fn kafka_common_DuplicateResourceError_to_string(
     unsafe { Payload::<DuplicateResourceError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_DuplicateResourceError_destroy(

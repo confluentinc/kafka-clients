@@ -176,7 +176,7 @@ mod tests {
     /// The standard-encoding branch of a message that is flexible only from v5 is
     /// generated separately from a never-flexible message's, so it is pinned on its own:
     /// below v5 a negative INT16 `Groups` element length is a null element, which Java
-    /// rejects (`MessageDataGenerator.java:613-617`). Field-by-field:
+    /// rejects (`MessageDataGenerator#generateVariableLengthReader`). Field-by-field:
     ///   groups: int32 array len 1                -> 00 00 00 01
     ///     element: int16 string len -1           -> FF FF (or 00 00 for the boundary)
     ///   include_authorized_operations: bool      -> 00 (v3+; left unread below v3)
@@ -197,8 +197,8 @@ mod tests {
 
     /// The compact-encoding branch of the same message, from v5: a compact length is the
     /// string length plus one, so 0 is a null element, which Java rejects — it reads the
-    /// length as `readUnsignedVarint() - 1` = -1 (`MessageDataGenerator.java:602`,
-    /// `:613-617`). Field-by-field:
+    /// length as `readUnsignedVarint() - 1` = -1 (`MessageDataGenerator#generateVariableLengthReader`).
+    /// Field-by-field:
     ///   groups: compact array len 1 + 1          -> 02
     ///     element: compact string len 0 (null)   -> 00 (or 01, an empty string, for the boundary)
     ///   include_authorized_operations: bool      -> 00

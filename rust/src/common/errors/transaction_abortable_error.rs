@@ -21,10 +21,8 @@ kafka_error_type! {
     /// The server encountered an error with the transaction. The client can abort
     /// the transaction to continue using this transactional ID.
     ///
-    /// Corresponds to Java's `TransactionAbortableException`, error code `Errors::TransactionAbortable`.
-    ///
-    /// Java `extends` chain:
-    ///    `TransactionAbortableException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::TransactionAbortable`. Java `extends` chain:
+    /// `TransactionAbortableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.TransactionAbortableException")]
     TransactionAbortableError,
     code: Errors::TransactionAbortable,

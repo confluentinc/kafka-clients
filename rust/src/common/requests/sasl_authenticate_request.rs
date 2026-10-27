@@ -169,7 +169,7 @@ impl std::fmt::Display for Builder {
 }
 
 /// Renders exactly what the [`Display`](std::fmt::Display) renders, which
-/// mirrors Java's `Builder.toString()` (`SaslAuthenticateRequest.java:49-50`):
+/// mirrors Java's `SaslAuthenticateRequest.Builder#toString`:
 /// the request type only.
 ///
 /// Java has a single `toString()`; a derived `Debug` would be a second rendering

@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Topic with this name already exists.
     ///
-    /// Corresponds to Java's `TopicExistsException`, error code `Errors::TopicAlreadyExists`.
-    ///
-    /// Java `extends` chain:
-    ///    `TopicExistsException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::TopicAlreadyExists`. Java `extends` chain: `TopicExistsException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.TopicExistsException")]
     TopicExistsError,
     code: Errors::TopicAlreadyExists,

@@ -533,7 +533,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                                             **_consumer_timeout(request))
         except KafkaError as e:
             return cpb.CommittedResponse(error=_kafka_error_to_proto(e))
-        entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp), offset=_oam_to_proto(oam))
+        # A partition with no committed offset maps to None (Java null): its offset stays unset.
+        entries = [cpb.OffsetMapEntry(partition=_tp_to_proto(tp),
+                                      offset=_oam_to_proto(oam) if oam is not None else None)
                    for tp, oam in result.items()]
         return cpb.CommittedResponse(offsets=cpb.OffsetMap(entries=entries))
 
@@ -618,15 +620,15 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except KafkaError as e:
             return cpb.OffsetAndTimestampResponse(error=_kafka_error_to_proto(e))
         # New value type: accessors are methods; a partition with no offset at or
-        # after its timestamp maps to None (Java null) and is omitted.
+        # after its timestamp maps to None (Java null): its offset stays unset.
         entries = [
             cpb.OffsetAndTimestampMapEntry(
                 partition=_tp_to_proto(tp),
-                offset=cpb.OffsetAndTimestamp(
+                offset=None if oat is None else cpb.OffsetAndTimestamp(
                     offset=oat.offset(), timestamp=oat.timestamp(),
                     leader_epoch=(oat.leader_epoch()
                                   if oat.leader_epoch() is not None else None)))
-            for tp, oat in result.items() if oat is not None
+            for tp, oat in result.items()
         ]
         return cpb.OffsetAndTimestampResponse(offsets=cpb.OffsetAndTimestampMap(entries=entries))
 

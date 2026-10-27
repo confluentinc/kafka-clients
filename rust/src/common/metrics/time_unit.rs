@@ -41,7 +41,7 @@ pub enum TimeUnit {
 }
 
 impl TimeUnit {
-    /// The `name()` of the unit, matching Java's enum constant name.
+    /// Returns the `name()` of the unit, matching Java's enum constant name.
     pub fn name(&self) -> &'static str {
         match self {
             TimeUnit::Nanoseconds => "NANOSECONDS",
@@ -54,9 +54,17 @@ impl TimeUnit {
         }
     }
 
-    /// Convert a duration expressed in this unit to milliseconds, mirroring
-    /// `TimeUnit.MILLISECONDS.convert(window, unit)`. Integer truncation matches
-    /// Java's `long` arithmetic.
+    /// Converts a duration expressed in this unit to milliseconds, as
+    /// `TimeUnit.MILLISECONDS.convert(window, unit)` does: a finer unit
+    /// truncates, a coarser one saturates at `i64::MAX` / `i64::MIN`.
+    ///
+    /// # Arguments
+    ///
+    /// - `window` - the duration, in this unit
+    ///
+    /// # Returns
+    ///
+    /// The duration in milliseconds.
     pub fn to_millis(self, window: i64) -> i64 {
         match self {
             TimeUnit::Nanoseconds => window / 1_000_000,

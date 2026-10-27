@@ -101,15 +101,20 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeDelegationTokenResult_t) 
     unsafe { result_ref(self_) }
 }
 
-/// `delegationTokens()`: a borrowed future, valid until the result is
-/// destroyed and never passed to `kafka_common_KafkaFuture_destroy`. Its
-/// `get` delivers a `kafka_List_t *` (owned by the future) of
-/// `kafka_common_security_token_delegation_DelegationToken_t *`, in the
-/// order the broker returned them.
+/// Returns a future which yields list of delegation tokens
+///
+/// # Returns
+///
+/// A future. Its `get` delivers a `kafka_List_t *` (owned by the future)
+/// of `kafka_common_security_token_delegation_DelegationToken_t *`, in the order the broker
+/// returned them.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is borrowed from `self_`, valid until it is destroyed, and is never passed
+/// to `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_tokens(
@@ -121,11 +126,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeDelegationTokenResult_delegation_to
 }
 
 /// Frees a result handle, and with it the future `delegation_tokens`
-/// borrows out; null is a no-op.
+/// borrows out; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

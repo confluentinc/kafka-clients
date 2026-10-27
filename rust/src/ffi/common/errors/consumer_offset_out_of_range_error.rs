@@ -44,12 +44,17 @@ impl PayloadClass for ConsumerOffsetOutOfRangeError {
     }
 }
 
-/// The payload of an `OffsetOutOfRangeException` error, borrowed from the
-/// error handle, or null when the error is another class.
+/// Returns the payload of an `OffsetOutOfRangeException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
@@ -71,15 +76,18 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_offset_out_of_range(
 }
 
 /// `new OffsetOutOfRangeException(Map<TopicPartition, Long>
-/// offsetOutOfRangePartitions)`; the map holds
-/// `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values,
-/// copied. Owned, freed with
-/// [`kafka_common_ConsumerOffsetOutOfRangeError_destroy`].
+/// offsetOutOfRangePartitions)`.
+///
+/// # Parameters
+///
+/// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset, with
+///   `const kafka_common_TopicPartition_t *` keys and `const int64_t *` values
 ///
 /// # Safety
 ///
-/// `offset_out_of_range_partitions` must be null or a valid map of the
-/// stated types.
+/// `offset_out_of_range_partitions` must be `NULL` or a valid map of the
+/// stated types; it is copied. The returned handle is owned, freed with
+/// `kafka_common_ConsumerOffsetOutOfRangeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
@@ -97,10 +105,18 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_new(
 /// `new OffsetOutOfRangeException(String message, Map<TopicPartition, Long>
 /// offsetOutOfRangePartitions)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message
+/// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset
+///
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string and
-/// `offset_out_of_range_partitions` null or a valid map of the stated types.
+/// `offset_out_of_range_partitions` `NULL` or a valid map of the stated types; it is copied.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_ConsumerOffsetOutOfRangeError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message(
@@ -120,12 +136,16 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_with_message
     ))
 }
 
-/// `partitions()`: an owned list of `kafka_common_TopicPartition_t *`,
-/// ordered by topic then partition, freed with `kafka_List_destroy`.
+/// `partitions()`: a list of `kafka_common_TopicPartition_t *`, ordered by topic then partition.
+///
+/// # Returns
+///
+/// The set of partitions with invalid offsets
 ///
 /// # Safety
 ///
-/// `self_` must be a valid offset-out-of-range handle.
+/// `self_` must be a valid offset-out-of-range handle. The returned list is owned, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_partitions(
@@ -142,13 +162,13 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_partitions(
     )
 }
 
-/// `offsetOutOfRangePartitions()`: an owned map of
-/// `kafka_common_TopicPartition_t *` to `int64_t *`, ordered by topic then
-/// partition, freed with `kafka_Map_destroy`.
+/// Returns the map of partition to the out-of-range offset (`offsetOutOfRangePartitions()`):
+/// `kafka_common_TopicPartition_t *` to `int64_t *`, ordered by topic then partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid offset-out-of-range handle.
+/// `self_` must be a valid offset-out-of-range handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
@@ -165,11 +185,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_o
     )
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
@@ -183,11 +204,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_message(
     unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
@@ -201,11 +223,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_source(
     unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid offset-out-of-range handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_to_string(
@@ -218,12 +241,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_to_string(
     unsafe { Payload::<ConsumerOffsetOutOfRangeError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_destroy(

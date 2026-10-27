@@ -143,6 +143,10 @@ pub struct JavaClass {
     /// The types it `extends` or `implements`, as written but without type
     /// arguments: `class A extends B<T> implements Outer.C` → `["B", "Outer.C"]`.
     pub supertypes: Vec<String>,
+    /// Its Javadoc, as [`clean_javadoc`] leaves it.
+    pub javadoc: Option<String>,
+    /// The Javadoc of each of `fields` that has one.
+    pub field_docs: BTreeMap<String, String>,
 }
 
 /// What a Java type is declared as.
@@ -175,6 +179,9 @@ pub struct Overload {
     pub param_names: Vec<String>,
     /// Whether it returns its own class: a static one is a factory.
     pub returns_class: bool,
+    /// Its own Javadoc, as [`clean_javadoc`] leaves it; see
+    /// [`JavaIndex::overload_doc`] for the inherited one.
+    pub javadoc: Option<String>,
 }
 
 /// A Java access level, narrowest first.
@@ -494,7 +501,7 @@ pub fn rust_method_bases(method: &str) -> Vec<String> {
 }
 
 /// Applies CLAUDE.md §2's word substitutions to a snake_case name.
-fn translate_words(snake: &str) -> String {
+pub(crate) fn translate_words(snake: &str) -> String {
     snake
         .split('_')
         .map(|w| match w {
@@ -510,7 +517,7 @@ fn translate_words(snake: &str) -> String {
 
 /// Applies CLAUDE.md §2's word substitutions to a PascalCase name, keeping
 /// every other word as written (`SSLException` → `SSLError`).
-fn translate_camel_words(name: &str) -> String {
+pub(crate) fn translate_camel_words(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut start = 0;
     for (i, c) in name.char_indices().skip(1).chain([(name.len(), 'A')]) {
@@ -710,6 +717,92 @@ impl JavaIndex {
         self.classes
             .iter()
             .find(|c| c.package == package && c.path.iter().map(String::as_str).eq(nested.iter().copied()))
+    }
+
+    /// The Javadoc of overload `o` of `class`. An undocumented overload takes
+    /// the doc of the member it overrides, and an `{@inheritDoc}` is replaced
+    /// by the overridden member's text, both found through `class`'s
+    /// supertypes as Javadoc finds them.
+    pub fn overload_doc(&self, class: &JavaClass, o: &Overload) -> Option<String> {
+        self.overload_doc_from(class, o, &mut BTreeSet::new())
+    }
+
+    fn overload_doc_from(&self, class: &JavaClass, o: &Overload, seen: &mut BTreeSet<String>) -> Option<String> {
+        if !seen.insert(class.marker()) {
+            return o.javadoc.clone();
+        }
+        let own = o.javadoc.as_deref();
+        if own.is_some_and(|d| !d.contains("{@inheritDoc}")) {
+            return own.map(str::to_string);
+        }
+        let inherited = class
+            .supertypes
+            .iter()
+            .filter_map(|s| self.supertype(class, s))
+            .find_map(|sup| {
+                let found = sup
+                    .overloads
+                    .iter()
+                    .find(|s| s.name == o.name && s.params == o.params)
+                    .or_else(|| {
+                        // A generic parameter is written as its type variable in
+                        // the supertype (`T data` against `String data`).
+                        let mut same_arity = sup
+                            .overloads
+                            .iter()
+                            .filter(|s| s.name == o.name && s.params.len() == o.params.len());
+                        match (same_arity.next(), same_arity.next()) {
+                            (Some(only), None) => Some(only),
+                            _ => None,
+                        }
+                    });
+                match found {
+                    Some(overridden) => self.overload_doc_from(sup, overridden, seen),
+                    // Not declared there: keep looking above it.
+                    None => self.overload_doc_from(sup, &Overload { javadoc: None, ..o.clone() }, seen),
+                }
+            });
+        match (own, inherited) {
+            (Some(own), Some(inherited)) => Some(crate::javadoc::inherit_doc(own, &inherited)),
+            (Some(own), None) => Some(own.to_string()),
+            (None, inherited) => inherited,
+        }
+    }
+
+    /// The Javadocs a marker's item is measured against: the class's for a
+    /// class marker, the overload's for `#m(T1,T2)`, the field's or constant's
+    /// for `#FIELD`, and every documented overload's for `#m`. `None` when the
+    /// marker names no indexed class.
+    pub fn marker_javadocs(&self, marker: &str) -> Option<Vec<String>> {
+        let class = self.resolve(marker)?;
+        let Some(member) = Self::marker_member(marker) else {
+            return Some(class.javadoc.iter().cloned().collect());
+        };
+        if member.contains('(') {
+            return Some(
+                class
+                    .overloads
+                    .iter()
+                    .filter(|o| o.signature() == member)
+                    .filter_map(|o| self.overload_doc(class, o))
+                    .collect(),
+            );
+        }
+        // A method and a field may share a name (a getter `topic()` and its
+        // field `topic`): the marker then names the method, the field's doc
+        // being one more candidate.
+        let mut docs: Vec<String> = Vec::new();
+        for o in class.overloads.iter().filter(|o| o.name == member) {
+            if let Some(d) = self.overload_doc(class, o) {
+                if !docs.contains(&d) {
+                    docs.push(d);
+                }
+            }
+        }
+        if let Some(doc) = class.field_docs.get(member).filter(|d| !docs.contains(d)) {
+            docs.push(doc.clone());
+        }
+        Some(docs)
     }
 
     /// The `#method` part of a marker, if any, without an overload's
@@ -929,7 +1022,7 @@ fn collect(dir: &Path, package: &mut Vec<String>, is_test: bool, out: &mut Vec<J
 
 /// Pushes the classes of one Java file of package `package` (below
 /// `org.apache.kafka`).
-fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<JavaClass>) {
+pub(crate) fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<JavaClass>) {
     let module = match package.split_first() {
         Some((first, rest)) if first == "clients" => rest.to_vec(),
         _ => package.to_vec(),
@@ -952,6 +1045,8 @@ fn push_classes(package: &[String], source: &str, is_test: bool, out: &mut Vec<J
             is_abstract: class.is_abstract,
             functional_interface: class.functional_interface,
             supertypes: class.supertypes,
+            javadoc: class.javadoc,
+            field_docs: class.field_docs,
         });
     }
 }
@@ -963,10 +1058,14 @@ enum Tok {
 }
 
 /// Tokenizes Java source, dropping comments, string/char/text-block literals
-/// and numbers: only identifiers and punctuation remain.
-fn tokenize(src: &str) -> Vec<Tok> {
+/// and numbers: only identifiers and punctuation remain. The second result
+/// holds each `/** .. */` comment, cleaned by [`clean_javadoc`], under the
+/// index of the token that follows it (the last one, when several precede the
+/// same token).
+fn tokenize(src: &str) -> (Vec<Tok>, BTreeMap<usize, String>) {
     let b: Vec<char> = src.chars().collect();
     let mut toks = Vec::new();
+    let mut docs = BTreeMap::new();
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -975,9 +1074,15 @@ fn tokenize(src: &str) -> Vec<Tok> {
                 i += 1;
             }
         } else if c == '/' && b.get(i + 1) == Some(&'*') {
+            let start = i;
             i += 2;
             while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
                 i += 1;
+            }
+            // `/**/` is an empty comment, not a Javadoc.
+            if b.get(start + 2) == Some(&'*') && i > start + 2 {
+                let inner: String = b[start + 3..i.min(b.len())].iter().collect();
+                docs.insert(toks.len(), clean_javadoc(&inner));
             }
             i += 2;
         } else if c == '"' && b.get(i + 1) == Some(&'"') && b.get(i + 2) == Some(&'"') {
@@ -1015,7 +1120,24 @@ fn tokenize(src: &str) -> Vec<Tok> {
             i += 1;
         }
     }
-    toks
+    (toks, docs)
+}
+
+/// The text of a Javadoc comment between `/**` and `*/`: each line's leading
+/// whitespace, one `*` and the one space after it removed, so `<pre>` blocks
+/// keep their indentation; leading and trailing blank lines dropped.
+pub fn clean_javadoc(inner: &str) -> String {
+    let lines: Vec<&str> = inner
+        .lines()
+        .map(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix('*').unwrap_or(line);
+            line.strip_prefix(' ').unwrap_or(line).trim_end()
+        })
+        .collect();
+    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let last = lines.iter().rposition(|l| !l.is_empty()).map_or(first, |l| l + 1);
+    lines[first..last].join("\n")
 }
 
 const KEYWORDS: &[&str] = &[
@@ -1073,6 +1195,8 @@ struct Scanned {
     is_abstract: bool,
     functional_interface: bool,
     supertypes: Vec<String>,
+    javadoc: Option<String>,
+    field_docs: BTreeMap<String, String>,
 }
 
 /// A class declaration seen, waiting for its `{`.
@@ -1084,6 +1208,7 @@ struct Pending {
     is_abstract: bool,
     functional_interface: bool,
     supertypes: Vec<String>,
+    javadoc: Option<String>,
 }
 
 impl Scanned {
@@ -1117,6 +1242,7 @@ impl Scanned {
                     is_default: false,
                     param_names: Vec::new(),
                     returns_class: false,
+                    javadoc: None,
                 });
             }
         }
@@ -1141,9 +1267,11 @@ struct Open {
 /// An `@Deprecated` annotation at class-body level (or before a top-level
 /// class) applies to the next declaration — a class, an overload or a field;
 /// any other statement ending first clears it. Other annotations are skipped,
-/// so `@Deprecated @Override void close(Duration)` still counts.
+/// so `@Deprecated @Override void close(Duration)` still counts. A Javadoc
+/// comment is held the same way, annotations between it and the declaration
+/// skipped.
 fn scan(src: &str) -> Vec<Scanned> {
-    let toks = tokenize(src);
+    let (toks, docs) = tokenize(src);
     let mut out: Vec<Scanned> = Vec::new();
     let mut stack: Vec<Open> = Vec::new();
     let mut depth = 0usize;
@@ -1162,9 +1290,16 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut is_abstract = false;
     // A `@FunctionalInterface` seen, waiting for the declaration it annotates.
     let mut functional = false;
+    // A Javadoc seen, waiting for the declaration it documents.
+    let mut doc: Option<String> = None;
     let mut i = 0;
     while i < toks.len() {
         let member_level = paren == 0 && stack.last().map_or(depth == 0, |o| depth == o.body);
+        if member_level {
+            if let Some(d) = docs.get(&i) {
+                doc = Some(d.clone());
+            }
+        }
         match &toks[i] {
             Tok::Punct('@') if paren == 0 && toks.get(i + 1) != Some(&Tok::Ident("interface".into())) => {
                 let (name, next) = annotation(&toks, i);
@@ -1186,6 +1321,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     is_abstract: abs,
                     functional_interface,
                     supertypes,
+                    javadoc,
                 }) = pending.take()
                 {
                     let parent = stack.last().map(|o| &out[o.idx]);
@@ -1216,6 +1352,8 @@ fn scan(src: &str) -> Vec<Scanned> {
                         is_abstract: abs,
                         functional_interface,
                         supertypes,
+                        javadoc,
+                        field_docs: BTreeMap::new(),
                     });
                     depth += 1;
                     let is_enum = keyword == "enum";
@@ -1230,6 +1368,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     is_default = false;
                     is_abstract = false;
                     functional = false;
+                    doc = None;
                 }
                 depth += 1;
             },
@@ -1244,6 +1383,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 is_default = false;
                 is_abstract = false;
                 functional = false;
+                doc = None;
             },
             Tok::Punct(';') if member_level => {
                 deprecated = false;
@@ -1252,6 +1392,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 is_default = false;
                 is_abstract = false;
                 functional = false;
+                doc = None;
                 if let Some(o) = stack.last_mut() {
                     o.enum_constants = false;
                 }
@@ -1276,6 +1417,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         is_abstract: std::mem::take(&mut is_abstract),
                         functional_interface: std::mem::take(&mut functional),
                         supertypes: supertypes(&toks, i + 2),
+                        javadoc: doc.take(),
                     });
                     is_static = false;
                     i += 2;
@@ -1304,6 +1446,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                 let idx = open.idx;
                 let is_enum = open.is_enum;
                 if is_constant {
+                    if let Some(d) = doc.take() {
+                        out[idx].field_docs.insert(name.clone(), d);
+                    }
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                     out[idx].field_visibility.insert(name.clone(), Visibility::Public);
                     out[idx].enum_constants.push(name.clone());
@@ -1327,6 +1472,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                             is_default: std::mem::take(&mut is_default),
                             param_names,
                             returns_class,
+                            javadoc: doc.take(),
                         });
                     }
                 } else if matches!(next, Some(Tok::Punct('=' | ';')))
@@ -1346,6 +1492,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                     } else {
                         Visibility::Package
                     };
+                    if let Some(d) = doc.take() {
+                        out[idx].field_docs.insert(name.clone(), d);
+                    }
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                     out[idx]
                         .field_visibility
@@ -2077,6 +2226,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         };
         assert!(class.is_rust_name_of("send", "send", true));
         assert!(class.is_rust_name_of("send", "send_with_callback", true));
@@ -2109,6 +2260,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");
         assert_eq!(oor.rust_name(), "ConsumerOffsetOutOfRangeError");
@@ -2126,6 +2279,80 @@ mod tests {
         let exceptional = class(&["common"], "common", "ExceptionalThrowable");
         assert_eq!(exceptional.rust_name(), "ExceptionalThrowable");
         assert!(same_name("SslFactory", "SSLFactory"));
+    }
+
+    #[test]
+    fn test_captures_javadoc_past_annotations() {
+        let src = r#"
+            package x;
+            /** Not this one. */
+            /**
+             * The record.
+             * <p>
+             * Second.
+             */
+            @InterfaceAudience.Public
+            @SuppressWarnings("unchecked")
+            public class Api<K> extends Base implements Face {
+                /** The constant. */
+                public static final String OLD = "o";
+                // A line comment is not a Javadoc.
+                public static final String PLAIN = "p";
+                /** Sends. @see x */
+                @Override
+                public void send(String topic) {}
+                /** Sends with a key. */
+                public void send(String topic, K key) {}
+                public void close() {}
+                /** {@inheritDoc} And more.
+                 * @param t {@inheritDoc}
+                 */
+                public void flush(String t) {}
+                public void undocumented(int a) {}
+                /** Inner. */
+                public enum Kind { /** First. */ A, B }
+            }
+        "#;
+        let base = r#"
+            package x;
+            public abstract class Base {
+                /** Closes it. */
+                public abstract void close();
+                /** Flushes.
+                 * @param t the topic
+                 * @return nothing
+                 */
+                public abstract void flush(String t);
+            }
+        "#;
+        let face = r#"
+            package x;
+            public interface Face {
+                /** From the interface. */
+                void undocumented(int a);
+            }
+        "#;
+        let mut classes = Vec::new();
+        for source in [src, base, face] {
+            push_classes(&["clients".into(), "x".into()], source, false, &mut classes);
+        }
+        let index = JavaIndex { classes };
+        let docs = |marker: &str| index.marker_javadocs(&format!("org.apache.kafka.clients.x.{marker}")).unwrap();
+        assert_eq!(docs("Api"), ["The record.\n<p>\nSecond."]);
+        assert_eq!(docs("Api#OLD"), ["The constant."]);
+        assert!(docs("Api#PLAIN").is_empty());
+        assert_eq!(docs("Api#send(String)"), ["Sends. @see x"]);
+        assert_eq!(docs("Api#send"), ["Sends. @see x", "Sends with a key."]);
+        // An undocumented override takes the overridden member's doc, from a
+        // superclass or an interface.
+        assert_eq!(docs("Api#close"), ["Closes it."]);
+        assert_eq!(docs("Api#undocumented"), ["From the interface."]);
+        // `{@inheritDoc}` merges the overridden doc in, tags included.
+        assert_eq!(docs("Api#flush"), ["Flushes. And more.\n@param t the topic\n@return  nothing"]);
+        assert_eq!(docs("Api$Kind"), ["Inner."]);
+        assert_eq!(docs("Api$Kind#A"), ["First."]);
+        assert!(docs("Api$Kind#B").is_empty());
+        assert_eq!(index.marker_javadocs("org.apache.kafka.clients.x.Missing"), None);
     }
 
     #[test]

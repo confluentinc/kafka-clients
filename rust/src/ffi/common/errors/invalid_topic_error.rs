@@ -41,12 +41,17 @@ impl PayloadClass for InvalidTopicError {
     }
 }
 
-/// The payload of an `InvalidTopicException` error, borrowed from the error
-/// handle, or null when the error is another class.
+/// Returns the payload of an `InvalidTopicException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
@@ -64,13 +69,16 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topic(
     }
 }
 
-/// `new InvalidTopicException(Set<String> invalidTopics)`; `invalid_topics`
-/// holds `const char *`, copied. Owned, freed with
-/// [`kafka_common_InvalidTopicError_destroy`].
+/// `new InvalidTopicException(Set<String> invalidTopics)`.
+///
+/// # Parameters
+///
+/// - `invalid_topics` - The invalid topics, as `const char *` elements; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `invalid_topics` must be null or a valid list of NUL-terminated strings.
+/// `invalid_topics` must be `NULL` or a valid list of NUL-terminated strings; it is copied. The
+/// returned handle is owned, freed with `kafka_common_InvalidTopicError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
@@ -83,18 +91,28 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_new(
 }
 
 /// `new InvalidTopicException()` with Java's default message and no topics.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_common_InvalidTopicError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_InvalidTopicError_with_default_message() -> *mut kafka_common_InvalidTopicError_t {
     Payload::boxed(InvalidTopicError::with_default_message())
 }
 
-/// `new InvalidTopicException(Set<String> invalidTopics, String message)`.
+/// `new InvalidTopicException(String message, Set<String> invalidTopics)`.
+///
+/// # Parameters
+///
+/// - `invalid_topics` - The invalid topics, as `const char *` elements; `NULL` reads as empty.
+/// - `message` - The detail message.
 ///
 /// # Safety
 ///
-/// `invalid_topics` must be null or a valid list of NUL-terminated strings
-/// and `message` a valid NUL-terminated string.
+/// `invalid_topics` must be `NULL` or a valid list of NUL-terminated strings
+/// and `message` a valid NUL-terminated string; both are copied. The returned handle is owned,
+/// freed with `kafka_common_InvalidTopicError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
@@ -113,12 +131,12 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_with_message(
     ))
 }
 
-/// `invalidTopics()`: an owned, sorted list of `char *`, freed with
-/// `kafka_List_destroy`.
+/// Returns the invalid topics (`invalidTopics()`), as a sorted list of `char *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid invalid-topic handle.
+/// `self_` must be a valid invalid-topic handle. The returned list is owned, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
@@ -135,11 +153,12 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
     )
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid invalid-topic handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
@@ -153,11 +172,12 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_source(
     unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid invalid-topic handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
@@ -170,12 +190,12 @@ pub unsafe extern "C" fn kafka_common_InvalidTopicError_to_string(
     unsafe { Payload::<InvalidTopicError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_InvalidTopicError_destroy(self_: *mut kafka_common_InvalidTopicError_t) {

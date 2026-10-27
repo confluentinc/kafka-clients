@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// This endpoint type is not supported yet.
     ///
-    /// Corresponds to Java's `UnsupportedEndpointTypeException`, error code `Errors::UnsupportedEndpointType`.
-    ///
-    /// Java `extends` chain:
-    ///    `UnsupportedEndpointTypeException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnsupportedEndpointType`. Java `extends` chain:
+    /// `UnsupportedEndpointTypeException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedEndpointTypeException")]
     UnsupportedEndpointTypeError,
     code: Errors::UnsupportedEndpointType,

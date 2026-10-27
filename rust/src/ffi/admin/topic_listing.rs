@@ -85,14 +85,21 @@ pub(crate) unsafe fn destroy_topic_listing_element(element: *mut c_void) {
     unsafe { kafka_admin_TopicListing_destroy(element as *mut kafka_admin_TopicListing_t) }
 }
 
-/// `new TopicListing(String name, Uuid topicId, boolean internal)`; the uuid
-/// is copied, the caller keeps its handle. Owned, freed with
-/// [`kafka_admin_TopicListing_destroy`].
+/// `new TopicListing(String name, Uuid topicId, boolean internal)`; the uuid is copied, the caller
+/// keeps its handle.
+///
+/// # Parameters
+///
+/// - `name` - The topic name
+/// - `topic_id` - The topic id.
+/// - `internal` - Whether the topic is internal to Kafka
 ///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `topic_id` a valid uuid
 /// handle.
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_TopicListing_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_new(
@@ -111,11 +118,12 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_new(
     ))
 }
 
-/// `name()`: borrowed from the handle.
+/// Returns the name of the topic.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-listing handle.
+/// `self_` must be a valid topic-listing handle. The returned string is borrowed, valid as long
+/// as the listing.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_name(self_: *const kafka_admin_TopicListing_t) -> *const c_char {
@@ -125,11 +133,12 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_name(self_: *const kafka_admin
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `topicId()`: an owned copy, freed with `kafka_common_Uuid_destroy`.
+/// Returns the id of the topic.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-listing handle.
+/// `self_` must be a valid topic-listing handle. The returned id is an owned copy, freed with
+/// `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
@@ -140,7 +149,7 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_topic_id(
     box_uuid(unsafe { topic_listing_ref(self_) }.topic_id())
 }
 
-/// `isInternal()`.
+/// Returns 1 if the topic is internal, else 0.
 ///
 /// # Safety
 ///
@@ -153,11 +162,12 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_is_internal(self_: *const kafk
     i8::from(unsafe { topic_listing_ref(self_) }.is_internal())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the listing.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-listing handle.
+/// `self_` must be a valid topic-listing handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicListing_to_string(self_: *const kafka_admin_TopicListing_t) -> *mut c_char {
@@ -166,11 +176,11 @@ pub unsafe extern "C" fn kafka_admin_TopicListing_to_string(self_: *const kafka_
     into_c_string(&unsafe { topic_listing_ref(self_) }.to_string())
 }
 
-/// Frees an owned topic-listing handle; null is a no-op.
+/// Frees an owned topic-listing handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -28,7 +28,7 @@ pub struct kafka_common_quota_ClientQuotaFilterComponent_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_quota_ClientQuotaFilterComponent_t`] points at: the
+/// What a `kafka_common_quota_ClientQuotaFilterComponent_t` points at: the
 /// component plus the NUL-terminated entity type its getter borrows out.
 pub(crate) struct ClientQuotaFilterComponentInner {
     component: ClientQuotaFilterComponent,
@@ -72,7 +72,7 @@ pub(crate) unsafe fn client_quota_filter_component_ref<'a>(
 }
 
 /// Hands `component` to C as an owned handle, freed with
-/// [`kafka_common_quota_ClientQuotaFilterComponent_destroy`].
+/// `kafka_common_quota_ClientQuotaFilterComponent_destroy`.
 pub(crate) fn box_client_quota_filter_component(
     component: ClientQuotaFilterComponent,
 ) -> *mut kafka_common_quota_ClientQuotaFilterComponent_t {
@@ -104,13 +104,23 @@ pub(crate) unsafe fn list_client_quota_filter_components(list: *const kafka_List
         .collect()
 }
 
-/// `ofEntity(String entityType, String entityName)`: a component matching
-/// the entity named `entity_name` exactly. Owned, freed with
-/// [`kafka_common_quota_ClientQuotaFilterComponent_destroy`].
+/// Constructs and returns a filter component that exactly matches the provided entity
+/// name for the entity type.
+///
+/// # Parameters
+///
+/// - `entity_type` - the entity type the filter component applies to
+/// - `entity_name` - the entity name that's matched exactly
+///
+/// # Returns
+///
+/// the new filter component
 ///
 /// # Safety
 ///
 /// `entity_type` and `entity_name` must be valid NUL-terminated strings.
+/// The returned component is owned, freed with
+/// `kafka_common_quota_ClientQuotaFilterComponent_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity(
@@ -129,12 +139,22 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity
     ))
 }
 
-/// `ofDefaultEntity(String entityType)`: a component matching the built-in
-/// default entity of `entity_type`. Owned.
+/// Constructs and returns a filter component that matches the built-in default entity name
+/// for the entity type.
+///
+/// # Parameters
+///
+/// - `entity_type` - the entity type the filter component applies to
+///
+/// # Returns
+///
+/// the new filter component
 ///
 /// # Safety
 ///
 /// `entity_type` must be a valid NUL-terminated string.
+/// The returned component is owned, freed with
+/// `kafka_common_quota_ClientQuotaFilterComponent_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_default_entity(
@@ -148,12 +168,22 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_defaul
     }))
 }
 
-/// `ofEntityType(String entityType)`: a component matching any specified
-/// entity of `entity_type`. Owned.
+/// Constructs and returns a filter component that matches any specified name for the
+/// entity type.
+///
+/// # Parameters
+///
+/// - `entity_type` - the entity type the filter component applies to
+///
+/// # Returns
+///
+/// the new filter component
 ///
 /// # Safety
 ///
 /// `entity_type` must be a valid NUL-terminated string.
+/// The returned component is owned, freed with
+/// `kafka_common_quota_ClientQuotaFilterComponent_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity_type(
@@ -167,11 +197,16 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_of_entity
     }))
 }
 
-/// `entityType()`: borrowed from the handle.
+/// `entityType()`.
+///
+/// # Returns
+///
+/// the component's entity type
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-component handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_entity_type(
@@ -183,14 +218,19 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_entity_ty
     unsafe { inner_ref(self_) }.entity_type_c.as_ptr()
 }
 
-/// `match()`: borrowed from the handle. A data-less match is the singleton
-/// returned by `kafka_common_quota_ClientQuotaMatch_default` /
-/// `kafka_common_quota_ClientQuotaMatch_any`, so it compares with `==`; an
-/// exact match dies with the component and is never destroyed.
+/// `match()`.
+///
+/// # Returns
+///
+/// the match, where: if exact, the name that's matched exactly; if
+/// `kafka_common_quota_ClientQuotaMatch_default`, matches the default name; if
+/// `kafka_common_quota_ClientQuotaMatch_any`, matches any specified name
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-component handle.
+/// The returned match is borrowed: a data-less one is the singleton, comparable with `==`; an
+/// exact one is valid as long as the handle. It is never destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_match(
@@ -203,11 +243,14 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_match(
     client_quota_match_ptr(unsafe { client_quota_filter_component_ref(self_) }.r#match())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// # Returns
+///
+/// the string form of this filter-component.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-component handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilterComponent_to_string(

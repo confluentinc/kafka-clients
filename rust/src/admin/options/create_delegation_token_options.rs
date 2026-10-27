@@ -13,16 +13,10 @@
 // limitations under the License.
 
 //! Options for `Admin::create_delegation_token`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.CreateDelegationTokenOptions`.
 
 use crate::common::security::auth::KafkaPrincipal;
 
 /// Options for `Admin::create_delegation_token`.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.CreateDelegationTokenOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions")]
 pub struct CreateDelegationTokenOptions {
@@ -48,7 +42,13 @@ impl CreateDelegationTokenOptions {
 
     /// Sets the principals allowed to renew the token.
     ///
-    /// Mirrors `CreateDelegationTokenOptions.renewers`.
+    /// # Arguments
+    ///
+    /// - `renewers` - the principals allowed to renew the token.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers")]
     pub fn set_renewers(mut self, renewers: Vec<KafkaPrincipal>) -> Self {
@@ -56,9 +56,7 @@ impl CreateDelegationTokenOptions {
         self
     }
 
-    /// The principals allowed to renew the token.
-    ///
-    /// Mirrors `CreateDelegationTokenOptions.renewers`.
+    /// Returns the principals allowed to renew the token.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#renewers")]
     pub fn renewers(&self) -> &[KafkaPrincipal] {
         &self.renewers
@@ -67,9 +65,14 @@ impl CreateDelegationTokenOptions {
     /// Sets the owner of the token, or `None` for none, in which case the
     /// broker makes the request principal the owner.
     ///
-    /// Mirrors `CreateDelegationTokenOptions.owner(KafkaPrincipal)`, which
-    /// stores the value as given, so `owner(null)` clears an owner set earlier
-    /// (`CreateDelegationTokenOptions.java:45-48`).
+    /// # Arguments
+    ///
+    /// - `owner` - the owner of the token, or `None` to clear an owner set
+    ///   earlier, so the request principal owns the token.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner")]
     pub fn set_owner(mut self, owner: Option<KafkaPrincipal>) -> Self {
@@ -77,19 +80,22 @@ impl CreateDelegationTokenOptions {
         self
     }
 
-    /// The owner of the token, if set.
-    ///
-    /// Mirrors `CreateDelegationTokenOptions.owner`, which returns an
-    /// `Optional`.
+    /// Returns the owner of the token, or `None` if not set.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#owner")]
     pub fn owner(&self) -> Option<&KafkaPrincipal> {
         self.owner.as_ref()
     }
 
-    /// Sets the maximum lifetime of the token in milliseconds, or `-1` to use
-    /// the server-side default.
+    /// Sets the maximum lifetime of the token in milliseconds, or `-1` to use the server-side
+    /// default.
     ///
-    /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
+    /// # Arguments
+    ///
+    /// - `max_lifetime_ms` - the maximum lifetime in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs")]
     pub fn set_max_lifetime_ms(mut self, max_lifetime_ms: i64) -> Self {
@@ -97,16 +103,22 @@ impl CreateDelegationTokenOptions {
         self
     }
 
-    /// The maximum lifetime of the token in milliseconds.
-    ///
-    /// Mirrors `CreateDelegationTokenOptions.maxLifetimeMs`.
+    /// Returns the maximum lifetime of the token in milliseconds.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenOptions#maxLifetimeMs")]
     pub fn max_lifetime_ms(&self) -> i64 {
         self.max_lifetime_ms
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateDelegationTokenOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -114,8 +126,8 @@ impl CreateDelegationTokenOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
@@ -152,7 +164,7 @@ mod tests {
 
     /// New test, no Java original: Java's `owner(null)` stores `null`, so it
     /// clears an owner set earlier and `owner()` is `Optional.empty()` again
-    /// (`CreateDelegationTokenOptions.java:45-52`).
+    /// (`CreateDelegationTokenOptions#owner(KafkaPrincipal)`).
     #[test]
     fn set_owner_none_clears_the_owner() {
         let owner = KafkaPrincipal::new(KafkaPrincipal::USER_TYPE, "alice");

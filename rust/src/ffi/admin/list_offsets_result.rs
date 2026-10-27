@@ -89,9 +89,18 @@ pub(crate) unsafe fn destroy_list_offsets_result_info_element(element: *mut c_vo
     }
 }
 
-/// `new ListOffsetsResultInfo(long offset, long timestamp, Optional<Integer>
-/// leaderEpoch)`: `leader_epoch` is `-1` for Java's empty `Optional`. Owned,
-/// freed with [`kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_destroy`].
+/// Creates the offset of a partition with its timestamp and leader epoch.
+///
+/// # Parameters
+///
+/// - `offset` - the offset
+/// - `timestamp` - the timestamp
+/// - `leader_epoch` - the leader epoch, `-1` when unknown
+///
+/// # Safety
+///
+/// The returned handle is owned and freed with
+/// `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_new(
@@ -103,7 +112,7 @@ pub extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_new(
     box_list_offsets_result_info(ListOffsetsResultInfo::new(offset, timestamp, leader_epoch))
 }
 
-/// `offset()`.
+/// Returns the offset.
 ///
 /// # Safety
 ///
@@ -119,7 +128,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_off
     unsafe { list_offsets_result_info_ref(self_) }.offset()
 }
 
-/// `timestamp()`.
+/// Returns the timestamp.
 ///
 /// # Safety
 ///
@@ -135,7 +144,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_tim
     unsafe { list_offsets_result_info_ref(self_) }.timestamp()
 }
 
-/// `leaderEpoch()`: `-1` for Java's empty `Optional`.
+/// Returns `-1` for Java's empty `Optional`.
 ///
 /// A caught Rust panic returns -2, which is no leader epoch.
 ///
@@ -153,11 +162,13 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_lea
     unsafe { list_offsets_result_info_ref(self_) }.leader_epoch().unwrap_or(-1)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_to_string(
@@ -169,11 +180,11 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_to_
     into_c_string(&unsafe { list_offsets_result_info_ref(self_) }.to_string())
 }
 
-/// Frees an owned list-offsets-result-info handle; null is a no-op.
+/// Frees an owned list-offsets-result-info handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -255,17 +266,26 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListOffsetsResult_t) -> &'a Resul
     unsafe { result_ref(self_) }
 }
 
-/// `partitionResult(TopicPartition partition)`: returns an owned future (freed
-/// with `kafka_common_KafkaFuture_destroy`) whose `get` yields a
-/// `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *` owned by the
-/// future, or stores the owned `IllegalArgumentError` in `*out_err` and returns
-/// `NULL` when `partition` was not part of the request. `partition` is borrowed
-/// for the call.
+/// Return a future which can be used to check the result for a given partition.
+///
+/// # Parameters
+///
+/// - `partition` - the partition, borrowed for the call
+///
+/// # Returns
+///
+/// A future whose `get` yields a `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *` owned
+/// by the future; `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `partition` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
-/// handle and `out_err` a valid slot pointing at null.
+/// handle and `out_err` a valid slot pointing at `NULL`. The returned future is
+/// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
@@ -295,15 +315,20 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
     }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of
-/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition
-/// and compared by value in `kafka_Map_get`, to
-/// `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *` values.
+/// Return a future which succeeds only if offsets for all specified partitions have been
+/// successfully retrieved.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and compared by value in
+/// `kafka_Map_get`, to `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *` values.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
@@ -318,21 +343,23 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), infos_map, destroy_map_element) }
 }
 
-/// `new ListOffsetsResult(Map<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> futures)`:
-/// `futures` is a borrowed map of `const kafka_common_TopicPartition_t *` to
-/// `const kafka_common_KafkaFuture_t *` whose value is a `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`,
-/// copied during the call; the caller keeps ownership of the map, its keys,
-/// its futures and their values. Only futures that are already complete
-/// (`kafka_common_KafkaFuture_is_done`) can be copied across the boundary:
-/// the outcome of each is taken as it stands, and a future still pending
-/// stands as one failed with the translation of `IllegalArgumentException`.
-/// Owned, freed with [`kafka_admin_ListOffsetsResult_destroy`].
+/// Creates a result from a map of partition to the future of its offset.
+///
+/// # Parameters
+///
+/// - `futures` - a map of `const kafka_common_TopicPartition_t *` to `const
+///   kafka_common_KafkaFuture_t *` whose value is a
+///   `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`, copied during the call
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid map whose keys are valid topic-partition handles
-/// and whose values are valid future handles, each successful one's value a
-/// valid `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`.
+/// `futures` must be `NULL` or a valid map whose keys are valid topic-partition handles and whose
+/// values are valid future handles, each successful one's value a valid
+/// `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`. The caller keeps ownership of the
+/// map, its keys, its futures and their values. Each future should already be complete
+/// (`kafka_common_KafkaFuture_is_done`): its outcome is copied as it stands, and one still pending
+/// stands as one failed with `kafka_common_Error_is_local_illegal_argument_error`. The returned
+/// handle is owned and freed with `kafka_admin_ListOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
@@ -368,12 +395,12 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
     box_result(ListOffsetsResult::new(futures), &FutureCtx::detached())
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -138,7 +138,7 @@ pub fn auth_io_error_with_source(message: impl Into<String>, source: Error) -> i
 /// typed error must therefore use this rather than `e.to_string()`, or the prefix
 /// is applied twice and the application sees
 /// `"AuthenticationError: AuthenticationError: <reason>"`. Java rethrows the
-/// exception object itself (`NetworkClientUtils.java:86-87`), so the message is
+/// exception object itself (`NetworkClientUtils#awaitReady`), so the message is
 /// untouched; prefer [`authentication_error`], which hands over that object.
 pub fn authentication_error_message(e: &io::Error) -> Option<&str> {
     authentication_error(e).map(Error::message)

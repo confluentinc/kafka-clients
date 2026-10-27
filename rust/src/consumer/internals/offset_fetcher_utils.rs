@@ -105,8 +105,7 @@ pub(crate) struct OffsetFetcherUtils {
     pub(crate) api_versions: std::sync::Arc<ApiVersions>,
     pub(crate) retry_backoff_ms: i64,
     cached_reset_positions_error: Mutex<Option<Error>>,
-    /// Java: `private final PositionsValidator positionsValidator`
-    /// (`OffsetFetcherUtils.java:63`). Shared — not owned: the same
+    /// Java: `OffsetFetcherUtils#positionsValidator`. Shared — not owned: the same
     /// instance is held by `AsyncKafkaConsumer` so the application task can
     /// consult it on the `poll()` critical path.
     positions_validator: std::sync::Arc<PositionsValidator>,
@@ -231,8 +230,8 @@ impl OffsetFetcherUtils {
     }
 
     /// Java: the six-argument
-    /// `OffsetFetcherUtils(LogContext, ConsumerMetadata, SubscriptionState, Time, long, ApiVersions)`
-    /// (`OffsetFetcherUtils.java:73`), which constructs its own
+    /// `OffsetFetcherUtils#OffsetFetcherUtils(LogContext,ConsumerMetadata,SubscriptionState,Time,long,ApiVersions)`,
+    /// which constructs its own
     /// [`PositionsValidator`].
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#OffsetFetcherUtils")]
     pub(crate) fn new(
@@ -248,9 +247,8 @@ impl OffsetFetcherUtils {
         Self::with_positions_validator(metadata, subscriptions, api_versions, retry_backoff_ms, positions_validator)
     }
 
-    /// Java: the seven-argument overload taking the shared
-    /// `PositionsValidator` (`OffsetFetcherUtils.java:83`). Per CLAUDE.md §2
-    /// the overload carrying the extra parameter is named after it.
+    /// Java: the seven-argument `OffsetFetcherUtils` constructor taking the shared
+    /// `PositionsValidator`. Per CLAUDE.md §2 the overload carrying the extra parameter is named after it.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#OffsetFetcherUtils")]
     pub(crate) fn with_positions_validator(
         metadata: std::sync::Arc<ConsumerMetadata>,
@@ -316,16 +314,16 @@ impl OffsetFetcherUtils {
                     },
                     // Java splits these into three arms that differ ONLY in their
                     // log statement — all three call `partitionsToRetry.add(tp)`
-                    // (`OffsetFetcherUtils.java:136-150`): a `debug` for the
-                    // leader/replica group, a distinct `warn` for
-                    // UNKNOWN_TOPIC_OR_PARTITION (`:147`), and a `warn` for the
-                    // default (`:154`). `UnsupportedForMessageFormat` above has a
-                    // fourth (`:132`).
+                    // (`org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#handleListOffsetResponse`): a
+                    // `debug` for the leader/replica group, a distinct `warn` for
+                    // UNKNOWN_TOPIC_OR_PARTITION, and a `warn` for the
+                    // default. `UnsupportedForMessageFormat` above has a
+                    // fourth.
                     //
                     // NOT TRANSLATED: this type has no logger. Java's
                     // `OffsetFetcherUtils` takes a `LogContext`
-                    // (`OffsetFetcherUtils.java:73`, `:84`); adding one here means
-                    // threading it through `OffsetFetcherUtils::new` AND
+                    // (both `org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils` constructors); adding one
+                    // here means threading it through `OffsetFetcherUtils::new` AND
                     // `OffsetsRequestManager::new` (11 call sites, none of which
                     // has one in scope). Deferred deliberately rather than
                     // bundled here: it is log-only — the four statements change no
@@ -458,7 +456,8 @@ impl OffsetFetcherUtils {
     }
 
     /// Java: `positionsValidator.maybeSetError(..)`
-    /// (`OffsetFetcherUtils.java:394,404`). Stores `error` for later
+    /// (`OffsetFetcherUtils#onSuccessfulResponseForValidatingPositions`,
+    /// `OffsetFetcherUtils#onFailedResponseForValidatingPositions`). Stores `error` for later
     /// propagation on the next call to
     /// [`Self::refresh_and_get_partitions_to_validate`].
     pub(crate) fn maybe_set_validate_error(&self, error: Error) {
@@ -502,9 +501,8 @@ impl OffsetFetcherUtils {
         Ok(result)
     }
 
-    /// Java: `OffsetFetcherUtils.refreshAndGetPartitionsToValidate()`
-    /// (`:175`) — a one-line delegation that supplies the `apiVersions`
-    /// field the validator does not hold.
+    /// Java: `OffsetFetcherUtils#refreshAndGetPartitionsToValidate` — a one-line delegation that supplies the
+    /// `apiVersions` field the validator does not hold.
     ///
     /// # Errors
     ///
@@ -522,7 +520,7 @@ impl OffsetFetcherUtils {
     /// If we have seen new metadata, check that all the assignments have a
     /// valid position.
     ///
-    /// Java: `OffsetFetcherUtils.validatePositionsOnMetadataChange()` (`:183`).
+    /// Java: `OffsetFetcherUtils#validatePositionsOnMetadataChange`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils#validatePositionsOnMetadataChange")]
     pub(crate) fn validate_positions_on_metadata_change(&self) {
         self.positions_validator

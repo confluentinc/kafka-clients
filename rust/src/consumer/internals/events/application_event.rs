@@ -134,7 +134,7 @@ pub(crate) enum ApplicationEvent {
     },
     /// `FetchCommittedOffsetsEvent`.
     FetchCommittedOffsets {
-        handle: CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        handle: CompletableEventHandle<HashMap<TopicPartition, Option<OffsetAndMetadata>>>,
         partitions: HashSet<TopicPartition>,
     },
     /// `ListOffsetsEvent`. Implements [`MetadataErrorNotifiable`].

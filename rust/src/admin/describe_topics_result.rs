@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_topics_with_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -23,10 +21,8 @@ use crate::admin::TopicDescription;
 use crate::common::{KafkaFuture, Uuid};
 
 /// The result of `Admin::describe_topics_with_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsResult`.
-/// Exactly one of the two maps is present, the one matching the kind of
-/// `TopicCollection` the request used.
+// Exactly one of the two maps is present, the one matching the kind of
+// `TopicCollection` the request used.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult")]
 pub struct DescribeTopicsResult {
@@ -72,9 +68,10 @@ impl DescribeTopicsResult {
     /// Use when `Admin::describe_topics_with_topics_options` used a
     /// `TopicCollection` of ids.
     ///
-    /// Returns a map from topic IDs to futures which can be used to check the
-    /// status of individual topics if the request used topic IDs, otherwise
-    /// `None`.
+    /// # Returns
+    ///
+    /// a map from topic IDs to futures which can be used to check the status of individual topics
+    /// if the request used topic IDs, otherwise return `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicIdValues")]
     pub fn topic_id_values(&self) -> Option<&HashMap<Uuid, KafkaFuture<TopicDescription>>> {
         self.topic_id_futures.as_ref()
@@ -83,27 +80,26 @@ impl DescribeTopicsResult {
     /// Use when `Admin::describe_topics_with_topics_options` used a
     /// `TopicCollection` of names.
     ///
-    /// Returns a map from topic names to futures which can be used to check
-    /// the status of individual topics if the request used topic names,
-    /// otherwise `None`.
+    /// # Returns
+    ///
+    /// a map from topic names to futures which can be used to check the status of individual topics
+    /// if the request used topic names, otherwise return `None`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#topicNameValues")]
     pub fn topic_name_values(&self) -> Option<&HashMap<String, KafkaFuture<TopicDescription>>> {
         self.name_futures.as_ref()
     }
 
-    /// A future map from topic names to descriptions which can be used to
-    /// check the status of individual description if the describe topic
-    /// request used topic names, otherwise `None`. This request succeeds only
-    /// if all the topic descriptions succeed.
+    /// Returns a future map from topic names to descriptions which can be used to check the
+    /// status of individual description if the describe topic request used topic names,
+    /// otherwise `None`. This request succeeds only if all the topic descriptions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicNames")]
     pub fn all_topic_names(&self) -> Option<KafkaFuture<HashMap<String, TopicDescription>>> {
         Self::all(self.name_futures.as_ref())
     }
 
-    /// A future map from topic ids to descriptions which can be used to check
-    /// the status of individual description if the describe topic request used
-    /// topic ids, otherwise `None`. This request succeeds only if all the topic
-    /// descriptions succeed.
+    /// Returns a future map from topic ids to descriptions which can be used to check the
+    /// status of individual description if the describe topic request used topic ids,
+    /// otherwise `None`. This request succeeds only if all the topic descriptions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsResult#allTopicIds")]
     pub fn all_topic_ids(&self) -> Option<KafkaFuture<HashMap<Uuid, TopicDescription>>> {
         Self::all(self.topic_id_futures.as_ref())

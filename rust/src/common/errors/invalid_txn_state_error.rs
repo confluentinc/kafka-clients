@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The producer attempted a transactional operation in an invalid state.
     ///
-    /// Corresponds to Java's `InvalidTxnStateException`, error code `Errors::InvalidTxnState`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidTxnStateException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidTxnState`. Java `extends` chain: `InvalidTxnStateException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTxnStateException")]
     InvalidTxnStateError,
     code: Errors::InvalidTxnState,

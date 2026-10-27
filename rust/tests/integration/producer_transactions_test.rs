@@ -729,7 +729,7 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
 /// move it, but not atomically with the output records.
 ///
 /// It also carries `ProducerIntegrationTest.testTransactionWithSendOffset`'s
-/// final check (`ProducerIntegrationTest.java:194-199`): the admin client
+/// final check: the admin client
 /// eventually lists the transactional id in `COMPLETE_COMMIT`.
 ///
 /// The input consumer comes from the same backend as the producer: its
@@ -801,8 +801,8 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
         .expect("sendOffsetsToTransaction");
     producer.commit_transaction().await.expect("commitTransaction");
 
-    // Java `ProducerIntegrationTest.testTransactionWithSendOffset`
-    // (`ProducerIntegrationTest.java:194-199`): the committed transaction is
+    // Java org.apache.kafka.clients.producer.ProducerIntegrationTest#testTransactionWithSendOffset:
+    // the committed transaction is
     // eventually listed by the coordinator in `COMPLETE_COMMIT`. The admin client
     // is native harness infrastructure, so this holds for every backend arm.
     let admin = txn_test_admin(ctx);
@@ -851,7 +851,7 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory 
         .await
         .expect("committed");
     assert_eq!(
-        committed.get(&input_tp).map(OffsetAndMetadata::offset),
+        committed.get(&input_tp).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
         Some(next_offset),
         "sendOffsetsToTransaction must have committed the input offsets with the transaction"
     );
@@ -1403,9 +1403,10 @@ async fn test_fencing_on_send() {
             ),
             // Java's `assertInstanceOf(InvalidProducerEpochException.class, e.getCause())`.
             // Only the class is checked: the message is the error code's default text
-            // when the broker rejects the record, but `maybeFailWithError`'s
-            // (`TransactionManager.java:1189-1191`) when one of producer1's earlier
-            // records, sent without waiting, already failed and this send is refused.
+            // when the broker rejects the record, but the one of
+            // org.apache.kafka.clients.producer.internals.TransactionManager#maybeFailWithError
+            // when one of producer1's earlier records, sent without waiting, already
+            // failed and this send is refused.
             Err(error) => assert!(
                 error.is_invalid_producer_epoch_error(),
                 "expected the send future to fail with InvalidProducerEpoch, got {error:?}"
@@ -1542,7 +1543,7 @@ async fn test_offset_metadata_in_send_offsets_to_transaction() {
     let start = Instant::now();
     loop {
         let committed = consumer.committed(std::slice::from_ref(&tp)).await;
-        if committed.is_ok_and(|committed| committed.get(&tp) == Some(&offset_and_metadata)) {
+        if committed.is_ok_and(|committed| committed.get(&tp) == Some(&Some(offset_and_metadata.clone()))) {
             break;
         }
         assert!(
@@ -1596,15 +1597,14 @@ pub(crate) async fn consumer_positions(
 
 /// `TestUtils.resetToCommittedPositions(consumer)` (`TestUtils.scala:1293-1303`):
 /// seek every assigned partition to its committed offset, or to the beginning if
-/// it has none. (Java filters `null` values out of `committed`; the Rust map omits
-/// partitions without a committed offset, which is the same set.)
+/// it has none.
 pub(crate) async fn reset_to_committed_positions(consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>) {
     let assignment: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
     let committed = consumer.committed(&assignment).await.expect("committed");
     for topic_partition in assignment {
         match committed.get(&topic_partition) {
-            Some(offset) => consumer.seek_with_offset(topic_partition, offset.offset()).await.expect("seek"),
-            None => consumer
+            Some(Some(offset)) => consumer.seek_with_offset(topic_partition, offset.offset()).await.expect("seek"),
+            _ => consumer
                 .seek_to_beginning(std::slice::from_ref(&topic_partition))
                 .await
                 .expect("seekToBeginning"),
@@ -1722,11 +1722,6 @@ async fn test_send_offsets_with_group_metadata() {
 ///
 /// Translates `TransactionsTest.testReadCommittedConsumerShouldNotSeeUndecidedData`
 /// (`TransactionsTest.scala:177-241`).
-///
-/// Deviation: Java asserts `offsetsForTimes(...).get(tp)` is `null` for the
-/// undecided partitions. The Rust `offsets_for_times` omits an unresolved
-/// partition instead of mapping it to `null` (see `Consumer::offsets_for_times`),
-/// so the assertion is that the key is absent.
 #[tokio::test]
 async fn test_read_committed_consumer_should_not_see_undecided_data() {
     let mut ctx = TestContext::new(cluster_config()).await;
@@ -1799,8 +1794,20 @@ async fn test_read_committed_consumer_should_not_see_undecided_data() {
         .await
         .expect("offsetsForTimes");
     assert_eq!(2, read_uncommitted_offsets_for_times.len());
-    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp1].timestamp());
-    assert_eq!(latest_written_timestamp, read_uncommitted_offsets_for_times[&tp2].timestamp());
+    assert_eq!(
+        latest_written_timestamp,
+        read_uncommitted_offsets_for_times[&tp1]
+            .as_ref()
+            .expect("tp1 resolves")
+            .timestamp()
+    );
+    assert_eq!(
+        latest_written_timestamp,
+        read_uncommitted_offsets_for_times[&tp2]
+            .as_ref()
+            .expect("tp2 resolves")
+            .timestamp()
+    );
     read_uncommitted_consumer.unsubscribe().await.expect("unsubscribe");
 
     // we should only see the first two records which come before the undecided second transaction
@@ -1830,12 +1837,14 @@ async fn test_read_committed_consumer_should_not_see_undecided_data() {
         ]))
         .await
         .expect("offsetsForTimes");
-    assert!(
-        !read_committed_offsets_for_times.contains_key(&tp1),
+    assert_eq!(
+        read_committed_offsets_for_times.get(&tp1),
+        Some(&None),
         "undecided data in {tp1:?} must not be searchable: {read_committed_offsets_for_times:?}"
     );
-    assert!(
-        !read_committed_offsets_for_times.contains_key(&tp2),
+    assert_eq!(
+        read_committed_offsets_for_times.get(&tp2),
+        Some(&None),
         "undecided data in {tp2:?} must not be searchable: {read_committed_offsets_for_times:?}"
     );
 
@@ -2210,8 +2219,9 @@ async fn test_fencing_on_transaction_expiration() {
 // ---------------------------------------------------------------------------
 //
 // Both Java classes run on a single KRaft broker with the transaction-state log
-// at replication factor 1 (`ProducerIntegrationTest.java:62-68`,
-// `TransactionsWithMaxInFlightOneTest.java:53-68`); [`txn_single_broker`] is
+// at replication factor 1 (the `@ClusterTestDefaults` of
+// org.apache.kafka.clients.producer.ProducerIntegrationTest and
+// org.apache.kafka.tiered.storage.integration.TransactionsWithMaxInFlightOneTest); [`txn_single_broker`] is
 // that cluster. Deviations shared by these tests, each forced by the pooled
 // harness:
 //
@@ -2247,7 +2257,7 @@ async fn producer_integration_cluster(transaction_version: i16) -> TestContext {
     ctx
 }
 
-/// `ClusterInstance.producer(configs)` (`ClusterInstance.java:150-156`):
+/// `ClusterInstance#producer(Map)`:
 /// `configs` plus byte-array serializers and the cluster's bootstrap servers.
 fn cluster_producer(bootstrap: &str, configs: &[(&str, &str)]) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let mut props: HashMap<String, String> = configs
@@ -2281,8 +2291,8 @@ async fn create_single_broker_topic(
 
 /// A transaction with a send and an empty transaction both commit.
 ///
-/// Translates `ProducerIntegrationTest.testTransactionWithAndWithoutSend`
-/// (`ProducerIntegrationTest.java:92-114`), one `@ClusterFeature` row per
+/// Translates `ProducerIntegrationTest#testTransactionWithAndWithoutSend`, one
+/// `@ClusterFeature` row per
 /// `transaction_version` (see above).
 async fn transaction_with_and_without_send(transaction_version: i16) {
     let mut ctx = producer_integration_cluster(transaction_version).await;
@@ -2317,22 +2327,19 @@ async fn transaction_with_and_without_send(transaction_version: i16) {
     ctx.cleanup().await;
 }
 
-/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 0` row
-/// (`ProducerIntegrationTest.java:93-94`).
+/// `ProducerIntegrationTest#testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 0` row.
 #[tokio::test]
 async fn test_transaction_with_and_without_send_tv0() {
     transaction_with_and_without_send(0).await;
 }
 
-/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 1` row
-/// (`ProducerIntegrationTest.java:95-96`).
+/// `ProducerIntegrationTest#testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 1` row.
 #[tokio::test]
 async fn test_transaction_with_and_without_send_tv1() {
     transaction_with_and_without_send(1).await;
 }
 
-/// `testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 2` row
-/// (`ProducerIntegrationTest.java:97-98`).
+/// `ProducerIntegrationTest#testTransactionWithAndWithoutSend`, `TRANSACTION_VERSION = 2` row.
 #[tokio::test]
 async fn test_transaction_with_and_without_send() {
     transaction_with_and_without_send(2).await;
@@ -2341,8 +2348,8 @@ async fn test_transaction_with_and_without_send() {
 /// A record the broker rejects as too large fails with `RecordTooLargeException`,
 /// and the transaction can still be aborted (the `EndTxn` request is sent).
 ///
-/// Translates `ProducerIntegrationTest.testTransactionWithInvalidSendAndEndTxnRequestSent`
-/// (`ProducerIntegrationTest.java:116-146`), one `@ClusterFeature` row per
+/// Translates `ProducerIntegrationTest#testTransactionWithInvalidSendAndEndTxnRequestSent`,
+/// one `@ClusterFeature` row per
 /// `transaction_version` (see above). Java asserts only the cause's class; the
 /// message is broker-generated text that embeds the batch size, so only the
 /// variant is asserted here too.
@@ -2389,22 +2396,22 @@ async fn transaction_with_invalid_send_and_end_txn_request_sent(transaction_vers
     ctx.cleanup().await;
 }
 
-/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 0`
-/// row (`ProducerIntegrationTest.java:117-118`).
+/// `ProducerIntegrationTest#testTransactionWithInvalidSendAndEndTxnRequestSent`,
+/// `TRANSACTION_VERSION = 0` row.
 #[tokio::test]
 async fn test_transaction_with_invalid_send_and_end_txn_request_sent_tv0() {
     transaction_with_invalid_send_and_end_txn_request_sent(0).await;
 }
 
-/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 1`
-/// row (`ProducerIntegrationTest.java:119-120`).
+/// `ProducerIntegrationTest#testTransactionWithInvalidSendAndEndTxnRequestSent`,
+/// `TRANSACTION_VERSION = 1` row.
 #[tokio::test]
 async fn test_transaction_with_invalid_send_and_end_txn_request_sent_tv1() {
     transaction_with_invalid_send_and_end_txn_request_sent(1).await;
 }
 
-/// `testTransactionWithInvalidSendAndEndTxnRequestSent`, `TRANSACTION_VERSION = 2`
-/// row (`ProducerIntegrationTest.java:121-122`).
+/// `ProducerIntegrationTest#testTransactionWithInvalidSendAndEndTxnRequestSent`,
+/// `TRANSACTION_VERSION = 2` row.
 #[tokio::test]
 async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
     transaction_with_invalid_send_and_end_txn_request_sent(2).await;
@@ -2414,8 +2421,8 @@ async fn test_transaction_with_invalid_send_and_end_txn_request_sent() {
 /// transactional requests queue on one connection; an aborted and a committed
 /// transaction still yield exactly the committed records.
 ///
-/// Translates `TransactionsWithMaxInFlightOneTest.testTransactionalProducerSingleBrokerMaxInFlightOne`
-/// (`TransactionsWithMaxInFlightOneTest.java:76-125`). Java loops over
+/// Translates `TransactionsWithMaxInFlightOneTest#testTransactionalProducerSingleBrokerMaxInFlightOne`.
+/// Java loops over
 /// `supportedGroupProtocols()`; only the CONSUMER arm is translated
 /// (`consumer-threading.md` §20).
 #[tokio::test]
@@ -2518,8 +2525,8 @@ async fn test_transactional_producer_single_broker_max_in_flight_one() {
 // become per-test names (`ctx.topic` / `ctx.group_id`), and the topic is created
 // through the admin client and awaited until its partition has a leader.
 
-/// `AdminFenceProducersTest`'s `@ClusterTestDefaults` broker
-/// (`AdminFenceProducersTest.java:44-50`): one broker, auto-create disabled, a
+/// `AdminFenceProducersTest`'s `@ClusterTestDefaults` broker: one broker,
+/// auto-create disabled, a
 /// one-partition RF-1 `__transaction_state`, and a 2 s abort-cleanup interval.
 /// The interval differs from every other config here, so this is its own pooled
 /// container.
@@ -2537,12 +2544,12 @@ fn admin_fence_producers_cluster() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
-/// `AdminFenceProducersTest.createProducer()` (`AdminFenceProducersTest.java:63-66`).
+/// `AdminFenceProducersTest#createProducer`.
 fn admin_fence_producers_producer(bootstrap: &str, txn_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     cluster_producer(bootstrap, &[("transactional.id", txn_id), ("transaction.timeout.ms", "2000")])
 }
 
-/// `AdminFenceProducersTest.RECORD` (`AdminFenceProducersTest.java:59`): no key,
+/// `AdminFenceProducersTest#RECORD`: no key,
 /// a one-byte value.
 fn admin_fence_producers_record(topic: &str) -> ProducerRecord<Vec<u8>, Vec<u8>> {
     ProducerRecord::with_key(topic.to_string(), None, Some(vec![0u8]))
@@ -2565,8 +2572,8 @@ async fn fence_producer(ctx: &TestContext, txn_id: &str) {
 /// coordinator's `ProducerFencedException`), and `commitTransaction` returns that
 /// same fatal error.
 ///
-/// Translates `AdminFenceProducersTest.testFenceAfterProducerCommit`
-/// (`AdminFenceProducersTest.java:68-96`). Java asserts the classes only; the
+/// Translates `AdminFenceProducersTest#testFenceAfterProducerCommit`. Java
+/// asserts the classes only; the
 /// message is the error code's fixed default text, so it is asserted too.
 #[tokio::test]
 async fn test_fence_after_producer_commit() {
@@ -2615,7 +2622,7 @@ async fn test_fence_after_producer_commit() {
         matches!(commit_error, Error::InvalidProducerEpoch(_)),
         "expected InvalidProducerEpoch, got {commit_error:?}"
     );
-    // `TransactionManager.maybeFailWithError` (`TransactionManager.java:1181-1184`)
+    // org.apache.kafka.clients.producer.internals.TransactionManager#maybeFailWithError
     // rethrows a fresh InvalidProducerEpochException naming the transactional id
     // and the producer id / epoch; the latter two are broker-assigned, so only
     // the fixed parts are asserted.
@@ -2635,8 +2642,7 @@ async fn test_fence_after_producer_commit() {
 /// the future with `ProducerFencedException` or `InvalidProducerEpochException`,
 /// and `commitTransaction` fails with an `ApiException` of one of those two.
 ///
-/// Translates `AdminFenceProducersTest.testFenceBeforeProducerCommit`
-/// (`AdminFenceProducersTest.java:111-137`).
+/// Translates `AdminFenceProducersTest#testFenceBeforeProducerCommit`.
 #[tokio::test]
 async fn test_fence_before_producer_commit() {
     let mut ctx = TestContext::new(admin_fence_producers_cluster()).await;
@@ -2690,8 +2696,9 @@ async fn test_fence_before_producer_commit() {
 // ---------------------------------------------------------------------------
 //
 // Both Java classes run on three brokers with short producer-id and
-// transactional-id expiration intervals (`ProducerIdExpirationTest.java:76-100`,
-// `TransactionsExpirationTest.java:65-86`). The two differ only in which of the
+// transactional-id expiration intervals (the `@ClusterTestDefaults` of
+// org.apache.kafka.clients.producer.ProducerIdExpirationTest and
+// org.apache.kafka.tiered.storage.integration.TransactionsExpirationTest). The two differ only in which of the
 // two expires first, so each gets its own pooled cluster
 // ([`producer_id_expiration_cluster`] / [`transactions_expiration_cluster`]).
 // Deviations shared by these tests, each forced by the pooled harness:
@@ -2709,16 +2716,16 @@ async fn test_fence_before_producer_commit() {
 //     first downgraded to 1 (see [`transactions_expiration_context`]).
 //   - `ProducerIdExpirationTest.testDynamicProducerIdExpirationMs` is not
 //     translated: its second half restarts a broker (`kafkaBroker.shutdown()` /
-//     `startup()`, `ProducerIdExpirationTest.java:196-200`), which the harness
+//     `startup()`), which the harness
 //     cannot do, and its first half reads the broker's in-memory
 //     `logManager().producerStateManagerConfig()` to prove the dynamic update
 //     landed — neither is observable from a client.
-//   - `assertConsumeRecords` iterates `supportedGroupProtocols()`
-//     (`TransactionsExpirationTest.java:243`); only the CONSUMER (KIP-848) arm is
+//   - `TransactionsTestHelper#assertConsumeCommittedRecords` runs once per
+//     `supportedGroupProtocols()` (in `TransactionsExpirationTest#testTransactionAfterProducerIdExpires`); only the CONSUMER (KIP-848) arm is
 //     translated (`consumer-threading.md` §20).
 
 /// The broker overrides both expiration suites share
-/// (`ProducerIdExpirationTest.java:76-100` / `TransactionsExpirationTest.java:65-86`)
+/// (the `@ClusterTestDefaults` of `ProducerIdExpirationTest` / `TransactionsExpirationTest`)
 /// on top of [`kip848_3_broker`]'s KIP-848 settings (which already give
 /// `__consumer_offsets` Java's single partition). Only the two expiration
 /// intervals differ between the suites.
@@ -2744,13 +2751,13 @@ fn expiration_cluster(transactional_id_expiration_ms: &str, producer_id_expirati
     config
 }
 
-/// `ProducerIdExpirationTest`'s cluster (`ProducerIdExpirationTest.java:76-100`):
+/// `ProducerIdExpirationTest`'s cluster:
 /// the transactional id (5 s) expires before the producer id (10 s).
 fn producer_id_expiration_cluster() -> ClusterConfig {
     expiration_cluster("5000", "10000")
 }
 
-/// `TransactionsExpirationTest`'s cluster (`TransactionsExpirationTest.java:65-86`):
+/// `TransactionsExpirationTest`'s cluster:
 /// the producer id (5 s) expires before the transactional id (10 s).
 /// (Java sets `log.unclean.leader.election.enable` here and
 /// `unclean.leader.election.enable` in `ProducerIdExpirationTest`; both are the
@@ -2772,7 +2779,7 @@ async fn transactions_expiration_context(transaction_version: i16) -> TestContex
     ctx
 }
 
-/// `ClusterInstance.consumer(configs)` (`ClusterInstance.java:161-169`): `configs`
+/// `ClusterInstance#consumer(Map)`: `configs`
 /// plus byte-array deserializers, `auto.offset.reset=earliest`, a random group id
 /// and the cluster's bootstrap servers — CONSUMER (KIP-848) arm.
 fn cluster_consumer(ctx: &TestContext, configs: &[(&str, &str)]) -> Box<dyn DynConsumer<Vec<u8>, Vec<u8>>> {
@@ -2809,7 +2816,8 @@ async fn create_expiration_topic(ctx: &TestContext, topic: &str, num_partitions:
 }
 
 /// `admin.describeProducers(List.of(tp)).partitionResult(tp).get().activeProducers()`
-/// (`ProducerIdExpirationTest.java:261-266`, `TransactionsExpirationTest.java:232-236`).
+/// (`ProducerIdExpirationTest#producerStates`, and inline in
+/// `TransactionsExpirationTest#testTransactionAfterProducerIdExpires`).
 async fn producer_states(admin: &dyn Admin, tp: &TopicPartition) -> Result<Vec<ProducerState>, Error> {
     let states = admin
         .describe_producers(std::slice::from_ref(tp))
@@ -2821,8 +2829,8 @@ async fn producer_states(admin: &dyn Admin, tp: &TopicPartition) -> Result<Vec<P
 
 /// Whether `admin.describeTransactions(List.of(id)).description(id).get()` fails
 /// with `TransactionalIdNotFoundException` — the condition of both suites'
-/// `waitUntilTransactionalStateExpires` (`ProducerIdExpirationTest.java:237-250`,
-/// `TransactionsExpirationTest.java:218-230`). Any other outcome is "not yet".
+/// `waitUntilTransactionalStateExpires` (`ProducerIdExpirationTest#waitUntilTransactionalStateExpires`,
+/// `TransactionsExpirationTest#waitUntilTransactionalStateExpires`). Any other outcome is "not yet".
 async fn transactional_state_expired(admin: &dyn Admin, transactional_id: &str) -> bool {
     let description = admin
         .describe_transactions(&[transactional_id.to_string()])
@@ -2833,8 +2841,8 @@ async fn transactional_state_expired(admin: &dyn Admin, transactional_id: &str) 
     }
 }
 
-/// `waitUntilTransactionalStateExpires(admin)` (`ProducerIdExpirationTest.java:237-250`,
-/// `TransactionsExpirationTest.java:218-230`).
+/// `ProducerIdExpirationTest#waitUntilTransactionalStateExpires`,
+/// `TransactionsExpirationTest#waitUntilTransactionalStateExpires`.
 async fn wait_until_transactional_state_expires(admin: &dyn Admin, transactional_id: &str) {
     test_utils::wait_until_true_with_timeout(
         || transactional_state_expired(admin, transactional_id),
@@ -2845,8 +2853,7 @@ async fn wait_until_transactional_state_expires(admin: &dyn Admin, transactional
     .await;
 }
 
-/// `TransactionsExpirationTest.waitUntilTransactionalStateExists`
-/// (`TransactionsExpirationTest.java:205-216`).
+/// `TransactionsExpirationTest#waitUntilTransactionalStateExists`.
 async fn wait_until_transactional_state_exists(ctx: &TestContext, transactional_id: &str) {
     let admin = txn_test_admin(ctx);
     test_utils::wait_until_true_with_timeout(
@@ -2867,8 +2874,7 @@ async fn wait_until_transactional_state_exists(ctx: &TestContext, transactional_
     admin.close().await;
 }
 
-/// `ProducerIdExpirationTest.waitProducerIdExpire(admin)`
-/// (`ProducerIdExpirationTest.java:219-231`). Java rethrows a `describeProducers`
+/// `ProducerIdExpirationTest#waitProducerIdExpire(Admin)`. Java rethrows a `describeProducers`
 /// failure out of the condition, failing the test; so does this.
 async fn wait_producer_id_expire(admin: &dyn Admin, tp: &TopicPartition) {
     test_utils::wait_until_true_with_timeout(
@@ -2883,7 +2889,8 @@ async fn wait_producer_id_expire(admin: &dyn Admin, tp: &TopicPartition) {
 /// The send that follows an expired mapping fails through its future with
 /// `InvalidPidMappingException`, and the producer is then in a fatal state, so
 /// `abortTransaction` fails with a `KafkaException`
-/// (`ProducerIdExpirationTest.java:143-153`, `TransactionsExpirationTest.java:124-132`).
+/// (`ProducerIdExpirationTest#testTransactionAfterTransactionIdExpiresButProducerIdRemains`,
+/// `TransactionsExpirationTest#testFatalErrorAfterInvalidProducerIdMapping`).
 ///
 /// Java's `assertFutureThrows(InvalidPidMappingException.class, ...)` and
 /// `assertThrows(KafkaException.class, ...)` check classes only; the variant, the
@@ -2913,7 +2920,7 @@ async fn assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
         .expect_err("abortTransaction must fail after the fatal error");
     // `TransactionManager.maybeFailWithError` throws a bare
     // `KafkaException("Cannot execute transactional method because we are in an
-    // error state", lastError)` (`TransactionManager.java:1189`), so the variant is the
+    // error state", lastError)`, so the variant is the
     // bare `KafkaError` and its source is the fatal `InvalidPidMapping`.
     assert!(abort_error.is_kafka_error(), "expected a KafkaException, got {abort_error:?}");
     assert!(
@@ -2934,8 +2941,7 @@ async fn assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
 /// An idempotent producer's id expires from the partition's producer state once
 /// it stops writing, and reappears when it writes again.
 ///
-/// Translates `ProducerIdExpirationTest.testProducerIdExpirationWithNoTransactions`
-/// (`ProducerIdExpirationTest.java:110-129`).
+/// Translates `ProducerIdExpirationTest#testProducerIdExpirationWithNoTransactions`.
 #[tokio::test]
 async fn test_producer_id_expiration_with_no_transactions() {
     let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
@@ -2972,8 +2978,7 @@ async fn test_producer_id_expiration_with_no_transactions() {
 /// partition's producer state makes the next transactional send fail with
 /// `InvalidPidMappingException` (fatal); a fresh producer recovers and commits.
 ///
-/// Translates `ProducerIdExpirationTest.testTransactionAfterTransactionIdExpiresButProducerIdRemains`
-/// (`ProducerIdExpirationTest.java:131-175`).
+/// Translates `ProducerIdExpirationTest#testTransactionAfterTransactionIdExpiresButProducerIdRemains`.
 #[tokio::test]
 async fn test_transaction_after_transaction_id_expires_but_producer_id_remains() {
     let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
@@ -2981,7 +2986,7 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
     let tp0 = TopicPartition::new(topic1.clone(), 0);
     let transactional_id = ctx.group_id("transactionalProducer");
     create_expiration_topic(&ctx, &topic1, 1).await;
-    // `transactionalProducerConfig()` (`ProducerIdExpirationTest.java:252-257`).
+    // org.apache.kafka.clients.producer.ProducerIdExpirationTest#transactionalProducerConfig.
     let transactional_producer_config = [
         ("transactional.id", transactional_id.as_str()),
         ("enable.idempotence", "true"),
@@ -3050,8 +3055,9 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
 
     // Producer IDs should be retained.
     //
-    // Deviation from Java's single `assertFalse(producerStates(admin).isEmpty())`
-    // (`ProducerIdExpirationTest.java:165-166`): the old producer id's entry
+    // Deviation from Java's single `assertFalse(producerStates(admin).isEmpty())` in
+    // `ProducerIdExpirationTest#testTransactionAfterTransactionIdExpiresButProducerIdRemains`
+    // (package org.apache.kafka.clients.producer): the old producer id's entry
     // expires ~10-10.5 s after the abort marker, and the two sends above are not
     // flushed, so a single check can land in the gap between that expiry and the
     // new records' append and see `Ok([])` — Java has the same race, it just
@@ -3089,7 +3095,7 @@ async fn test_transaction_after_transaction_id_expires_but_producer_id_remains()
 
 /// `new ProducerRecord<>(topic, partition, key, value, Set.of(new RecordHeader(HEADER_KEY, value)))`
 /// as `TransactionsExpirationTest` builds its records inline
-/// (`TransactionsExpirationTest.java:119-120`, ...).
+/// (`TransactionsExpirationTest#testFatalErrorAfterInvalidProducerIdMapping`, ...).
 fn expiration_record(
     topic: &str,
     partition: Option<i32>,
@@ -3105,7 +3111,7 @@ fn expiration_record(
     )
 }
 
-/// `TransactionsExpirationTest.assertConsumeRecords` (`TransactionsExpirationTest.java:238-263`),
+/// `org.apache.kafka.tiered.storage.integration.TransactionsTestHelper#assertConsumeCommittedRecords`,
 /// CONSUMER arm: a read_committed consumer subscribed to `topics` sees exactly
 /// `expected_count` records within 15 s, each carrying the committed header.
 async fn assert_consume_records(ctx: &TestContext, topics: &[String], expected_count: usize) {
@@ -3145,8 +3151,8 @@ async fn assert_consume_records(ctx: &TestContext, topics: &[String], expected_c
 /// `InvalidPidMappingException` (fatal); a reinitialized producer with the same id
 /// commits a new transaction across two topics.
 ///
-/// Translates `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMapping`
-/// (`TransactionsExpirationTest.java:116-164`), run by one `@ClusterFeature` row
+/// Translates `TransactionsExpirationTest#testFatalErrorAfterInvalidProducerIdMapping`,
+/// run by one `@ClusterFeature` row
 /// per `transaction_version` (see the section note).
 async fn fatal_error_after_invalid_producer_id_mapping(transaction_version: i16) {
     let mut ctx = transactions_expiration_context(transaction_version).await;
@@ -3212,22 +3218,20 @@ async fn fatal_error_after_invalid_producer_id_mapping(transaction_version: i16)
     ctx.cleanup().await;
 }
 
-/// `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV1`
-/// (`TransactionsExpirationTest.java:96-99`).
+/// `TransactionsExpirationTest#testFatalErrorAfterInvalidProducerIdMappingWithTV1`.
 #[tokio::test]
 async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv1() {
     fatal_error_after_invalid_producer_id_mapping(1).await;
 }
 
-/// `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV2`
-/// (`TransactionsExpirationTest.java:101-104`).
+/// `TransactionsExpirationTest#testFatalErrorAfterInvalidProducerIdMappingWithTV2`.
 #[tokio::test]
 async fn test_fatal_error_after_invalid_producer_id_mapping_with_tv2() {
     fatal_error_after_invalid_producer_id_mapping(2).await;
 }
 
 /// `TransactionsExpirationTest`'s "Ensure producer IDs are added" / "Producer IDs
-/// should repopulate" wait (`TransactionsExpirationTest.java:167-177`, `:201-211`):
+/// should repopulate" waits in `TransactionsExpirationTest#testTransactionAfterProducerIdExpires`:
 /// accumulate `describeProducers` results until non-empty, treating a failed call
 /// as "not yet", then assert exactly one producer was seen.
 async fn wait_for_single_producer_state(ctx: &TestContext, tp: &TopicPartition) -> ProducerState {
@@ -3257,8 +3261,8 @@ async fn wait_for_single_producer_state(ctx: &TestContext, tp: &TopicPartition) 
 /// transactional id still maps to it: a new producer with the same id reuses the
 /// producer id with a bumped epoch, and its transaction commits.
 ///
-/// Translates `TransactionsExpirationTest.testTransactionAfterProducerIdExpires`
-/// (`TransactionsExpirationTest.java:166-247`), run by one `@ClusterFeature` row
+/// Translates `TransactionsExpirationTest#testTransactionAfterProducerIdExpires`,
+/// run by one `@ClusterFeature` row
 /// per `is_tv2_enabled` (see the section note).
 async fn transaction_after_producer_id_expires(is_tv2_enabled: bool) {
     let mut ctx = transactions_expiration_context(if is_tv2_enabled { 2 } else { 1 }).await;
@@ -3345,15 +3349,13 @@ async fn transaction_after_producer_id_expires(is_tv2_enabled: bool) {
     ctx.cleanup().await;
 }
 
-/// `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV1`
-/// (`TransactionsExpirationTest.java:106-109`).
+/// `TransactionsExpirationTest#testTransactionAfterProducerIdExpiresWithTV1`.
 #[tokio::test]
 async fn test_transaction_after_producer_id_expires_with_tv1() {
     transaction_after_producer_id_expires(false).await;
 }
 
-/// `TransactionsExpirationTest.testTransactionAfterProducerIdExpiresWithTV2`
-/// (`TransactionsExpirationTest.java:111-114`).
+/// `TransactionsExpirationTest#testTransactionAfterProducerIdExpiresWithTV2`.
 #[tokio::test]
 async fn test_transaction_after_producer_id_expires_with_tv2() {
     transaction_after_producer_id_expires(true).await;
@@ -3371,9 +3373,11 @@ async fn test_transaction_after_producer_id_expires_with_tv2() {
 
 /// `TransactionsTest.overridingProps` (`TransactionsTest.scala:61-76`) on a
 /// dedicated `Type::Kraft` cluster of `brokerCount = 3` brokers and one
-/// controller. Java also hands the properties to the controllers
-/// (`kraftControllerConfigs`, `:82-85`), as the harness does with every
-/// server property.
+/// controller. Java also hands the properties to the controllers (AK 4.3.1:
+/// `TransactionsTest#kraftControllerConfigs`; 4.4.0:
+/// `org.apache.kafka.tiered.storage.integration.TransactionsTest` runs
+/// `Type.CO_KRAFT`, so its `@ClusterTestDefaults` server properties reach the
+/// combined controller), as the harness does with every server property.
 fn transactions_test_dedicated_cluster() -> ClusterConfig {
     let props = [
         ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false"),
@@ -4123,7 +4127,7 @@ mod rust_only_fallback {
 }
 
 /// `ProducerIntegrationTest.testTransactionWithSendOffset`'s TV0 / TV1
-/// `@ClusterFeature` rows (`ProducerIntegrationTest.java:149-152`), carried by
+/// `@ClusterFeature` rows, carried by
 /// [`consume_transform_produce_with_offsets_inner`] like its TV2 row
 /// (`test_consume_transform_produce_with_offsets`). The body runs on a
 /// [`ClusterConfig::dedicated`] copy of [`cluster_config`] whose finalized
@@ -4136,15 +4140,13 @@ async fn consume_transform_produce_with_offsets_at(transaction_version: i16) {
     consume_transform_produce_with_offsets_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
 
-/// `testTransactionWithSendOffset`, `TRANSACTION_VERSION = 0` row
-/// (`ProducerIntegrationTest.java:149-150`).
+/// `ProducerIntegrationTest#testTransactionWithSendOffset`, `TRANSACTION_VERSION = 0` row.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_consume_transform_produce_with_offsets_tv0() {
     consume_transform_produce_with_offsets_at(0).await;
 }
 
-/// `testTransactionWithSendOffset`, `TRANSACTION_VERSION = 1` row
-/// (`ProducerIntegrationTest.java:151-152`).
+/// `ProducerIntegrationTest#testTransactionWithSendOffset`, `TRANSACTION_VERSION = 1` row.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_consume_transform_produce_with_offsets_tv1() {
     consume_transform_produce_with_offsets_at(1).await;

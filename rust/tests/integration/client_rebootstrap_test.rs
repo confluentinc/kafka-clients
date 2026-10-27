@@ -28,12 +28,12 @@
 //!
 //! ## Translated
 //!
-//! - `testAdminRebootstrap` (line 57) → `test_admin_rebootstrap`
-//! - `testAdminRebootstrapDisabled` (line 87) → `test_admin_rebootstrap_disabled`
-//! - `testProducerRebootstrap` (line 116) → `test_producer_rebootstrap`
-//! - `testProducerRebootstrapDisabled` (line 151) → `test_producer_rebootstrap_disabled`
-//! - `testConsumerRebootstrap` (line 231) → `test_consumer_rebootstrap`
-//! - `testConsumerRebootstrapDisabled` (line 293) → `test_consumer_rebootstrap_disabled`
+//! - `testAdminRebootstrap` → `test_admin_rebootstrap`
+//! - `testAdminRebootstrapDisabled` → `test_admin_rebootstrap_disabled`
+//! - `testProducerRebootstrap` → `test_producer_rebootstrap`
+//! - `testProducerRebootstrapDisabled` → `test_producer_rebootstrap_disabled`
+//! - `testConsumerRebootstrap` → `test_consumer_rebootstrap`
+//! - `testConsumerRebootstrapDisabled` → `test_consumer_rebootstrap_disabled`
 //!
 //! ## SKIPped
 //!
@@ -115,8 +115,7 @@ async fn assert_list_topics_succeeds(admin: &dyn Admin, timeout: Duration) {
     }
 }
 
-/// Translated from `ClientRebootstrapTest.testAdminRebootstrap`
-/// (`ClientRebootstrapTest.java:57`).
+/// Translated from `ClientRebootstrapTest#testAdminRebootstrap`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_admin_rebootstrap() {
     let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
@@ -142,8 +141,7 @@ async fn test_admin_rebootstrap() {
     admin.close().await;
 }
 
-/// Translated from `ClientRebootstrapTest.testAdminRebootstrapDisabled`
-/// (`ClientRebootstrapTest.java:87`).
+/// Translated from `ClientRebootstrapTest#testAdminRebootstrapDisabled`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_admin_rebootstrap_disabled() {
     let mut ctx = TestContext::new(admin_rebootstrap_cluster_config()).await;
@@ -230,8 +228,7 @@ async fn wait_for_one_polled_record(consumer: &mut dyn DynConsumer<Vec<u8>, Vec<
     }
 }
 
-/// Translated from `ClientRebootstrapTest.testProducerRebootstrap`
-/// (`ClientRebootstrapTest.java:116`).
+/// Translated from `ClientRebootstrapTest#testProducerRebootstrap`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_producer_rebootstrap() {
     let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
@@ -260,8 +257,7 @@ async fn test_producer_rebootstrap() {
     producer.close().await.expect("producer close");
 }
 
-/// Translated from `ClientRebootstrapTest.testProducerRebootstrapDisabled`
-/// (`ClientRebootstrapTest.java:151`).
+/// Translated from `ClientRebootstrapTest#testProducerRebootstrapDisabled`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_producer_rebootstrap_disabled() {
     let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
@@ -305,8 +301,8 @@ async fn test_producer_rebootstrap_disabled() {
     producer.close_with_timeout(Duration::ZERO).await.expect("producer close");
 }
 
-/// Java `consumerRebootstrap(clusterInstance, GroupProtocol.CONSUMER)`
-/// (`ClientRebootstrapTest.java:178`).
+/// Java `ClientRebootstrapTest#consumerRebootstrap`, called as
+/// `consumerRebootstrap(clusterInstance, GroupProtocol.CONSUMER)`.
 async fn consumer_rebootstrap(ctx: &mut TestContext) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -347,16 +343,15 @@ async fn consumer_rebootstrap(ctx: &mut TestContext) {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translated from `ClientRebootstrapTest.testConsumerRebootstrap`
-/// (`ClientRebootstrapTest.java:231`), the `GroupProtocol.CONSUMER` arm.
+/// Translated from `ClientRebootstrapTest#testConsumerRebootstrap`, the `GroupProtocol.CONSUMER` arm.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_consumer_rebootstrap() {
     let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;
     consumer_rebootstrap(&mut ctx).await;
 }
 
-/// Java `consumerRebootstrapDisabled(clusterInstance, GroupProtocol.CONSUMER)`
-/// (`ClientRebootstrapTest.java:235`).
+/// Java `ClientRebootstrapTest#consumerRebootstrapDisabled`, called as
+/// `consumerRebootstrapDisabled(clusterInstance, GroupProtocol.CONSUMER)`.
 async fn consumer_rebootstrap_disabled(ctx: &mut TestContext) {
     let topic = ctx.topic(TOPIC);
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -397,8 +392,7 @@ async fn consumer_rebootstrap_disabled(ctx: &mut TestContext) {
     consumer.close().await.expect("consumer close");
 }
 
-/// Translated from `ClientRebootstrapTest.testConsumerRebootstrapDisabled`
-/// (`ClientRebootstrapTest.java:293`), the `GroupProtocol.CONSUMER` arm.
+/// Translated from `ClientRebootstrapTest#testConsumerRebootstrapDisabled`, the `GroupProtocol.CONSUMER` arm.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_consumer_rebootstrap_disabled() {
     let mut ctx = TestContext::new(rebootstrap_cluster_config()).await;

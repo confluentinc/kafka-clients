@@ -21,11 +21,9 @@ kafka_error_type! {
     /// Replication factor is below 1 or larger than the number of available
     /// brokers.
     ///
-    /// Corresponds to Java's `InvalidReplicationFactorException`, error code `Errors::InvalidReplicationFactor`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidReplicationFactorException` -> `InvalidConfigurationException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidReplicationFactor`. Java `extends` chain:
+    /// `InvalidReplicationFactorException` -> `InvalidConfigurationException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidReplicationFactorException")]
     InvalidReplicationFactorError,
     code: Errors::InvalidReplicationFactor,

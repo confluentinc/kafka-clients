@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::create_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreateTopicsResult`.
 
 use std::collections::HashMap;
 
@@ -23,9 +21,8 @@ use crate::common::{Error, KafkaFuture, Uuid};
 
 /// Topic metadata and configuration returned per created topic.
 ///
-/// Corresponds to `CreateTopicsResult.TopicMetadataAndConfig`. Carries either
-/// the metadata or a stored error; the accessors surface the error (mirroring
-/// Java's `ensureSuccess`, which rethrows the stored `ApiException`).
+/// Carries either the metadata or a stored error; the accessors return the
+/// stored error.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig")]
 pub struct TopicMetadataAndConfig {
@@ -38,6 +35,13 @@ pub struct TopicMetadataAndConfig {
 
 impl TopicMetadataAndConfig {
     /// Creates a successful metadata-and-config holder.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_id` - the topic id.
+    /// - `num_partitions` - the number of partitions of the topic.
+    /// - `replication_factor` - the replication factor of the topic.
+    /// - `config` - the topic config.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig")]
     pub fn new(topic_id: Uuid, num_partitions: i32, replication_factor: i32, config: Config) -> Self {
         Self { error: None, topic_id, num_partitions, replication_factor, config: Some(config) }
@@ -45,6 +49,10 @@ impl TopicMetadataAndConfig {
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
+    ///
+    /// # Arguments
+    ///
+    /// - `error` - the error every accessor returns.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#TopicMetadataAndConfig")]
     pub fn with_error(error: Error) -> Self {
         Self {
@@ -64,28 +72,44 @@ impl TopicMetadataAndConfig {
         }
     }
 
-    /// The topic id, or the stored error.
+    /// Returns the topic id, or the stored error.
+    ///
+    /// # Errors
+    ///
+    /// The error the topic creation failed with, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#topicId")]
     pub fn topic_id(&self) -> Result<Uuid, Error> {
         self.ensure_success()?;
         Ok(self.topic_id)
     }
 
-    /// The number of partitions, or the stored error.
+    /// Returns the number of partitions, or the stored error.
+    ///
+    /// # Errors
+    ///
+    /// The error the topic creation failed with, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#numPartitions")]
     pub fn num_partitions(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.num_partitions)
     }
 
-    /// The replication factor, or the stored error.
+    /// Returns the replication factor, or the stored error.
+    ///
+    /// # Errors
+    ///
+    /// The error the topic creation failed with, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#replicationFactor")]
     pub fn replication_factor(&self) -> Result<i32, Error> {
         self.ensure_success()?;
         Ok(self.replication_factor)
     }
 
-    /// The topic config, or the stored error.
+    /// Returns the topic config, or the stored error.
+    ///
+    /// # Errors
+    ///
+    /// The error the topic creation failed with, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult$TopicMetadataAndConfig#config")]
     pub fn config(&self) -> Result<Config, Error> {
         self.ensure_success()?;
@@ -95,8 +119,6 @@ impl TopicMetadataAndConfig {
 }
 
 /// The result of `Admin::create_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreateTopicsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult")]
 pub struct CreateTopicsResult {
@@ -113,7 +135,7 @@ impl CreateTopicsResult {
         Self { futures }
     }
 
-    /// Return a map from topic names to futures, which can be used to check the
+    /// Returns a map from topic names to futures, which can be used to check the
     /// status of individual topic creations.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#values")]
     pub fn values(&self) -> HashMap<String, KafkaFuture<()>> {
@@ -123,7 +145,7 @@ impl CreateTopicsResult {
             .collect()
     }
 
-    /// Return a future which succeeds if all the topic creations succeed.
+    /// Returns a future which succeeds if all the topic creations succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())
@@ -132,32 +154,53 @@ impl CreateTopicsResult {
     /// Returns a future that provides topic configs for the topic when the
     /// request completes.
     ///
+    /// If broker version doesn't support replication factor in the response, the future
+    /// completes with an error answering `Error::is_unsupported_version_error`. If broker
+    /// returned an error for topic configs, it completes with the appropriate error, for
+    /// example one answering `Error::is_topic_authorization_error` if user does not have
+    /// permission to describe topic configs. Note that the values for the type and documentation
+    /// fields will be `None`.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name.
+    ///
     /// # Panics
     ///
     /// Panics with `Topic <topic> was not part of the createTopics request` if
     /// `topic` was not part of the original request, where Java's
     /// `futures.get(topic)` is `null` and the call throws
-    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). Asking for a
+    /// `NullPointerException`. Asking for a
     /// topic the caller did not request is a programming error the caller can
-    /// rule out, so the accessor keeps its plain `KafkaFuture` signature
-    /// (CLAUDE.md §12.5); read the requested topics from
+    /// rule out, so the accessor keeps its plain `KafkaFuture` signature;
+    /// read the requested topics from
     /// [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#config")]
     pub fn config(&self, topic: &str) -> KafkaFuture<Config> {
         self.future_for(topic).then_apply(|tmac: TopicMetadataAndConfig| tmac.config())
     }
 
-    /// Returns a future that provides the topic id for the topic.
+    /// Returns a future that provides the topic id for the topic when the request completes.
+    ///
+    /// If broker version doesn't support replication factor in the response, the future
+    /// completes with an error answering `Error::is_unsupported_version_error`. If broker
+    /// returned an error for topic configs, it completes with the appropriate error, for
+    /// example one answering `Error::is_topic_authorization_error` if user does not have
+    /// permission to describe topic configs.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name.
     ///
     /// # Panics
     ///
     /// Panics with `Topic <topic> was not part of the createTopics request` if
     /// `topic` was not part of the original request, where Java's
     /// `futures.get(topic)` is `null` and the call throws
-    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). Asking for a
+    /// `NullPointerException`. Asking for a
     /// topic the caller did not request is a programming error the caller can
-    /// rule out, so the accessor keeps its plain `KafkaFuture` signature
-    /// (CLAUDE.md §12.5); read the requested topics from
+    /// rule out, so the accessor keeps its plain `KafkaFuture` signature;
+    /// read the requested topics from
     /// [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#topicId")]
     pub fn topic_id(&self, topic: &str) -> KafkaFuture<Uuid> {
@@ -165,17 +208,28 @@ impl CreateTopicsResult {
             .then_apply(|tmac: TopicMetadataAndConfig| tmac.topic_id())
     }
 
-    /// Returns a future that provides the number of partitions for the topic.
+    /// Returns a future that provides the number of partitions for the topic when the request
+    /// completes.
+    ///
+    /// If broker version doesn't support replication factor in the response, the future
+    /// completes with an error answering `Error::is_unsupported_version_error`. If broker
+    /// returned an error for topic configs, it completes with the appropriate error, for
+    /// example one answering `Error::is_topic_authorization_error` if user does not have
+    /// permission to describe topic configs.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name.
     ///
     /// # Panics
     ///
     /// Panics with `Topic <topic> was not part of the createTopics request` if
     /// `topic` was not part of the original request, where Java's
     /// `futures.get(topic)` is `null` and the call throws
-    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). Asking for a
+    /// `NullPointerException`. Asking for a
     /// topic the caller did not request is a programming error the caller can
-    /// rule out, so the accessor keeps its plain `KafkaFuture` signature
-    /// (CLAUDE.md §12.5); read the requested topics from
+    /// rule out, so the accessor keeps its plain `KafkaFuture` signature;
+    /// read the requested topics from
     /// [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#numPartitions")]
     pub fn num_partitions(&self, topic: &str) -> KafkaFuture<i32> {
@@ -183,17 +237,28 @@ impl CreateTopicsResult {
             .then_apply(|tmac: TopicMetadataAndConfig| tmac.num_partitions())
     }
 
-    /// Returns a future that provides the replication factor for the topic.
+    /// Returns a future that provides the replication factor for the topic when the request
+    /// completes.
+    ///
+    /// If broker version doesn't support replication factor in the response, the future
+    /// completes with an error answering `Error::is_unsupported_version_error`. If broker
+    /// returned an error for topic configs, it completes with the appropriate error, for
+    /// example one answering `Error::is_topic_authorization_error` if user does not have
+    /// permission to describe topic configs.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name.
     ///
     /// # Panics
     ///
     /// Panics with `Topic <topic> was not part of the createTopics request` if
     /// `topic` was not part of the original request, where Java's
     /// `futures.get(topic)` is `null` and the call throws
-    /// `NullPointerException` (`CreateTopicsResult.java:67-108`). Asking for a
+    /// `NullPointerException`. Asking for a
     /// topic the caller did not request is a programming error the caller can
-    /// rule out, so the accessor keeps its plain `KafkaFuture` signature
-    /// (CLAUDE.md §12.5); read the requested topics from
+    /// rule out, so the accessor keeps its plain `KafkaFuture` signature;
+    /// read the requested topics from
     /// [`values`](Self::values) to avoid it.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateTopicsResult#replicationFactor")]
     pub fn replication_factor(&self, topic: &str) -> KafkaFuture<i32> {
@@ -221,7 +286,7 @@ mod tests {
     /// New test, no Java original: each per-topic accessor panics, as its
     /// `# Panics` section documents, for a topic the request did not name,
     /// where Java's `futures.get(topic)` is `null` and the call throws
-    /// `NullPointerException` (`CreateTopicsResult.java:67-108`).
+    /// `NullPointerException`.
     #[test]
     fn accessors_panic_for_a_topic_not_in_the_request() {
         let handle: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();

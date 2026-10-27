@@ -64,15 +64,24 @@ fn boxed(options: DescribeFeaturesOptions) -> *mut kafka_admin_DescribeFeaturesO
 }
 
 /// `new DescribeFeaturesOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_DescribeFeaturesOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_DescribeFeaturesOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeFeaturesOptions_new() -> *mut kafka_admin_DescribeFeaturesOptions_t {
     boxed(DescribeFeaturesOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -90,8 +99,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -107,7 +120,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesOptions_timeout_ms(
     unsafe { describe_features_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `DescribeFeaturesOptions.nodeId(int nodeId)`: the node the request is sent to (Java's `Optional` is always present once set).
+/// `DescribeFeaturesOptions.nodeId(int nodeId)`.
+///
+/// # Parameters
+///
+/// - `node_id` - the node the request is sent to (Java's `Optional` is always present once set).
 ///
 /// # Safety
 ///
@@ -125,7 +142,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesOptions_set_node_id(
     *options = std::mem::take(options).set_node_id(node_id);
 }
 
-/// `DescribeFeaturesOptions.nodeId()`: the node the request is sent to, `-1` when unset (Java's empty `Optional`: an arbitrary node).
+/// `DescribeFeaturesOptions.nodeId()`.
+///
+/// # Returns
+///
+/// The node the request is sent to, `-1` when unset (Java's empty `Optional`: an arbitrary node).
 ///
 /// # Safety
 ///

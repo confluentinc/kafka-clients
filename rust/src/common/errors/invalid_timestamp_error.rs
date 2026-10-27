@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The timestamp of the message is out of acceptable range.
+    /// Indicate the timestamp of a record is invalid.
     ///
-    /// Corresponds to Java's `InvalidTimestampException`, error code `Errors::InvalidTimestamp`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidTimestampException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidTimestamp`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTimestampException")]
     InvalidTimestampError,
     code: Errors::InvalidTimestamp,

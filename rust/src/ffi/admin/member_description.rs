@@ -110,20 +110,28 @@ fn optional_c_str(s: Option<&CString>) -> *const c_char {
     s.map_or(ptr::null(), |s| s.as_ptr())
 }
 
-/// `new MemberDescription(String memberId, Optional<String> groupInstanceId,
-/// Optional<String> rackId, String clientId, String host, MemberAssignment
-/// assignment, Optional<MemberAssignment> targetAssignment, Optional<Integer>
-/// memberEpoch, Optional<Boolean> upgraded)`. `group_instance_id`, `rack_id`
-/// and `target_assignment` are nullable (null = `Optional.empty()`);
-/// `member_epoch` is `-1` for `Optional.empty()`; `upgraded` is `-1` for
-/// `Optional.empty()`, else `0`/`1`. The assignments are copied, the caller
-/// keeps its handles. Owned, freed with [`kafka_admin_MemberDescription_destroy`].
+/// Creates the description of a group member.
+///
+/// # Parameters
+///
+/// - `member_id` - the consumer id of the group member.
+/// - `group_instance_id` - the instance id of the group member, `NULL` for none.
+/// - `rack_id` - the rack id of the group member, `NULL` for none.
+/// - `client_id` - the client id of the group member.
+/// - `host` - the host where the group member is running.
+/// - `assignment` - the assignment of the group member; copied, the caller keeps its handle.
+/// - `target_assignment` - the target assignment of the member, `NULL` for none; copied, the
+///   caller keeps its handle.
+/// - `member_epoch` - the epoch of the group member, `-1` for none.
+/// - `upgraded` - 1 if the member uses the consumer protocol, 0 if it does not, `-1` if
+///   unknown.
 ///
 /// # Safety
 ///
-/// The strings must be null (where nullable) or valid NUL-terminated
+/// The strings must be `NULL` (where nullable) or valid NUL-terminated
 /// strings; `assignment` must be a valid member-assignment handle and
-/// `target_assignment` null or a valid one.
+/// `target_assignment` `NULL` or a valid one. The returned handle is owned, freed with
+/// [`kafka_admin_MemberDescription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
@@ -171,11 +179,12 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_new(
     ))
 }
 
-/// `consumerId()`: the member id, borrowed from the handle.
+/// Returns the consumer id of the group member.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
@@ -187,12 +196,16 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_consumer_id(
     unsafe { inner_ref(self_) }.member_id_c.as_ptr()
 }
 
-/// `groupInstanceId()`: borrowed from the handle, or null for
-/// `Optional.empty()`.
+/// The instance id of the group member.
+///
+/// # Returns
+///
+/// The id, `NULL` for `Optional.empty()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
@@ -204,11 +217,19 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_group_instance_id(
     optional_c_str(unsafe { inner_ref(self_) }.group_instance_id_c.as_ref())
 }
 
-/// `rackId()`: borrowed from the handle, or null for `Optional.empty()`.
+/// The rack id of the group member.
+///
+/// It is only available for consumer groups using the new consumer group protocol
+/// (`group.protocol=consumer`).
+///
+/// # Returns
+///
+/// The rack id, `NULL` for `Optional.empty()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
@@ -220,11 +241,12 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_rack_id(
     optional_c_str(unsafe { inner_ref(self_) }.rack_id_c.as_ref())
 }
 
-/// `clientId()`: borrowed from the handle.
+/// Returns the client id of the group member.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
@@ -236,11 +258,12 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_client_id(
     unsafe { inner_ref(self_) }.client_id_c.as_ptr()
 }
 
-/// `host()`: borrowed from the handle.
+/// Returns the host where the group member is running.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
@@ -252,12 +275,14 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_host(
     unsafe { inner_ref(self_) }.host_c.as_ptr()
 }
 
-/// `assignment()`: a borrowed handle valid as long as the description, never
-/// passed to `kafka_admin_MemberAssignment_destroy`.
+/// Returns the assignment of the group member. Provided for both classic group and consumer
+/// group.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned handle is borrowed, valid as
+/// long as the description, never passed to
+/// `kafka_admin_MemberAssignment_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
@@ -269,13 +294,17 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_assignment(
     member_assignment_ptr(unsafe { member_description_ref(self_) }.assignment())
 }
 
-/// `targetAssignment()`: a borrowed handle valid as long as the description
-/// (never passed to `kafka_admin_MemberAssignment_destroy`), or null for
-/// `Optional.empty()`.
+/// The target assignment of the member. Provided only for consumer group.
+///
+/// # Returns
+///
+/// The assignment, `NULL` for `Optional.empty()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned handle is borrowed, valid as
+/// long as the description, never passed to
+/// `kafka_admin_MemberAssignment_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
@@ -289,7 +318,12 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_target_assignment(
         .map_or(ptr::null(), member_assignment_ptr)
 }
 
-/// `memberEpoch()`: the member epoch, or `-1` for `Optional.empty()`.
+/// The epoch of the group member. The optional is set to an integer if the member is in a
+/// `CONSUMER` group, and to empty if it is in a `CLASSIC` group.
+///
+/// # Returns
+///
+/// The epoch, or `-1` for `Optional.empty()`.
 ///
 /// # Safety
 ///
@@ -304,8 +338,13 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_member_epoch(
     unsafe { member_description_ref(self_) }.member_epoch().unwrap_or(-1)
 }
 
-/// `upgraded()`: `1` or `0` for the present value, `-1` for
-/// `Optional.empty()`.
+/// The flag indicating whether a member within a `CONSUMER` group uses the `CONSUMER` protocol.
+/// The optional is set to true if it does, to false if it does not, and to empty if it is unknown
+/// or if the group is a `CLASSIC` group.
+///
+/// # Returns
+///
+/// `1` or `0` for the present value, `-1` for `Optional.empty()`.
 ///
 /// # Safety
 ///
@@ -318,11 +357,12 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_upgraded(self_: *const ka
     unsafe { member_description_ref(self_) }.upgraded().map_or(-1, i8::from)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-description handle.
+/// `self_` must be a valid member-description handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberDescription_to_string(
@@ -333,11 +373,11 @@ pub unsafe extern "C" fn kafka_admin_MemberDescription_to_string(
     into_c_string(&unsafe { member_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned member-description handle; null is a no-op.
+/// Frees an owned member-description handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

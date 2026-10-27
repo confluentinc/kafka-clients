@@ -82,28 +82,28 @@ pub(crate) unsafe fn scram_mechanism_value_of(mechanism: *const kafka_admin_Scra
     unsafe { *(mechanism as *const ScramMechanism) }
 }
 
-/// `ScramMechanism.UNKNOWN`.
+/// Returns `ScramMechanism.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_unknown() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::Unknown)
 }
 
-/// `ScramMechanism.SCRAM_SHA_256`.
+/// Returns `ScramMechanism.SCRAM_SHA_256`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_256() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha256)
 }
 
-/// `ScramMechanism.SCRAM_SHA_512`.
+/// Returns `ScramMechanism.SCRAM_SHA_512`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::ScramSha512)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_ScramMechanism_UNKNOWN`.
 ///
@@ -120,12 +120,12 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     enum_of(unsafe { scram_mechanism_value_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns the constant's name, as Java's inherited `Enum.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_to_string(
@@ -136,21 +136,40 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_to_string(
     into_c_string(&unsafe { scram_mechanism_value_of(self_) }.to_string())
 }
 
-/// `ScramMechanism.fromType(byte type)`: the borrowed singleton with that
-/// wire type, `UNKNOWN` for a type Java does not know.
+/// # Parameters
+///
+/// - `type` - the type indicator
+///
+/// # Returns
+///
+/// the instance corresponding to the given type indicator, otherwise `UNKNOWN`
+///
+/// # Safety
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ScramMechanism_from_type(r#type: i8) -> *const kafka_admin_ScramMechanism_t {
     scram_mechanism_singleton(ScramMechanism::from_type(r#type))
 }
 
-/// `ScramMechanism.fromMechanismName(String mechanismName)`: the borrowed
-/// singleton with that SASL mechanism name (`"SCRAM-SHA-256"`, ...),
+/// `ScramMechanism.fromMechanismName(String mechanismName)`: the singleton with that SASL
+/// mechanism name (`"SCRAM-SHA-256"`, ...),
 /// `UNKNOWN` for a name Java does not know.
+///
+/// # Parameters
+///
+/// - `mechanism_name` - the SASL SCRAM mechanism name
+///
+/// # Returns
+///
+/// the corresponding SASL SCRAM mechanism enum, otherwise `UNKNOWN`
 ///
 /// # Safety
 ///
 /// `mechanism_name` must be a valid NUL-terminated string.
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
@@ -161,12 +180,18 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_from_mechanism_name(
     scram_mechanism_singleton(ScramMechanism::from_mechanism_name(&unsafe { c_str_to_string(mechanism_name) }))
 }
 
-/// `mechanismName()`: the SASL mechanism name, a borrowed string valid for
-/// the life of the process and never passed to `kafka_string_destroy`.
+/// `mechanismName()`: the SASL mechanism name.
+///
+/// # Returns
+///
+/// the corresponding SASL SCRAM mechanism name
 ///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
+///
+/// The returned string is borrowed, valid for the life of the process, and is never passed to
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
@@ -178,14 +203,14 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
     MECHANISM_NAMES[enum_of(unsafe { scram_mechanism_value_of(self_) }) as usize].as_ptr()
 }
 
-/// `type()`: the wire-protocol byte of the mechanism.
+/// # Returns
 ///
-/// A caught Rust panic returns -1, which is no code of this Java `byte`
-/// enum: its 0 is the valid `UNKNOWN`.
+/// the type indicator for this SASL SCRAM mechanism
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. A caught Rust panic returns -1, which is
+/// no code of this Java `byte` enum: its 0 is the valid `UNKNOWN`.
 #[ffi_guard(fallback = -1)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_type(self_: *const kafka_admin_ScramMechanism_t) -> i8 {

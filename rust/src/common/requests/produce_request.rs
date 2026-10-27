@@ -190,16 +190,15 @@ impl ProduceRequest {
     /// 3. ZStandard compression is not used before version 7
     /// 4. Exactly one record batch per partition
     ///
-    /// Corresponds to Java's `ProduceRequest.validateRecords`
-    /// (`ProduceRequest.java:211-232`).
+    /// Corresponds to Java's `ProduceRequest#validateRecords`.
     ///
     /// Java walks `records.batches().iterator()`, whose `hasNext()` is
     /// `ByteBufferLogInputStream.nextBatch() != null`: true for any complete
     /// batch, whatever its magic. `BatchIterator` (in `memory_records.rs`)
     /// cannot answer that, because it ends at a v0/v1 batch this client has no
     /// view for, so the two presence checks ask the stream directly and the magic
-    /// is read off the header, where `nextBatch()` itself reads it
-    /// (`ByteBufferLogInputStream.java:48`). None of it copies the batch.
+    /// is read off the header, where `ByteBufferLogInputStream#nextBatch` itself reads it.
+    /// None of it copies the batch.
     ///
     /// # Errors
     ///
@@ -285,7 +284,7 @@ impl ProduceRequest {
 /// Java's `iterator.hasNext()` for a batch iterator positioned at the start of
 /// `bytes`: the size of the complete batch there, if one is.
 ///
-/// `ByteBufferLogInputStream.nextBatch() != null` (`ByteBufferLogInputStream.java:41-46`):
+/// `ByteBufferLogInputStream#nextBatch` returning non-null:
 /// the header validates and the whole batch is present. A header that does not
 /// validate is the `CorruptRecordException` Java's `hasNext()` throws.
 fn complete_batch_size(bytes: &[u8]) -> io::Result<Option<usize>> {
@@ -542,13 +541,12 @@ mod tests {
         );
     }
 
-    /// Java's `ProduceRequest.Builder.build(short version)` (`ProduceRequest.java:68-74`)
-    /// is a pure read of `data` — it validates, then returns
+    /// Java's `ProduceRequest.Builder#build` is a pure read of `data` — it validates, then returns
     /// `new ProduceRequest(data, version)` sharing the reference — so a builder may be
     /// built more than once and every result carries the records.
     ///
     /// Rust's `build_version` instead drains the builder with
-    /// `std::mem::replace(&mut self.data, ProduceRequestData::new())` (`:307`), so the
+    /// `std::mem::replace(&mut self.data, ProduceRequestData::new())`, so the
     /// second build silently returns a request with no `topic_data`. It is the only one
     /// of this crate's 53 `RequestBuilder` impls that drains rather than clones.
     ///
@@ -566,7 +564,7 @@ mod tests {
         use crate::common::record::internal::MemoryRecords;
         use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
 
-        // `validate_records` requires a real magic-v2 batch (`:185-193`), so build one
+        // `validate_records` requires a real magic-v2 batch (see its doc), so build one
         // rather than a sentinel payload — otherwise the build fails before reaching the
         // behaviour under test.
         let mut records_builder = MemoryRecords::builder_with_buffer_magic(
@@ -610,7 +608,7 @@ mod tests {
         assert_eq!(first.data().topic_data, second.data().topic_data);
     }
 
-    // ── `validate_records` (`ProduceRequest.java:211-232`) ─────────────────
+    // ── `validate_records` (`org.apache.kafka.common.requests.ProduceRequest#validateRecords`) ──
 
     /// One uncompressed v2 batch holding one record at `base_offset`.
     fn v2_batch(base_offset: i64, compression: crate::common::compress::Compression) -> Vec<u8> {

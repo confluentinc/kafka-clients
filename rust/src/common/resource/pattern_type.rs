@@ -17,8 +17,6 @@
 //! Corresponds to `org.apache.kafka.common.resource.PatternType`.
 
 /// Resource pattern type.
-///
-/// Corresponds to `org.apache.kafka.common.resource.PatternType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.resource.PatternType")]
@@ -44,9 +42,7 @@ pub enum PatternType {
 }
 
 impl PatternType {
-    /// All pattern types, in declaration (code) order.
-    ///
-    /// Mirrors `PatternType.values()`.
+    /// Returns all pattern types, in declaration (code) order.
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#values")]
     pub fn values() -> &'static [Self] {
         &[
@@ -58,7 +54,9 @@ impl PatternType {
         ]
     }
 
-    /// Return the code of this resource pattern type.
+    /// # Returns
+    ///
+    /// the code of this resource.
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#code")]
     pub fn code(&self) -> i8 {
         match self {
@@ -70,21 +68,25 @@ impl PatternType {
         }
     }
 
-    /// Return whether this resource pattern type is [`PatternType::Unknown`].
+    /// Returns whether this resource pattern type is [`PatternType::Unknown`].
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == PatternType::Unknown
     }
 
-    /// Return whether this resource pattern type is a concrete type, rather than
+    /// Returns whether this resource pattern type is a concrete type, rather than
     /// `UNKNOWN` or one of the filter types.
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#isSpecific")]
     pub fn is_specific(&self) -> bool {
         *self != PatternType::Unknown && *self != PatternType::Any && *self != PatternType::Match
     }
 
-    /// Return the `PatternType` with the provided code or [`PatternType::Unknown`]
+    /// Returns the `PatternType` with the provided code or [`PatternType::Unknown`]
     /// if one cannot be found.
+    ///
+    /// # Arguments
+    ///
+    /// - `code` - the code to look up
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#fromCode")]
     pub fn from_code(code: i8) -> PatternType {
         match code {
@@ -97,11 +99,12 @@ impl PatternType {
         }
     }
 
-    /// Return the `PatternType` with the provided name or [`PatternType::Unknown`]
+    /// Returns the `PatternType` with the provided name or [`PatternType::Unknown`]
     /// if one cannot be found.
     ///
-    /// Matches Java's case-sensitive `NAME_TO_VALUE` lookup on the enum constant
-    /// name.
+    /// # Arguments
+    ///
+    /// - `name` - the constant's name, matched case-sensitively
     #[doc(alias = "org.apache.kafka.common.resource.PatternType#fromString")]
     pub fn from_string(name: &str) -> PatternType {
         match name {

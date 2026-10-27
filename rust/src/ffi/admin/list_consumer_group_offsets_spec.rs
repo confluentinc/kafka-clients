@@ -61,9 +61,13 @@ pub(crate) fn box_list_consumer_group_offsets_spec(
         as *mut kafka_admin_ListConsumerGroupOffsetsSpec_t
 }
 
-/// `new ListConsumerGroupOffsetsSpec()`: no partitions set, so all of the
-/// group's partitions are listed. Owned, freed with
-/// [`kafka_admin_ListConsumerGroupOffsetsSpec_destroy`].
+/// `new ListConsumerGroupOffsetsSpec()`: no partitions set, so all of the group's partitions are
+/// listed.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsSpec_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_new() -> *mut kafka_admin_ListConsumerGroupOffsetsSpec_t {
@@ -75,10 +79,14 @@ pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_new() -> *mut kafka_a
 /// `const kafka_common_TopicPartition_t *`, copied; `NULL` is Java's null
 /// and lists all of the group's partitions.
 ///
+/// # Parameters
+///
+/// - `topic_partitions` - List of topic partitions to include
+///
 /// # Safety
 ///
 /// `self_` must be a valid spec handle that no other call uses at the same
-/// time, and `topic_partitions` null or a valid list of topic-partition
+/// time, and `topic_partitions` `NULL` or a valid list of topic-partition
 /// handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -99,14 +107,19 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_part
     inner.spec = inner.spec.clone().set_topic_partitions(topic_partitions);
 }
 
-/// `topicPartitions()`, the getter: an owned list of owned
-/// `kafka_common_TopicPartition_t *` copies in the order given, freed
-/// together with `kafka_List_destroy`; `NULL` when none were set (Java
-/// returns null).
+/// `topicPartitions()`, the getter: a list of owned `kafka_common_TopicPartition_t *` copies in
+/// the order given; `NULL` when none were set (Java returns null).
+///
+/// # Returns
+///
+/// This ListConsumerGroupOffsetSpec
 ///
 /// # Safety
 ///
 /// `self_` must be a valid spec handle.
+///
+/// The returned list is owned by the caller, freed together with its elements with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions(
@@ -121,11 +134,12 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitio
         .map_or(std::ptr::null_mut(), |tps| topic_partition_list(tps.iter().cloned()))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the spec.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid spec handle.
+/// `self_` must be a valid spec handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
@@ -138,11 +152,11 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
     into_c_string(&unsafe { list_consumer_group_offsets_spec_ref(self_) }.to_string())
 }
 
-/// Frees an owned spec handle; null is a no-op.
+/// Frees an owned spec handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned spec handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned spec handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

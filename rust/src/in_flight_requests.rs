@@ -52,7 +52,8 @@ pub struct InFlightRequest {
     /// The built request.
     pub(crate) request: Option<AbstractRequest>,
     /// The network send associated with this request.
-    // Java only ever assigns `InFlightRequest.send` (`NetworkClient.java:1829`).
+    // Java only ever assigns `InFlightRequest.send` in the constructor of
+    // `org.apache.kafka.clients.NetworkClient.InFlightRequest` that takes a `RequestHeader`.
     #[expect(dead_code)]
     pub(crate) send: NetworkSend,
     /// Whether the network send has been completed (confirmed by the selector).

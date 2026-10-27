@@ -132,7 +132,7 @@ impl MockSelector {
     /// `AuthenticationException` subclass.
     ///
     /// `KafkaChannel.prepare` catches `SslAuthenticationException` and
-    /// `SaslAuthenticationException` separately (`KafkaChannel.java:463-472`) and
+    /// `SaslAuthenticationException` separately (and `KafkaChannel#receive`) and
     /// stores whichever it caught in the `ChannelState`, so which subclass reaches
     /// `client.authenticationException(node)` is observable behaviour; this lets a
     /// test pick it.

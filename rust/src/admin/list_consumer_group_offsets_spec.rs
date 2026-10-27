@@ -13,17 +13,12 @@
 // limitations under the License.
 
 //! Specification of consumer group offsets to list.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec`.
 
 use crate::common::TopicPartition;
 
 /// Specification of consumer group offsets to list using
 /// `Admin::list_consumer_group_offsets_with_group_specs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec`.
-///
-/// `topic_partitions == None` includes all topic partitions of the group.
+// `topic_partitions == None` includes all topic partitions of the group.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec")]
 pub struct ListConsumerGroupOffsetsSpec {
@@ -40,7 +35,13 @@ impl ListConsumerGroupOffsetsSpec {
     /// Set the topic partitions whose offsets are to be listed for a consumer
     /// group. `None` includes all topic partitions.
     ///
-    /// Mirrors `topicPartitions(Collection<TopicPartition>)`.
+    /// # Arguments
+    ///
+    /// - `topic_partitions` - List of topic partitions to include
+    ///
+    /// # Returns
+    ///
+    /// This ListConsumerGroupOffsetSpec
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions")]
     pub fn set_topic_partitions(mut self, topic_partitions: Option<Vec<TopicPartition>>) -> Self {
@@ -51,8 +52,6 @@ impl ListConsumerGroupOffsetsSpec {
     /// Returns the topic partitions whose offsets are to be listed for a
     /// consumer group. `None` indicates that offsets of all partitions of the
     /// group are to be listed.
-    ///
-    /// Mirrors `topicPartitions()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec#topicPartitions")]
     pub fn topic_partitions(&self) -> Option<&[TopicPartition]> {
         self.topic_partitions.as_deref()

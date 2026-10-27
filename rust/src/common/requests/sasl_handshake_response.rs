@@ -178,8 +178,8 @@ mod tests {
     }
 
     /// A negative INT16 element length is a null element, which Java rejects for the
-    /// non-nullable `Mechanisms` array (`MessageDataGenerator.java:613-617`, via the
-    /// element read at `:668-677`) rather than sizing a buffer from it. This response
+    /// non-nullable `Mechanisms` array (`MessageDataGenerator#generateVariableLengthReader`, also for
+    /// the element read) rather than sizing a buffer from it. This response
     /// is decoded before SASL authentication completes. Neither version is flexible:
     ///   error_code: int16 0                -> 00 00
     ///   mechanisms: int32 array len 1      -> 00 00 00 01

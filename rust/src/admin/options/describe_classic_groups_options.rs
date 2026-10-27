@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_classic_groups`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeClassicGroupsOptions`.
 
 /// Options for `Admin::describe_classic_groups`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeClassicGroupsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsOptions")]
 pub struct DescribeClassicGroupsOptions {
@@ -33,8 +29,15 @@ impl DescribeClassicGroupsOptions {
         Self::default()
     }
 
-    /// Whether to include authorized operations in the description. Mirrors
-    /// `includeAuthorizedOperations`.
+    /// Sets whether to include authorized operations in the description.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_authorized_operations` - `true` to request the authorized operations.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeClassicGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsOptions#includeAuthorizedOperations")]
     pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
@@ -42,7 +45,16 @@ impl DescribeClassicGroupsOptions {
         self
     }
 
-    /// Set the operation timeout in milliseconds (or `None` for the default).
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeClassicGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -50,14 +62,14 @@ impl DescribeClassicGroupsOptions {
         self
     }
 
-    /// Whether authorized operations are requested. Mirrors
-    /// `includeAuthorizedOperations()`.
+    /// Returns whether authorized operations are requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClassicGroupsOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
-    /// The operation timeout in milliseconds, or `None` for the default.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

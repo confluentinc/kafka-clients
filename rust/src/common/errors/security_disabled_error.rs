@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Security features are disabled.
+    /// An error indicating that security is disabled on the broker.
     ///
-    /// Corresponds to Java's `SecurityDisabledException`, error code `Errors::SecurityDisabled`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `SecurityDisabledException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::SecurityDisabled`.
     #[doc(alias = "org.apache.kafka.common.errors.SecurityDisabledException")]
     SecurityDisabledError,
     code: Errors::SecurityDisabled,

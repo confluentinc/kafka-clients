@@ -28,8 +28,6 @@ use std::sync::Arc;
 ///
 /// Once [`set_read_only()`](RecordHeaders::set_read_only) is called, all
 /// mutating operations will return an error.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders")]
 // the only `Headers` implementation, returned by ConsumerRecord / ProducerRecord `headers()`
@@ -47,57 +45,41 @@ pub struct RecordHeaders {
 
 impl RecordHeaders {
     /// Create an empty `RecordHeaders`.
-    ///
-    /// Translates Java's no-arg `RecordHeaders()` (`RecordHeaders.java:35`).
-    /// The three Java constructors have no parameter in common, and the no-arg
-    /// one matches that empty intersection, so it keeps the plain name under
-    /// CLAUDE.md §2 — its two siblings are suffixed below.
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn new() -> Self {
         Self { headers: None, is_read_only: false }
     }
 
-    /// Create `RecordHeaders` from a slice of headers.
+    /// Create `RecordHeaders` holding a copy of the given headers, in order.
     ///
-    /// Translates Java's `RecordHeaders(Header[] headers)`
-    /// (`RecordHeaders.java:39`). Java's other parameterised constructor names
-    /// its parameter `headers` too, so the parameter name cannot tell them
-    /// apart; per CLAUDE.md §2 the Rust parameter *type* discriminates, spelled
-    /// as the caller writes it (`&[RecordHeader]` → `_header_slice`).
+    /// # Arguments
     ///
-    /// # Panics
-    ///
-    /// This corresponds to the Java behavior where null entries in the array
-    /// cause a NullPointerException. In Rust, the Option type prevents null
-    /// headers so this is safe by construction.
+    /// - `headers` - the headers to copy
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_slice(headers: &[RecordHeader]) -> Self {
         Self::with_header_iter(headers.iter().cloned())
     }
 
-    /// Create `RecordHeaders` from headers.
+    /// Create `RecordHeaders` holding the given headers, in order.
     ///
-    /// Translates Java's `RecordHeaders(Iterable<Header> headers)`
-    /// (`RecordHeaders.java:43`) — see
-    /// [`with_header_slice`](RecordHeaders::with_header_slice) for why the type,
-    /// not the parameter name, supplies the suffix.
+    /// # Arguments
+    ///
+    /// - `headers` - the headers to hold
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_header_iter(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
         let headers: Vec<RecordHeader> = headers.into_iter().collect();
         Self { headers: (!headers.is_empty()).then(|| Arc::new(headers)), is_read_only: false }
     }
 
-    /// Create `RecordHeaders` by copying from another `RecordHeaders`.
-    ///
-    /// Java reaches this through `RecordHeaders(Iterable<Header> headers)`
-    /// (`RecordHeaders.java:43`), since `RecordHeaders` is itself an
-    /// `Iterable<Header>`. Rust needs a distinct overload because
-    /// `&RecordHeaders` iterates as `&RecordHeader`, not `RecordHeader`, so it
-    /// does not satisfy [`with_header_iter`](RecordHeaders::with_header_iter)'s
-    /// bound. The suffix follows the type, as the sibling overloads do.
+    /// Create `RecordHeaders` by copying from another `RecordHeaders`, as Java's
+    /// `RecordHeaders(Iterable<Header>)` does given a `RecordHeaders`.
     ///
     /// The new instance is writable regardless of the source's read-only state.
     /// It shares the source's list until either of them is written.
+    ///
+    /// # Arguments
+    ///
+    /// - `other` - the headers to copy
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders")]
     pub fn with_record_headers(other: &RecordHeaders) -> Self {
         Self { headers: other.headers.clone(), is_read_only: false }

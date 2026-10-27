@@ -643,11 +643,12 @@ pub(crate) const COMMIT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 fn record_committed(
     verifier: &dyn Verifier,
     consumer: &str,
-    committed: Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>,
+    committed: Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>,
 ) {
     match committed {
         Ok(offsets) => {
-            for (tp, offset) in offsets {
+            // A partition without a committed offset has nothing to check.
+            for (tp, offset) in offsets.into_iter().filter_map(|(tp, offset)| Some((tp, offset?))) {
                 verifier.record(WorkloadEvent::Committed {
                     consumer: consumer.to_string(),
                     topic: tp.topic().to_string(),
@@ -1065,9 +1066,11 @@ mod tests {
                 offset,
             });
         }
-        let offsets: HashMap<TopicPartition, OffsetAndMetadata> = [
-            (tp(0), OffsetAndMetadata::new(42).unwrap()),
-            (tp(1), OffsetAndMetadata::new(3).unwrap()),
+        // `t-2` has no committed offset: it is not checked.
+        let offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = [
+            (tp(0), Some(OffsetAndMetadata::new(42).unwrap())),
+            (tp(1), Some(OffsetAndMetadata::new(3).unwrap())),
+            (tp(2), None),
         ]
         .into_iter()
         .collect();
