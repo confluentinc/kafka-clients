@@ -3236,7 +3236,10 @@ mod tests {
     /// The test parks a `Metadata::update` inside a cluster-resource listener,
     /// which runs while the metadata lock is held, and then requires
     /// `update_partition_state` with a preferred read replica to complete on
-    /// another thread before the update is released.
+    /// another thread before the update is released. It also requires a getter
+    /// that does lock the metadata (`update_requested`) to stay blocked while
+    /// the update is parked, so the test fails if the listener ever stops
+    /// running under the lock instead of silently passing.
     #[test]
     fn preferred_read_replica_update_does_not_take_the_metadata_lock() {
         use crate::common::ClusterResource;
@@ -3272,9 +3275,11 @@ mod tests {
         partition_data.set_preferred_read_replica(99);
 
         let metadata = h.metadata.metadata_arc();
+        let probe_metadata = h.metadata.metadata_arc();
         let collector = &h.collector;
+        let (probe_tx, probe_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        let outcome = std::thread::scope(|s| {
+        let (probe_outcome, outcome) = std::thread::scope(|s| {
             // Owned by this closure so that a panic below drops it, which
             // unparks the listener and lets the scope join every thread.
             let release_tx = release_tx;
@@ -3285,16 +3290,30 @@ mod tests {
             entered_rx
                 .recv_timeout(Duration::from_secs(5))
                 .expect("Metadata::update never reached the cluster-resource listener");
-            // The metadata lock is now held by the parked update.
+            // The metadata lock is now held by the parked update. Prove it: a
+            // getter that does lock it must not finish while the update is
+            // parked. The probe finishes once the listener is released.
+            s.spawn(move || {
+                let _ = probe_metadata.update_requested();
+                let _ = probe_tx.send(());
+            });
+            let probe_outcome = probe_rx.recv_timeout(Duration::from_millis(100));
             s.spawn(|| {
                 let updated = collector.update_partition_state(&partition_data, &partition);
                 let _ = done_tx.send(updated);
             });
             let outcome = done_rx.recv_timeout(Duration::from_secs(5));
             drop(release_tx);
-            outcome
+            (probe_outcome, outcome)
         });
 
+        assert_eq!(
+            Err(mpsc::RecvTimeoutError::Timeout),
+            probe_outcome,
+            "the test setup no longer holds the metadata lock while the update is parked in the \
+             cluster-resource listener: Metadata::update_requested() finished, so this test cannot \
+             catch a locking getter in update_partition_state"
+        );
         assert_eq!(
             Ok(true),
             outcome,
