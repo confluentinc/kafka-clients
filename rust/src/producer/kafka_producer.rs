@@ -7233,7 +7233,7 @@ mod tests {
         assert!(
             ctx.transaction_manager.lock().unwrap().has_abortable_error(),
             "CLUSTER_AUTHORIZATION_FAILED is an abortable error on InitProducerId \
-             (TransactionManager.java:1522-1526)"
+             (`TransactionManager.InitProducerIdHandler#handleResponse`)"
         );
 
         // Java retries with
@@ -8037,7 +8037,8 @@ mod tests {
         assert_eq!(
             ctx.sender.client().request_count(),
             sent_before,
-            "KafkaProducer.java:800 returns before touching the transaction state"
+            "an empty offsets map returns from `KafkaProducer#sendOffsetsToTransaction` before touching \
+             the transaction state"
         );
 
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
@@ -8964,7 +8965,8 @@ mod tests {
             exited.load(Ordering::SeqCst),
             "close returned before the Sender task finished: the graceful wait expired, \
              so close force-closed and must then have joined the handle \
-             (KafkaProducer.java:1517-1521, CLAUDE.md §11.4)"
+             (the `ioThread.join()` after the force close in `KafkaProducer#close(Duration, boolean)`, \
+             CLAUDE.md §11.4)"
         );
 
         init.abort();

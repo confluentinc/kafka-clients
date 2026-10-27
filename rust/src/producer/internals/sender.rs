@@ -5893,7 +5893,8 @@ mod tests {
         );
         assert!(
             ctx.sender.has_pending_requests(),
-            "the FindCoordinator must be re-queued, not dropped (Sender.java:495)"
+            "the FindCoordinator must be re-queued, not dropped (the `transactionManager.retry` of \
+             `Sender#maybeSendAndPollTransactionalRequest`'s no-target-node arm)"
         );
         assert!(!ctx.sender.has_in_flight_request());
         assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
@@ -6073,11 +6074,12 @@ mod tests {
         );
         assert!(
             ctx.sender.has_pending_requests(),
-            "the FindCoordinator must be re-queued (Sender.java:529)"
+            "the FindCoordinator must be re-queued (the `transactionManager.retry` ending \
+             `Sender#maybeFindCoordinatorAndRetry`)"
         );
         assert!(
             !update_requests_before && ctx.metadata.update_requested(),
-            "the else arm must call metadata.requestUpdate(false) (Sender.java:526)"
+            "the else arm of `Sender#maybeFindCoordinatorAndRetry` must call metadata.requestUpdate(false)"
         );
 
         // Clear the delay and let the FindCoordinator through (Java's second
@@ -6118,7 +6120,8 @@ mod tests {
                 .coordinator(CoordinatorType::Transaction)
                 .expect("valid type")
                 .is_none(),
-            "an unready coordinator must be forgotten so the lookup can repeat (TransactionManager.java:1194)"
+            "an unready coordinator must be forgotten so the lookup can repeat \
+             (`TransactionManager#lookupCoordinator(CoordinatorType, String)`)"
         );
         assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
         assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
@@ -6521,7 +6524,7 @@ mod tests {
 
         assert!(
             ctx.sender.force_close.load(Ordering::Acquire),
-            "the rejected beginAbort must force-close (Sender.java:274-278)"
+            "the rejected beginAbort must force-close (the catch around `beginAbort` in `Sender#run`)"
         );
         // The `runOnce` in the loop body still executes, and it is what recovers the
         // state — pinning the body order (abort attempt, then runOnce).
@@ -8716,7 +8719,8 @@ mod tests {
         assert!(!ctx.transaction_manager().lock().unwrap().has_producer_id());
         assert!(
             ctx.sender.has_pending_requests(),
-            "the InitProducerId must be re-queued, not dropped (Sender.java:495)"
+            "the InitProducerId must be re-queued, not dropped (the `transactionManager.retry` of \
+             `Sender#maybeSendAndPollTransactionalRequest`'s no-target-node arm)"
         );
         assert!(!ctx.sender.has_in_flight_request());
 

@@ -2586,8 +2586,8 @@ mod tests {
         assert_eq!(
             mm.state(),
             MemberState::Fatal,
-            "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (Java \
-             `AbstractHeartbeatRequestManager.java:481-487` `default:` arm)"
+            "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (the `default:` arm \
+             of Java's `AbstractHeartbeatRequestManager#onErrorResponse`)"
         );
 
         // Java `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#handleFatalFailure` emits
