@@ -29,6 +29,7 @@ import copy
 import importlib
 import pickle
 import re
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -909,6 +910,15 @@ def _record_deserialization_error() -> RecordDeserializationError:
         cause=ValueError("c"))
 
 
+def _add_note(error: BaseException, note: str) -> None:
+    """``error.add_note(note)``. ``BaseException.add_note`` is Python 3.11+; on
+    3.10 the note is the ``__notes__`` list ``add_note`` would have made."""
+    if sys.version_info >= (3, 11):
+        error.add_note(note)
+    else:
+        error.__notes__ = [*getattr(error, "__notes__", ()), note]
+
+
 @pytest.mark.parametrize("make,refused", [
     # RecordDeserializationException's keyBuffer / valueBuffer (ByteBuffer) and
     # headers (Headers) are not Serializable; nor is QuotaViolationException's
@@ -919,7 +929,7 @@ def _record_deserialization_error() -> RecordDeserializationError:
 def test_an_error_java_cannot_serialize_refuses_pickle_and_deepcopy(
         make: Callable[[], BaseException], refused: str) -> None:
     error = make()
-    error.add_note("a note")
+    _add_note(error, "a note")
     error.extra = 1  # type: ignore[attr-defined]
     with pytest.raises(TypeError) as pickled:
         pickle.dumps(error)
@@ -1007,8 +1017,8 @@ def test_copy_and_pickle_keep_the_notes(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(errmod, "_lib", _fake_lib(LogTruncationError._ffi_id, "truncated"))
     core = from_ffi_error(0)
     for error in (built, core):
-        error.add_note("first")
-        error.add_note("second")
+        _add_note(error, "first")
+        _add_note(error, "second")
         for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
             assert type(clone) is type(error) and str(clone) == str(error)
             assert clone.__notes__ == ["first", "second"]
