@@ -60,6 +60,7 @@ from confluent_kafka.common.errors import (
     InvalidTopicError,
     TopicAuthorizationError,
     UnknownServerError,
+    UnsupportedEndpointTypeError,
 )
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 
@@ -228,7 +229,8 @@ def test_config_values_checked_by_admin_client_config() -> None:
                           "client.id": None}).close()
     with pytest.raises(ConfigError) as info:
         Admin.create(configs={"bootstrap.controllers": 5})
-    assert "bootstrap.controllers" in str(info.value)
+    assert str(info.value) == (
+        "Invalid value 5 for configuration bootstrap.controllers: Expected a comma separated list.")
 
 
 def test_config_without_bootstrap() -> None:
@@ -246,6 +248,16 @@ def test_config_without_bootstrap() -> None:
         assert str(info.value) == "Failed to create new KafkaAdminClient"
         assert type(info.value.__cause__) is ConfigError
         assert str(info.value.__cause__) == message
+
+
+def test_config_with_bootstrap_controllers_alone() -> None:
+    """``bootstrap.controllers`` alone builds a client that talks to the
+    controller quorum (KIP-919): a broker-only API fails at once with Java's
+    ``UnsupportedEndpointTypeException``, before anything is sent."""
+    with Admin.create(configs={"bootstrap.controllers": "localhost:1"}) as admin:
+        error = assert_future_throws(admin.list_topics().names(), UnsupportedEndpointTypeError)
+        assert str(error) == ("This Admin API is not yet supported when communicating "
+                              "directly with the controller quorum.")
 
 
 # ---- close ------------------------------------------------------------------

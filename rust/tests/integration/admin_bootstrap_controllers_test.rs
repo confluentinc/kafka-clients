@@ -82,6 +82,23 @@
 //!   them give only one of the two nodes a static config. That needs separate
 //!   controller nodes reachable from the host, which this harness cannot
 //!   provide (see above).
+//! - Other controller-side tests that need what the combined-node harness does
+//!   not have, so they are not translated on purpose:
+//!   - `DescribeFeaturesTest.testSendRequestToWrongNodeType` sends to a
+//!     controller-only node through `bootstrap.servers` and to a broker-only
+//!     node through `bootstrap.controllers`. A combined node is both, so
+//!     neither request reaches the wrong node type.
+//!   - `DescribeFeaturesTest.testUnstableApiVersions` gives two controller-only
+//!     nodes (3000, 3001) different `unstable.api.versions.enable` values,
+//!     which needs controller nodes of their own.
+//!   - `KRaftClusterTest.testUnregisterBroker(true)`: this client has no
+//!     `unregisterBroker`, in either mode.
+//!   - `SslAdminIntegrationTest.testListNodesFromControllers` /
+//!     `testListNodesFromControllersIncludingFencedBrokers` reach the
+//!     controllers over SSL; the harness's controller listener is PLAINTEXT
+//!     only. The client-side check of the second ("Cannot request fenced
+//!     brokers from controller endpoint") is covered by a unit test in
+//!     `kafka_admin_client.rs`.
 //!
 //! [`KafkaCluster::bootstrap_controllers`]: crate::common::kafka_cluster::KafkaCluster::bootstrap_controllers
 //! [`Type::CoKraft`]: crate::common::cluster_config::Type::CoKraft
@@ -724,12 +741,35 @@ async fn test_acls() {
     acls(false).await;
 }
 
+/// Logs that `test` skipped itself, and why, where CI shows it: libtest keeps
+/// a passing test's `eprintln!` output to itself, so this writes to the
+/// process's stderr directly.
+fn log_skip(test: &str, reason: &str) {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr(),
+        "{test}: skipped: {reason}; the broker is {:?}",
+        kafka_cluster::broker_release()
+    );
+}
+
+/// The first broker release whose controller writes `min.insync.replicas` as a
+/// cluster-level config when it activates a cluster, which ELR (KIP-966) does
+/// by default from 4.1.
+const ELR_DEFAULT_RELEASE: (u32, u32) = (4, 1);
+
 /// Translates `testDescribeConfigs`: the default BROKER resource, described
 /// through the controllers, reports the cluster's `min.insync.replicas` as a
 /// dynamic default. Java's cluster sets it to `2`; this one keeps the default,
-/// `1` (see the module docs).
+/// `1` (see the module docs), so the source is what shows the value came from
+/// the cluster-level config: `1` is also the static default. Skips itself on a
+/// broker older than 4.1, which writes no such config.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_describe_configs() {
+    if kafka_cluster::broker_release() < ELR_DEFAULT_RELEASE {
+        log_skip("test_describe_configs", "no cluster-level min.insync.replicas before 4.1");
+        return;
+    }
     let ctx = TestContext::new(ClusterConfig::default()).await;
     let admin = create_admin(&admin_config(&ctx, true));
     let resource = broker_resource("");
@@ -757,9 +797,9 @@ const QUOTA_CONFIGS_WRITABLE_RELEASE: (u32, u32) = (4, 3);
 #[tokio::test(flavor = "multi_thread")]
 async fn test_quota_configs_is_read_only_should_be_false() {
     if kafka_cluster::broker_release() < QUOTA_CONFIGS_WRITABLE_RELEASE {
-        eprintln!(
-            "skipped: the throttle configs are read-only on a broker older than 4.3; the broker is {:?}",
-            kafka_cluster::broker_release()
+        log_skip(
+            "test_quota_configs_is_read_only_should_be_false",
+            "the throttle configs are read-only on a broker older than 4.3",
         );
         return;
     }

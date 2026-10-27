@@ -149,8 +149,8 @@ state used by `AdminClientRunnable` to decide when to issue a
 `isReady()`, `nodeById(id)`, `controller()`, `requestUpdate()`,
 `metadataFetchDelayMs(now)`, `transitionToUpdatePending(now)`,
 `update(cluster, now)`, `updateFailed(e)`, `usingBootstrapControllers()`.
-`bootstrap.controllers` support may be stubbed to `false` in Phase 1 if not
-needed by the four topic RPCs — note the deferral in the phase self-review.
+`usingBootstrapControllers()` comes from `determineBootstrapType`, as in
+Java: `bootstrap.controllers` (KIP-919) is supported.
 
 ## 4. `KafkaFuture` reuse and required extension
 

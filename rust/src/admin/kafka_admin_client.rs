@@ -8066,6 +8066,28 @@ mod tests {
         assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
     }
 
+    /// The same for a client bootstrapping from `bootstrap.controllers`: its
+    /// addresses go through the same `ClientUtils.parseAndValidateAddresses`,
+    /// whose message names `bootstrap.servers` whichever list was given
+    /// (`ClientUtils.java:182`), so it does here too.
+    #[test]
+    fn test_admin_constructor_fails_with_config_error_on_unresolvable_bootstrap_controllers() {
+        let mut props = HashMap::new();
+        props.insert(
+            AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG.to_string(),
+            "unresolvable.invalid:9093".to_string(),
+        );
+        let config = AdminClientConfig::new(&props).unwrap();
+
+        let error = KafkaAdminClient::new(config).expect_err("creation must fail");
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        let cause: &Error = std::error::Error::source(&error)
+            .and_then(|e| e.downcast_ref::<Error>())
+            .expect("the cause is a crate Error");
+        assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
+        assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
     /// An admin config with `bootstrap.servers` and `bootstrap.controllers` set
     /// to the given values (`None` leaves a key unset).
     fn bootstrap_config(servers: Option<&str>, controllers: Option<&str>) -> AdminClientConfig {
@@ -10777,6 +10799,32 @@ mod tests {
         pump(&mut runnable, 8).await;
         let err = result.nodes().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
+    }
+
+    /// `describeCluster`'s `handleUnsupportedVersionException` answers `false`
+    /// for a `bootstrap.controllers` client before anything else
+    /// (`KafkaAdminClient.java:2654-2656`): a controller
+    /// has no `Metadata` endpoint, so an UnsupportedVersion fails the call
+    /// instead of falling back to a `MetadataRequest`. The Metadata answer
+    /// prepared here is what a fallback would consume.
+    #[tokio::test]
+    async fn test_describe_cluster_unsupported_version_in_controller_mode_does_not_fall_back() {
+        let (admin, mut runnable, _time, nodes) = controller_env();
+        runnable.client_mut().prepare_unsupported_version_response();
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::Metadata(RequestTestUtils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )));
+        let result = admin.describe_cluster_with_options(DescribeClusterOptions::new());
+        let nodes_future = result.nodes();
+        pump_until(&mut runnable, 20, |_| nodes_future.is_done()).await;
+        assert!(nodes_future.is_done(), "describeCluster did not complete");
+        let err = nodes_future.get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::UnsupportedVersion, "got {err:?}");
     }
 
     // --- describeConfigs -----------------------------------------------------
@@ -16486,65 +16534,426 @@ mod tests {
         assert_eq!(runnable.metadata_manager().controller().map(|node| node.id()), Some(2));
     }
 
+    /// What a broker-only call's rejection resolved to: `None` when the call was
+    /// not rejected as it was submitted, else its error.
+    type Rejection = std::pin::Pin<Box<dyn std::future::Future<Output = Option<Error>>>>;
+
+    /// [`Rejection`] of `future`, read only once it is done, so a call that is
+    /// sent instead of rejected cannot hang the test.
+    fn rejection<T: Send + 'static>(future: KafkaFuture<T>) -> Rejection {
+        Box::pin(async move {
+            if !future.is_done() {
+                return None;
+            }
+            future.get().await.err()
+        })
+    }
+
     /// `AdminClientRunnable.call` (`KafkaAdminClient.java:1710-1713`): a
     /// `bootstrap.controllers` client fails every call whose node provider
     /// cannot reach a controller at once, with Java's message, and sends
-    /// nothing. Covers each provider that answers `false`: the least-loaded
-    /// node (`listTopics`, `listGroups`' broker lookup, the `AdminApiDriver`'s
-    /// coordinator lookup), the controller (`createTopics`, `electLeaders`) and
-    /// a constant broker id (`describeLogDirs`).
+    /// nothing. Covers every public API whose provider answers `false`: the
+    /// least-loaded node (the topic, quota, SCRAM-describe, delegation-token
+    /// and config-resource APIs, `listGroups`' broker lookup, and the
+    /// `AdminApiDriver`'s coordinator, partition-leader and all-brokers
+    /// lookups), the controller with `supportsUseControllers` false
+    /// (`createTopics`, `createPartitions`, `deleteTopics`, `electLeaders`,
+    /// `alterUserScramCredentials`) and a constant broker id with it false (the
+    /// three log-dir APIs). The controller-capable APIs are
+    /// `controller_capable_apis_are_sent_in_controller_mode`'s; between them the
+    /// two tests cover the whole `Admin` surface.
     #[tokio::test]
     async fn broker_only_apis_fail_with_unsupported_endpoint_type_in_controller_mode() {
-        let (admin, mut runnable, _time, _nodes) = controller_env();
+        type Issue = Box<dyn Fn(&KafkaAdminClient) -> Rejection>;
+        let tp = || TopicPartition::new("topic", 0);
+        let replica = || TopicPartitionReplica::new("topic".to_string(), 0, 0);
+        let groups = || vec!["group".to_string()];
+        let cases: Vec<(&str, Issue)> = vec![
+            (
+                "listTopics",
+                Box::new(|a| rejection(a.list_topics_with_options(ListTopicsOptions::new()).names())),
+            ),
+            (
+                "describeTopics by id",
+                Box::new(|a| {
+                    let topics = TopicCollection::of_topic_ids(vec![Uuid::random_uuid()]);
+                    rejection(
+                        a.describe_topics_with_topics_options(topics, DescribeTopicsOptions::new())
+                            .all_topic_ids()
+                            .expect("a by-id result"),
+                    )
+                }),
+            ),
+            (
+                "createTopics",
+                Box::new(|a| {
+                    let topic = NewTopic::with_num_partitions_replication_factor("topic", Some(1), Some(1));
+                    rejection(a.create_topics_with_options(&[topic], CreateTopicsOptions::new()).all())
+                }),
+            ),
+            (
+                "createPartitions",
+                Box::new(|a| {
+                    let partitions = HashMap::from([("topic".to_string(), NewPartitions::increase_to(2))]);
+                    rejection(
+                        a.create_partitions_with_options(&partitions, CreatePartitionsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "deleteTopics by name",
+                Box::new(|a| {
+                    let topics = TopicCollection::of_topic_names(vec!["topic".to_string()]);
+                    rejection(a.delete_topics_with_options(topics, DeleteTopicsOptions::new()).all())
+                }),
+            ),
+            (
+                "deleteTopics by id",
+                Box::new(|a| {
+                    let topics = TopicCollection::of_topic_ids(vec![Uuid::random_uuid()]);
+                    rejection(a.delete_topics_with_options(topics, DeleteTopicsOptions::new()).all())
+                }),
+            ),
+            (
+                "deleteRecords",
+                Box::new(move |a| {
+                    let records = HashMap::from([(tp(), RecordsToDelete::with_offset(1))]);
+                    rejection(a.delete_records_with_options(&records, DeleteRecordsOptions::new()).all())
+                }),
+            ),
+            (
+                "listOffsets",
+                Box::new(move |a| {
+                    let offsets = HashMap::from([(tp(), OffsetSpec::latest())]);
+                    rejection(a.list_offsets_with_options(&offsets, ListOffsetsOptions::new()).all())
+                }),
+            ),
+            (
+                "electLeaders",
+                Box::new(move |a| {
+                    let partitions = HashSet::from([tp()]);
+                    rejection(
+                        a.elect_leaders_with_options(
+                            ElectionType::Preferred,
+                            Some(partitions),
+                            ElectLeadersOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "describeLogDirs",
+                Box::new(|a| {
+                    rejection(
+                        a.describe_log_dirs_with_options(&[0], DescribeLogDirsOptions::new())
+                            .all_descriptions(),
+                    )
+                }),
+            ),
+            (
+                "alterReplicaLogDirs",
+                Box::new(move |a| {
+                    let assignment = HashMap::from([(replica(), "/tmp/log".to_string())]);
+                    rejection(
+                        a.alter_replica_log_dirs_with_options(&assignment, AlterReplicaLogDirsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "describeReplicaLogDirs",
+                Box::new(move |a| {
+                    rejection(
+                        a.describe_replica_log_dirs_with_options(&[replica()], DescribeReplicaLogDirsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "listConfigResources",
+                Box::new(|a| {
+                    rejection(
+                        a.list_config_resources_with_options(&HashSet::new(), ListConfigResourcesOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "listGroups",
+                Box::new(|a| rejection(a.list_groups_with_options(ListGroupsOptions::new()).all())),
+            ),
+            (
+                "describeConsumerGroups",
+                Box::new(move |a| {
+                    rejection(
+                        a.describe_consumer_groups_with_options(&groups(), DescribeConsumerGroupsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "describeClassicGroups",
+                Box::new(move |a| {
+                    rejection(
+                        a.describe_classic_groups_with_options(&groups(), DescribeClassicGroupsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "deleteConsumerGroups",
+                Box::new(move |a| {
+                    rejection(
+                        a.delete_consumer_groups_with_options(&groups(), DeleteConsumerGroupsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "listConsumerGroupOffsets",
+                Box::new(|a| {
+                    rejection(
+                        a.list_consumer_group_offsets_with_group_id_options(
+                            "group",
+                            ListConsumerGroupOffsetsOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "alterConsumerGroupOffsets",
+                Box::new(move |a| {
+                    let offsets = HashMap::from([(tp(), OffsetAndMetadata::new(1).unwrap())]);
+                    rejection(
+                        a.alter_consumer_group_offsets_with_options(
+                            "group",
+                            &offsets,
+                            AlterConsumerGroupOffsetsOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "deleteConsumerGroupOffsets",
+                Box::new(move |a| {
+                    let partitions = HashSet::from([tp()]);
+                    rejection(
+                        a.delete_consumer_group_offsets_with_options(
+                            "group",
+                            &partitions,
+                            DeleteConsumerGroupOffsetsOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "removeMembersFromConsumerGroup",
+                Box::new(|a| {
+                    rejection(
+                        a.remove_members_from_consumer_group_with_options(
+                            "group",
+                            RemoveMembersFromConsumerGroupOptions::default(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "describeProducers",
+                Box::new(move |a| {
+                    rejection(
+                        a.describe_producers_with_options(&[tp()], DescribeProducersOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "abortTransaction",
+                Box::new(move |a| {
+                    let spec = AbortTransactionSpec::new(tp(), 1, 0, 0);
+                    rejection(a.abort_transaction_with_options(spec, AbortTransactionOptions::new()).all())
+                }),
+            ),
+            (
+                "describeTransactions",
+                Box::new(|a| {
+                    rejection(
+                        a.describe_transactions_with_options(&["txn".to_string()], DescribeTransactionsOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "fenceProducers",
+                Box::new(|a| {
+                    rejection(
+                        a.fence_producers_with_options(&["txn".to_string()], FenceProducersOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "listTransactions",
+                Box::new(|a| rejection(a.list_transactions_with_options(ListTransactionsOptions::new()).all())),
+            ),
+            (
+                "forceTerminateTransaction",
+                Box::new(|a| {
+                    rejection(
+                        a.force_terminate_transaction_with_options("txn", TerminateTransactionOptions::new())
+                            .result(),
+                    )
+                }),
+            ),
+            (
+                "describeClientQuotas",
+                Box::new(|a| {
+                    rejection(
+                        a.describe_client_quotas_with_options(
+                            &ClientQuotaFilter::all(),
+                            DescribeClientQuotasOptions::new(),
+                        )
+                        .entities()
+                        .clone(),
+                    )
+                }),
+            ),
+            (
+                "alterClientQuotas",
+                Box::new(|a| {
+                    let entity = ClientQuotaEntity::new(HashMap::from([(
+                        ClientQuotaEntity::USER.to_string(),
+                        Some("user".to_string()),
+                    )]));
+                    let alteration = ClientQuotaAlteration::new(entity, vec![Op::new("consumer_byte_rate", Some(1.0))]);
+                    rejection(
+                        a.alter_client_quotas_with_options(&[alteration], AlterClientQuotasOptions::new())
+                            .all(),
+                    )
+                }),
+            ),
+            (
+                "describeUserScramCredentials",
+                Box::new(|a| {
+                    rejection(
+                        a.describe_user_scram_credentials_with_users_options(
+                            &[],
+                            DescribeUserScramCredentialsOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "alterUserScramCredentials",
+                Box::new(|a| {
+                    let deletion = UserScramCredentialAlteration::Deletion(UserScramCredentialDeletion::new(
+                        "user",
+                        ScramMechanism::ScramSha256,
+                    ));
+                    rejection(
+                        a.alter_user_scram_credentials_with_options(
+                            &[deletion],
+                            AlterUserScramCredentialsOptions::new(),
+                        )
+                        .all(),
+                    )
+                }),
+            ),
+            (
+                "createDelegationToken",
+                Box::new(|a| {
+                    rejection(
+                        a.create_delegation_token_with_options(CreateDelegationTokenOptions::new())
+                            .delegation_token()
+                            .clone(),
+                    )
+                }),
+            ),
+            (
+                "renewDelegationToken",
+                Box::new(|a| {
+                    rejection(
+                        a.renew_delegation_token_with_options(b"hmac", RenewDelegationTokenOptions::new())
+                            .expiry_timestamp()
+                            .clone(),
+                    )
+                }),
+            ),
+            (
+                "expireDelegationToken",
+                Box::new(|a| {
+                    rejection(
+                        a.expire_delegation_token_with_options(b"hmac", ExpireDelegationTokenOptions::new())
+                            .expiry_timestamp()
+                            .clone(),
+                    )
+                }),
+            ),
+            (
+                "describeDelegationToken",
+                Box::new(|a| {
+                    rejection(
+                        a.describe_delegation_token_with_options(DescribeDelegationTokenOptions::new())
+                            .delegation_tokens()
+                            .clone(),
+                    )
+                }),
+            ),
+        ];
 
-        // Each future is complete as soon as the call returns: the call is
-        // rejected when it is submitted.
-        let list_topics = admin.list_topics_with_options(ListTopicsOptions::new()).names();
-        assert!(list_topics.is_done(), "listTopics");
-        assert_unsupported_endpoint_type("listTopics", list_topics.get().await.unwrap_err());
-
-        let create_topics = admin
-            .create_topics_with_options(
-                &[NewTopic::with_num_partitions_replication_factor(
-                    "topic",
-                    Some(1),
-                    Some(1),
-                )],
-                CreateTopicsOptions::new(),
-            )
-            .all();
-        assert!(create_topics.is_done(), "createTopics");
-        assert_unsupported_endpoint_type("createTopics", create_topics.get().await.unwrap_err());
-
-        let describe_log_dirs = admin
-            .describe_log_dirs_with_options(&[0], DescribeLogDirsOptions::new())
-            .all_descriptions();
-        assert!(describe_log_dirs.is_done(), "describeLogDirs");
-        assert_unsupported_endpoint_type("describeLogDirs", describe_log_dirs.get().await.unwrap_err());
-
-        let partitions = HashSet::from([TopicPartition::new("topic", 0)]);
-        let elect_leaders = admin
-            .elect_leaders_with_options(ElectionType::Preferred, Some(partitions), ElectLeadersOptions::new())
-            .all();
-        assert!(elect_leaders.is_done(), "electLeaders");
-        assert_unsupported_endpoint_type("electLeaders", elect_leaders.get().await.unwrap_err());
-
-        // `findAllBrokers`' `handleFailure` wraps it
-        // (`KafkaAdminClient.java:3684-3688`).
-        let list_groups = admin.list_groups_with_options(ListGroupsOptions::new()).all();
-        assert!(list_groups.is_done(), "listGroups");
-        let error = list_groups.get().await.unwrap_err();
-        assert_eq!(error.message(), "Failed to find brokers to send ListGroups");
-        assert_unsupported_endpoint_type("listGroups", error.source().expect("the cause").clone());
-
-        let describe_groups = admin
-            .describe_consumer_groups_with_options(&["group".to_string()], DescribeConsumerGroupsOptions::new())
-            .all();
-        assert!(describe_groups.is_done(), "describeConsumerGroups");
-        assert_unsupported_endpoint_type("describeConsumerGroups", describe_groups.get().await.unwrap_err());
+        let (admin, mut runnable, _time, nodes) = controller_env();
+        for (api, issue) in &cases {
+            // Each call is rejected when it is submitted, so its future is done
+            // as soon as the call returns.
+            let error = issue(&admin)
+                .await
+                .unwrap_or_else(|| panic!("{api}: the call was not rejected"));
+            // Two APIs wrap the rejection, as Java does: `findAllBrokers`'
+            // `handleFailure` (`KafkaAdminClient.java:3684-3688`) and
+            // `getMembersFromGroup` (`:4303`).
+            let wrapper = match *api {
+                "listGroups" => Some("Failed to find brokers to send ListGroups"),
+                "removeMembersFromConsumerGroup" => {
+                    Some("Encounter error when trying to get members from group: group")
+                },
+                _ => None,
+            };
+            match wrapper {
+                Some(message) => {
+                    assert_eq!(error.message(), message, "{api}");
+                    assert_unsupported_endpoint_type(api, error.source().expect("the cause").clone());
+                },
+                None => assert_unsupported_endpoint_type(api, error),
+            }
+        }
 
         pump(&mut runnable, 5).await;
         assert_eq!(runnable.client_mut().request_count(), 0, "nothing is sent");
+
+        // describeTopics by name first describes the cluster, which a controller
+        // answers, and only then submits its DescribeTopicPartitions call, which
+        // is rejected (`KafkaAdminClient.java:2458-2470`), as in Java.
+        runnable.client_mut().prepare_response(prepare_describe_cluster_response(
+            0,
+            &nodes,
+            "mock-cluster",
+            0,
+            MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+            true,
+        ));
+        let by_name = admin
+            .describe_topics_with_topic_names_options(&["topic".to_string()], DescribeTopicsOptions::new())
+            .all_topic_names()
+            .expect("a by-name result");
+        pump_until(&mut runnable, 20, |_| by_name.is_done()).await;
+        assert!(by_name.is_done(), "describeTopics by name: the call was not rejected");
+        assert_unsupported_endpoint_type("describeTopics by name", by_name.get().await.unwrap_err());
     }
 
     /// The calls a `bootstrap.controllers` client may send: those whose Java

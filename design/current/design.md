@@ -714,10 +714,11 @@ Two behaviours are worth knowing because they are easy to get wrong:
   `maybeCompleteQuotaExceededException` (`maybe_complete_quota_exceeded`,
   `kafka_admin_client.rs:1100`).
 
-A note on names: the Rust `NodeProvider` enum (`admin/internals/call.rs:86`)
-has the variants `Controller`, `LeastLoaded`,
+A note on names: the Rust `NodeProvider` enum (`admin/internals/call.rs:103`)
+has the variants `Controller { supports_use_controllers }`, `LeastLoaded`,
 `LeastLoadedBrokerOrActiveKController`, `MetadataUpdate` and
-`ConstantNodeId(i32)`. Prose in `status.md` sometimes uses the Java class
+`ConstantNodeId { node_id, supports_use_controllers }`; the flag is Java's
+`supportsUseControllers`. Prose in `status.md` sometimes uses the Java class
 names (`ControllerNodeProvider`, `LeastLoadedNodeProvider`,
 `ConstantNodeIdProvider`, `MetadataUpdateNodeIdProvider`). They refer to these
 variants.
