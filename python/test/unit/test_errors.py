@@ -29,6 +29,7 @@ import copy
 import importlib
 import pickle
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -735,10 +736,8 @@ def test_singletons() -> None:
     ConfigError(name="a", value=1, message="bad"),
     IllegalStateError(message="root"),
     NoOffsetForPartitionError(partition=_TP),
-    RecordDeserializationError(
-        origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY, partition=_TP,
-        offset=1, timestamp=2, timestamp_type=TimestampType.CREATE_TIME, key_buffer=b"k",
-        value_buffer=None, headers=(), message="m", cause=ValueError("c")),
+    LogTruncationError(message="m", fetch_offsets={_TP: 3},
+                       divergent_offsets={_TP: OffsetAndMetadata(offset=2)}),
 ])
 def test_copy_and_pickle_rebuild_from_the_constructor_arguments(error: BaseException) -> None:
     for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
@@ -812,12 +811,12 @@ def test_from_ffi_error_chains_the_core_cause(monkeypatch: pytest.MonkeyPatch) -
     assert from_ffi_error(0, cause=explicit).__cause__ is explicit
 
 
-@pytest.mark.parametrize("outer", [UnknownServerError, RecordDeserializationError])
+@pytest.mark.parametrize("outer", [UnknownServerError, LogTruncationError])
 def test_copy_and_pickle_keep_the_core_cause(monkeypatch: pytest.MonkeyPatch,
                                               outer: type[BaseException]) -> None:
     # The core's cause is set after construction, so the constructor arguments
-    # do not carry it. RecordDeserializationError is built without its
-    # constructor (the core reports no record), the other path of __reduce__.
+    # do not carry it. LogTruncationError is built without its constructor
+    # (the core reports no offsets), the other path of __reduce__.
     monkeypatch.setattr(errmod, "_lib", _fake_lib(
         outer._ffi_id,  # type: ignore[attr-defined]
         "outer", source={1: (TopicAuthorizationError._ffi_id, "inner")}))
@@ -875,14 +874,85 @@ def test_from_ffi_error_quota_violation(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_from_ffi_error_keeps_the_message_when_java_needs_more(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    # A RecordDeserializationError the core reports without its record: no Java
+    # A LogTruncationError the core reports without its offsets: no Java
     # constructor takes a message alone, so only the message is kept.
-    monkeypatch.setattr(errmod, "_lib", _fake_lib(RecordDeserializationError._ffi_id,
-                                                  "bad record"))
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(LogTruncationError._ffi_id,
+                                                  "truncated"))
+    err = from_ffi_error(0)
+    assert type(err) is LogTruncationError and str(err) == "truncated"
+    clone = pickle.loads(pickle.dumps(err))
+    assert type(clone) is LogTruncationError and str(clone) == "truncated"
+
+
+# ----------------------------------------------------------------------------
+# An error Java cannot serialize does not pickle or deep-copy
+# ----------------------------------------------------------------------------
+
+_RDE_REFUSED = ("RecordDeserializationError cannot be pickled or deep-copied, as Java's "
+                "RecordDeserializationException cannot be serialized")
+_QUOTA_REFUSED = ("QuotaViolationError cannot be pickled or deep-copied, as Java's "
+                  "QuotaViolationException cannot be serialized")
+
+
+def _record_deserialization_error() -> RecordDeserializationError:
+    return RecordDeserializationError(
+        origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY, partition=_TP,
+        offset=1, timestamp=2, timestamp_type=TimestampType.CREATE_TIME,
+        key_buffer=b"k", value_buffer=None, headers=[("h", b"v")], message="m",
+        cause=ValueError("c"))
+
+
+@pytest.mark.parametrize("make,refused", [
+    # RecordDeserializationException's keyBuffer / valueBuffer (ByteBuffer) and
+    # headers (Headers) are not Serializable; nor is QuotaViolationException's
+    # metric (KafkaMetric).
+    (_record_deserialization_error, _RDE_REFUSED),
+    (_quota_violation, _QUOTA_REFUSED),
+])
+def test_an_error_java_cannot_serialize_refuses_pickle_and_deepcopy(
+        make: Callable[[], BaseException], refused: str) -> None:
+    error = make()
+    error.add_note("a note")
+    error.extra = 1  # type: ignore[attr-defined]
+    with pytest.raises(TypeError) as pickled:
+        pickle.dumps(error)
+    assert str(pickled.value) == refused
+    with pytest.raises(TypeError) as deep:
+        copy.deepcopy(error)
+    assert str(deep.value) == refused
+    # copy.copy rebuilds from the same arguments, which it shares.
+    shallow = copy.copy(error)
+    assert type(shallow) is type(error) and shallow is not error
+    assert str(shallow) == str(error) and shallow.args == error.args
+    assert shallow.__notes__ == ["a note"] and shallow.extra == 1  # type: ignore[attr-defined]
+    if isinstance(error, RecordDeserializationError):
+        assert isinstance(shallow, RecordDeserializationError)
+        assert shallow.__cause__ is error.__cause__
+        assert shallow.headers() == error.headers()
+        assert bytes(shallow.key_buffer() or b"") == b"k"
+    else:
+        assert isinstance(error, QuotaViolationError) and isinstance(shallow, QuotaViolationError)
+        assert shallow.metric() is error.metric()
+        assert (shallow.value(), shallow.bound()) == (9.5, 5.0)
+
+
+def test_a_core_record_deserialization_error_refuses_pickle_and_deepcopy(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # Built without its constructor (the core reports no record), it still
+    # refuses: Java's class cannot be serialized whatever it holds.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        RecordDeserializationError._ffi_id, "bad record",
+        source={1: (TopicAuthorizationError._ffi_id, "inner")}))
     err = from_ffi_error(0)
     assert type(err) is RecordDeserializationError and str(err) == "bad record"
-    clone = pickle.loads(pickle.dumps(err))
-    assert type(clone) is RecordDeserializationError and str(clone) == "bad record"
+    for refuse in (pickle.dumps, copy.deepcopy):
+        with pytest.raises(TypeError) as refused:
+            refuse(err)
+        assert str(refused.value) == _RDE_REFUSED
+    shallow = copy.copy(err)
+    assert type(shallow) is RecordDeserializationError and str(shallow) == "bad record"
+    assert shallow.__cause__ is err.__cause__
+    assert type(shallow.__cause__) is TopicAuthorizationError
 
 
 # ----------------------------------------------------------------------------

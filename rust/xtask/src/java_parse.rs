@@ -85,6 +85,8 @@ pub struct Field {
     pub ty: String,
     pub name: String,
     pub is_static: bool,
+    /// `transient`: left out by Java's serialization.
+    pub is_transient: bool,
     pub init: Option<Expr>,
 }
 
@@ -828,9 +830,15 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
             let words: Vec<&str> = decl.split(' ').collect();
             let name = words.last().unwrap().to_string();
             let is_static = words.contains(&"static");
+            let is_transient = words.contains(&"transient");
             let ty = words[..words.len() - 1]
                 .iter()
-                .filter(|w| !matches!(**w, "public" | "private" | "protected" | "static" | "final" | "volatile"))
+                .filter(|w| {
+                    !matches!(
+                        **w,
+                        "public" | "private" | "protected" | "static" | "final" | "volatile" | "transient"
+                    )
+                })
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -847,7 +855,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
                     _ => anyhow::bail!("{simple}: unsupported public static member `{header}`"),
                 }
             }
-            fields.push(Field { ty, name, is_static, init: init_expr });
+            fields.push(Field { ty, name, is_static, is_transient, init: init_expr });
             continue;
         }
         if ch == b'{' {

@@ -46,6 +46,7 @@ __all__ = [
     "non_null",
     "rebuild",
     "reduce",
+    "shallow_copy",
     "singleton",
     "to_string",
     "view",
@@ -126,16 +127,6 @@ def rebuild(cls: type[BaseException], arguments: dict[str, Any]) -> BaseExceptio
         return cls(**arguments)
 
 
-def _portable(value: Any) -> Any:
-    """A constructor argument as it pickles: a ``memoryview`` (a buffer the
-    error views, such as a fetched record's key) as the bytes it shows."""
-    if isinstance(value, memoryview):
-        return value.tobytes()
-    if isinstance(value, (list, tuple)):
-        return type(value)(_portable(v) for v in value)
-    return value
-
-
 def reduce(self: BaseException) -> str | tuple[Any, ...]:
     """``__reduce__`` for every generated error: a singleton pickles by name;
     any other error rebuilds from its constructor arguments by keyword. The
@@ -159,7 +150,21 @@ def reduce(self: BaseException) -> str | tuple[Any, ...]:
         # Built without its constructor (an error from the core whose Java
         # constructors cannot take what the core reported): keep the message.
         return (_rebuild_private, (type(self), java_message(self)), state)
-    return (rebuild, (type(self), {k: _portable(v) for k, v in arguments.items()}), state)
+    return (rebuild, (type(self), dict(arguments)), state)
+
+
+def shallow_copy(self: _E) -> _E:
+    """``__copy__`` of an error Java cannot serialize, whose ``__reduce__``
+    refuses: the rebuild :func:`reduce` describes, sharing the arguments and
+    the state as ``copy.copy`` does for every other error."""
+    reduced = reduce(self)
+    if isinstance(reduced, str):
+        return self
+    build, arguments, state = reduced
+    copied = build(*arguments)
+    if state:
+        copied.__setstate__(state)
+    return cast(_E, copied)
 
 
 def _rebuild_private(cls: type[BaseException], message: str | None) -> BaseException:
@@ -186,6 +191,7 @@ def singleton(cls: type[BaseException], name: str, message: str | None,
 
 _T = TypeVar("_T")
 _I = TypeVar("_I", bound="Iterable[Any] | None")
+_E = TypeVar("_E", bound=BaseException)
 
 
 def materialize(value: _I) -> _I:

@@ -21,7 +21,7 @@ Errors) and validated for staleness by ``cargo xtask check-generated``.
 
 from __future__ import annotations
 
-from typing import ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
 from confluent_kafka._java import java_str
@@ -81,3 +81,17 @@ class QuotaViolationError(KafkaError):
         if not (hasattr(self, "_metric") and hasattr(self, "_value") and hasattr(self, "_bound")):
             return _throwable.message_text(self)
         return ("'" + java_str(_throwable.non_null(self._metric, "metric").metric_name()) + "' violated quota. Actual: " + java_str(self._value) + ", Threshold: " + java_str(self._bound))
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        """Refused, as Java's serialization of ``QuotaViolationException``
+        throws ``NotSerializableException``: ``metric`` (``KafkaMetric``) is
+        not ``Serializable`` (CLAUDE.md, Python Binding Conventions,
+        Errors)."""
+        raise TypeError(
+            "QuotaViolationError cannot be pickled or deep-copied, as Java's "
+            "QuotaViolationException cannot be serialized")
+
+    def __copy__(self) -> QuotaViolationError:
+        """``copy.copy``: a rebuild from the same constructor arguments, which it
+        shares, with the cause, the notes and the attributes a caller added."""
+        return _throwable.shallow_copy(self)
