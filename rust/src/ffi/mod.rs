@@ -429,8 +429,9 @@ mod tests {
     /// bare attribute, or a boolean given -1, fails.
     #[test]
     fn test_byte_code_exports_fall_back_to_minus_one() {
-        const BYTE_CODES: [&str; 10] = [
+        const BYTE_CODES: [&str; 11] = [
             "kafka_admin_AlterConfigOp_OpType_id",
+            "kafka_admin_EndpointType_id",
             "kafka_admin_FeatureUpdate_UpgradeType_code",
             "kafka_admin_ScramMechanism_type",
             "kafka_common_ElectionType_value",
@@ -494,8 +495,9 @@ mod tests {
     /// dropped back to the derived value, is a reviewed change.
     #[test]
     fn test_explicit_fallbacks() {
-        const BYTE_CODES: [&str; 10] = [
+        const BYTE_CODES: [&str; 11] = [
             "kafka_admin_AlterConfigOp_OpType_id",
+            "kafka_admin_EndpointType_id",
             "kafka_admin_FeatureUpdate_UpgradeType_code",
             "kafka_admin_ScramMechanism_type",
             "kafka_common_ElectionType_value",
@@ -506,7 +508,7 @@ mod tests {
             "kafka_common_resource_PatternType_code",
             "kafka_common_resource_ResourceType_code",
         ];
-        const EXPECTED: [(&str, &str); 71] = [
+        const EXPECTED: [(&str, &str); 72] = [
             ("kafka_admin_AlterConfigOp_OpType__enum", "kafka_admin_AlterConfigOp_OpType_SET"),
             (
                 "kafka_admin_ConfigEntry_ConfigSource__enum",
@@ -519,6 +521,7 @@ mod tests {
             ("kafka_admin_ConsumerGroupDescription_group_epoch", "-2"),
             ("kafka_admin_ConsumerGroupDescription_target_assignment_epoch", "-2"),
             ("kafka_admin_DeleteAclsResult_FilterResult_error", "null()"),
+            ("kafka_admin_EndpointType__enum", "kafka_admin_EndpointType_UNKNOWN"),
             ("kafka_admin_FeatureMetadata_finalized_features_epoch", "-2"),
             (
                 "kafka_admin_FeatureUpdate_UpgradeType__enum",

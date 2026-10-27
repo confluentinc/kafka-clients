@@ -1059,10 +1059,15 @@ impl CommitRequestManager {
             guard.pending.unsent_offset_commits.push_back(request);
         }
         // Java queues this request on the network thread before the managers
-        // are polled in the same `runOnce`, so it goes out at once. Rust
-        // reaches here from the spawned AsyncPoll task (reconcile), i.e. while
-        // the bg loop is parked in its network poll: wake it so the commit is
-        // sent now rather than after the poll timeout or an unrelated wake.
+        // are polled in the same `runOnce`, so it goes out at once. Rust does
+        // the same: the only caller is `reconcile` step 8a, which queues a
+        // request only with auto-commit enabled, and then only the AsyncPoll
+        // reconcile (run on the bg task during the Phase 1 event drain, before
+        // the commit manager's Phase 2 poll) gets that far — Phase 2.5's
+        // `reconcile(now, false)` stops at the KAFKA-20106 gate. So the request
+        // is sent in the same `run_once`. The wake is defensive: it only
+        // stores a permit, costing at most one extra loop iteration per
+        // rebalance.
         wake_background_task(&self.inner);
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         // A `Weak`: see "Retry drivers" below.
@@ -1722,13 +1727,12 @@ impl CommitRequestManager {
             }
             guard.member_info.clone()
         };
-        // Keep a copy of the offsets so the auto-commit success arm can enqueue
-        // the interceptor invocation with the committed offsets (Java's
-        // `autoCommitCallback(allConsumedOffsets)`). `OffsetCommitRequestState`
-        // takes ownership of `offsets`, so the success arm holds the request's
-        // own offsets via the spawned task; we snapshot only when an
-        // interceptor is actually wired to avoid the no-interceptor clone.
-        let offsets_for_interceptor = self.inner.has_auto_commit_interceptors().then(|| offsets.clone());
+        // Keep a copy of the offsets for the completion below (Java's
+        // `autoCommitCallback(allConsumedOffsets)`): it logs them on success
+        // and failure, and on success hands them to the interceptors.
+        // `OffsetCommitRequestState` takes ownership of `offsets`. One map
+        // clone per auto-commit interval, not a per-record cost.
+        let committed_offsets = offsets.clone();
         let (request, request_rx) = OffsetCommitRequestState::new(
             offsets,
             member_info,
@@ -1773,24 +1777,43 @@ impl CommitRequestManager {
                     ac.set_inflight_commit_status(false);
                 }
             }
+            // Wake the bg loop now that the flag is clear. Java's
+            // `autoCommitCallback` runs on the network thread, so its next
+            // `runOnce` sees the cleared flag at once: `maximumTimeToWait`
+            // stops reporting the interval (KAFKA-20253, see `remaining_ms`),
+            // and if the interval expired while this commit was in flight the
+            // next poll's `maybeAutoCommitAsync` sends the next one ("after a
+            // response for the in-flight is received"). Here the callback runs
+            // on a spawned task; without the wake the bg loop would only see
+            // it when something else ended the network poll (up to its ~5 s
+            // timeout). At most one wake per auto-commit, on success and
+            // failure alike.
+            wake_background_task(&inner);
+            // The offsets as Java's `Map.toString` prints them, through the
+            // Java-form `Display` of `TopicPartition` and `OffsetAndMetadata`:
+            // `{topic-0=OffsetAndMetadata{offset=5, leaderEpoch=null, metadata=''}}`.
+            // Called inside the `log` macros, so only when the line is logged.
+            let offsets_text = || {
+                let entries: Vec<String> = committed_offsets.iter().map(|(tp, o)| format!("{tp}={o}")).collect();
+                format!("{{{}}}", entries.join(", "))
+            };
             match outcome {
                 Ok(Ok(_committed)) => {
                     // Java `autoCommitCallback`: on success, enqueue the
                     // interceptor `on_commit` invocation with the committed
-                    // offsets (`CommitRequestManager.java:393`). The snapshot
-                    // is `Some` only when an interceptor is wired (the
-                    // no-interceptor path clones nothing).
-                    if let Some(offsets) = offsets_for_interceptor {
-                        inner.enqueue_interceptor_invocation(&offsets);
-                    }
-                    log::debug!("Completed auto-commit of offsets");
+                    // offsets (`CommitRequestManager.java:393`); it clones
+                    // them only when an interceptor is wired.
+                    inner.enqueue_interceptor_invocation(&committed_offsets);
+                    log::debug!("Completed auto-commit of offsets {}", offsets_text());
                 },
                 Ok(Err(err)) => {
                     // Java's `autoCommitCallback` logs every auto-commit
                     // failure at WARN: its debug branch is reserved for a
                     // `RetriableCommitFailedException`, which the auto-commit
-                    // future never carries (see above).
-                    log::warn!("Auto-commit of offsets failed: {err}");
+                    // future never carries (see above). Java passes the
+                    // throwable as the last argument; `log` has none, so the
+                    // error follows the Java text.
+                    log::warn!("Auto-commit of offsets {} failed: {err}", offsets_text());
                 },
                 Err(_) => {
                     log::debug!("Asynchronous auto-commit channel closed without a result");
@@ -2387,19 +2410,6 @@ impl CommitRequestManagerInner {
     /// is not wired (Phase 9 unit tests) or the interceptor chain is empty.
     /// Mirrors Java's `autoCommitCallback` success arm
     /// (`CommitRequestManager.java:393`).
-    /// Whether a wired auto-commit interceptor hook has at least one
-    /// interceptor registered. Used to gate the committed-offsets clone on
-    /// the auto-commit success path so the common (no-interceptor) case
-    /// clones nothing — matching Java's by-reference capture in
-    /// `autoCommitCallback`.
-    fn has_auto_commit_interceptors(&self) -> bool {
-        let guard = self
-            .auto_commit_interceptor_hook
-            .lock()
-            .expect("commit manager auto-commit interceptor hook poisoned");
-        guard.as_ref().is_some_and(|hook| hook.has_interceptors())
-    }
-
     fn enqueue_interceptor_invocation(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
         let hook = {
             let guard = self
@@ -2742,8 +2752,9 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Wakes the bg task's network poll after a spawned retry driver
 /// ([`fetch_offsets_with_retries`], [`commit_sync_with_retries`],
 /// [`auto_commit_sync_before_rebalance_with_retries`]) re-enqueues a retry, so the next `poll` sees the retry and
-/// sleeps only for its backoff, and after `maybe_auto_commit_async` enqueues
-/// an interval auto-commit (possibly from the spawned `AsyncPoll` task). See
+/// sleeps only for its backoff, after `maybe_auto_commit_async` enqueues
+/// an interval auto-commit (possibly from the spawned `AsyncPoll` task), and
+/// after that auto-commit's completion clears the in-flight flag. See
 /// `CommitRequestManagerInner::completion_notify` for why Java needs no
 /// equivalent (its retry is enqueued on the network thread itself). The guard
 /// on `inner.state` MUST already be dropped (the poke is lock-free anyway).
@@ -3856,6 +3867,74 @@ mod tests {
         manager.update_timer_and_maybe_commit(4_000);
         assert_eq!(1, manager.unsent_offset_commits_len_for_test());
         assert!(!woken(), "no new auto-commit was enqueued, so the bg loop must not be woken");
+    }
+
+    /// PR #255 review follow-up 3: Java's `autoCommitCallback`
+    /// (`CommitRequestManager.requestAutoCommit`) clears the in-flight flag on
+    /// the network thread, so the next `runOnce` already sees it: the cached
+    /// `maximumTimeToWait` stops reporting the interval, and the next poll
+    /// sends the auto-commit whose interval expired while the previous one was
+    /// in flight (`maybeAutoCommitAsync` javadoc: "the next auto-commit request
+    /// will be sent on the next call to poll, after a response for the
+    /// in-flight is received"). In Rust that callback runs on a spawned task,
+    /// so it must wake the bg loop once the flag is clear.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_completion_wakes_background_task_after_clearing_inflight_flag() {
+        use futures_util::FutureExt;
+        let (manager, subs) = make_manager_with_subs(0, true); // interval 1000
+        let coordinator = coordinator_with_node();
+        manager.set_coordinator(Arc::new(coordinator_with_node()));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        manager.set_completion_notify(Arc::clone(&notify));
+        let tp = topic_partition("t", 0);
+        {
+            let mut s = subs.lock().unwrap();
+            s.assign_from_user(HashSet::from([tp.clone()])).expect("assign");
+            s.seek(&tp, 10).expect("seek");
+        }
+        manager.update_timer_and_maybe_commit(2_000);
+        // Consume the wake stored when the auto-commit was enqueued, so only
+        // the completion's own wake can satisfy the wait below.
+        assert!(
+            notify.notified().now_or_never().is_some(),
+            "enqueueing the auto-commit must wake the bg loop"
+        );
+        let inflight = || {
+            let guard = manager.inner.state.lock().unwrap();
+            guard.auto_commit.as_ref().unwrap().has_inflight_commit
+        };
+        assert!(inflight(), "the auto-commit must be in flight until its response arrives");
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 2_000);
+        // The interval expires again while the commit is in flight: Java's
+        // `maybeAutoCommitAsync` skips it, and `maximumTimeToWait` reports the
+        // interval instead of 0 (KAFKA-20253).
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(0, manager.unsent_offset_commits_len_for_test());
+        assert_eq!(1_000, manager.maximum_time_to_wait(3_000));
+
+        let woken = notify.notified();
+        unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("the auto-commit completion must wake the bg loop, as Java's callback runs on the network thread");
+        assert!(
+            !inflight(),
+            "the in-flight flag must already be clear when the completion wakes the bg loop"
+        );
+        assert_eq!(
+            0,
+            manager.maximum_time_to_wait(3_000),
+            "with the flag clear, the expired interval must be due at once"
+        );
+
+        // The next application poll now sends the pending auto-commit.
+        manager.update_timer_and_maybe_commit(3_000);
+        assert_eq!(
+            1,
+            manager.unsent_offset_commits_len_for_test(),
+            "after the in-flight auto-commit completes, the expired interval must enqueue the next one"
+        );
     }
 
     /// Audit finding C4-01 / KAFKA-18641: `CommitRequestManager.poll()`
@@ -6088,9 +6167,10 @@ mod tests {
             s.seek(&tp, 100).expect("seek");
         }
         let _public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
-        // The initial enqueue wakes the bg task too (it is reached from the
-        // spawned AsyncPoll task's reconcile); consume that permit so only the
-        // retry's own wake can satisfy the wait below.
+        // The initial enqueue wakes the bg task too (a defensive wake: the
+        // AsyncPoll reconcile that reaches it runs on the bg task before the
+        // commit manager's poll); consume that permit so only the retry's own
+        // wake can satisfy the wait below.
         tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
             .await
             .expect("queuing the pre-rebalance auto-commit must wake the bg task");
@@ -6873,6 +6953,51 @@ mod tests {
             "no pending commit after the poll"
         );
         unsent.handler().on_complete(offset_commit_response_single(&tp, Errors::None));
+    }
+
+    /// PR #255 review follow-up 7: Java's `autoCommitCallback`
+    /// (`CommitRequestManager.requestAutoCommit`) logs a failed auto-commit at
+    /// WARN with the offsets it tried to commit
+    /// (`"Auto-commit of offsets {} failed"`, `allConsumedOffsets`), printed
+    /// as `Map.toString` prints them. Without the offsets a failed auto-commit
+    /// cannot be diagnosed. (The DEBUG success line carries them the same way
+    /// but is below the capture's INFO floor.)
+    #[test]
+    fn auto_commit_failure_logs_the_offsets_at_warn() {
+        use crate::test_log_capture::capture_logs;
+        let tp = topic_partition("topic", 1);
+        let ((), lines) = capture_logs(|| {
+            // A current-thread runtime runs the spawned completion task on
+            // this thread, where the capture records.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let (manager, coordinator, _, commit_interval) = auto_commit_manager_for_failure_tests(&tp);
+                fire_and_fail_auto_commit(
+                    &manager,
+                    &coordinator,
+                    &tp,
+                    commit_interval,
+                    Errors::CoordinatorLoadInProgress,
+                )
+                .await;
+            });
+        });
+        let failures: Vec<&str> = lines
+            .iter()
+            .filter(|(level, line)| *level == log::Level::Warn && line.starts_with("Auto-commit of offsets"))
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert_eq!(
+            vec![
+                "Auto-commit of offsets {topic-1=OffsetAndMetadata{offset=100, leaderEpoch=null, metadata=''}} \
+                 failed: CoordinatorLoadInProgressError: The coordinator is loading and hence can't process requests."
+            ],
+            failures,
+            "Java logs a failed auto-commit once, at WARN, with the offsets it tried to commit"
+        );
     }
 
     /// Rust-specific companion of `async_autocommit_not_retried_after_error`:

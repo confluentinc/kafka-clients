@@ -714,10 +714,11 @@ Two behaviours are worth knowing because they are easy to get wrong:
   `maybeCompleteQuotaExceededException` (`maybe_complete_quota_exceeded`,
   `kafka_admin_client.rs:1100`).
 
-A note on names: the Rust `NodeProvider` enum (`admin/internals/call.rs:86`)
-has the variants `Controller`, `LeastLoaded`,
+A note on names: the Rust `NodeProvider` enum (`admin/internals/call.rs:103`)
+has the variants `Controller { supports_use_controllers }`, `LeastLoaded`,
 `LeastLoadedBrokerOrActiveKController`, `MetadataUpdate` and
-`ConstantNodeId(i32)`. Prose in `status.md` sometimes uses the Java class
+`ConstantNodeId { node_id, supports_use_controllers }`; the flag is Java's
+`supportsUseControllers`. Prose in `status.md` sometimes uses the Java class
 names (`ControllerNodeProvider`, `LeastLoadedNodeProvider`,
 `ConstantNodeIdProvider`, `MetadataUpdateNodeIdProvider`). They refer to these
 variants.
@@ -736,9 +737,10 @@ Java ships the mock in its test jar. Here it stays public through its
 
 The admin client builds its channel builder from `security.protocol` like the
 other two clients (`kafka_admin_client.rs:325`), so SSL and SASL/PLAIN work.
-The one visible gap is `bootstrap.controllers` (KIP-919), which is passed to
-`AdminMetadataManager` as `false` (`kafka_admin_client.rs:313`); the
-`using_bootstrap_controllers()` branches exist but are never taken.
+`bootstrap.controllers` (KIP-919) is supported: such a client bootstraps from
+the controllers, refreshes its metadata with `DescribeCluster` for the
+CONTROLLER endpoint, and fails at once every call whose node provider cannot
+reach a controller (`UnsupportedEndpointTypeError`), as Java's does.
 
 Beyond the 44 RPCs there is no `ForwardingAdmin`, and there are no
 Streams-group, share-group or KRaft raft-voter RPCs (`add_raft_voter`,

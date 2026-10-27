@@ -35,7 +35,7 @@ Per class (`clients/admin`, `common.*`):
   DeleteTopicsResultTest | ported before | test_admin_reference_set.py
   DescribeTopicsResultTest | ported before | test_admin_results_hand.py
   DescribeUserScramCredentialsResultTest | ported before | test_admin_results_hand.py
-  EndpointTypeTest | skipped | EndpointType is used only inside KafkaAdminClient, not reachable from the public API, not generated
+  EndpointTypeTest | skipped | EndpointType is public, but no public method takes or returns it, so it is not reachable from what is generated; core: rust/src/admin/endpoint_type.rs test_round_trip_broker, test_round_trip_controller, test_unknown
   GroupListingTest | ported before | test_admin_value_types.py
   ListConsumerGroupsOptionsTest | skipped | deprecated class, not generated
   ListGroupsOptionsTest | ported before | test_admin_reference_set.py
@@ -58,9 +58,9 @@ The seven 4.4.0 files, 283 tests in all (Apache Kafka 4.4.0 split 4.3.1's KafkaA
 KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient, 6 now, 14 not generated, 1 JVM-only.
 
   testDefaultApiTimeoutAndRequestTimeoutConflicts | ported before | test_admin_client.py::test_default_api_timeout_and_request_timeout_conflicts
-  testParseDescribeClusterResponseWithError | skipped | package-private static helper, not generated; core: none
-  testParseDescribeClusterResponseWithUnexpectedEndpointType | skipped | package-private static helper, not generated; core: none
-  testParseSuccessfulDescribeClusterResponse | skipped | package-private static helper, not generated; core: none
+  testParseDescribeClusterResponseWithError | skipped | package-private static helper, not generated; core: test_parse_describe_cluster_response_with_error
+  testParseDescribeClusterResponseWithUnexpectedEndpointType | skipped | package-private static helper, not generated; core: test_parse_describe_cluster_response_with_unexpected_endpoint_type
+  testParseSuccessfulDescribeClusterResponse | skipped | package-private static helper, not generated; core: test_parse_successful_describe_cluster_response
   testGetOrCreateListValue | skipped | package-private static helper, not generated; core: none
   testCalcTimeoutMsRemainingAsInt | skipped | package-private static helper, not generated; core: none
   testPrettyPrintException | skipped | package-private static helper, not generated; core: none
@@ -98,9 +98,9 @@ KafkaAdminClientTest, 73 tests: 5 before, 8 internal, 8 telemetry, 31 MockClient
   testDescribeMetadataQuorumFailure | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testGetSubLevelError | skipped | package-private static helper, not generated; core: none
   testSuccessfulRetryAfterRequestTimeout | skipped | drives MockClient; core: no same-named core test
-  testDefaultApiTimeout | skipped | MockTime / MockClient; core: none (the call timeout itself is test_admin_client.py::test_create_topics_futures_fail_with_the_call_timeout)
-  testDefaultApiTimeoutOverride | skipped | MockTime / MockClient; core: none (the call timeout itself is test_admin_client.py::test_create_topics_futures_fail_with_the_call_timeout)
-  testRequestTimeoutExceedingDefaultApiTimeout | skipped | drives MockClient; core: no same-named core test
+  testDefaultApiTimeout | skipped | MockTime / MockClient; core: test_default_api_timeout
+  testDefaultApiTimeoutOverride | skipped | MockTime / MockClient; core: test_default_api_timeout_override
+  testRequestTimeoutExceedingDefaultApiTimeout | skipped | drives MockClient; core: test_request_timeout_exceeding_default_api_timeout
   testUnregisterBrokerSuccess | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testUnregisterBrokerFailure | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
   testUnregisterBrokerTimeoutAndSuccessRetry | skipped | subject not generated (Streams/Share/Raft/Quorum/UnregisterBroker, or a deprecated API)
@@ -145,7 +145,7 @@ KafkaAdminClientConfigTest, 19 tests: 18 MockClient, 1 now.
   testDescribeClientMetricsConfigs | skipped | drives MockClient; core: test_describe_client_metrics_configs
   testDescribeConsumerGroupConfigs | skipped | drives MockClient; core: no same-named core test
   testIncrementalAlterConfigs | skipped | drives MockClient; core: test_incremental_alter_configs
-  testIncrementalAlterConfigsToController | skipped | drives MockClient; core: no same-named core test
+  testIncrementalAlterConfigsToController | skipped | drives MockClient; core: test_incremental_alter_configs_to_controller
   testDescribeClientQuotas | skipped | drives MockClient; core: test_describe_client_quotas
   testEqualsOfClientQuotaFilterComponent | ported now | test_equals_of_client_quota_filter_component
   testAlterClientQuotas | skipped | drives MockClient; core: test_alter_client_quotas

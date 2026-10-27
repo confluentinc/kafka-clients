@@ -28,6 +28,17 @@ use crate::ffi::ffi_guard;
 /// delivers it as an owned `Admin_t`, freed with `kafka_admin_Admin_destroy`.
 /// The configuration stays the caller's and can build further clients.
 ///
+/// # Errors
+///
+/// Returns NULL and sets `out_err` to a Kafka error, `Failed to create new
+/// KafkaAdminClient`, whose cause is the failure: neither or both of
+/// `bootstrap.servers` and `bootstrap.controllers` are set (a config error, as
+/// Java's `KafkaAdminClient.determineBootstrapType` throws), the bootstrap
+/// addresses cannot be resolved, the channel builder cannot be created, or
+/// `default.api.timeout.ms` is set explicitly below `request.timeout.ms` (a
+/// config error, as Java's `KafkaAdminClient.configureDefaultApiTimeoutMs`
+/// throws).
+///
 /// # Safety
 ///
 /// `config` must be a live handle and `out_err` a valid slot pointing at null.

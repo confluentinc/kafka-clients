@@ -28,13 +28,6 @@
 //! - `config.providers`: config providers are not translated, so the key is
 //!   left undefined and a value set for it is reported as unused, rather than
 //!   accepted and ignored.
-//! - `bootstrap.controllers`: bootstrapping through the controllers (KIP-919)
-//!   is not implemented, so the key is left undefined and a value set for it
-//!   is reported as unused. Without `bootstrap.servers` the client then fails
-//!   to build, whatever `bootstrap.resolve.timeout.ms` is, as Java's does:
-//!   with `ClientUtils`'s "No resolvable bootstrap urls given in
-//!   bootstrap.servers", where Java's `KafkaAdminClient.determineBootstrapType`
-//!   says "You must set either bootstrap.servers or bootstrap.controllers".
 //! - `enable.metrics.push`: KIP-714 client telemetry is not implemented, so
 //!   the key is left undefined and a value set for it is reported as unused,
 //!   rather than accepted and ignored.
@@ -67,9 +60,13 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ValidList::any_non_duplicate_values(true, false),
             Importance::High,
         )
-        // Java defines `bootstrap.controllers` here
-        // (`AdminClientConfig.java:173-178`); it is left undefined until
-        // bootstrapping through the controllers (KIP-919) is implemented.
+        .define_with_validator(
+            AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG,
+            Type::List,
+            Vec::<String>::new(),
+            ValidList::any_non_duplicate_values(true, false),
+            Importance::High,
+        )
         .define(AdminClientConfig::CLIENT_ID_CONFIG, Type::String, "", Importance::Medium)
         .define_with_validator(
             AdminClientConfig::METADATA_MAX_AGE_CONFIG,
@@ -254,6 +251,7 @@ pub struct AdminClientConfig {
     /// used when it is built from this configuration (`ValuesReader`).
     read_keys: Vec<&'static str>,
     bootstrap_servers: Vec<String>,
+    bootstrap_controllers: Vec<String>,
     client_dns_lookup: ClientDnsLookup,
     client_id: String,
     request_timeout_ms: i32,
@@ -299,6 +297,7 @@ impl fmt::Debug for AdminClientConfig {
             config,
             read_keys: _,
             bootstrap_servers,
+            bootstrap_controllers,
             client_dns_lookup,
             client_id,
             request_timeout_ms,
@@ -325,6 +324,7 @@ impl fmt::Debug for AdminClientConfig {
         let originals: BTreeSet<&str> = config.originals_map().keys().map(String::as_str).collect();
         f.debug_struct("AdminClientConfig")
             .field("bootstrap_servers", bootstrap_servers)
+            .field("bootstrap_controllers", bootstrap_controllers)
             .field("client_dns_lookup", client_dns_lookup)
             .field("client_id", client_id)
             .field("request_timeout_ms", request_timeout_ms)
@@ -374,6 +374,15 @@ impl Hash for AdminClientConfig {
 impl AdminClientConfig {
     /// `bootstrap.servers`
     pub const BOOTSTRAP_SERVERS_CONFIG: &'static str = "bootstrap.servers";
+    /// `bootstrap.controllers` (KIP-919): a list of host/port pairs to use for
+    /// establishing the initial connection to the KRaft controller quorum. This
+    /// list should be in the form `host1:port1,host2:port2,...`.
+    ///
+    /// Set it in place of `bootstrap.servers`: the client then talks to the
+    /// controllers directly, and fails at once every call the controllers
+    /// cannot serve. Setting both, or neither, fails client creation, as
+    /// Java's `KafkaAdminClient.determineBootstrapType` does.
+    pub const BOOTSTRAP_CONTROLLERS_CONFIG: &'static str = "bootstrap.controllers";
     /// Config key: `client.dns.lookup`. Java's `AdminClientConfig.java` declares it as its
     /// own public alias of `CommonClientConfigs.CLIENT_DNS_LOOKUP_CONFIG`.
     pub const CLIENT_DNS_LOOKUP_CONFIG: &'static str = CommonClientConfigs::CLIENT_DNS_LOOKUP_CONFIG;
@@ -427,9 +436,10 @@ impl AdminClientConfig {
     ///
     /// Returns [`Error::Config`] if a value fails to parse or validate, with
     /// `ConfigDef`'s message, or if a SASL `security.protocol` has an empty
-    /// `sasl.mechanism`. An empty `bootstrap.servers` is accepted here, as in
-    /// Java; the client built from it fails (see
-    /// [`KafkaAdminClient`](crate::admin::KafkaAdminClient)).
+    /// `sasl.mechanism`. Any combination of `bootstrap.servers` and
+    /// `bootstrap.controllers` is accepted here, as in Java: exactly one of
+    /// them must be set, but the client checks it when it is created
+    /// ([`AdminClient::create`](crate::admin::AdminClient::create)).
     ///
     /// A SASL `security.protocol` with a `sasl.mechanism` other than `PLAIN`
     /// returns a [`ConfigError`](crate::common::config::ConfigError): Java accepts any mechanism
@@ -494,6 +504,9 @@ impl AdminClientConfig {
         )?;
         let mut values = ValuesReader::new(&config);
         let bootstrap_servers = values.list(Self::BOOTSTRAP_SERVERS_CONFIG)?.to_vec();
+        // Read, and so marked used by the client, whichever list it bootstraps
+        // from, as Java's `determineBootstrapType` reads both.
+        let bootstrap_controllers = values.list(Self::BOOTSTRAP_CONTROLLERS_CONFIG)?.to_vec();
         let client_dns_lookup = ClientDnsLookup::parse_config_value(values.string(Self::CLIENT_DNS_LOOKUP_CONFIG)?)?;
         let client_id = values.string(Self::CLIENT_ID_CONFIG)?.to_string();
         let request_timeout_ms = values.int(Self::REQUEST_TIMEOUT_MS_CONFIG)?;
@@ -543,6 +556,7 @@ impl AdminClientConfig {
             config,
             read_keys,
             bootstrap_servers,
+            bootstrap_controllers,
             client_dns_lookup,
             client_id,
             request_timeout_ms,
@@ -696,6 +710,11 @@ impl AdminClientConfig {
         &self.bootstrap_servers
     }
 
+    /// The `bootstrap.controllers` list (KIP-919), empty when unset.
+    pub(crate) fn bootstrap_controllers(&self) -> &[String] {
+        &self.bootstrap_controllers
+    }
+
     /// `client.dns.lookup`.
     pub(crate) fn client_dns_lookup(&self) -> ClientDnsLookup {
         self.client_dns_lookup
@@ -714,6 +733,15 @@ impl AdminClientConfig {
     /// `default.api.timeout.ms`.
     pub(crate) fn default_api_timeout_ms(&self) -> i32 {
         self.default_api_timeout_ms
+    }
+
+    /// Whether the user set `key` explicitly.
+    ///
+    /// Java's `config.originals().containsKey(key)`: a key is "user
+    /// configured" iff it appears in the properties the configuration was
+    /// built from, not merely because it has a (possibly derived) value.
+    pub(crate) fn user_configured(&self, key: &str) -> bool {
+        self.config.originals_map().contains_key(key)
     }
 
     /// `retries`.
@@ -925,20 +953,63 @@ mod tests {
         );
     }
 
-    /// Without `bootstrap.servers` the configuration builds, as Java's does;
-    /// the client fails later (`kafka_admin_client.rs`'s
-    /// `test_missing_bootstrap_fails_creation`). `bootstrap.controllers` is
-    /// not defined, so a value set for it is only reported as unused.
+    /// Java's `AdminClientConfig` does not require a bootstrap list: an empty
+    /// map is a valid config, and `KafkaAdminClient.determineBootstrapType`
+    /// rejects it when the client is created (`kafka_admin_client.rs`'s
+    /// `test_missing_bootstrap_fails_creation`).
     #[test]
-    fn missing_bootstrap_builds_and_controllers_is_unused() {
+    fn missing_bootstrap_is_accepted_by_the_config() {
         let config = AdminClientConfig::new(&HashMap::new()).unwrap();
         assert!(config.bootstrap_servers().is_empty());
+        assert!(config.bootstrap_controllers().is_empty());
+    }
 
-        let props = HashMap::from([("bootstrap.controllers".to_string(), "c:9093".to_string())]);
+    /// `bootstrap.controllers` (KIP-919) is defined as Java defines it
+    /// (`AdminClientConfig.java:173-178`): a `LIST`, empty by default,
+    /// validated with `ValidList.anyNonDuplicateValues(true, false)`, and
+    /// accepted in any combination with `bootstrap.servers`, which
+    /// `KafkaAdminClient.determineBootstrapType` checks when the client is
+    /// created. The client reads it whichever list it bootstraps from, so it
+    /// is never reported as unused.
+    #[test]
+    fn bootstrap_controllers() {
+        assert_eq!(AdminClientConfig::BOOTSTRAP_CONTROLLERS_CONFIG, "bootstrap.controllers");
+        let props = HashMap::from([("bootstrap.controllers".to_string(), "c:9093, d:9093".to_string())]);
         let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_controllers(), ["c:9093".to_string(), "d:9093".to_string()]);
         assert!(config.bootstrap_servers().is_empty());
         config.mark_read_keys_used();
-        assert!(config.unused().contains("bootstrap.controllers"));
+        assert!(config.unused().is_empty(), "{:?}", config.unused());
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "a:9092".to_string()),
+            ("bootstrap.controllers".to_string(), "c:9093".to_string()),
+        ]);
+        let config = AdminClientConfig::new(&props).unwrap();
+        assert_eq!(config.bootstrap_servers(), ["a:9092".to_string()]);
+        assert_eq!(config.bootstrap_controllers(), ["c:9093".to_string()]);
+
+        for value in ["", " "] {
+            let props = HashMap::from([("bootstrap.controllers".to_string(), value.to_string())]);
+            assert!(
+                AdminClientConfig::new(&props).unwrap().bootstrap_controllers().is_empty(),
+                "{value:?}"
+            );
+        }
+        // `ConfigDef.parseValue` removes duplicates (with a warning) before validating.
+        let props = HashMap::from([("bootstrap.controllers".to_string(), "c:1,c:1".to_string())]);
+        assert_eq!(
+            AdminClientConfig::new(&props).unwrap().bootstrap_controllers(),
+            ["c:1".to_string()]
+        );
+
+        let props = HashMap::from([("bootstrap.controllers".to_string(), "c:1,,d:1".to_string())]);
+        match AdminClientConfig::new(&props) {
+            Err(Error::Config(e)) => {
+                assert_eq!(e.message(), "Configuration 'bootstrap.controllers' values must not be empty.")
+            },
+            other => panic!("Expected Config, got: {other:?}"),
+        }
     }
 
     /// `enable.metrics.push` is not defined until KIP-714 client telemetry is
@@ -1138,10 +1209,7 @@ mod tests {
         );
         assert_eq!(config.get_string("client.id").unwrap(), Some("admin-1"));
         assert_eq!(config.get_list("bootstrap.servers").unwrap(), Some(&["a:9092".to_string()][..]));
-        assert_eq!(
-            config.get_list("bootstrap.controllers").unwrap_err().message(),
-            "Unknown configuration 'bootstrap.controllers'"
-        );
+        assert_eq!(config.get_list("bootstrap.controllers").unwrap(), Some(&[][..]));
         assert_eq!(config.get_string("sasl.jaas.config").unwrap(), None);
 
         let err = config.get_int("no.such.key").unwrap_err();
@@ -1160,6 +1228,7 @@ mod tests {
         let names = AdminClientConfig::config_names();
         for key in [
             "bootstrap.servers",
+            "bootstrap.controllers",
             "client.id",
             "metadata.recovery.strategy",
             "metadata.cluster.check.enable",
@@ -1173,7 +1242,6 @@ mod tests {
             "metric.reporters",
             "security.providers",
             "config.providers",
-            "bootstrap.controllers",
             "enable.metrics.push",
             "ssl.keystore.password",
             "ssl.key.password",
@@ -1482,8 +1550,9 @@ mod tests {
             "Configuration 'bootstrap.servers' values must not be empty."
         );
         // Admin allows an empty list (`isEmptyAllowed = true`), so the
-        // ValidList message never appears and the configuration builds; the
-        // client built from it fails in `ClientUtils.parseAndValidateAddresses`.
+        // ValidList message never appears and the configuration builds;
+        // `KafkaAdminClient.determineBootstrapType` rejects the missing
+        // bootstrap list when the client is created.
         for value in ["", "  "] {
             let props = HashMap::from([("bootstrap.servers".to_string(), value.to_string())]);
             assert!(
