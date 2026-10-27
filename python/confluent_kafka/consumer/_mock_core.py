@@ -587,13 +587,11 @@ class MockConsumerCore(Generic[K, V]):
 
     def _c_close(self, option: CloseOptions) -> None:
         """Java's ``close()`` / ``close(CloseOptions)``, both of which only mark
-        the mock closed, a null ``option`` included (it is never read); the
-        callbacks it holds are released (Threads and callbacks)."""
+        the mock closed, a null ``option`` included (it is never read): the
+        listener and the scheduled poll tasks are kept, so ``rebalance()`` after
+        ``close()`` still runs the listener, as on Java's mock."""
         with self._lock:
             self._mock_closed = True
-            self._subscriptions.release_rebalance_listener()
-            with self._poll_tasks_lock:
-                self._poll_tasks.clear()
 
     def _c_wakeup(self) -> None:
         self._wakeup_requested = True

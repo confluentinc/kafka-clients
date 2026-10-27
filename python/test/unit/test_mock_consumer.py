@@ -778,20 +778,51 @@ def test_close_with_a_negative_timeout_closes_the_mock() -> None:
     assert consumer.closed()
 
 
-def test_close_releases_the_listener() -> None:
-    import gc
-    import weakref
-
+def test_close_only_marks_the_mock_closed() -> None:
+    # Java's MockConsumer.close() only sets `closed`: the listener and the poll
+    # tasks stay, and rebalance(), which does not check for a closed consumer,
+    # still runs the listener.
     consumer = earliest()
-    listener = _NoOpListener()
-    ref = weakref.ref(listener)
-    consumer.subscribe(topics=["t"], callback=listener)
-    del listener
-    gc.collect()
-    assert ref() is not None
+    events: list[tuple[str, set[TopicPartition]]] = []
+
+    class Recording(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            events.append(("revoked", set(partitions)))
+
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            events.append(("assigned", set(partitions)))
+
+    consumer.subscribe(topics=["t"], callback=Recording())
+    ran: list[str] = []
+    consumer.schedule_poll_task(task=lambda: ran.append("task"))
     consumer.close()
-    gc.collect()
-    assert ref() is None
+    assert consumer.closed()
+    consumer.rebalance(new_assignment=[tp("t", 0)])
+    assert events == [("assigned", {tp("t", 0)})]
+    assert consumer._poll_tasks and not ran  # kept, though no poll() can run it now
+
+
+def test_async_close_only_marks_the_mock_closed() -> None:
+    async def main() -> None:
+        consumer: AsyncMockConsumer[str, str] = AsyncMockConsumer(
+            offset_reset_strategy="earliest")
+        assigned: list[set[TopicPartition]] = []
+
+        class Recording(ConsumerRebalanceListener):
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+            async def on_partitions_assigned(  # type: ignore[override]
+                    self, partitions: set[TopicPartition]) -> None:
+                assigned.append(set(partitions))
+
+        await consumer.subscribe(topics=["t"], callback=Recording())
+        await consumer.close()
+        assert consumer.closed()
+        await consumer.rebalance(new_assignment=[tp("t", 0)])
+        assert assigned == [{tp("t", 0)}]
+
+    asyncio.run(main())
 
 
 def test_rebalance_needs_a_subscription() -> None:

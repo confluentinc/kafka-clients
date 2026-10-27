@@ -647,7 +647,8 @@ def test_async_mock_commit_nowait_inside_a_coroutine_callback_runs_its_callback(
 
 # ---------------------------------------------------------------------------
 # The listener's registration lifetime (retained while subscribed and across
-# unsubscribe; released by a replacing or listener-less subscribe, and by close)
+# unsubscribe; released by a replacing or listener-less subscribe, and by the
+# FFI-backed client's close; a mock's close only marks it closed, as Java's)
 # ---------------------------------------------------------------------------
 def listener() -> ConsumerRebalanceListener:
     return _NoOpListener()
@@ -668,7 +669,11 @@ def test_listener_retained_while_subscribed(make: Any) -> None:
     assert ref() is not None
     close(consumer)
     gc.collect()
-    assert ref() is None
+    if make is mock_consumer:
+        # Java's MockConsumer.close() only sets `closed`: the listener stays.
+        assert ref() is not None
+    else:
+        assert ref() is None
 
 
 @pytest.mark.parametrize("make", [kafka_consumer, mock_consumer])
