@@ -31,9 +31,7 @@ pub struct NewTopic {
     num_partitions: Option<i32>,
     replication_factor: Option<i16>,
     replicas_assignments: Option<BTreeMap<i32, Vec<i32>>>,
-    /// A `None` value is Java's `null` config value, which the request carries
-    /// as a null `CreatableTopicConfig.value`.
-    configs: Option<BTreeMap<String, Option<String>>>,
+    configs: Option<BTreeMap<String, String>>,
 }
 
 impl NewTopic {
@@ -122,7 +120,7 @@ impl NewTopic {
     /// This NewTopic object.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
-    pub fn set_configs(mut self, configs: Option<BTreeMap<String, Option<String>>>) -> Self {
+    pub fn set_configs(mut self, configs: Option<BTreeMap<String, String>>) -> Self {
         self.configs = configs;
         self
     }
@@ -130,7 +128,7 @@ impl NewTopic {
     /// Returns the configuration for the new topic or `None` if no configs were ever
     /// specified.
     #[doc(alias = "org.apache.kafka.clients.admin.NewTopic#configs")]
-    pub fn configs(&self) -> Option<&BTreeMap<String, Option<String>>> {
+    pub fn configs(&self) -> Option<&BTreeMap<String, String>> {
         self.configs.as_ref()
     }
 
@@ -156,7 +154,7 @@ impl NewTopic {
             for (name, value) in configs {
                 let mut config = CreatableTopicConfig::new();
                 config.set_name(name.clone());
-                config.set_value(value.clone());
+                config.set_value(Some(value.clone()));
                 creatable.configs.push(config);
             }
         }
@@ -167,7 +165,7 @@ impl NewTopic {
 /// Java's `toString()`: an unset partition
 /// count or replication factor renders as `default`, and the two maps as Java's
 /// `AbstractMap.toString()` renders them (`{0=[1, 2]}`, `{k=v}`), with `null`
-/// for a missing map or config value.
+/// for a missing map.
 impl std::fmt::Display for NewTopic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(name={}, numPartitions=", self.name)?;
@@ -209,7 +207,7 @@ impl std::fmt::Display for NewTopic {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    write!(f, "{name}={}", value.as_deref().unwrap_or("null"))?;
+                    write!(f, "{name}={value}")?;
                 }
                 f.write_str("}")?;
             },
@@ -253,7 +251,7 @@ mod tests {
     #[test]
     fn configs_builder_is_fluent() {
         let mut configs = BTreeMap::new();
-        configs.insert("retention.ms".to_string(), Some("1000".to_string()));
+        configs.insert("retention.ms".to_string(), "1000".to_string());
         let topic =
             NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(configs.clone()));
         assert_eq!(topic.configs(), Some(&configs));
@@ -275,7 +273,7 @@ mod tests {
         let mut assignments = BTreeMap::new();
         assignments.insert(0, vec![1, 2]);
         let mut configs = BTreeMap::new();
-        configs.insert("cleanup.policy".to_string(), Some("compact".to_string()));
+        configs.insert("cleanup.policy".to_string(), "compact".to_string());
         let creatable = NewTopic::with_replicas_assignments("t", assignments)
             .set_configs(Some(configs))
             .convert_to_creatable_topic();
@@ -333,7 +331,7 @@ mod tests {
 
         let topic1 = topic1.set_configs(Some(BTreeMap::from([(
             CLEANUP_POLICY_CONFIG_KEY.to_string(),
-            Some(CLEANUP_POLICY_CONFIG_VALUE.to_string()),
+            CLEANUP_POLICY_CONFIG_VALUE.to_string(),
         )])));
         let expected2 = format!(
             "(name={TEST_TOPIC}, numPartitions={NUM_PARTITIONS}, replicationFactor={REPLICATION_FACTOR}, \
@@ -380,25 +378,6 @@ mod tests {
         assert_ne!(hash_code(&topic1), hash_code(&topic3));
     }
 
-    /// New test, no Java original: a `null` config value, which Java's map
-    /// allows, reaches the request as a null `CreatableTopicConfig.value`
-    /// (`NewTopic#convertToCreatableTopic`) and renders as `null`.
-    #[test]
-    fn a_null_config_value_is_sent_and_printed_as_null() {
-        let topic = NewTopic::with_num_partitions_replication_factor(
-            TEST_TOPIC,
-            Some(NUM_PARTITIONS),
-            Some(REPLICATION_FACTOR),
-        )
-        .set_configs(Some(BTreeMap::from([(CLEANUP_POLICY_CONFIG_KEY.to_string(), None)])));
-        assert_eq!(topic.configs().unwrap()[CLEANUP_POLICY_CONFIG_KEY], None);
-        let creatable = topic.convert_to_creatable_topic();
-        assert_eq!(creatable.configs.len(), 1);
-        assert_eq!(creatable.configs[0].name, CLEANUP_POLICY_CONFIG_KEY);
-        assert_eq!(creatable.configs[0].value, None);
-        assert!(topic.to_string().ends_with("configs={cleanup.policy=null})"), "{topic}");
-    }
-
     /// New test, no Java original: Java's `configs(null)` clears configs set
     /// earlier (`NewTopic#configs(Map)`), so none are sent.
     #[test]
@@ -410,7 +389,7 @@ mod tests {
         )
         .set_configs(Some(BTreeMap::from([(
             CLEANUP_POLICY_CONFIG_KEY.to_string(),
-            Some(CLEANUP_POLICY_CONFIG_VALUE.to_string()),
+            CLEANUP_POLICY_CONFIG_VALUE.to_string(),
         )])))
         .set_configs(None);
         assert_eq!(topic.configs(), None);

@@ -276,7 +276,7 @@ use std::collections::HashSet;
 ///     Some(12),
 ///     Some(3),
 /// )
-/// .set_configs(BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))]);
+/// .set_configs(Some(BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())])))]);
 ///
 /// // Call values() to get the result for a specific topic
 /// let future = result.values()[topic_name].clone();

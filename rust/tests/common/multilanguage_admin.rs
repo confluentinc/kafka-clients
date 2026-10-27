@@ -950,19 +950,7 @@ fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
         // encoding the wire and both bindings use.
         num_partitions: topic.num_partitions(),
         replication_factor: topic.replication_factor() as i32,
-        // The proto's `map<string, string>` cannot carry Java's `null` config
-        // value; no test sends one.
-        configs: topic
-            .configs()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, value)| {
-                let value =
-                    value.unwrap_or_else(|| panic!("NewTopic config {name} is null, which the proto cannot carry"));
-                (name, value)
-            })
-            .collect(),
+        configs: topic.configs().cloned().unwrap_or_default().into_iter().collect(),
         replicas_assignments: topic
             .replicas_assignments()
             .map(|assignments| {

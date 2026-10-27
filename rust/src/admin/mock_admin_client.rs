@@ -1112,7 +1112,7 @@ fn config_from_new_topic(new_topic: &NewTopic) -> Config {
         .map(|configs| {
             configs
                 .iter()
-                .map(|(k, v)| ConfigEntry::new(k.clone(), v.clone()))
+                .map(|(k, v)| ConfigEntry::new(k.clone(), Some(v.clone())))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1397,9 +1397,10 @@ impl Admin for MockAdminClient {
                     is_internal: false,
                     partitions,
                     partition_log_dirs,
-                    // Java stores the map as given, `null` values included
-                    // (`MockAdminClient#createTopics`).
-                    configs: new_topic.configs().cloned(),
+                    // Java stores the map as given (`MockAdminClient#createTopics`).
+                    configs: new_topic
+                        .configs()
+                        .map(|configs| configs.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect()),
                     marked_for_deletion: false,
                     fetches_remaining_until_visible: 0,
                 },
@@ -3623,31 +3624,6 @@ mod tests {
         result.values()[resource].get().await.unwrap()
     }
 
-    /// New test, no Java original: Java's mock stores a created topic's configs
-    /// as given (`MockAdminClient#createTopics`), so a config set to `null` reads
-    /// back from `describeConfigs` as `new ConfigEntry(key, null)`, not as an
-    /// empty value (`MockAdminClient#toConfigObject`).
-    #[tokio::test]
-    async fn describe_configs_returns_a_null_value_given_to_create_topics() {
-        let client = admin();
-        let new_topic = NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(
-            BTreeMap::from([
-                ("cleanup.policy".to_string(), None),
-                ("retention.ms".to_string(), Some("1000".to_string())),
-            ]),
-        ));
-        client
-            .create_topics_with_options(&[new_topic], CreateTopicsOptions::new())
-            .all()
-            .get()
-            .await
-            .unwrap();
-
-        let config = described(&client, &ConfigResource::new(config_resource::Type::Topic, "t".to_string())).await;
-        assert_eq!(config.get("cleanup.policy").expect("the null config is stored").value(), None);
-        assert_eq!(config.get("retention.ms").unwrap().value(), Some("1000"));
-    }
-
     /// New test, no Java original: Java's `incrementalAlterConfigs` stores a
     /// `SET` value as given, `null` included, for every resource type
     /// (`MockAdminClient#handleIncrementalResourceAlteration`), so `describeConfigs` reads
@@ -3721,7 +3697,7 @@ mod tests {
     async fn describe_configs_topic_returns_stored_configs() {
         let client = admin();
         let mut configs = BTreeMap::new();
-        configs.insert("retention.ms".to_string(), Some("1000".to_string()));
+        configs.insert("retention.ms".to_string(), "1000".to_string());
         let new_topic =
             NewTopic::with_num_partitions_replication_factor("t", Some(1), Some(1)).set_configs(Some(configs));
         client
