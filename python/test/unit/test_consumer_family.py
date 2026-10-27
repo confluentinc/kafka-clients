@@ -41,6 +41,18 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.consumer._mock_core import MockConsumerCore
 
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
 TP = TopicPartition(topic="t", partition=0)
 CONFIGS = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer", "group.id": "g"}
 
@@ -159,11 +171,11 @@ def test_rebalance_listener_defaults() -> None:
         def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
             calls.append(("revoked", partitions))
 
-    # The abstract methods are no-ops; the default onPartitionsLost calls
-    # onPartitionsRevoked. They are called positionally.
-    ConsumerRebalanceListener().on_partitions_revoked({TP})
-    ConsumerRebalanceListener().on_partitions_assigned({TP})
-    ConsumerRebalanceListener().on_partitions_lost({TP})
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+    # The default onPartitionsLost calls onPartitionsRevoked. They are called
+    # positionally.
     Revokes().on_partitions_lost({TP})
     assert calls == [("revoked", {TP})]
 
@@ -229,6 +241,39 @@ def test_constructors_are_keyword_only() -> None:
 SUBSCRIBE_MESSAGE = ("subscribe() takes one of (topics), (topics, callback), (pattern, callback), "
                      "(pattern); got ")
 SEEK_MESSAGE = "seek() takes one of (partition, offset), (partition, offset_and_metadata); got "
+def test_rebalance_listener_is_abstract() -> None:
+    """Java's abstract onPartitionsRevoked / onPartitionsAssigned stay abstract:
+    the base and a subclass missing either fail at construction, as a Java
+    implementation missing one fails to compile; onPartitionsLost has a default."""
+    assert inspect.isabstract(ConsumerRebalanceListener)
+    assert ConsumerRebalanceListener.__abstractmethods__ == frozenset(
+        {"on_partitions_revoked", "on_partitions_assigned"})
+
+    class OnlyRevoked(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+    class OnlyAssigned(ConsumerRebalanceListener):
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+    class AsyncBoth(ConsumerRebalanceListener):
+        async def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+        async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
+    for cls, missing in [(ConsumerRebalanceListener, "on_partitions_assigned"),
+                         (OnlyRevoked, "on_partitions_assigned"),
+                         (OnlyAssigned, "on_partitions_revoked")]:
+        with pytest.raises(TypeError) as e:
+            cls()  # type: ignore[abstract]
+        assert f"Can't instantiate abstract class {cls.__name__}" in str(e.value)
+        assert missing in str(e.value)
+    assert isinstance(AsyncBoth(), ConsumerRebalanceListener)
+
+
 COMMIT_NOWAIT_MESSAGE = "commit_nowait() takes one of (), (callback), (offsets, callback); got "
 
 
@@ -236,8 +281,8 @@ COMMIT_NOWAIT_MESSAGE = "commit_nowait() takes one of (), (callback), (offsets, 
     ({}, "()"),
     ({"topics": ["t"], "pattern": SubscriptionPattern(pattern="t")}, "(topics, pattern)"),
     ({"topics": ["t"], "pattern": SubscriptionPattern(pattern="t"),
-      "callback": ConsumerRebalanceListener()}, "(topics, pattern, callback)"),
-    ({"callback": ConsumerRebalanceListener()}, "(callback)"),
+      "callback": _NoOpListener()}, "(topics, pattern, callback)"),
+    ({"callback": _NoOpListener()}, "(callback)"),
 ])
 def test_subscribe_rejects_a_non_java_combination(kwargs: dict[str, Any], given: str) -> None:
     with pytest.raises(IllegalArgumentError) as e:
@@ -316,7 +361,7 @@ def test_the_async_classes_check_the_same_forms() -> None:
 
 def test_every_stub_form_works() -> None:
     c = mock()
-    listener = ConsumerRebalanceListener()
+    listener = _NoOpListener()
     c.subscribe(topics=["t"])
     c.subscribe(topics=["t"], callback=listener)
     c.unsubscribe()

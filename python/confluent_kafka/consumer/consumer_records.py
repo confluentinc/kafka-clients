@@ -60,8 +60,14 @@ class ConsumerRecords(Generic[K, V]):
         raise ``TypeError`` where Java's dereference throws."""
         if next_offsets is None:
             raise TypeError("next_offsets must not be None")
+        # Java stores the records map as given, a None list included (Class family).
         self._records: dict[TopicPartition, tuple[ConsumerRecord[K, V], ...]] | None = (
-            None if records is None else {tp: tuple(recs) for tp, recs in records.items()})
+            None if records is None
+            else {tp: None if recs is None else tuple(recs)
+                  for tp, recs in records.items()})
+        # Map.copyOf rejects a null key or value (Types).
+        if any(k is None or v is None for k, v in next_offsets.items()):
+            raise TypeError("next_offsets must not contain None")
         self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = dict(next_offsets)
 
     @overload
@@ -76,15 +82,20 @@ class ConsumerRecords(Generic[K, V]):
         one, as Java's map lookup), or for the given topic (``None`` raises
         Java's ``IllegalArgumentError``)."""
         if partition is not MISSING:
-            return list(self._by_partition().get(partition, ()))
+            recs = self._by_partition().get(partition)
+            # Java's `if (recs == null) return Collections.emptyList()`.
+            return [] if recs is None else list(recs)
         if topic is None:
             from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
             raise IllegalArgumentError(message="Topic must be non-None.")
         result: list[ConsumerRecord[K, V]] = []
         for tp, recs in self._by_partition().items():
+            if tp is None:
+                # Java's entry.getKey().topic() dereferences the key (Types).
+                raise TypeError("records must not contain a None key")
             if tp.topic() == topic:
-                result.extend(recs)
+                result.extend(_given(recs))
         return result
 
     def next_offsets(self) -> dict[TopicPartition, OffsetAndMetadata]:
@@ -109,11 +120,11 @@ class ConsumerRecords(Generic[K, V]):
 
     def __iter__(self) -> Iterator[ConsumerRecord[K, V]]:
         # Not a generator: a null records map throws here, as Java's iterator().
-        return (r for recs in self._by_partition().values() for r in recs)
+        return (r for recs in self._by_partition().values() for r in _given(recs))
 
     def __len__(self) -> int:
         """The number of records for all topics (Java's ``count()``)."""
-        return sum(len(recs) for recs in self._by_partition().values())
+        return sum(len(_given(recs)) for recs in self._by_partition().values())
 
     def is_empty(self) -> bool:
         return not self._by_partition()
@@ -127,6 +138,14 @@ class ConsumerRecords(Generic[K, V]):
     @staticmethod
     def empty() -> ConsumerRecords[Any, Any]:
         return ConsumerRecords.EMPTY
+
+
+def _given(recs: tuple[ConsumerRecord[Any, Any], ...] | None) -> tuple[ConsumerRecord[Any, Any], ...]:
+    """A partition's records, which Java dereferences here (``recs.size()``, the
+    concatenated iterator): ``TypeError`` for a stored ``None`` (Types)."""
+    if recs is None:
+        raise TypeError("records must not contain None")
+    return recs
 
 
 ConsumerRecords.EMPTY = ConsumerRecords(records={}, next_offsets={})

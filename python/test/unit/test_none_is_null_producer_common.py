@@ -29,14 +29,14 @@ from confluent_kafka import IllegalArgumentError, IllegalStateError
 from confluent_kafka._args import MISSING
 from confluent_kafka.common import (
     KafkaFuture,
-    KafkaPrincipal,
     Node,
     TopicIdPartition,
     TopicPartition,
     TopicPartitionInfo,
     Uuid,
 )
-from confluent_kafka.common.token_information import TokenInformation
+from confluent_kafka.common.security.auth import KafkaPrincipal
+from confluent_kafka.common.security.token.delegation.token_information import TokenInformation
 from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata, OffsetAndTimestamp
 from confluent_kafka.producer import (
     AsyncKafkaProducer,

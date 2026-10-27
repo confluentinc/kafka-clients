@@ -39,6 +39,18 @@ from confluent_kafka.consumer import (
     OffsetAndMetadata,
 )
 
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
 TP = TopicPartition(topic="t", partition=0)
 CONFIGS = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer", "group.id": "g"}
 
@@ -638,7 +650,7 @@ def test_async_mock_commit_nowait_inside_a_coroutine_callback_runs_its_callback(
 # unsubscribe; released by a replacing or listener-less subscribe, and by close)
 # ---------------------------------------------------------------------------
 def listener() -> ConsumerRebalanceListener:
-    return ConsumerRebalanceListener()
+    return _NoOpListener()
 
 
 @pytest.mark.parametrize("make", [kafka_consumer, mock_consumer])
@@ -739,6 +751,9 @@ class FreshErrorListener(ConsumerRebalanceListener):
         self.raised.append(weakref.ref(error))
         raise error
 
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
+
 
 class AsyncFreshErrorListener(ConsumerRebalanceListener):
     def __init__(self) -> None:
@@ -750,6 +765,9 @@ class AsyncFreshErrorListener(ConsumerRebalanceListener):
         self.raised.append(weakref.ref(error))
         raise error
 
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
+
 
 class HeldErrorListener(ConsumerRebalanceListener):
     """Raises the exception the test holds, to count its references."""
@@ -760,6 +778,9 @@ class HeldErrorListener(ConsumerRebalanceListener):
     def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
         raise self.error
 
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
+
 
 class AsyncHeldErrorListener(ConsumerRebalanceListener):
     def __init__(self, error: BaseException) -> None:
@@ -768,6 +789,9 @@ class AsyncHeldErrorListener(ConsumerRebalanceListener):
     async def on_partitions_assigned(  # type: ignore[override]
             self, partitions: set[TopicPartition]) -> None:
         raise self.error
+
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
 
 
 def test_the_listener_exception_lives_in_its_error_until_it_is_dropped() -> None:

@@ -44,9 +44,9 @@ from confluent_kafka.admin import (
     NewTopic,
     OffsetSpec,
 )
+from confluent_kafka.common.acl import AclBindingFilter
+from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common import (
-    AclBindingFilter,
-    KafkaPrincipal,
     Node,
     TopicCollection,
     TopicPartition,

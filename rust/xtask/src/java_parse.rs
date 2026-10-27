@@ -148,6 +148,8 @@ pub struct JavaClass {
     pub singletons: Vec<Singleton>,
     /// Public static factories, which become `@staticmethod`s.
     pub factories: Vec<Factory>,
+    /// The `return` expression of a `toString()` override, normalized.
+    pub to_string: Option<String>,
 }
 
 type Res<T> = anyhow::Result<T>;
@@ -773,6 +775,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
     let mut enums = Vec::new();
     let mut singletons = Vec::new();
     let mut factories = Vec::new();
+    let mut to_string = None;
 
     // Walk the members at depth 1: each ends with `;` or a `{...}` block.
     let b = body.as_bytes();
@@ -906,7 +909,15 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
                     _ => anyhow::bail!("{simple}.{name}(...): unsupported public method `{header}`"),
                 }
             }
-            if matches!(name.as_str(), "toString" | "fillInStackTrace" | "hashCode") {
+            if name == "toString" {
+                let stmt = normalize_ws(block.trim().trim_end_matches(';').trim());
+                let Some(expr) = stmt.strip_prefix("return ") else {
+                    anyhow::bail!("{simple}.toString(): unsupported body `{stmt}`")
+                };
+                to_string = Some(expr.trim().to_string());
+                continue;
+            }
+            if matches!(name.as_str(), "fillInStackTrace" | "hashCode") {
                 continue;
             }
             let ret = before
@@ -945,6 +956,7 @@ pub fn parse_class(raw: &str) -> Res<JavaClass> {
         enums,
         singletons,
         factories,
+        to_string,
     })
 }
 

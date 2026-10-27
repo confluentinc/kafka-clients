@@ -59,22 +59,26 @@ from confluent_kafka.admin._internals import (
     _ProducerIdAndEpoch,
     _to_member_identity,
 )
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AccessControlEntryFilter,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
+)
+from confluent_kafka.common import (
     GroupState,
     GroupType,
+    TopicPartition,
+    TopicPartitionReplica,
+    Uuid,
+)
+from confluent_kafka.common.resource import (
     PatternType,
     ResourcePattern,
     ResourcePatternFilter,
     ResourceType,
-    TopicPartition,
-    TopicPartitionReplica,
-    Uuid,
 )
 from confluent_kafka.common.errors import (
     DuplicateResourceError,

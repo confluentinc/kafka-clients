@@ -322,7 +322,7 @@ impl Flavor {
 }
 
 /// The Python module a Java type lives in (CLAUDE.md, Python Binding
-/// Conventions, Modules): an admin type by its file, any other by its package.
+/// Conventions, Modules): an admin type by its file, any other by its Java package.
 fn py_module(fqcn: &str) -> Option<String> {
     let (pkg, simple) = fqcn.rsplit_once('.')?;
     if pkg == "org.apache.kafka.clients.admin" {
@@ -331,11 +331,10 @@ fn py_module(fqcn: &str) -> Option<String> {
     if pkg.contains(".internals") {
         return None;
     }
-    if pkg == "org.apache.kafka.common.config" || pkg.starts_with("org.apache.kafka.common.config.") {
-        return Some("confluent_kafka.common.config".into());
-    }
+    // Any other type: the module of its Java package (`common.acl.AclBinding` ->
+    // `confluent_kafka.common.acl`).
     if pkg == "org.apache.kafka.common" || pkg.starts_with("org.apache.kafka.common.") {
-        return Some("confluent_kafka.common".into());
+        return Some(format!("confluent_kafka.{}", &pkg["org.apache.kafka.".len()..]));
     }
     None
 }
@@ -1773,7 +1772,9 @@ impl Renderer<'_> {
         } else {
             p.clone()
         };
-        if f.optional {
+        // A copy keeps a `None` as `None`, as Java's constructor stores a null
+        // (CLAUDE.md, Python Binding Conventions, Class family).
+        if f.optional || value != p {
             format!("{target}._{} = None if {p} is None else {value}", f.py)
         } else {
             format!("{target}._{} = {value}", f.py)
@@ -1892,13 +1893,32 @@ impl Renderer<'_> {
         if !paras.is_empty() || !fields.is_empty() {
             body.push(docstring(8, &paras, &fields));
         }
-        for (p, f) in self.r.ctor.clone() {
-            let field = self.field(&f);
-            body.push(format!("        {}", self.store("self", &p, &field)));
-        }
         let [f] = self.r.fields.as_slice() else {
             return Err(self.st("a public constructor with several fields".into()));
         };
+        // The kind is read from the futures, so they are required: the one
+        // constructor that does not store a `None` (Class family).
+        let (f_py, f_optional) = (f.py.clone(), f.optional);
+        let mut guarded = None;
+        if !f_optional {
+            let ctor = self.r.ctor.clone();
+            if let Some((p, _)) = ctor.iter().find(|(_, g)| self.field(g).py == f_py) {
+                let p = snake(&p.name);
+                body.push(format!(
+                    "        if {p} is None:\n            raise TypeError(\"{p} must not be None\")"
+                ));
+                guarded = Some(p);
+            }
+        }
+        for (p, f) in self.r.ctor.clone() {
+            let field = self.field(&f);
+            let mut store = self.store("self", &p, &field);
+            if let Some(g) = &guarded {
+                store = store.replace(&format!("None if {g} is None else "), "");
+            }
+            body.push(format!("        {store}"));
+        }
+        let f = &self.r.fields[0];
         let futures = if f.ty.is_map() {
             format!("self._{}.values()", f.py)
         } else {
@@ -1938,12 +1958,13 @@ impl Renderer<'_> {
     }
 
     /// A Java concatenation's terms as Python (`java_str` for a non-`String`).
-    fn py_terms(&mut self, terms: &[Term], params: &[JParam]) -> Vec<String> {
+    fn py_terms(&mut self, terms: &[Term]) -> Vec<String> {
         terms
             .iter()
             .map(|t| match t {
                 Term::Lit(l) => l.clone(),
-                Term::Var(v) if params.iter().any(|p| &p.name == v && p.ty == "String") => snake(v),
+                // A `String` parameter through `java_str` too: Java's concatenation
+                // spells a `null` (as Python's `None`), which a bare `+` cannot.
                 Term::Var(v) => {
                     self.uses.java_str = true;
                     format!("java_str({})", snake(v))
@@ -1995,7 +2016,7 @@ impl Renderer<'_> {
             },
             Pat::Lookup { field, param, coordinator, message } => {
                 self.uses.illegal_argument = true;
-                let terms = self.py_terms(message, &m.params);
+                let terms = self.py_terms(message);
                 let p = snake(param);
                 let mut s = String::new();
                 let key = if *coordinator {
@@ -2078,7 +2099,7 @@ impl Renderer<'_> {
             Pat::SubErrorOne { future, partitions, message } => {
                 self.uses.when_complete();
                 self.uses.illegal_argument = true;
-                let terms = self.py_terms(message, &m.params);
+                let terms = self.py_terms(message);
                 let errs = self.sub_error_map(future)?;
                 let action = self.action_def("topic_partitions", &errs, "throwable");
                 SUB_ERROR_ONE
@@ -2098,7 +2119,7 @@ impl Renderer<'_> {
             },
             Pat::SubErrorHelper { message } => {
                 self.uses.sub_level_error = true;
-                let terms = self.py_terms(message, &m.params);
+                let terms = self.py_terms(message);
                 let errors = snake(&m.params[0].name);
                 format!(
                     "        assert {errors} is not None\n        exception = _sub_level_error(\n            {errors}, \
@@ -2228,8 +2249,9 @@ impl Renderer<'_> {
         let params = self.nested_params(n, false)?;
         s.push_str(&py_def(8, "__init__", &params, "None", false));
         for (f, t) in &n.fields {
+            // A copy keeps a `None` as `None`, as Java stores a null (Class family).
             let v = if matches!(t.name.as_str(), "List" | "Collection") {
-                format!("list({})", snake(f))
+                format!("None if {0} is None else list({0})", snake(f))
             } else {
                 snake(f)
             };
@@ -3105,7 +3127,10 @@ mod tests {
             ),
             "{py}"
         );
-        assert!(py.contains("result._futures = dict(futures)"), "{py}");
+        assert!(
+            py.contains("result._futures = None if futures is None else dict(futures)"),
+            "{py}"
+        );
         assert!(!pyi.contains("| None"), "{pyi}");
     }
 

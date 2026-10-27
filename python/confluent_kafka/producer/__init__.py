@@ -16,8 +16,8 @@
 
 The records (``ProducerRecord``, ``RecordMetadata``), the client family
 (``Producer``, ``KafkaProducer``, ``MockProducer`` and their ``Async`` peers),
-the ``Callback`` protocol, the ``Partitioner`` placeholder and the errors Java
-declares in this package (CLAUDE.md, Python Binding Conventions, Modules).
+the ``Callback`` protocol, the ``Partitioner`` placeholder, the constants of
+``ProducerConfig`` and the errors Java declares in this package (CLAUDE.md, Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from .kafka_producer import KafkaProducer as KafkaProducer
 from .mock_producer import MockProducer as MockProducer
 from .partitioner import Partitioner as Partitioner
 from .producer import Producer as Producer
+from .producer_config import ProducerConfig as ProducerConfig
 from .producer_record import ProducerRecord as ProducerRecord
 from .record_metadata import RecordMetadata as RecordMetadata
 
@@ -42,6 +43,7 @@ __all__ = [
     "MockProducer",
     "Partitioner",
     "Producer",
+    "ProducerConfig",
     "ProducerRecord",
     "RecordMetadata",
 ]

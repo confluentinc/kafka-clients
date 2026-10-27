@@ -167,14 +167,11 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.records_to_delete import RecordsToDelete
     from confluent_kafka.admin.topic_description import TopicDescription
     from confluent_kafka.admin.unregister_controller_result import UnregisterControllerResult
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import ClientQuotaAlteration, ClientQuotaFilter
+    from confluent_kafka.common.security.token.delegation import DelegationToken
     from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
-        ClientQuotaAlteration,
-        ClientQuotaFilter,
-        DelegationToken,
         ElectionType,
-        KafkaPrincipal,
         Node,
         TopicCollection,
         TopicPartition,
@@ -182,6 +179,7 @@ if TYPE_CHECKING:
         TopicPartitionReplica,
         Uuid,
     )
+    from confluent_kafka.common.security.auth import KafkaPrincipal
     from confluent_kafka.common.config import ConfigResource
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
     from confluent_kafka.consumer import OffsetAndMetadata
@@ -1288,7 +1286,12 @@ class MockAdminClientCore:
         from confluent_kafka.admin.create_delegation_token_result import (
             CreateDelegationTokenResult,
         )
-        from confluent_kafka.common import DelegationToken, KafkaPrincipal, TokenInformation, Uuid
+        from confluent_kafka.common.security.token.delegation import (
+            DelegationToken,
+            TokenInformation,
+        )
+        from confluent_kafka.common.security.auth import KafkaPrincipal
+        from confluent_kafka.common import Uuid
         from confluent_kafka.common.errors.invalid_principal_type_error import (
             InvalidPrincipalTypeError,
         )

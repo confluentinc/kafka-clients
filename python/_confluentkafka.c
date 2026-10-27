@@ -3564,8 +3564,8 @@ static PyObject* ConsumerRecord_get_delivery_count(ConsumerRecordObject* self, v
 }
 
 // The Python classes a fetched record's headers are built as --
-// `confluent_kafka.common.header.Header` and `confluent_kafka.common.headers.
-// Headers` -- and the slot descriptors of their fields, looked up once. The
+// `confluent_kafka.common.header.Header` and `confluent_kafka.common.header.Headers`
+// -- and the slot descriptors of their fields, looked up once. The
 // objects are allocated without running the classes' keyword constructors and
 // their slots set directly: the values are already in the form the
 // constructors would make (a str key, a read-only byte view).
@@ -3588,7 +3588,7 @@ static PyObject* slot_descriptor(PyTypeObject* type, const char* name) {
 
 static int load_header_types(void) {
     if (py_headers_type != NULL) return 0;
-    PyObject* module = PyImport_ImportModule("confluent_kafka.common.headers");
+    PyObject* module = PyImport_ImportModule("confluent_kafka.common.header.headers");
     if (module == NULL) return -1;
     PyObject* header = PyObject_GetAttrString(module, "Header");
     PyObject* headers = header ? PyObject_GetAttrString(module, "Headers") : NULL;
@@ -3645,7 +3645,7 @@ static PyObject* new_headers(PyObject* items) {
     return hs;
 }
 
-// headers -> a `confluent_kafka.common.Headers` of `Header`s, in insertion
+// headers -> a `confluent_kafka.common.header.Headers` of `Header`s, in insertion
 // order (CLAUDE.md, Python Binding Conventions, Behaviour with no other home):
 // each key a str, each value a memoryview into the batch, never copied
 // (CLAUDE.md §14), or None for a null value. A mock batch's values are bytes
@@ -3738,7 +3738,7 @@ static PyGetSetDef ConsumerRecord_getsetters[] = {
     {"serialized_value_size", (getter)ConsumerRecord_get_serialized_value_size, NULL, "Serialized value size", NULL},
     {"leader_epoch", (getter)ConsumerRecord_get_leader_epoch, NULL, "Leader epoch or None", NULL},
     {"delivery_count", (getter)ConsumerRecord_get_delivery_count, NULL, "Delivery count or None", NULL},
-    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.Headers of Header objects", NULL},
+    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.header.Headers of Header objects", NULL},
     {NULL}
 };
 

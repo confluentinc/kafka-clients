@@ -34,7 +34,8 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka.common import Header, TimestampType
+from confluent_kafka.common.header import Header
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka.producer import ProducerRecord
 
 from .broker_helpers import (

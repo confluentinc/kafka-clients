@@ -92,8 +92,10 @@ class NewTopic:
                 raise TypeError("replicas_assignments must not be None")
             self._num_partitions = None
             self._replication_factor = None
+            # Java stores the map as given, a None list included (Class family).
             self._replicas_assignments = {
-                k: tuple(v) for k, v in replicas_assignments.items()}
+                k: None if v is None else tuple(v)
+                for k, v in replicas_assignments.items()}
 
     def name(self) -> str:
         """The name of the topic to be created."""
@@ -116,7 +118,8 @@ class NewTopic:
         if the number of partitions and replication factor have been specified
         instead."""
         a = self._replicas_assignments
-        return None if a is None else {k: list(v) for k, v in a.items()}
+        return None if a is None else {
+            k: None if v is None else list(v) for k, v in a.items()}
 
     @overload
     def configs(self) -> dict[str, str] | None: ...

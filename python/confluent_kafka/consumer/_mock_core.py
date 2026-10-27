@@ -219,12 +219,12 @@ class MockConsumerCore(Generic[K, V]):
             new_list, added, removed = self._rebalance_begin(new_assignment)
             listener = self._subscriptions.rebalance_listener()
             if removed and listener is not None:
-                _no_coroutine(listener.on_partitions_revoked(set(removed)),  # type: ignore[func-returns-value]
+                _no_coroutine(listener.on_partitions_revoked(set(removed)),
                               "rebalance listener")
             self._subscriptions.assign_from_subscribed(new_list)
             listener = self._subscriptions.rebalance_listener()
             if listener is not None:
-                _no_coroutine(listener.on_partitions_assigned(set(added)),  # type: ignore[func-returns-value]
+                _no_coroutine(listener.on_partitions_assigned(set(added)),
                               "rebalance listener")
 
     async def _a_rebalance(self, new_assignment: Iterable[TopicPartition]) -> None:
@@ -236,14 +236,14 @@ class MockConsumerCore(Generic[K, V]):
             previous, self._lock.owner = self._lock.owner, _current_task()
         try:
             if removed and listener is not None:
-                result = listener.on_partitions_revoked(set(removed))  # type: ignore[func-returns-value]
+                result = listener.on_partitions_revoked(set(removed))
                 if inspect.isawaitable(result):
                     await result
             with self._lock:
                 self._subscriptions.assign_from_subscribed(new_list)
                 listener = self._subscriptions.rebalance_listener()
             if listener is not None:
-                result = listener.on_partitions_assigned(set(added))  # type: ignore[func-returns-value]
+                result = listener.on_partitions_assigned(set(added))
                 if inspect.isawaitable(result):
                     await result
         finally:
@@ -319,6 +319,10 @@ class MockConsumerCore(Generic[K, V]):
         """Java's private ``subscribe(SubscriptionPattern, Optional)``, after the
         listener's null check."""
         listener = _mock_listener(callback)
+        if pattern is not None and pattern.pattern() is None:
+            # Java's pattern.toString().isEmpty(): toString() returns the null
+            # pattern, which isEmpty() dereferences (Types).
+            raise TypeError("SubscriptionPattern.pattern must not be None")
         if pattern is None or str(pattern) == "":
             raise IllegalArgumentError(
                 message="Topic pattern cannot be " + ("None" if pattern is None else "empty"))

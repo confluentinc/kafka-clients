@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Generic
 from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.acl import AclBinding
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeAclsResult"]

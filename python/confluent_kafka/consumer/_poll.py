@@ -44,8 +44,8 @@ from collections.abc import Mapping
 from typing import Any, Callable, NamedTuple, cast
 
 from confluent_kafka.common.errors.record_deserialization_error import RecordDeserializationError
-from confluent_kafka.common.headers import Headers
-from confluent_kafka.common.timestamp_type import TimestampType
+from confluent_kafka.common.header.headers import Headers
+from confluent_kafka.common.record.timestamp_type import TimestampType
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_record import ConsumerRecord

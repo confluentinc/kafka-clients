@@ -29,9 +29,9 @@ from confluent_kafka import _throwable
 from confluent_kafka.common.errors.serialization_error import SerializationError
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.header import Header
-    from confluent_kafka.common.headers import Headers
-    from confluent_kafka.common.timestamp_type import TimestampType
+    from confluent_kafka.common.header.header import Header
+    from confluent_kafka.common.header.headers import Headers
+    from confluent_kafka.common.record.timestamp_type import TimestampType
     from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = ["RecordDeserializationError"]

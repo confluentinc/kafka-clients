@@ -36,7 +36,9 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common import Headers, TimestampType, TopicPartition
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common.record import TimestampType
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
     ConsumerGroupMetadata,

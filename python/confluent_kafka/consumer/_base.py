@@ -846,9 +846,9 @@ class _ConsumerState:
         token = self._enter_callback()
         try:
             if method == _REVOKED:
-                result: object = listener.on_partitions_revoked(partitions)  # type: ignore[func-returns-value]
+                result: object = listener.on_partitions_revoked(partitions)
             elif method == _ASSIGNED:
-                result = listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
+                result = listener.on_partitions_assigned(partitions)
             else:
                 result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
             if inspect.isawaitable(result):

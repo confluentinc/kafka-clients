@@ -76,6 +76,7 @@ from confluent_kafka.admin import (
     ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
     ListGroupsOptions,
+    ListPartitionReassignmentsOptions,
     MockAdminClient,
     NewPartitionReassignment,
     NewTopic,
@@ -86,14 +87,13 @@ from confluent_kafka.admin import (
     SupportedVersionRange,
     UpdateFeaturesOptions,
 )
+from confluent_kafka.common.acl import AclBindingFilter
+from confluent_kafka.common.quota import ClientQuotaFilter
+from confluent_kafka.common.security.token.delegation import DelegationToken
 from confluent_kafka.common import (
-    AclBindingFilter,
-    ClientQuotaFilter,
-    DelegationToken,
     ElectionType,
     GroupState,
     GroupType,
-    KafkaPrincipal,
     Node,
     TopicCollection,
     TopicPartition,
@@ -101,6 +101,7 @@ from confluent_kafka.common import (
     TopicPartitionReplica,
     Uuid,
 )
+from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors.delegation_token_not_found_error import (
     DelegationTokenNotFoundError,
@@ -430,6 +431,23 @@ def test_alter_then_list_partition_reassignments_reports_adding_and_removing() -
     # None (Java's empty Optional) cancels (MockAdminClient.java:1160-1162).
     value_of(client.alter_partition_reassignments(reassignments={tp: None}).all())
     assert value_of(client.list_partition_reassignments().reassignments()) == {}
+
+
+def test_list_partition_reassignments_optional_empty_lists_every_partition() -> None:
+    """Java's ``listPartitionReassignments(Optional<Set>, options)``: with
+    ``options`` given, ``partitions=None`` is ``Optional.empty()``, every
+    partition, as ``(options=o)``; without ``options`` it is ``Optional.of(null)``."""
+    client, tp = admin_with_reassignment()
+    options = ListPartitionReassignmentsOptions()
+    every = value_of(client.list_partition_reassignments(partitions=None, options=options)
+                     .reassignments())
+    assert set(every) == {tp}
+    assert every[tp].removing_replicas() == [0]
+    plain = value_of(client.list_partition_reassignments(options=options).reassignments())
+    assert set(plain) == {tp}
+    with pytest.raises(TypeError) as e:
+        client.list_partition_reassignments(partitions=None)  # type: ignore[call-overload]
+    assert str(e.value) == "partitions must not be None"
 
 
 def test_list_partition_reassignments_after_topic_deletion_fails_the_future() -> None:

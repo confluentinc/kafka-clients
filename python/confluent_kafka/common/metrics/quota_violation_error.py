@@ -24,10 +24,11 @@ from __future__ import annotations
 from typing import ClassVar, TYPE_CHECKING
 
 from confluent_kafka import _throwable
+from confluent_kafka._java import java_str
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
-    from confluent_kafka.common.kafka_metric import KafkaMetric
+    from confluent_kafka.common.metrics.kafka_metric import KafkaMetric
 
 __all__ = ["QuotaViolationError"]
 
@@ -52,8 +53,8 @@ class QuotaViolationError(KafkaError):
     ) -> None:
         _throwable.init(self, None, None)
         self._metric = metric
-        self._value = value
-        self._bound = bound
+        self._value = float(value)
+        self._bound = float(bound)
         self._java_kwargs = _throwable.kwargs(metric=metric, value=value, bound=bound)
 
     def metric(self) -> KafkaMetric:
@@ -67,3 +68,16 @@ class QuotaViolationError(KafkaError):
     def bound(self) -> float:
         """Java's ``bound()``."""
         return self._bound
+
+    def _java_to_string(self) -> str | None:
+        """Java's ``toString()`` override, with the Python class path
+        (``_throwable.to_string`` prefers it); ``None`` without the payload."""
+        if not (hasattr(self, "_metric") and hasattr(self, "_value") and hasattr(self, "_bound")):
+            return None
+        return (type(self).__module__ + "." + type(self).__qualname__ + ": '" + java_str(_throwable.non_null(self._metric, "metric").metric_name()) + "' violated quota. Actual: " + java_str(self._value) + ", Threshold: " + java_str(self._bound))
+
+    def __str__(self) -> str:
+        """Java's ``toString()`` override's text after the class name (Errors)."""
+        if not (hasattr(self, "_metric") and hasattr(self, "_value") and hasattr(self, "_bound")):
+            return _throwable.message_text(self)
+        return ("'" + java_str(_throwable.non_null(self._metric, "metric").metric_name()) + "' violated quota. Actual: " + java_str(self._value) + ", Threshold: " + java_str(self._bound))

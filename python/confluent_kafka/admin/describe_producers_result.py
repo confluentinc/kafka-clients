@@ -55,7 +55,7 @@ class DescribeProducersResult(Generic[KindT]):
         __slots__ = ("_active_producers",)
 
         def __init__(self, *, active_producers: Sequence[ProducerState]) -> None:
-            self._active_producers = list(active_producers)
+            self._active_producers = None if active_producers is None else list(active_producers)
 
         def active_producers(self) -> list[ProducerState]:
             return self._active_producers
@@ -78,7 +78,7 @@ class DescribeProducersResult(Generic[KindT]):
             kind: type[Sync] | type[Async]) -> DescribeProducersResult[Any]:
         """Java's package-private ``DescribeProducersResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

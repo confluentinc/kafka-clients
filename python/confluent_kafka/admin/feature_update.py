@@ -99,8 +99,13 @@ class FeatureUpdate:
             return True
         if not isinstance(other, FeatureUpdate):
             return NotImplemented
-        return (self._max_version_level == other._max_version_level
-                and self._upgrade_type == other._upgrade_type)
+        if self._max_version_level != other._max_version_level:
+            return False
+        if self._upgrade_type is None:
+            # Java's this.upgradeType.equals(...) dereferences it (Types); its
+            # hashCode is null-safe.
+            raise TypeError("upgrade_type must not be None")
+        return self._upgrade_type == other._upgrade_type
 
     def __hash__(self) -> int:
         return hash((self._max_version_level, self._upgrade_type))

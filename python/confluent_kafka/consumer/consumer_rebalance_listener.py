@@ -15,10 +15,12 @@
 """``ConsumerRebalanceListener``: Java's
 ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
 
-A multi-method interface the user implements, so a class to subclass: the
-abstract ``onPartitionsRevoked`` / ``onPartitionsAssigned`` become no-ops and the
-``default`` ``onPartitionsLost`` keeps its body (CLAUDE.md, Python Binding
-Conventions, Idiom translations). The methods are called positionally with the
+A multi-method interface the user implements, so a class to subclass
+(``abc.ABC``): Java's abstract ``onPartitionsRevoked`` / ``onPartitionsAssigned``
+stay abstract (``@abstractmethod``), so a subclass missing one fails at
+construction with ``TypeError``, as a Java implementation missing one fails to
+compile; the ``default`` ``onPartitionsLost`` keeps its body (CLAUDE.md, Python
+Binding Conventions, Idiom translations). The methods are called positionally with the
 partitions (a user-written callable, Signatures).
 
 The listener runs on the caller's thread, inside the call that delivers it
@@ -34,12 +36,14 @@ a queued completion meanwhile).
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = ["ConsumerRebalanceListener"]
 
 
-class ConsumerRebalanceListener:
+class ConsumerRebalanceListener(ABC):
     """A callback interface that the user can implement to trigger custom
     actions when the set of partitions assigned to the consumer changes.
 
@@ -50,6 +54,7 @@ class ConsumerRebalanceListener:
     Java: ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
     """
 
+    @abstractmethod
     def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
         """A callback method the user can implement to provide handling of
         offset commits to a customized store. This method will be called during
@@ -67,6 +72,7 @@ class ConsumerRebalanceListener:
         consumer propagates to the call in which this callback is being executed.
         """
 
+    @abstractmethod
     def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
         """A callback method the user can implement to provide handling of
         customized offsets on completion of a successful partition

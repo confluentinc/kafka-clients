@@ -65,7 +65,7 @@ class DeleteConsumerGroupOffsetsResult(Generic[KindT]):
         """Java's package-private ``DeleteConsumerGroupOffsetsResult(future, partitions)``."""
         result = cls.__new__(cls)
         result._future = future
-        result._partitions = set(partitions)
+        result._partitions = None if partitions is None else set(partitions)
         result._kind = kind
         return result
 

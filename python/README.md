@@ -30,10 +30,14 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
-    MetricName, Metric, KafkaMetric, TimestampType, Header, Headers,
+    MetricName, Metric,
     KafkaError,  # Java's org.apache.kafka.common.KafkaException
     KafkaFuture, AsyncKafkaFuture,  # every future the package hands out
 )
+# Every type lives in the module of its Java package, `clients` dropped:
+from confluent_kafka.common.header import Header, Headers  # common.header
+from confluent_kafka.common.metrics import KafkaMetric  # common.metrics
+from confluent_kafka.common.record import TimestampType  # common.record
 from confluent_kafka.common.errors import RetriableError  # typed hierarchy
 from confluent_kafka.common.serialization import (
     bytes_serializer, string_serializer, int_serializer, json_serializer,  # etc.
@@ -73,7 +77,7 @@ and is never a value to pass.
 ## Headers
 
 A record's headers are Java's: `record.headers()` returns a `Headers`
-(`confluent_kafka.common`), never `None` and empty when there are none, holding
+(`confluent_kafka.common.header`), never `None` and empty when there are none, holding
 `Header` objects with `key()` and `value()`, a `memoryview` or `None` (for a
 fetched record, a view into the fetch batch, never a copy). `Headers` has
 Java's `add(header=…)` / `add(key=…, value=…)`, `remove(key=…)`,
