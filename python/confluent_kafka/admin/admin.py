@@ -1522,9 +1522,15 @@ class Admin(_AdminState):
         self, *,
         options: ListPartitionReassignmentsOptions,
     ) -> ListPartitionReassignmentsResult[Sync]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition] | None,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Sync]: ...
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
             options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Sync]:
         """List the current reassignments for the given partitions, or all of the
@@ -1543,14 +1549,18 @@ class Admin(_AdminState):
         ``partitions``: the partitions we want to get reassignment for, left out
         (Java's ``listPartitionReassignments()`` and
         ``listPartitionReassignments(options)``, which pass ``Optional.empty()``) if we
-        want to get the reassignments for all partitions in the cluster; a ``None`` is
-        Java's ``Optional.of(null)`` and raises ``TypeError``; ``options``:
+        want to get the reassignments for all partitions in the cluster; a ``None`` with
+        ``options`` given is Java's ``listPartitionReassignments(Optional<Set>, options)``
+        with ``Optional.empty()`` (all partitions), and without ``options`` Java's
+        ``Optional.of(null)``, raising ``TypeError``; ``options``:
         the options to use (Java's short forms pass
         ``new ListPartitionReassignmentsOptions()``). Returns the result.
         """
         self._check_not_closed()
         targets: Iterable[TopicPartition] | None = None
-        if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
+        # Left out (Java's (options) form), or None with options given (Java's
+        # (Optional<Set>, options) form with Optional.empty()): every partition.
+        if partitions is not MISSING and (partitions is not None or options is MISSING):
             _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
             targets = partitions
         args = _conversions.list_partition_reassignments_args(targets)
