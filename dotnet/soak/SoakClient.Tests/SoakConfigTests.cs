@@ -292,6 +292,25 @@ public sealed class SoakConfigTests
     }
 
     [Fact]
+    public void JaasCredentialsValueCutByARawLineBreakIsAbsent()
+    {
+        (string? username, string? password) =
+            SoakConfig.JaasCredentials("PlainLoginModule required username=\"u\" password=\"ab\ncd\";");
+        Assert.Equal("u", username);
+        Assert.Null(password);
+
+        (username, password) =
+            SoakConfig.JaasCredentials("PlainLoginModule required username=\"u\" password=\"ab\rcd\";");
+        Assert.Equal("u", username);
+        Assert.Null(password);
+
+        (username, password) =
+            SoakConfig.JaasCredentials("PlainLoginModule required username=\"u\"\n password=\"abcd\";");
+        Assert.Equal("u", username);
+        Assert.Equal("abcd", password);
+    }
+
+    [Fact]
     public void JaasCredentialsAbsent()
     {
         (string? username, string? password) = SoakConfig.JaasCredentials("org.apache...PlainLoginModule required;");

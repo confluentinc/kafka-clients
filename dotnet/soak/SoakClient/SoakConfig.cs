@@ -240,8 +240,10 @@ internal static class SoakConfig
         return conf;
     }
 
-    // Mirrors the core's SaslConfig::parse_jaas_option, so the check and the client never disagree:
-    // a key counts only at an option start outside quotes, and the raw quoted content is returned.
+    // Finds a field as the core's SaslConfigs::parse_jaas_option does, so the check and the client agree on
+    // whether it is present: a key counts only at an option start outside quotes, and a quoted value that a raw
+    // line break cuts short is absent. It returns the raw quoted content, escapes not decoded, unlike the core;
+    // the soak only checks that a field is present and never forwards it.
     internal static string? JaasField(string jaasConfig, string name)
     {
         string s = jaasConfig;
@@ -297,6 +299,11 @@ internal static class SoakConfig
                                 return s.Substring(start, k - start);
                             }
 
+                            if (s[k] == '\r' || s[k] == '\n')
+                            {
+                                return null;
+                            }
+
                             k += 1;
                         }
 
@@ -335,6 +342,11 @@ internal static class SoakConfig
             if (s[i] == quote)
             {
                 return i + 1;
+            }
+
+            if (s[i] == '\r' || s[i] == '\n')
+            {
+                return i;
             }
 
             i += 1;
