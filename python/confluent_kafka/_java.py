@@ -30,17 +30,35 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 import unicodedata
 import uuid
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 __all__ = ["java_str", "java_trim", "parse_double", "parse_int", "parse_long", "parse_long_string",
            "uuid_from_string"]
 
 
+def _closest_of_two_digits(a: float, shortest: Decimal) -> Decimal:
+    """The decimal Java's ``Double.toString`` takes when the shortest decimal that
+    reads back as ``a`` has one digit: the one closest to ``a`` among those of one
+    or two digits that read back as ``a``."""
+    exact = Decimal(a)
+    with localcontext() as ctx:
+        ctx.prec = 800  # a double's exact value has at most 767 digits
+        best, gap = shortest, abs(shortest - exact)
+        # No two are equally close: the exact value has hundreds of digits.
+        for significand in range(10, 100):
+            candidate = Decimal(significand).scaleb(exact.adjusted() - 1)
+            if float(candidate) == a and abs(candidate - exact) < gap:
+                best, gap = candidate, abs(candidate - exact)
+    return best
+
+
 def _double_to_string(d: float) -> str:
-    """Java's ``Double.toString``."""
+    """Java's ``Double.toString``, as specified since JDK 19 (older JDKs print
+    extra digits for some values: ``9.999999999999999E22`` for ``1.0E23``)."""
     if math.isnan(d):
         return "NaN"
     if math.isinf(d):
@@ -53,7 +71,13 @@ def _double_to_string(d: float) -> str:
         # this range; it keeps a ".0" on an integral value, as Java does.
         return repr(d)
     # Computerized scientific notation: one digit, a point, the rest, "E" exp.
-    _, digits, exponent = Decimal(repr(a)).normalize().as_tuple()
+    shortest = Decimal(repr(a))
+    if a < sys.float_info.min and len(shortest.normalize().as_tuple().digits) == 1:
+        # Only a subnormal can have a closer decimal of two digits that reads
+        # back as it (4.9E-324, not 5.0E-324); a normal double's two-digit
+        # neighbours are too far from it.
+        shortest = _closest_of_two_digits(a, shortest)
+    _, digits, exponent = shortest.normalize().as_tuple()
     text = "".join(str(x) for x in digits)
     exp10 = len(text) - 1 + int(exponent)
     mantissa = text[0] + "." + (text[1:] or "0")
