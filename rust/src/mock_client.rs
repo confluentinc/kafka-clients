@@ -180,11 +180,11 @@ pub struct MockClient {
     future_responses: VecDeque<FutureResponse>,
     /// Nodes served by this mock client.
     nodes: Vec<Node>,
-    /// Java: `pendingAuthenticationErrors` (`MockClient.java:78`) — nodes whose
+    /// Java: `MockClient#pendingAuthenticationErrors` — nodes whose
     /// next [`KafkaClient::send`] fails authentication, with the backoff to apply
     /// to the node when it does. See [`Self::create_pending_authentication_error`].
     pending_authentication_errors: HashMap<Node, i64>,
-    /// Java: `authenticationErrors` (`MockClient.java:79`) — the error
+    /// Java: `MockClient#authenticationErrors` — the error
     /// [`KafkaClient::authentication_error`] reports for a node whose
     /// authentication failed.
     authentication_errors: HashMap<Node, Error>,
@@ -316,8 +316,7 @@ impl MockClient {
     /// `SASL_AUTHENTICATION_FAILED`'s error for it from now on, the node is
     /// disconnected, and it backs off for `backoff_ms`.
     ///
-    /// Translated from `MockClient.authenticationFailed(Node, long)`
-    /// (`MockClient.java:166-171`).
+    /// Translated from `MockClient#authenticationFailed(Node, long)`.
     #[doc(alias = "org.apache.kafka.clients.MockClient#authenticationFailed")]
     pub fn authentication_failed(&mut self, node: &Node, backoff_ms: i64) {
         self.pending_authentication_errors.remove(node);
@@ -333,8 +332,8 @@ impl MockClient {
     /// Makes the next request sent to `node` fail authentication, as
     /// [`Self::authentication_failed`] does, with `backoff_ms` as the node's backoff.
     ///
-    /// Translated from `MockClient.createPendingAuthenticationError(Node, long)`
-    /// (`MockClient.java:173-175`). The failure is raised by [`KafkaClient::send`]:
+    /// Translated from `MockClient#createPendingAuthenticationError(Node, long)`.
+    /// The failure is raised by [`KafkaClient::send`]:
     /// the request is answered with a disconnected response carrying an
     /// `AuthenticationException("Authentication failed")`.
     #[doc(alias = "org.apache.kafka.clients.MockClient#createPendingAuthenticationError")]
@@ -687,8 +686,8 @@ impl MockClient {
         self.responses.clear();
         self.future_responses.clear();
         self.poll_timeouts.clear();
-        // Java's `reset` clears `authenticationErrors` but not
-        // `pendingAuthenticationErrors` (`MockClient.java:499-506`).
+        // Java's `MockClient#reset` clears `authenticationErrors` but not
+        // `pendingAuthenticationErrors`.
         self.authentication_errors.clear();
     }
 
@@ -737,7 +736,7 @@ impl KafkaClient for MockClient {
     }
 
     fn authentication_error(&self, node: &Node) -> Option<Error> {
-        // Java: `return authenticationErrors.get(node)` (`MockClient.java:182-185`).
+        // Java's `MockClient#authenticationException`: `return authenticationErrors.get(node)`.
         self.authentication_errors.get(node).cloned()
     }
 
@@ -748,7 +747,7 @@ impl KafkaClient for MockClient {
         }
 
         // Check if the request is directed to a node with a pending authentication
-        // error (`MockClient.java:225-246`).
+        // error, as `MockClient#send` does.
         let pending_authentication_error = self
             .pending_authentication_errors
             .iter()
@@ -1080,12 +1079,12 @@ mod tests {
     }
 
     /// A pending authentication error fails the next request sent to its node, as
-    /// `MockClient.send` does (`MockClient.java:225-246`): the request is answered
-    /// with a disconnected response carrying `AuthenticationException("Authentication
-    /// failed")`, and `authenticationFailed` (`:166-171`) makes
-    /// `authenticationException(node)` report `SASL_AUTHENTICATION_FAILED`'s
-    /// exception, disconnects the node and backs it off. A second request is sent
-    /// normally, and `reset` (`:499-506`) clears the recorded error.
+    /// `MockClient#send` does: the request is answered with a disconnected response
+    /// carrying `AuthenticationException("Authentication failed")`, and
+    /// `MockClient#authenticationFailed` makes `authenticationException(node)`
+    /// report `SASL_AUTHENTICATION_FAILED`'s exception, disconnects the node and
+    /// backs it off. A second request is sent normally, and `MockClient#reset`
+    /// clears the recorded error.
     #[tokio::test]
     async fn test_pending_authentication_error_fails_the_next_send() {
         let time = time();

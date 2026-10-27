@@ -1170,10 +1170,11 @@ fn skip_line_word(s: &str) -> Option<&str> {
 }
 
 /// The line number or range `s` starts with (`12`, `12-34`, `12–34`,
-/// `967/972`), unless it is a version (`4.4`, `11's`) or part of a word.
+/// `967/972`), unless it is a version (`4.4`, `11's`), part of a word, or `0`,
+/// which no line is (`` `lastMetadataUpdateMs` at 0 `` is a value).
 fn line_number(s: &str) -> Option<&str> {
     let digits = s.chars().take_while(char::is_ascii_digit).count();
-    if digits == 0 {
+    if digits == 0 || s[..digits].bytes().all(|b| b == b'0') {
         return None;
     }
     let mut end = digits;
@@ -2757,6 +2758,11 @@ mod tests {
         assert!(java_line_refs("partitions 0 at 3-5 are fetched").is_empty());
         assert!(java_line_refs("`test_foo` at 727").is_empty());
         assert!(java_line_refs("`SenderTest` in sender.rs, at 12-14").is_empty());
+        // `0` is never a line: a Java field left at it is a value.
+        assert!(java_line_refs("the bootstrap cluster leaves `lastMetadataUpdateMs` at 0").is_empty());
+        assert!(
+            java_line_refs_run(&["/// `SenderTest#testFoo` reads `lastSendMs`", "/// at 0 and line 0."]).is_empty()
+        );
     }
 
     #[test]

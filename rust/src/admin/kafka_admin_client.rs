@@ -545,14 +545,14 @@ impl KafkaAdminClient {
     /// `metadata.recovery.strategy` and
     /// `metadata.recovery.rebootstrap.trigger.ms` come from the config.
     ///
-    /// `maxInFlightRequestsPerConnection` is `1` (`:625`). The admin loop sends at
+    /// `maxInFlightRequestsPerConnection` is `1`. The admin loop sends at
     /// most one call per node and checks `client.ready(..)` first, so the limit
     /// does not change what is sent; it matters to `least_loaded_node` and
     /// `ready`, which treat a node with an in-flight request as busy only when the
     /// connection cannot take another one.
     ///
     /// The `NetworkClient`'s default request timeout is one hour,
-    /// `(int) TimeUnit.HOURS.toMillis(1)` (`:626`), not `request.timeout.ms`.
+    /// `(int) TimeUnit.HOURS.toMillis(1)`, not `request.timeout.ms`.
     /// Every admin call is sent with its own timeout, `min(request.timeout.ms,
     /// time left to the call deadline)` (`sendEligibleCalls`), so the default
     /// bounds only what the `NetworkClient` sends on its own, the `ApiVersions`
@@ -573,12 +573,12 @@ impl KafkaAdminClient {
             selector,
             metadata_updater,
             client_id,
-            1, // maxInFlightRequestsPerConnection (`KafkaAdminClient.java:625`)
+            1, // maxInFlightRequestsPerConnection in `KafkaAdminClient#createInternal`
             config.reconnect_backoff_ms(),
             config.reconnect_backoff_max_ms(),
             config.send_buffer_bytes(),
             config.receive_buffer_bytes(),
-            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)` (`:626`)
+            3_600_000, // defaultRequestTimeoutMs: `(int) TimeUnit.HOURS.toMillis(1)`, as above
             config.socket_connection_setup_timeout_ms(),
             config.socket_connection_setup_timeout_max_ms(),
             true, // discover_broker_versions
@@ -596,8 +596,7 @@ impl KafkaAdminClient {
     /// max of the default and `request.timeout.ms`. Also we should probably log
     /// a warning. Otherwise, use the provided values for both configurations.
     ///
-    /// Translated from `KafkaAdminClient.configureDefaultApiTimeoutMs`
-    /// (`KafkaAdminClient.java:715-731`).
+    /// Translated from `KafkaAdminClient#configureDefaultApiTimeoutMs`.
     ///
     /// # Errors
     ///
@@ -645,8 +644,8 @@ impl KafkaAdminClient {
         time: Arc<dyn Time>,
         log_context: LogContext,
     ) -> Result<(Self, AdminClientRunnable<C>), Error> {
-        // `this.defaultApiTimeoutMs = configureDefaultApiTimeoutMs(config)`
-        // (`KafkaAdminClient.java:680`).
+        // `this.defaultApiTimeoutMs = configureDefaultApiTimeoutMs(config)` in
+        // the constructor `KafkaAdminClient#KafkaAdminClient`.
         let default_api_timeout_ms = Self::configure_default_api_timeout_ms(config, &log_context)?;
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
         let wakeup = client.wakeup_notify();
@@ -1530,7 +1529,7 @@ where
 }
 
 /// Computes the absolute deadline for a call. Mirrors
-/// `KafkaAdminClient.calcDeadlineMs` (`KafkaAdminClient.java:504-508`): a
+/// `KafkaAdminClient#calcDeadlineMs`: a
 /// negative option timeout is clamped to zero (`now + Math.max(0, optionTimeoutMs)`),
 /// so the call is still sent once instead of expiring before it is assigned a node.
 /// The default API timeout is not clamped, as in Java.
@@ -5364,9 +5363,9 @@ impl Admin for KafkaAdminClient {
             }
         }
         // Java's `close()` publishes only `hardShutdownTimeMs`; the runnable's
-        // `closing` flag is set by the I/O task itself once its loop exits
-        // (`KafkaAdminClient.java:1551`), so calls keep being retried during the
-        // grace period.
+        // `closing` flag is set by the I/O task itself once its loop exits (the
+        // `finally` of `KafkaAdminClient.AdminClientRunnable#run`), so calls keep
+        // being retried during the grace period.
         //
         // Java calls `client.wakeup()` from inside the successful CAS arm. Here
         // the wakeup follows the CAS, so the woken I/O task is guaranteed to
@@ -7079,7 +7078,8 @@ mod tests {
     ///
     /// The request to node 0 is answered as disconnected, and the admin loop
     /// fails the call with `client.authenticationException(node)`
-    /// (`KafkaAdminClient.java:1462-1465`), which is not retriable.
+    /// (`KafkaAdminClient.AdminClientRunnable#handleResponses`), which is not
+    /// retriable.
     ///
     /// Java runs on `Time.SYSTEM`; here the mock clock stays still, so neither
     /// `request.timeout.ms=10` nor the 1 s call timeout can expire, and the call
@@ -8026,7 +8026,8 @@ mod tests {
     /// an explicit `default.api.timeout.ms` (500) below `request.timeout.ms`
     /// (1000) fails creation with `configureDefaultApiTimeoutMs`'s
     /// `ConfigException`, wrapped in the constructor's `KafkaException`
-    /// (`KafkaAdminClient.java:569-573`, `:715-731`).
+    /// (`KafkaAdminClient#createInternal`,
+    /// `KafkaAdminClient#configureDefaultApiTimeoutMs`).
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientTest#testDefaultApiTimeoutAndRequestTimeoutConflicts"
@@ -8660,11 +8661,13 @@ mod tests {
     }
 
     /// Java's `calcDeadlineMs` clamps a negative option timeout to zero
-    /// (`now + Math.max(0, optionTimeoutMs)`, `KafkaAdminClient.java:504-508`), so
-    /// on a frozen clock a call with `timeoutMs = -1` has `deadlineMs == now`. The
-    /// timeout processor only expires a call whose remaining time is `< 0`
-    /// (`:1131-1132`, `:1151-1152`), so the call is sent and succeeds. Without the
-    /// clamp the deadline is `now - 1` and the call expires unsent.
+    /// (`now + Math.max(0, optionTimeoutMs)` in `KafkaAdminClient#calcDeadlineMs`),
+    /// so on a frozen clock a call with `timeoutMs = -1` has `deadlineMs == now`.
+    /// The timeout processor only expires a call whose remaining time is `< 0`
+    /// (`KafkaAdminClient.TimeoutProcessor#handleTimeouts` and
+    /// `KafkaAdminClient.TimeoutProcessor#callHasExpired`), so the call is sent and
+    /// succeeds. Without the clamp the deadline is `now - 1` and the call expires
+    /// unsent.
     #[tokio::test]
     async fn test_negative_option_timeout_is_clamped_to_zero() {
         let (admin, mut runnable, time, nodes) = env();
@@ -10346,8 +10349,8 @@ mod tests {
     }
 
     /// Java's `listTransactions()` is `listTransactions(new ListTransactionsOptions())`
-    /// (`Admin.java`), whose `filteredDuration` starts at `-1L`
-    /// (`ListTransactionsOptions.java:36`), and `ListTransactionsHandler.buildBatchedRequest`
+    /// (`Admin#listTransactions()`), whose `filteredDuration` starts at `-1L`
+    /// (`ListTransactionsOptions#filteredDuration`), and `ListTransactionsHandler.buildBatchedRequest`
     /// copies it into `DurationFilter`. So the no-arg call asks every broker with
     /// `DurationFilter = -1` (no duration filter), not `0`.
     #[tokio::test]
@@ -16029,7 +16032,7 @@ mod tests {
         assert_eq!(
             handle_not_controller_error(&with_controllers, &not_leader).map(|e| e.error()),
             Some(Errors::NotLeaderOrFollower),
-            "Java rethrows the error built for the code it matched (`KafkaAdminClient.java:4152`)"
+            "Java rethrows the error built for the code it matched (`KafkaAdminClient#handleNotControllerError`)"
         );
         assert!(
             handle_not_controller_error(&without_controllers, &not_leader).is_none(),
@@ -16118,7 +16121,7 @@ mod tests {
     /// still serves the admin client, as in Java.
     ///
     /// Java builds the admin `NetworkClient` with a one-hour default request
-    /// timeout (`KafkaAdminClient.java:626`), which is the timeout of the
+    /// timeout (`KafkaAdminClient#createInternal`), which is the timeout of the
     /// handshake. With `request.timeout.ms=5000`, a `listTopics` against a broker
     /// that answers the handshake after 8 s succeeds: the bootstrap metadata call
     /// times out at 5 s and is retried on the same, still-handshaking connection.
@@ -16391,13 +16394,14 @@ mod tests {
 
     /// A retriable failure during the `close(timeout)` grace period is retried.
     ///
-    /// Java's `close()` only publishes `hardShutdownTimeMs`
-    /// (`KafkaAdminClient.java:734-760`); `Call.fail` refuses to retry only once
-    /// `runnable.closing` is set (`:970-978`), and that happens in the I/O
-    /// thread's `finally`, after `processRequests` has returned (`:1546-1551`).
-    /// So a `createTopics` whose first attempt is disconnected after `close(30s)`
-    /// is retried and succeeds, and the loop then exits because no external call
-    /// is left (`threadShouldExit`, `:1532-1543`).
+    /// Java's `KafkaAdminClient#close(Duration)` only publishes
+    /// `hardShutdownTimeMs`; `KafkaAdminClient.Call#fail` refuses to retry only
+    /// once `runnable.closing` is set, and that happens in the I/O thread's
+    /// `finally` (`KafkaAdminClient.AdminClientRunnable#run`), after
+    /// `processRequests` has returned. So a `createTopics` whose first attempt is
+    /// disconnected after `close(30s)` is retried and succeeds, and the loop then
+    /// exits because no external call is left
+    /// (`KafkaAdminClient.AdminClientRunnable#threadShouldExit`).
     #[tokio::test]
     async fn a_retriable_error_during_close_is_retried_within_the_grace_period() {
         let (admin, mut runnable, time, _nodes) = env();

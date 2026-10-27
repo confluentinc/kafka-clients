@@ -2902,7 +2902,7 @@ mod tests {
     }
 
     /// The admin client builds its `NetworkClient` with one in-flight request per
-    /// connection (`KafkaAdminClient.java:625`), so a connected node that already
+    /// connection (`KafkaAdminClient#createInternal`), so a connected node that already
     /// has a request in flight cannot take another one and `leastLoadedNode`
     /// prefers a node it can connect to (`NetworkClient.java` `leastLoadedNode`:
     /// `canSendRequest` is false, `canConnect` is true). With a larger limit the
@@ -2953,7 +2953,7 @@ mod tests {
     }
 
     /// The admin client builds its `NetworkClient` with a one-hour default request
-    /// timeout (`KafkaAdminClient.java:626`), not `request.timeout.ms`. The
+    /// timeout (`KafkaAdminClient#createInternal`), not `request.timeout.ms`. The
     /// `ApiVersions` handshake is sent with that default
     /// (`NetworkClient.handleInitiateApiVersionRequests`), so a broker that answers
     /// it after `request.timeout.ms` is waited for and the node becomes ready; the

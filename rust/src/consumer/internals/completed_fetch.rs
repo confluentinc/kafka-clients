@@ -1791,12 +1791,12 @@ impl CompletedFetch {
                         self.partition, batch_meta.producer_id, batch_meta.base_offset, batch_meta.last_offset
                     );
                     self.next_fetch_offset = batch_meta.next_offset;
-                    // Java's `currentBatch` is every batch `batches.next()` returns
-                    // (`CompletedFetch.java:204`), skipped ones included, so when the
-                    // fetch ends on this batch `nextFetchedRecord` ends at its
-                    // `nextOffset()` (`:198-199`), not the last installed batch's. Nothing else reads it before the next batch is
-                    // installed: the previous batch is exhausted and its records
-                    // released.
+                    // Java's `currentBatch` is every batch `batches.next()` returns in
+                    // `CompletedFetch#nextFetchedRecord`, skipped ones included, so when
+                    // the fetch ends on this batch `nextFetchedRecord` ends at its
+                    // `nextOffset()`, not the last installed batch's. Nothing else reads
+                    // it before the next batch is installed: the previous batch is
+                    // exhausted and its records released.
                     if let Some(cursor) = self.cursor.as_mut() {
                         cursor.current_batch = Some(batch_meta);
                     }
@@ -2874,7 +2874,7 @@ mod tests {
 
     /// A fetch ending on an aborted batch ends at that batch's next offset, as
     /// Java's `nextFetchedRecord` sets `nextFetchOffset = currentBatch.nextOffset()`
-    /// from the last batch it read, skipped or not (`CompletedFetch.java:198-204`).
+    /// from the last batch it read, skipped or not (`CompletedFetch#nextFetchedRecord`).
     /// Layout `[pid 1 data 0-1][COMMIT 2][pid 2 aborted 3-4]`; Java 4.4 reports
     /// `size@nextFetchOffset` per `fetchRecords` call as `[2@5, 0@5]` with
     /// `maxRecords = 10` and `[1@1, 1@2, 0@5]` with `maxRecords = 1`. Ending at 3

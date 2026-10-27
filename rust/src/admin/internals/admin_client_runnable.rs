@@ -66,8 +66,8 @@ struct InFlightCall {
 /// background task.
 pub(crate) struct ShutdownSignal {
     /// Java's `AdminClientRunnable.closing`: set only once the I/O task's loop
-    /// has exited (`run()`'s `finally`, `KafkaAdminClient.java:1550-1551`), never
-    /// by `close()`. While it is set `fail_call` does not retry.
+    /// has exited (the `finally` of `KafkaAdminClient.AdminClientRunnable#run`),
+    /// never by `close()`. While it is set `fail_call` does not retry.
     pub(crate) closing: AtomicBool,
     /// Java's `hardShutdownTimeMs`: the hard-shutdown deadline in epoch ms, or
     /// [`KafkaAdminClient::NO_HARD_SHUTDOWN`]. `close()` publishes it; once set,
@@ -401,7 +401,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
     /// Whether the loop should terminate: `processRequests`'
     /// `curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME && threadShouldExit(now,
-    /// curHardShutdownTimeMs)` (`KafkaAdminClient.java:1578-1581`, `:1532-1543`).
+    /// curHardShutdownTimeMs)` (`KafkaAdminClient.AdminClientRunnable#processRequests`,
+    /// `KafkaAdminClient.AdminClientRunnable#threadShouldExit`).
     ///
     /// It keys off the hard-shutdown deadline `close()` publishes, not
     /// `ShutdownSignal::closing`: Java sets `closing` only once the loop has
@@ -550,11 +551,11 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// `AdminClientRunnable.call(call, now)` for a call issued from inside the
     /// loop by a response hook ([`HandleResult::NewCall`] or
     /// [`HandleResult::CallAgain`]): the [`ShutdownSignal::admit_new_call`] gate,
-    /// then `enqueue` (`KafkaAdminClient.java:1668-1696`).
+    /// then `KafkaAdminClient.AdminClientRunnable#enqueue`.
     ///
     /// `enqueue` accepts the call only while the runnable is not `closing`, and
     /// otherwise fails it with `TimeoutException("The AdminClient thread has
-    /// exited.")` (`:1679-1695`). Response hooks run inside the loop, before
+    /// exited.")`. Response hooks run inside the loop, before
     /// [`fail_all_remaining`](Self::fail_all_remaining) sets `closing`, so that
     /// branch is not reached today. It is checked anyway, as Java does, so that a
     /// follow-up issued after the final drain fails instead of sitting in
@@ -962,8 +963,9 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Fails all remaining calls (finally-block on shutdown).
     fn fail_all_remaining(&mut self, now: i64) {
         let msg = "The AdminClient thread has exited.";
-        // finally: `closing = true` (`KafkaAdminClient.java:1551`). This is the
-        // only place it is set; from here on `fail_call` does not retry.
+        // The `finally` of `KafkaAdminClient.AdminClientRunnable#run`:
+        // `closing = true`. This is the only place it is set; from here on
+        // `fail_call` does not retry.
         self.shutdown.closing.store(true, Ordering::Release);
 
         // Java fails `newCalls` under `synchronized (this)` after setting
