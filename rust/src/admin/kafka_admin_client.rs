@@ -296,9 +296,9 @@ impl KafkaAdminClient {
         let now = self.now();
         let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
 
-        // Mirrors Java: a set nodeId routes to that specific node via
-        // `new ConstantNodeIdProvider(options.nodeId().getAsInt(), true)`
-        // (`KafkaAdminClient.java:4653-4654`), a broker or, for a
+        // Mirrors `KafkaAdminClient#describeFeatures`: a set nodeId routes to
+        // that specific node via
+        // `new ConstantNodeIdProvider(options.nodeId().getAsInt(), true)`, a broker or, for a
         // `bootstrap.controllers` client, a controller; otherwise the request
         // goes to an arbitrary broker or the active controller.
         let node_provider = match options.node_id() {
@@ -463,7 +463,7 @@ impl KafkaAdminClient {
         );
 
         // Get the appropriate bootstrap configuration: Java's
-        // `bootstrapAddressesToUse` (`KafkaAdminClient.java:589-591`), used both
+        // `bootstrapAddressesToUse` in `KafkaAdminClient#createInternal`, used both
         // for the synchronous DNS resolution below and for the `NetworkClient`'s
         // bootstrap configuration, which also drives its rebootstrap.
         let bootstrap: &[String] = if using_bootstrap_controllers {
@@ -603,9 +603,8 @@ impl KafkaAdminClient {
     /// Returns `true` if using `bootstrap.controllers`, `false` if using
     /// `bootstrap.servers`.
     ///
-    /// Translated from `KafkaAdminClient.determineBootstrapType`
-    /// (`KafkaAdminClient.java:533-560`). An unset list reads as empty, as
-    /// Java's `null` does.
+    /// Translated from `KafkaAdminClient#determineBootstrapType`. An unset list
+    /// reads as empty, as Java's `null` does.
     ///
     /// # Errors
     ///
@@ -640,9 +639,8 @@ impl KafkaAdminClient {
     /// and the active controller as its controller (none when the response's
     /// controller id names none of them).
     ///
-    /// Translated from `KafkaAdminClient.parseDescribeClusterResponse`
-    /// (`KafkaAdminClient.java:1816-1840`), which the metadata refresh of a
-    /// `bootstrap.controllers` client calls.
+    /// Translated from `KafkaAdminClient#parseDescribeClusterResponse`, which
+    /// the metadata refresh of a `bootstrap.controllers` client calls.
     ///
     /// # Errors
     ///
@@ -2738,7 +2736,7 @@ fn get_alter_partition_reassignments_call(
     Call::new(
         "alterPartitionReassignments",
         deadline,
-        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4073-4074`).
+        // `new ControllerNodeProvider(true)`, as in `KafkaAdminClient#alterPartitionReassignments`.
         NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
@@ -2820,7 +2818,7 @@ fn get_list_partition_reassignments_call(
     Call::new(
         "listPartitionReassignments",
         deadline,
-        // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4209-4210`).
+        // `new ControllerNodeProvider(true)`, as in `KafkaAdminClient#listPartitionReassignments`.
         NodeProvider::Controller { supports_use_controllers: true },
         create_request,
         handle_response,
@@ -2951,7 +2949,7 @@ fn get_describe_configs_call(
     });
 
     // `node != null ? new ConstantNodeIdProvider(node, true) : new
-    // LeastLoadedBrokerOrActiveKController()` (`KafkaAdminClient.java:2854-2855`).
+    // LeastLoadedBrokerOrActiveKController()`, as in `KafkaAdminClient#describeConfigs`.
     let node_provider = match node {
         Some(node_id) => NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
         None => NodeProvider::LeastLoadedBrokerOrActiveKController,
@@ -4300,7 +4298,8 @@ impl Admin for KafkaAdminClient {
                     configs,
                     &options,
                     std::slice::from_ref(resource),
-                    // `new ConstantNodeIdProvider(node, true)` (`KafkaAdminClient.java:2986`).
+                    // `new ConstantNodeIdProvider(node, true)`, as in
+                    // `KafkaAdminClient#incrementalAlterConfigs`.
                     NodeProvider::ConstantNodeId { node_id, supports_use_controllers: true },
                 );
                 all_futures.extend(futures);
@@ -5418,7 +5417,7 @@ impl Admin for KafkaAdminClient {
         let call = Call::new(
             "updateFeatures",
             deadline,
-            // `new ControllerNodeProvider(true)` (`KafkaAdminClient.java:4733-4734`).
+            // `new ControllerNodeProvider(true)`, as in `KafkaAdminClient#updateFeatures`.
             NodeProvider::Controller { supports_use_controllers: true },
             create_request,
             handle_response,
@@ -5944,9 +5943,9 @@ impl KafkaAdminClient {
     /// Mirrors Java's `AdminClientUnitTestEnv`, including how it picks the
     /// bootstrap mode: the client uses `bootstrap.controllers` when the config
     /// sets that key, whatever `bootstrap.servers` holds, as
-    /// `config.containsKey(BOOTSTRAP_CONTROLLERS_CONFIG)` decides there
-    /// (`AdminClientUnitTestEnv.java:74-77`). Like Java's test constructor, it
-    /// does not run `determineBootstrapType`.
+    /// `config.containsKey(BOOTSTRAP_CONTROLLERS_CONFIG)` decides in its
+    /// constructor. Like that constructor, it does not run
+    /// `determineBootstrapType`.
     pub(crate) fn create_for_test<C: KafkaClient + Send + 'static>(
         client: C,
         cluster: Cluster,
@@ -8104,8 +8103,8 @@ mod tests {
 
     /// The same for a client bootstrapping from `bootstrap.controllers`: its
     /// addresses go through the same `ClientUtils.parseAndValidateAddresses`,
-    /// whose message names `bootstrap.servers` whichever list was given
-    /// (`ClientUtils.java:182`), so it does here too.
+    /// whose message names `bootstrap.servers` whichever list was given, so it
+    /// does here too.
     #[test]
     fn test_admin_constructor_fails_with_config_error_on_unresolvable_bootstrap_controllers() {
         let mut props = HashMap::new();
@@ -8140,9 +8139,8 @@ mod tests {
         AdminClientConfig::new(&props).expect("the config accepts any bootstrap combination")
     }
 
-    /// `KafkaAdminClient.determineBootstrapType`'s three outcomes, with Java's
-    /// messages (`KafkaAdminClient.java:533-560`). An empty list counts as
-    /// unset.
+    /// `KafkaAdminClient#determineBootstrapType`'s three outcomes, with Java's
+    /// messages. An empty list counts as unset.
     #[test]
     fn test_determine_bootstrap_type() {
         let determine =
@@ -10846,9 +10844,9 @@ mod tests {
         assert_eq!(err.error(), Errors::UnsupportedVersion);
     }
 
-    /// `describeCluster`'s `handleUnsupportedVersionException` answers `false`
-    /// for a `bootstrap.controllers` client before anything else
-    /// (`KafkaAdminClient.java:2654-2656`): a controller
+    /// `KafkaAdminClient#describeCluster`'s `handleUnsupportedVersionException`
+    /// answers `false` for a `bootstrap.controllers` client before anything
+    /// else: a controller
     /// has no `Metadata` endpoint, so an UnsupportedVersion fails the call
     /// instead of falling back to a `MetadataRequest`. The Metadata answer
     /// prepared here is what a fallback would consume.
@@ -16425,8 +16423,8 @@ mod tests {
 
     /// Matches the metadata refresh of a `bootstrap.controllers` client: a
     /// `DescribeCluster` request for the CONTROLLER endpoint, without the
-    /// authorized operations (`makeControllerMetadataCall`,
-    /// `KafkaAdminClient.java:1735-1739`).
+    /// authorized operations (the `createRequest` of
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`).
     fn controller_metadata_request() -> crate::RequestMatcher {
         Box::new(|request| {
             matches!(
@@ -16440,7 +16438,7 @@ mod tests {
     }
 
     /// Java's `UnsupportedEndpointTypeException` text for a call a
-    /// `bootstrap.controllers` client cannot send (`KafkaAdminClient.java:1711-1712`).
+    /// `bootstrap.controllers` client cannot send (`KafkaAdminClient.AdminClientRunnable#call`).
     const UNSUPPORTED_ENDPOINT_MESSAGE: &str =
         "This Admin API is not yet supported when communicating directly with the controller quorum.";
 
@@ -16598,7 +16596,7 @@ mod tests {
         })
     }
 
-    /// `AdminClientRunnable.call` (`KafkaAdminClient.java:1710-1713`): a
+    /// `KafkaAdminClient.AdminClientRunnable#call`: a
     /// `bootstrap.controllers` client fails every call whose node provider
     /// cannot reach a controller at once, with Java's message, and sends
     /// nothing. Covers every public API whose provider answers `false`: the
@@ -16964,8 +16962,8 @@ mod tests {
                 .await
                 .unwrap_or_else(|| panic!("{api}: the call was not rejected"));
             // Two APIs wrap the rejection, as Java does: `findAllBrokers`'
-            // `handleFailure` (`KafkaAdminClient.java:3684-3688`) and
-            // `getMembersFromGroup` (`:4303`).
+            // `handleFailure` in `KafkaAdminClient#listGroups` and
+            // `KafkaAdminClient#getMembersFromGroup`.
             let wrapper = match *api {
                 "listGroups" => Some("Failed to find brokers to send ListGroups"),
                 "removeMembersFromConsumerGroup" => {
@@ -16987,7 +16985,8 @@ mod tests {
 
         // describeTopics by name first describes the cluster, which a controller
         // answers, and only then submits its DescribeTopicPartitions call, which
-        // is rejected (`KafkaAdminClient.java:2458-2470`), as in Java.
+        // is rejected, as in Java's
+        // `KafkaAdminClient#handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`.
         runnable.client_mut().prepare_response(prepare_describe_cluster_response(
             0,
             &nodes,
@@ -17007,8 +17006,10 @@ mod tests {
 
     /// The calls a `bootstrap.controllers` client may send: those whose Java
     /// node provider is `ControllerNodeProvider(true)` or
-    /// `ConstantNodeIdProvider(node, true)` (`KafkaAdminClient.java:2855`,
-    /// `:2986`, `:4074`, `:4210`, `:4654`, `:4734`), and those using
+    /// `ConstantNodeIdProvider(node, true)` (`describeConfigs`,
+    /// `incrementalAlterConfigs`, `alterPartitionReassignments`,
+    /// `listPartitionReassignments`, `describeFeatures`, `updateFeatures`),
+    /// and those using
     /// `LeastLoadedBrokerOrActiveKController`, which go to the active
     /// controller (node 0). Each is sent to the node Java sends it to.
     #[tokio::test]
@@ -17086,7 +17087,7 @@ mod tests {
             ),
             (
                 // A specific BROKER resource goes to the active controller, not to
-                // the node it names (`KafkaAdminClient.java:2980-2984`).
+                // the node it names (`KafkaAdminClient#incrementalAlterConfigs`).
                 "incrementalAlterConfigs to a broker",
                 Box::new({
                     let configs = HashMap::from([(broker_1, set("log.segment.bytes"))]);
@@ -17142,9 +17143,10 @@ mod tests {
     }
 
     /// `describeCluster` asks a `bootstrap.controllers` client's controllers to
-    /// describe the CONTROLLER endpoint (`KafkaAdminClient.java:2598-2599`), and
-    /// cannot ask them for fenced brokers (`:2593-2595`): the `createRequest`
-    /// failure is wrapped as an internal error, as `sendEligibleCalls` wraps it.
+    /// describe the CONTROLLER endpoint, and cannot ask them for fenced brokers,
+    /// as the `createRequest` of `KafkaAdminClient#describeCluster`'s call
+    /// decides: the `createRequest` failure is wrapped as an internal error, as
+    /// `sendEligibleCalls` wraps it.
     #[tokio::test]
     async fn describe_cluster_describes_the_controller_endpoint_in_controller_mode() {
         let (admin, mut runnable, _time, _nodes) = controller_env();
@@ -17174,7 +17176,7 @@ mod tests {
         assert_eq!(runnable.client_mut().request_count(), 0, "nothing is sent");
     }
 
-    /// `makeControllerMetadataCall` (`KafkaAdminClient.java:1730-1770`): a
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`: a
     /// `bootstrap.controllers` client that only knows its bootstrap address
     /// refreshes its metadata with `DescribeCluster` for the CONTROLLER
     /// endpoint, takes the controllers it names as its nodes and the active
@@ -17239,8 +17241,8 @@ mod tests {
         assert_eq!(result.nodes().get().await.unwrap().len(), 3);
     }
 
-    /// `makeControllerMetadataCall`'s `handleResponse`
-    /// (`KafkaAdminClient.java:1742-1750`): a refresh answered by a BROKER
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`'s
+    /// `handleResponse`: a refresh answered by a BROKER
     /// endpoint fails with `parseDescribeClusterResponse`'s
     /// `MismatchedEndpointTypeException`, which `updateFailed` keeps as fatal
     /// (`RequestUtils.isFatalException`), so the waiting call fails with it.
@@ -17271,9 +17273,10 @@ mod tests {
         assert_eq!(runnable.client_mut().request_count(), 0, "nothing else is sent");
     }
 
-    /// Both metadata calls override `handleUnsupportedVersionException` with
-    /// `metadataManager.updateFailed(e)` (`KafkaAdminClient.java:1759-1763`,
-    /// `:1802-1806`). It matters when the `UnsupportedVersionException` arrives
+    /// Both metadata calls
+    /// (`KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall` and
+    /// `#makeBrokerMetadataCall`) override `handleUnsupportedVersionException`
+    /// with `metadataManager.updateFailed(e)`. It matters when the `UnsupportedVersionException` arrives
     /// past the call's deadline: `Call.fail` then ends in
     /// `handleTimeoutFailure`, whose `TimeoutException` is not fatal, so only the
     /// hook keeps the fatal error, and `isReady()` reports it.
@@ -17308,9 +17311,9 @@ mod tests {
         }
     }
 
-    /// `LeastLoadedBrokerOrActiveKController.provide` returns
-    /// `metadataManager.controller()` for a `bootstrap.controllers` client
-    /// (`KafkaAdminClient.java:901-902`): with no known controller the call
+    /// `KafkaAdminClient.LeastLoadedBrokerOrActiveKController#provide` returns
+    /// `metadataManager.controller()` for a `bootstrap.controllers` client:
+    /// with no known controller the call
     /// stays pending, and the provider, unlike `ControllerNodeProvider`, does
     /// not request a metadata update for it.
     #[tokio::test]
@@ -17363,9 +17366,10 @@ mod tests {
         (admin, runnable, time, nodes)
     }
 
-    /// Both metadata calls end their `handleResponse` with
-    /// `unassignUnsentCalls(node -> true)` (`KafkaAdminClient.java:1756`,
-    /// `:1799`): a call assigned to a node that is not ready yet goes back to
+    /// Both metadata calls
+    /// (`KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall` and
+    /// `#makeBrokerMetadataCall`) end their `handleResponse` with
+    /// `unassignUnsentCalls(node -> true)`: a call assigned to a node that is not ready yet goes back to
     /// the pending calls, so the refreshed metadata picks its node. The
     /// controller-bound call waits on the throttled node 0; the refresh names
     /// node 2 the controller, and the call goes there instead of waiting out
@@ -17447,9 +17451,9 @@ mod tests {
         }
     }
 
-    /// `makeControllerMetadataCall`'s `handleResponse` returns right after
-    /// `handleFailure(e)` when `parseDescribeClusterResponse` throws
-    /// (`KafkaAdminClient.java:1747-1750`), before `unassignUnsentCalls`: a call
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`'s
+    /// `handleResponse` returns right after `handleFailure(e)` when
+    /// `parseDescribeClusterResponse` throws, before `unassignUnsentCalls`: a call
     /// already assigned to a node stays assigned, and keeps waiting for it,
     /// instead of failing with the error the failed refresh left behind.
     #[tokio::test]
@@ -17481,7 +17485,7 @@ mod tests {
     /// `bootstrap.controllers` alone builds a client that talks to the
     /// controllers (KIP-919): `createInternal` uses the controllers list for
     /// the bootstrap cluster and the `NetworkClient`'s bootstrap configuration
-    /// (`bootstrapAddressesToUse`, `KafkaAdminClient.java:589-591`), and fails a
+    /// (`bootstrapAddressesToUse` in `KafkaAdminClient#createInternal`), and fails a
     /// call the controllers cannot serve at once.
     #[tokio::test]
     async fn bootstrap_controllers_alone_builds_a_client() {

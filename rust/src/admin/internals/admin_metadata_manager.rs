@@ -325,9 +325,6 @@ impl AdminMetadataManager {
     /// it is an API error, kept, so that [`is_ready`](Self::is_ready) returns it
     /// until the next successful update; any other error is logged at info
     /// level.
-    ///
-    /// Translated from `AdminMetadataManager.updateFailed`
-    /// (`AdminMetadataManager.java:317-339`).
     #[doc(alias = "org.apache.kafka.clients.admin.internals.AdminMetadataManager#updateFailed")]
     pub(crate) fn update_failed(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
@@ -348,8 +345,8 @@ impl AdminMetadataManager {
         }
     }
 
-    /// The warning `updateFailed` adds for a fatal `UnsupportedVersionException`
-    /// (`AdminMetadataManager.java:328-335`), which names the API the remote
+    /// The warning `AdminMetadataManager#updateFailed` adds for a fatal
+    /// `UnsupportedVersionException`, which names the API the remote
     /// node does not support: KIP-919's `DESCRIBE_CLUSTER` for a
     /// `bootstrap.controllers` client, `METADATA` otherwise. `None` for any
     /// other error.
@@ -662,7 +659,7 @@ mod tests {
         assert!(mgr.is_ready().unwrap());
     }
 
-    /// `updateFailed`'s KIP-919 branch (`AdminMetadataManager.java:328-335`): a
+    /// The KIP-919 branch of `AdminMetadataManager#updateFailed`: a
     /// fatal `UnsupportedVersionException` names the API the remote node lacks,
     /// `DESCRIBE_CLUSTER` for a `bootstrap.controllers` client and `METADATA`
     /// otherwise; other errors add no such warning. The fatal error is kept

@@ -77,9 +77,10 @@ pub(crate) enum HandleResult {
     /// The call is finished, and the runnable moves every call that is
     /// assigned to a node but not yet sent back to the pending calls, so that
     /// a new destination is chosen from the metadata just applied. Java's
-    /// metadata calls end their `handleResponse` with
-    /// `unassignUnsentCalls(node -> true)` (`KafkaAdminClient.java:1756`,
-    /// `:1799`), a method of the runnable a Rust hook cannot call.
+    /// metadata calls (`KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`
+    /// and `#makeBrokerMetadataCall`) end their `handleResponse` with
+    /// `unassignUnsentCalls(node -> true)`, a method of the runnable a Rust
+    /// hook cannot call.
     UnassignUnsentCalls,
     /// Enqueue a fresh follow-up call (e.g. quota-exceeded retry topics). The
     /// current call is finished.
@@ -202,8 +203,9 @@ impl NodeProvider {
             NodeProvider::LeastLoadedBrokerOrActiveKController => {
                 if metadata_manager.is_ready()? {
                     if metadata_manager.using_bootstrap_controllers() {
-                        // `return metadataManager.controller();`
-                        // (`KafkaAdminClient.java:901-902`): with no known
+                        // `return metadataManager.controller();` in
+                        // `KafkaAdminClient.LeastLoadedBrokerOrActiveKController#provide`:
+                        // with no known
                         // controller the call stays pending, and unlike
                         // `ControllerNodeProvider` this provider does not
                         // request a metadata update for it.
@@ -518,8 +520,8 @@ mod tests {
         assert!(!rebootstrapped(&manager));
     }
 
-    /// `supportsUseControllers()` of each Java `NodeProvider`
-    /// (`KafkaAdminClient.java:788-917`): `MetadataUpdateNodeIdProvider` and
+    /// `supportsUseControllers()` of each Java `NodeProvider` nested in
+    /// `KafkaAdminClient`: `MetadataUpdateNodeIdProvider` and
     /// `LeastLoadedBrokerOrActiveKController` answer `true`,
     /// `LeastLoadedNodeProvider` `false`, and `ControllerNodeProvider` /
     /// `ConstantNodeIdProvider` answer what their constructor was given.

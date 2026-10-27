@@ -1027,7 +1027,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client uses `bootstrap.controllers`, [`make_broker_metadata_call`]
     /// otherwise.
     ///
-    /// Translated from `makeMetadataCall` (`KafkaAdminClient.java:1722-1728`).
+    /// Translated from `KafkaAdminClient.AdminClientRunnable#makeMetadataCall`.
     ///
     /// [`make_controller_metadata_call`]: Self::make_controller_metadata_call
     /// [`make_broker_metadata_call`]: Self::make_broker_metadata_call
@@ -1043,8 +1043,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client: a `DescribeCluster` request for the CONTROLLER endpoint, as
     /// KIP-919 specifies.
     ///
-    /// Translated from `makeControllerMetadataCall`
-    /// (`KafkaAdminClient.java:1730-1770`).
+    /// Translated from
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`.
     fn make_controller_metadata_call(&self, now: i64) -> Call {
         // Use DescribeCluster here, as specified by KIP-919.
         let deadline = now + self.request_timeout_ms as i64;
@@ -1062,7 +1062,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 Ok(Box::new(describe_cluster_request::Builder::new(data)) as Box<dyn RequestBuilder>)
             }),
             Box::new(move |response, now, _cur_node| {
-                // Java casts unguarded (`KafkaAdminClient.java:1743`); a mismatch
+                // Java's `handleResponse` casts unguarded; a mismatch
                 // reaches `call.fail` through the response loop's `catch`, as
                 // for the broker metadata call.
                 let ConcreteResponse::DescribeCluster(describe_cluster_response) = response else {
@@ -1075,8 +1075,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     Ok(cluster) => cluster,
                     Err(error) => {
                         // `catch (ApiException e) { handleFailure(e); return; }`
-                        // (`:1747-1750`): this call's `handleFailure`, and no
-                        // unassignment.
+                        // in Java's `handleResponse`: this call's
+                        // `handleFailure`, and no unassignment.
                         mm_ok.update_failed(error);
                         return HandleResult::Done;
                     },
@@ -1100,8 +1100,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client. We use `MetadataRequest` here so that we can continue to support
     /// brokers that are too old to handle `DescribeCluster`.
     ///
-    /// Translated from `makeBrokerMetadataCall`
-    /// (`KafkaAdminClient.java:1772-1813`).
+    /// Translated from
+    /// `KafkaAdminClient.AdminClientRunnable#makeBrokerMetadataCall`.
     fn make_broker_metadata_call(&self, now: i64) -> Call {
         let deadline = now + self.request_timeout_ms as i64;
         let mm_ok = self.metadata_manager.clone();

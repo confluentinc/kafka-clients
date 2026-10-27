@@ -1032,8 +1032,8 @@ mod tests {
         assert!(config.bootstrap_controllers().is_empty());
     }
 
-    /// `bootstrap.controllers` (KIP-919) is defined as Java defines it
-    /// (`AdminClientConfig.java:173-178`): a `LIST`, empty by default,
+    /// `bootstrap.controllers` (KIP-919) is defined as Java's
+    /// `AdminClientConfig.CONFIG` defines it: a `LIST`, empty by default,
     /// validated with `ValidList.anyNonDuplicateValues(true, false)`, and
     /// accepted in any combination with `bootstrap.servers`, which
     /// `KafkaAdminClient.determineBootstrapType` checks when the client is
