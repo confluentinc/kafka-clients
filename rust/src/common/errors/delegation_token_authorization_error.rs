@@ -20,11 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Delegation Token authorization failed.
     ///
-    /// Corresponds to Java's `DelegationTokenAuthorizationException`, error code `Errors::DelegationTokenAuthorizationFailed`.
-    ///
-    /// Java `extends` chain:
-    ///    `DelegationTokenAuthorizationException` -> `AuthorizationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::DelegationTokenAuthorizationFailed`. Java `extends` chain:
+    /// `DelegationTokenAuthorizationException` -> `AuthorizationException` ->
+    /// `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenAuthorizationException")]
     DelegationTokenAuthorizationError,
     code: Errors::DelegationTokenAuthorizationFailed,

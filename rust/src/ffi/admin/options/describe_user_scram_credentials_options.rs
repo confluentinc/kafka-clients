@@ -67,8 +67,13 @@ fn boxed(options: DescribeUserScramCredentialsOptions) -> *mut kafka_admin_Descr
     Box::into_raw(Box::new(options)) as *mut kafka_admin_DescribeUserScramCredentialsOptions_t
 }
 
-/// `new DescribeUserScramCredentialsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_DescribeUserScramCredentialsOptions_destroy`].
+/// `new DescribeUserScramCredentialsOptions()`: the defaults, with the client's default API
+/// timeout.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_DescribeUserScramCredentialsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeUserScramCredentialsOptions_new()
@@ -76,8 +81,13 @@ pub extern "C" fn kafka_admin_DescribeUserScramCredentialsOptions_new()
     boxed(DescribeUserScramCredentialsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -95,8 +105,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsOptions_set_tim
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///

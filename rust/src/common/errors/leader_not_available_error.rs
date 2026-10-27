@@ -18,15 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// There is no leader for this topic-partition as we are in the middle of a
-    /// leadership election.
+    /// There is no currently available leader for the given partition (either because a leadership
+    /// election is in progress or because all replicas are down).
     ///
-    /// Corresponds to Java's `LeaderNotAvailableException`, error code `Errors::LeaderNotAvailable`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `LeaderNotAvailableException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::LeaderNotAvailable`. Java `extends` chain: `LeaderNotAvailableException`
+    /// -> `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.LeaderNotAvailableException")]
     LeaderNotAvailableError,
     code: Errors::LeaderNotAvailable,

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::delete_consumer_group_offsets`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,8 +23,6 @@ use crate::common::{Error, KafkaFuture, TopicPartition};
 type PartitionErrors = HashMap<TopicPartition, Errors>;
 
 /// The result of `Admin::delete_consumer_group_offsets`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult")]
 pub struct DeleteConsumerGroupOffsetsResult {
@@ -45,11 +41,13 @@ impl DeleteConsumerGroupOffsetsResult {
     /// Returns a future which can be used to check the result for a given
     /// partition.
     ///
-    /// Mirrors `partitionResult(TopicPartition)`.
+    /// # Arguments
+    ///
+    /// - `partition` - the partition to check.
     ///
     /// # Errors
     ///
-    /// Returns an error (Java's `IllegalArgumentException`) immediately if the
+    /// Returns an error answering `Error::is_local_illegal_argument_error` immediately if the
     /// partition was not included in the original request. The returned future
     /// fails if the deletion for the partition failed (or the partition is
     /// missing from the response).
@@ -71,8 +69,6 @@ impl DeleteConsumerGroupOffsetsResult {
 
     /// Returns a future which succeeds only if all the deletions succeed.
     /// If not, the first partition error is returned.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         // Sort for a stable "first error" (Java relies on set iteration order,

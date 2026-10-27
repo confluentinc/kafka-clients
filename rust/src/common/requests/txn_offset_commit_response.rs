@@ -408,7 +408,7 @@ mod tests {
     use super::*;
     use crate::common::requests::ConcreteResponse;
 
-    // Fixture values of `OffsetCommitResponseTest` (Java 41-50), which
+    // Fixture values of `org.apache.kafka.common.requests.OffsetCommitResponseTest`, which
     // `TxnOffsetCommitResponseTest` extends.
     const THROTTLE_TIME_MS: i32 = 10;
     const TOPIC_ONE: &str = "topic1";

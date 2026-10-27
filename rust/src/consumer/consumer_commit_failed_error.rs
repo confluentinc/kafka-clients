@@ -19,22 +19,16 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// An offset commit with [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync)
-/// failed with an unrecoverable error. This error is generated on the client
-/// side, typically when a group rebalance completes before the commit could be
+/// This error is returned when an offset commit with
+/// [`Consumer::commit_sync`](crate::consumer::Consumer::commit_sync) fails with
+/// an unrecoverable error. This error is generated on the client side,
+/// typically when a group rebalance completes before the commit could be
 /// successfully applied. In this case, the commit cannot generally be retried
 /// because some of the partitions may have already been assigned to another
 /// member in the group.
-///
-/// Corresponds to Java's `CommitFailedException`. It has no entry in `Errors`,
-/// so it carries no protocol code.
-///
-/// Java `extends` chain:
-///    `CommitFailedException` -> `KafkaException`
-///
-/// Note it extends `KafkaException` directly, so it is NOT an `ApiException` —
-/// unlike its sibling [`ConsumerRetriableCommitFailedError`](super::ConsumerRetriableCommitFailedError),
-/// which goes through `RetriableException`.
+// Java `extends` chain: `CommitFailedException` -> `KafkaException`. It is NOT
+// an `ApiException`, unlike its sibling `ConsumerRetriableCommitFailedError`,
+// and has no entry in `Errors`, so it carries no protocol code.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException")]
 pub struct ConsumerCommitFailedError {
@@ -48,6 +42,10 @@ impl ConsumerCommitFailedError {
     pub(crate) const CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE: &str = "Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing max.poll.interval.ms or by reducing the maximum size of batches returned in poll() with max.poll.records.";
 
     /// Create the error with the given message.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - The error message
     #[doc(alias = "org.apache.kafka.clients.consumer.CommitFailedException#CommitFailedException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
@@ -59,7 +57,7 @@ impl ConsumerCommitFailedError {
         Self::new(ConsumerCommitFailedError::CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE)
     }
 
-    /// The error message.
+    /// Returns the error message.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
@@ -96,10 +94,10 @@ impl ErrorSource for ConsumerCommitFailedError {
 }
 
 impl ConsumerCommitFailedError {
-    /// Always `None`: `CommitFailedException` exposes no `Throwable cause` constructor, so its
-    /// cause is null in Java too. Present as an inherent method so it shadows
-    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
-    /// `x.source()` unambiguous and typed.
+    /// Returns the cause of this error: always `None`, as no constructor takes
+    /// one.
+    // An inherent method, so it shadows both `ErrorSource::source` and
+    // `std::error::Error::source`, keeping `x.source()` unambiguous and typed.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
@@ -122,7 +120,7 @@ mod tests {
     /// was split into one file per error class.
     ///
     /// Java: `CommitFailedException()` uses the long default message
-    /// (`CommitFailedException.java:47-53`).
+    /// (`org.apache.kafka.clients.consumer.CommitFailedException#CommitFailedException()`).
     #[test]
     fn test_commit_failed_default_message() {
         let e = ConsumerCommitFailedError::with_default_message();
@@ -152,7 +150,7 @@ mod tests {
     /// variant that replaced it.
     ///
     /// `CommitFailedException extends KafkaException` directly
-    /// (`CommitFailedException.java:31`), so it is a `KafkaException` but NOT an
+    /// (`org.apache.kafka.clients.consumer.CommitFailedException`), so it is a `KafkaException` but NOT an
     /// `ApiException` and NOT retriable — the exact opposite of its
     /// [`ConsumerRetriableCommitFailedError`](super::ConsumerRetriableCommitFailedError)
     /// sibling.

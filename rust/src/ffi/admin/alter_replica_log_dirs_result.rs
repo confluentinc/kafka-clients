@@ -104,16 +104,30 @@ unsafe fn replica_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     }
 }
 
-/// `AlterReplicaLogDirsResult.values()`: an owned map, sorted by topic,
-/// partition then broker id, of owned `kafka_common_TopicPartitionReplica_t *`
-/// keys (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers
-/// `NULL`). Freed with `kafka_Map_destroy`, which frees the keys and the
-/// futures.
+/// Return a map from `TopicPartitionReplica` to `KafkaFuture` which holds the status of individual
+/// replica movement. To check the result of individual replica movement, call
+/// `kafka_common_KafkaFuture_get` from the value contained in the returned map. If there is no
+/// error, it will return silently; if not, it fails with an error like the following:
+///
+/// - `ClusterAuthorizationError`: Authorization failed. (CLUSTER_AUTHORIZATION_FAILED, 31)
+/// - `InvalidTopicError`: The specified topic name is too long. (INVALID_TOPIC_EXCEPTION, 17)
+/// - `LogDirNotFoundError`: The specified log directory is not found in the broker. (LOG_DIR_NOT_FOUND, 57)
+/// - `ReplicaNotAvailableError`: The replica does not exist on the broker. (REPLICA_NOT_AVAILABLE, 9)
+/// - `KafkaStorageError`: Disk error occurred. (KAFKA_STORAGE_ERROR, 56)
+/// - `UnknownServerError`: Unknown. (UNKNOWN_SERVER_ERROR, -1)
+///
+/// # Returns
+///
+/// A map, sorted by topic, partition then broker id, of owned
+/// `kafka_common_TopicPartitionReplica_t *` keys (compared by value in `kafka_Map_get`) to owned
+/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
@@ -135,13 +149,20 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_values(
     )
 }
 
-/// `AlterReplicaLogDirsResult.all()`: an owned `KafkaFuture<Void>` (its
-/// `get` delivers `NULL`) that succeeds once every replica move was
-/// accepted, freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a `KafkaFuture` which succeeds on `kafka_common_KafkaFuture_get` if all the replica
+/// movement have succeeded. If not, it fails with an error described in
+/// `kafka_admin_AlterReplicaLogDirsResult_values`.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every replica move was
+/// accepted.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
@@ -153,12 +174,12 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

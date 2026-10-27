@@ -75,7 +75,7 @@ impl SaslConfigs {
 
 /// SASL configuration for Kafka connections.
 ///
-/// Translated from `org.apache.kafka.common.config.SaslConfigs`. The Java class
+/// The Java class
 /// hosts only the `sasl.*` config keys and defaults; the values themselves
 /// travel in the `Map<String, ?>` handed to `SaslChannelBuilder.configure`.
 /// The Rust struct keeps Java's name and constants, and additionally holds the
@@ -105,7 +105,7 @@ pub struct SaslConfigs {
     /// via [`SaslConfigs::resolve_username`] and [`SaslConfigs::resolve_password`].
     ///
     /// A [`Password`] because Java defines `sasl.jaas.config` as
-    /// `ConfigDef.Type.PASSWORD` (`SaslConfigs.java:398`): the string embeds
+    /// `ConfigDef.Type.PASSWORD` (`org.apache.kafka.common.config.SaslConfigs#addClientSaslSupport`): the string embeds
     /// the credentials, so every rendering of it is `[hidden]`.
     pub(crate) jaas_config: Option<Password>,
 
@@ -297,7 +297,7 @@ impl SaslConfigs {
     /// Decodes the backslash escapes of a quoted JAAS option value.
     ///
     /// Java parses `sasl.jaas.config` with a `java.io.StreamTokenizer`
-    /// (`JaasConfig.java:52-58`), which, as its documentation says, recognizes
+    /// (in `JaasConfig`'s constructor), which, as its documentation says, recognizes
     /// "the usual escape sequences" in a string constant and converts each to
     /// the character it stands for:
     ///

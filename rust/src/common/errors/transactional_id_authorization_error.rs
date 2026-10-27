@@ -20,11 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Transactional Id authorization failed.
     ///
-    /// Corresponds to Java's `TransactionalIdAuthorizationException`, error code `Errors::TransactionalIdAuthorizationFailed`.
-    ///
-    /// Java `extends` chain:
-    ///    `TransactionalIdAuthorizationException` -> `AuthorizationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::TransactionalIdAuthorizationFailed`. Java `extends` chain:
+    /// `TransactionalIdAuthorizationException` -> `AuthorizationException` ->
+    /// `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.TransactionalIdAuthorizationException")]
     TransactionalIdAuthorizationError,
     code: Errors::TransactionalIdAuthorizationFailed,

@@ -18,13 +18,12 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The limit of share sessions has been reached.
+    /// Indicates that a new share session could not be opened because the limit of share sessions
+    /// has been reached.
     ///
-    /// Corresponds to Java's `ShareSessionLimitReachedException`, error code `Errors::ShareSessionLimitReached`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ShareSessionLimitReachedException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::ShareSessionLimitReached`.
     #[doc(alias = "org.apache.kafka.common.errors.ShareSessionLimitReachedException")]
     ShareSessionLimitReachedError,
     code: Errors::ShareSessionLimitReached,

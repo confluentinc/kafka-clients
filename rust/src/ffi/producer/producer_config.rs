@@ -122,24 +122,35 @@ pub(crate) unsafe fn producer_config_ref<'a>(
     unsafe { &*(config as *const ProducerConfigInner) }
 }
 
-/// `new ProducerConfig(Map<String, String> props)`: validates the
-/// properties (the map stays the caller's) and delivers the configuration,
-/// owned by the caller ([`kafka_producer_ProducerConfig_destroy`]).
+/// Constructs a new ProducerConfig with the given configuration map.
 ///
-/// It first sets up the default stderr logger, as creating a client does, so
-/// the warnings the configuration logs while it is built are not lost when it
-/// is created before any client; its clients do not log them again.
+/// # Parameters
+///
+/// - `props` - The producer configuration map
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_config_error` if a value is invalid, the settings
+///   conflict, or a SASL mechanism other than `PLAIN` is set
+///
+/// # Translation notes
+///
+/// WARNING: `sasl.mechanism` must be `PLAIN`.
 ///
 /// # Safety
 ///
-/// `props` must be a live map of C strings and `out_err` a valid slot pointing
-/// at null.
+/// `props` must be a live map of C strings, which stays the caller's, and `out_err`
+/// a valid slot pointing at null. The configuration is owned by the caller, freed
+/// with [`kafka_producer_ProducerConfig_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     props: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_producer_ProducerConfig_t {
+    // Sets up the default stderr logger first, as creating a client does, so the warnings the
+    // configuration logs while it is built are not lost when it is created before any client;
+    // its clients do not log them again.
     init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, as `map_strings`
     // requires; its entries are copied into owned `String`s.
@@ -159,15 +170,19 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     Box::into_raw(Box::new(inner)) as *mut kafka_producer_ProducerConfig_t
 }
 
-/// `ProducerConfig::set_partitioner`: the `*mut` parameter consumes an owned
-/// `kafka_producer_Partitioner_t` or shares the implementation of an
-/// `__as_Partitioner` view (whose class handle the caller keeps alive until
-/// the producers built from this configuration are destroyed).
+/// `ProducerConfig::set_partitioner`.
+///
+/// # Parameters
+///
+/// - `partitioner` - the partitioner of the producers built from this configuration
 ///
 /// # Safety
 ///
 /// `self_` and `partitioner` must be live handles, and no other call may use
-/// `self_` at the same time.
+/// `self_` at the same time. An owned `kafka_producer_Partitioner_t` is consumed;
+/// an `__as_Partitioner` view shares its implementation, its class handle kept
+/// alive by the caller until the producers built from this configuration are
+/// destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
@@ -185,13 +200,25 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
     inner.partitioner = Some(unsafe { take_partitioner(partitioner) });
 }
 
-/// `getShort(String key)`: the `SHORT` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_producer_ProducerConfig_unused`]).
+/// `getShort(String key)`: the `SHORT` configuration `key`. Reading a key marks it used
+/// ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -212,13 +239,25 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_short(key)) }
 }
 
-/// `getInt(String key)`: the `INT` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_producer_ProducerConfig_unused`]).
+/// `getInt(String key)`: the `INT` configuration `key`. Reading a key marks it used
+/// ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -239,13 +278,25 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_int(key)) }
 }
 
-/// `getLong(String key)`: the `LONG` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_producer_ProducerConfig_unused`]).
+/// `getLong(String key)`: the `LONG` configuration `key`. Reading a key marks it used
+/// ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -266,13 +317,25 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_long(key)) }
 }
 
-/// `getDouble(String key)`: the `DOUBLE` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_producer_ProducerConfig_unused`]).
+/// `getDouble(String key)`: the `DOUBLE` configuration `key`. Reading a key marks it used
+/// ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -293,13 +356,25 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_double(key)) }
 }
 
-/// `getBoolean(String key)`: the `BOOLEAN` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_producer_ProducerConfig_unused`]).
+/// `getBoolean(String key)`: the `BOOLEAN` configuration `key`. Reading a key marks it used
+/// ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -324,18 +399,32 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
     }
 }
 
-/// `getString(String key)`: the `STRING` configuration `key`, borrowed from
-/// the handle and valid until it is destroyed, or `NULL` with `*out_err`
-/// still `NULL` when the key has no value (Java's `null`, which is also what
-/// an unset `PASSWORD` key such as `ssl.keystore.key` answers). `client.id`
-/// is the resolved id, generated when the property is unset, under which
-/// every producer created from the handle runs. Fails as
-/// [`kafka_producer_ProducerConfig_get_int`] does.
+/// `getString(String key)`: the `STRING` configuration `key`. Reading a key marks
+/// it used ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+///
+/// # Returns
+///
+/// The value, or `NULL` with `*out_err` still `NULL` when the key has no value
+/// (Java's `null`, which is also what an unset `PASSWORD` key such as
+/// `ssl.keystore.key` answers). `client.id` is the resolved id, generated when the
+/// property is unset, under which every producer created from the handle runs.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle; `key` a valid NUL-terminated string;
-/// `out_err` a valid slot pointing at null.
+/// `out_err` a valid slot pointing at null. The string is borrowed from the
+/// handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
@@ -349,15 +438,30 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
     unsafe { config_getters::get_string(&inner.strings, key, out_err, |key| inner.config.get_string(key)) }
 }
 
-/// `getList(String key)`: the `LIST` configuration `key`, as an owned list of
-/// `char *` the caller frees with `kafka_List_destroy`, or `NULL` with
-/// `*out_err` still `NULL` when the key has no value (Java's `null`). Fails
-/// as [`kafka_producer_ProducerConfig_get_int`] does.
+/// `getList(String key)`: the `LIST` configuration `key`. Reading a key marks it
+/// used ([`kafka_producer_ProducerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+///
+/// # Returns
+///
+/// The values, or `NULL` with `*out_err` still `NULL` when the key has no value
+/// (Java's `null`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle; `key` a valid NUL-terminated string;
-/// `out_err` a valid slot pointing at null.
+/// `out_err` a valid slot pointing at null. The list of `char *` is owned by the
+/// caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_list(
@@ -372,13 +476,18 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_list(
 }
 
 /// `unused()`: the keys of the properties never read through this handle's
-/// getters nor marked with [`kafka_producer_ProducerConfig_ignore`], as an
-/// owned, sorted list of `char *` the caller frees with `kafka_List_destroy`.
+/// getters nor marked with [`kafka_producer_ProducerConfig_ignore`].
+///
+/// # Returns
+///
+/// The unused keys, sorted.
+///
 /// A producer created from the handle keeps its own record, starting empty.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list of `char *` is owned by the caller,
+/// freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_unused(
@@ -388,8 +497,11 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_unused(
     sorted_string_list(unsafe { producer_config_ref(self_) }.config.unused())
 }
 
-/// `ignore(String key)`: marks the configuration `key` used without reading
-/// it.
+/// `ignore(String key)`: marks the configuration `key` used without reading it.
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
 ///
 /// # Safety
 ///
@@ -406,9 +518,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_ignore(
     unsafe { config_getters::ignore(key, |key| inner.config.ignore(key)) }
 }
 
-/// `logUnused()`: logs at INFO, in one line, the keys
-/// [`kafka_producer_ProducerConfig_unused`] answers, and nothing when there
-/// are none.
+/// Info level log for any unused configurations
 ///
 /// # Safety
 ///
@@ -420,8 +530,15 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_log_unused(self_: *const 
     unsafe { producer_config_ref(self_) }.config.log_unused();
 }
 
-/// `configNames()`: the names of the configurations `ProducerConfig`
-/// defines, as an owned, sorted list of `char *` the caller frees with
+/// Gets the set of all producer configuration names.
+///
+/// # Returns
+///
+/// The set of configuration names
+///
+/// # Safety
+///
+/// The sorted list of `char *` is owned by the caller, freed with
 /// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]

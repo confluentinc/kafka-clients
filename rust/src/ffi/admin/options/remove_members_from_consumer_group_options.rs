@@ -117,9 +117,13 @@ fn boxed(options: RemoveMembersFromConsumerGroupOptions) -> *mut kafka_admin_Rem
         as *mut kafka_admin_RemoveMembersFromConsumerGroupOptions_t
 }
 
-/// `new RemoveMembersFromConsumerGroupOptions()`: options removing every
-/// member of the group (`remove_all()` is true). Owned, freed with
-/// [`kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`].
+/// `new RemoveMembersFromConsumerGroupOptions()`: options removing every member of the group
+/// (`remove_all()` is true).
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
@@ -127,20 +131,29 @@ pub extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_new()
     boxed(RemoveMembersFromConsumerGroupOptions::new())
 }
 
-/// `new RemoveMembersFromConsumerGroupOptions(Collection<MemberToRemove>
-/// members)`: `members` is a borrowed `kafka_List_t` of borrowed
-/// `kafka_admin_MemberToRemove_t *`, copied during the call. Returns an owned
-/// handle, freed with
-/// [`kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`]. When the list
-/// is empty or `NULL` it stores the translation of Java\'s
-/// `IllegalArgumentException` ("Invalid empty members has been provided"),
-/// owned by the caller, in `*out_err` and returns `NULL`.
+/// Creates options removing the given members from the group.
+///
+/// # Parameters
+///
+/// - `members` - the members to remove, a `kafka_List_t` of `kafka_admin_MemberToRemove_t *`;
+///   `NULL` reads as empty.
+///
+/// # Returns
+///
+/// The new options, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `members` is empty or `NULL`
+///   ("Invalid empty members has been provided").
+/// - `kafka_common_Error_is_local_illegal_state_error` - a Rust panic caught at the FFI boundary.
 ///
 /// # Safety
 ///
 /// `members` must be `NULL` or a valid list, not mutated during the call, whose
 /// elements are live member-to-remove handles; `out_err` a valid slot pointing
-/// at null.
+/// at `NULL`. The list and its elements are borrowed and copied during the call. The handle is
+/// owned by the caller, freed with `kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(
@@ -160,14 +173,16 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_with_
     unsafe { deliver_value(RemoveMembersFromConsumerGroupOptions::with_members(members), out_err, boxed) }
 }
 
-/// `RemoveMembersFromConsumerGroupOptions.reason(String reason)`: `reason`
-/// is copied during the call; `NULL` is Java's `null`, which clears a reason
-/// set earlier.
+/// Sets an optional reason.
+///
+/// # Parameters
+///
+/// - `reason` - the reason, copied during the call; `NULL` clears a reason set earlier.
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time;
-/// `reason` must be `NULL` or a valid NUL-terminated string.
+/// `reason` must be `NULL` or a valid NUL-terminated string, borrowed and copied during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason(
@@ -186,8 +201,13 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_r
     });
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -204,13 +224,17 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_set_t
     unsafe { inner_mut(self_) }.replace(|options| options.set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms)));
 }
 
-/// `RemoveMembersFromConsumerGroupOptions.members()`: an owned `kafka_List_t`
-/// of owned `kafka_admin_MemberToRemove_t *` sorted by group instance id,
-/// freed with `kafka_List_destroy`; empty when all members are removed.
+/// The members to remove from the group.
+///
+/// # Returns
+///
+/// A `kafka_List_t` of `kafka_admin_MemberToRemove_t *` sorted by group instance id, empty when
+/// all members are removed.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list and its elements are owned by the caller, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_members(
@@ -234,13 +258,16 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_membe
     )
 }
 
-/// `RemoveMembersFromConsumerGroupOptions.reason()`: a borrowed string valid
-/// until the handle is destroyed or the reason is set again, `NULL` when no
-/// reason is set.
+/// The optional reason.
+///
+/// # Returns
+///
+/// The reason, `NULL` when no reason is set.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is borrowed, valid until the handle is destroyed or
+/// the reason is set again.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reason(
@@ -257,8 +284,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_reaso
         .map_or(ptr::null(), |reason| reason.as_ptr())
 }
 
-/// `RemoveMembersFromConsumerGroupOptions.removeAll()`: whether every member
-/// of the group is removed, that is, no specific member was given.
+/// `RemoveMembersFromConsumerGroupOptions.removeAll()`.
+///
+/// # Returns
+///
+/// Whether every member of the group is removed, that is, no specific member was given.
 ///
 /// # Safety
 ///
@@ -275,8 +305,12 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupOptions_remov
     i8::from(unsafe { remove_members_from_consumer_group_options_ref(self_) }.remove_all())
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///

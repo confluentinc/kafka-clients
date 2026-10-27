@@ -18,20 +18,16 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The producer cannot allocate memory for a record because the buffer pool
-    /// is full and the max blocking time has elapsed.
-    ///
-    /// Corresponds to Java's `BufferExhaustedException`, which lives in
-    /// `org.apache.kafka.clients.producer` rather than `common.errors`.
-    ///
-    /// Java `extends` chain:
-    ///    `BufferExhaustedException` -> `TimeoutException` ->
-    ///   `RetriableException` -> `ApiException` -> `KafkaException`
-    ///
-    /// It is therefore **retriable**, and reports error code
-    /// `Errors::RequestTimedOut`: it has no entry in `Errors` itself, and
-    /// Java's `Errors.forException` walks up the superclass chain, finding
-    /// `TimeoutException`'s.
+    /// This error is returned if the producer cannot allocate memory for a
+    /// record within `max.block.ms` due to the buffer being too full. In
+    /// earlier versions a `TimeoutError` was returned instead of this. To keep
+    /// existing checks working, `Error::is_timeout_error` answers `true` for
+    /// it.
+    // Java `extends` chain: `BufferExhaustedException` -> `TimeoutException`
+    // -> `RetriableException` -> `ApiException` -> `KafkaException`. It is
+    // therefore retriable, and reports error code `Errors::RequestTimedOut`:
+    // it has no entry in `Errors` itself, and Java's `Errors.forException`
+    // walks up the superclass chain, finding `TimeoutException`'s.
     #[doc(alias = "org.apache.kafka.clients.producer.BufferExhaustedException")]
     ProducerBufferExhaustedError,
     code: Errors::RequestTimedOut,

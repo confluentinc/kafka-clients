@@ -24,9 +24,9 @@ use std::fmt;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 
-/// A universally unique identifier paired with a [`TopicPartition`].
-///
-/// Corresponds to Java's `org.apache.kafka.common.TopicIdPartition`.
+/// This represents universally unique identifier with topic id for a topic
+/// partition. This makes sure that topics recreated with the same name will
+/// always have unique topic identifiers.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.TopicIdPartition")]
 pub struct TopicIdPartition {
@@ -37,7 +37,10 @@ pub struct TopicIdPartition {
 impl TopicIdPartition {
     /// Creates an instance with the provided topic ID and topic partition.
     ///
-    /// Translates Java's `TopicIdPartition(Uuid topicId, TopicPartition topicPartition)`.
+    /// # Arguments
+    ///
+    /// - `topic_id` - the topic id
+    /// - `topic_partition` - the topic partition
     #[doc(alias = "org.apache.kafka.common.TopicIdPartition#TopicIdPartition")]
     pub fn new(topic_id: Uuid, topic_partition: TopicPartition) -> Self {
         Self { topic_id, topic_partition }
@@ -45,7 +48,11 @@ impl TopicIdPartition {
 
     /// Creates an instance from a topic ID, partition number, and topic name.
     ///
-    /// Translates Java's `TopicIdPartition(Uuid topicId, int partition, String topic)`.
+    /// # Arguments
+    ///
+    /// - `topic_id` - the topic id
+    /// - `partition` - the partition id
+    /// - `topic` - the topic name, empty if unknown
     #[doc(alias = "org.apache.kafka.common.TopicIdPartition#TopicIdPartition")]
     pub fn with_partition_topic(topic_id: Uuid, partition: i32, topic: impl Into<String>) -> Self {
         Self { topic_id, topic_partition: TopicPartition::new(topic.into(), partition) }

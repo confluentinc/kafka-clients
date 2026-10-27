@@ -18,13 +18,13 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The transaction timeout is larger than the maximum value allowed by the
-    /// broker (as configured by transaction.max.timeout.ms).
+    /// The transaction coordinator returns this error code if the timeout received via the
+    /// InitProducerIdRequest is larger than the `transaction.max.timeout.ms` config value.
     ///
-    /// Corresponds to Java's `InvalidTxnTimeoutException`, error code `Errors::InvalidTransactionTimeout`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidTxnTimeoutException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidTransactionTimeout`. Java `extends` chain:
+    /// `InvalidTxnTimeoutException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidTxnTimeoutException")]
     InvalidTxnTimeoutError,
     code: Errors::InvalidTransactionTimeout,

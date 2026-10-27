@@ -125,7 +125,7 @@ pub(crate) unsafe fn config_source_value_of(source: *const kafka_admin_ConfigEnt
     unsafe { *(source as *const ConfigSource) }
 }
 
-/// `ConfigSource.DYNAMIC_TOPIC_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_TOPIC_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_topic_config()
@@ -133,7 +133,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_topic_config()
     config_source_singleton(ConfigSource::DynamicTopicConfig)
 }
 
-/// `ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_logger_config()
@@ -141,7 +141,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_logger_con
     config_source_singleton(ConfigSource::DynamicBrokerLoggerConfig)
 }
 
-/// `ConfigSource.DYNAMIC_BROKER_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_BROKER_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_config()
@@ -149,7 +149,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_broker_config()
     config_source_singleton(ConfigSource::DynamicBrokerConfig)
 }
 
-/// `ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_default_broker_config()
@@ -157,7 +157,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_default_broker_co
     config_source_singleton(ConfigSource::DynamicDefaultBrokerConfig)
 }
 
-/// `ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_CLIENT_METRICS_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_client_metrics_config()
@@ -165,7 +165,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_client_metrics_co
     config_source_singleton(ConfigSource::DynamicClientMetricsConfig)
 }
 
-/// `ConfigSource.DYNAMIC_GROUP_CONFIG`.
+/// Returns `ConfigSource.DYNAMIC_GROUP_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_group_config()
@@ -173,7 +173,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_dynamic_group_config()
     config_source_singleton(ConfigSource::DynamicGroupConfig)
 }
 
-/// `ConfigSource.STATIC_BROKER_CONFIG`.
+/// Returns `ConfigSource.STATIC_BROKER_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_static_broker_config()
@@ -181,7 +181,7 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_static_broker_config()
     config_source_singleton(ConfigSource::StaticBrokerConfig)
 }
 
-/// `ConfigSource.DEFAULT_CONFIG`.
+/// Returns `ConfigSource.DEFAULT_CONFIG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_default_config() -> *const kafka_admin_ConfigEntry_ConfigSource_t
@@ -189,14 +189,14 @@ pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_default_config() -> *cons
     config_source_singleton(ConfigSource::DefaultConfig)
 }
 
-/// `ConfigSource.UNKNOWN`.
+/// Returns `ConfigSource.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigSource_unknown() -> *const kafka_admin_ConfigEntry_ConfigSource_t {
     config_source_singleton(ConfigSource::Unknown)
 }
 
-/// The C enumerator of a source singleton, for a `switch`.
+/// Returns the C enumerator of a source singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigSource_UNKNOWN`.
 ///
@@ -213,12 +213,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource__enum(
     source_enum_of(unsafe { config_source_value_of(self_) })
 }
 
-/// `ConfigSource.toString()`: the Java constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the Java constant name, as `ConfigSource.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is owned by the caller, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSource_to_string(
@@ -305,77 +305,77 @@ pub(crate) unsafe fn config_type_value_of(config_type: *const kafka_admin_Config
     unsafe { *(config_type as *const ConfigType) }
 }
 
-/// `ConfigType.UNKNOWN`.
+/// Returns `ConfigType.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_unknown() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Unknown)
 }
 
-/// `ConfigType.BOOLEAN`.
+/// Returns `ConfigType.BOOLEAN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_boolean() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Boolean)
 }
 
-/// `ConfigType.STRING`.
+/// Returns `ConfigType.STRING`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_string() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::String)
 }
 
-/// `ConfigType.INT`.
+/// Returns `ConfigType.INT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_int() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Int)
 }
 
-/// `ConfigType.SHORT`.
+/// Returns `ConfigType.SHORT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_short() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Short)
 }
 
-/// `ConfigType.LONG`.
+/// Returns `ConfigType.LONG`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_long() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Long)
 }
 
-/// `ConfigType.DOUBLE`.
+/// Returns `ConfigType.DOUBLE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_double() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Double)
 }
 
-/// `ConfigType.LIST`.
+/// Returns `ConfigType.LIST`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_list() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::List)
 }
 
-/// `ConfigType.CLASS`.
+/// Returns `ConfigType.CLASS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_class() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Class)
 }
 
-/// `ConfigType.PASSWORD`.
+/// Returns `ConfigType.PASSWORD`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntry_ConfigType_password() -> *const kafka_admin_ConfigEntry_ConfigType_t {
     config_type_singleton(ConfigType::Password)
 }
 
-/// The C enumerator of a type singleton, for a `switch`.
+/// Returns the C enumerator of a type singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_ConfigEntry_ConfigType_UNKNOWN`.
 ///
@@ -392,12 +392,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType__enum(
     type_enum_of(unsafe { config_type_value_of(self_) })
 }
 
-/// `ConfigType.toString()`: the Java constant name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the Java constant name, as `ConfigType.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The string is owned by the caller, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigType_to_string(
@@ -481,11 +481,11 @@ pub(crate) unsafe fn destroy_config_synonym_element(element: *mut c_void) {
 }
 
 /// Reads a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`
-/// into clones; null reads as empty.
+/// into clones; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are valid
+/// `list` must be `NULL` or a valid list whose elements are valid
 /// config-synonym handles, all kept alive and not mutated for this call.
 unsafe fn list_config_synonyms(list: *const kafka_List_t) -> Vec<ConfigSynonym> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
@@ -502,12 +502,12 @@ unsafe fn list_config_synonyms(list: *const kafka_List_t) -> Vec<ConfigSynonym> 
         .collect()
 }
 
-/// `ConfigSynonym.name()`: a borrowed string valid as long as the synonym,
-/// never passed to `kafka_string_destroy`.
+/// Returns the name of this configuration.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-synonym handle.
+/// `self_` must be a valid config-synonym handle. The string is borrowed, valid as long as the
+/// synonym, and never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
@@ -519,13 +519,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_name(
     unsafe { synonym_inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `ConfigSynonym.value()`: a borrowed string valid as long as the synonym,
-/// never passed to `kafka_string_destroy`; `NULL` when the configuration is
-/// sensitive and the value was withheld.
+/// Returns the value of this configuration, which may be `NULL` if the configuration is sensitive.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-synonym handle.
+/// `self_` must be a valid config-synonym handle. The string is borrowed, valid as long as the
+/// synonym, and never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
@@ -540,11 +539,13 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_value(
         .map_or(std::ptr::null(), |v| v.as_ptr())
 }
 
-/// `ConfigSynonym.source()`: a borrowed source singleton.
+/// Returns the source of this configuration.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid config-synonym handle.
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
@@ -555,12 +556,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_source(
     config_source_singleton(unsafe { config_synonym_ref(self_) }.source())
 }
 
-/// `ConfigSynonym.toString()`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the synonym's string form, as Java's `toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-synonym handle.
+/// `self_` must be a valid config-synonym handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
@@ -571,11 +572,11 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_ConfigSynonym_to_string(
     into_c_string(&unsafe { config_synonym_ref(self_) }.to_string())
 }
 
-/// Frees an owned synonym handle; null is a no-op.
+/// Frees an owned synonym handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned synonym handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned synonym handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -622,11 +623,11 @@ pub(crate) unsafe fn config_entry_options_ref<'a>(
     unsafe { &*(options as *const ConfigEntryOptions) }
 }
 
-/// Frees an owned options handle; null is a no-op.
+/// Frees an owned options handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned options handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned options handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -713,22 +714,32 @@ unsafe fn builder_mut<'a>(
     unsafe { &mut *(builder as *mut ConfigEntryOptionsBuilderInner) }
 }
 
-/// `ConfigEntryOptionsBuilder::new()`: a builder with every mandatory
-/// parameter unset and every other parameter at the value Java's narrow
-/// constructor passes. Owned, freed with
-/// [`kafka_admin_ConfigEntryOptionsBuilder_destroy`].
+/// Creates a builder with every mandatory parameter unset and every other parameter at the value
+/// Java's narrow constructor passes.
+///
+/// # Returns
+///
+/// The builder.
+///
+/// # Safety
+///
+/// The builder is owned by the caller, freed with `kafka_admin_ConfigEntryOptionsBuilder_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_new() -> *mut kafka_admin_ConfigEntryOptionsBuilder_t {
     Box::into_raw(Box::new(ConfigEntryOptionsBuilderInner::default())) as *mut kafka_admin_ConfigEntryOptionsBuilder_t
 }
 
-/// `set_name(name)`: Java's `name`, a mandatory parameter; copied.
+/// Sets Java's `name`, a mandatory parameter.
+///
+/// # Parameters
+///
+/// - `name` - the config name, copied
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `name` a valid NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and `name` a
+/// valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
@@ -741,13 +752,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_name(
     unsafe { builder_mut(self_) }.name = Some(unsafe { c_str_to_string(name) });
 }
 
-/// `set_value(value)`: Java's `value`, a mandatory parameter that may be
-/// `NULL` (Java's null value); copied.
+/// Sets Java's `value`, a mandatory parameter.
+///
+/// # Parameters
+///
+/// - `value` - the config value, copied, or `NULL` (Java's null value)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `value` null or a valid NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and `value`
+/// `NULL` or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
@@ -760,12 +774,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_value(
     unsafe { builder_mut(self_) }.value = Some(unsafe { c_str_to_option(value) });
 }
 
-/// `set_source(source)`: Java's `source`.
+/// Sets Java's `source`.
+///
+/// # Parameters
+///
+/// - `source` - the source of this configuration entry
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `source` a source singleton.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and `source` a
+/// source singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
@@ -778,12 +796,15 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_source(
     unsafe { builder_mut(self_) }.source = Some(unsafe { config_source_value_of(source) });
 }
 
-/// `set_is_sensitive(is_sensitive)`: Java's `isSensitive` (0 or 1).
+/// Sets Java's `isSensitive`.
+///
+/// # Parameters
+///
+/// - `is_sensitive` - 1 if the config value is sensitive, else 0
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time.
+/// `self_` must be a valid builder handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
@@ -795,12 +816,15 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_sensitive(
     unsafe { builder_mut(self_) }.is_sensitive = Some(is_sensitive != 0);
 }
 
-/// `set_is_read_only(is_read_only)`: Java's `isReadOnly` (0 or 1).
+/// Sets Java's `isReadOnly`.
+///
+/// # Parameters
+///
+/// - `is_read_only` - 1 if the config is read-only and cannot be updated, else 0
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time.
+/// `self_` must be a valid builder handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
@@ -812,15 +836,18 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_is_read_only(
     unsafe { builder_mut(self_) }.is_read_only = Some(is_read_only != 0);
 }
 
-/// `set_synonyms(synonyms)`: Java's `synonyms`, a borrowed list of
-/// `const kafka_admin_ConfigEntry_ConfigSynonym_t *` whose elements are
-/// copied; `NULL` reads as an empty list.
+/// Sets Java's `synonyms`.
+///
+/// # Parameters
+///
+/// - `synonyms` - a borrowed list of `const kafka_admin_ConfigEntry_ConfigSynonym_t *`, copied;
+///   `NULL` reads as an empty list
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `synonyms` null or a valid list whose elements are valid
-/// config-synonym handles, all kept alive and not mutated for this call.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and `synonyms`
+/// `NULL` or a valid list whose elements are valid config-synonym handles, all kept alive and not
+/// mutated for this call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
@@ -835,13 +862,17 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_synonyms(
     unsafe { builder_mut(self_) }.synonyms = Some(unsafe { list_config_synonyms(synonyms) });
 }
 
-/// `set_config_type(config_type)`: Java's `type`, `NULL` for Java's `null`
-/// (the type a `createTopics` entry carries).
+/// Sets Java's `type`.
+///
+/// # Parameters
+///
+/// - `config_type` - the config data type, or `NULL` for Java's `null` (the type a
+///   `createTopics` entry carries)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `config_type` null or a type singleton.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and
+/// `config_type` `NULL` or a type singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
@@ -860,13 +891,16 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_config_type(
     unsafe { builder_mut(self_) }.config_type = Some(config_type);
 }
 
-/// `set_documentation(documentation)`: Java's `documentation`, `NULL` for
-/// none; copied.
+/// Sets Java's `documentation`.
+///
+/// # Parameters
+///
+/// - `documentation` - the config documentation, copied, or `NULL` for none
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `documentation` null or a valid NUL-terminated string.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and
+/// `documentation` `NULL` or a valid NUL-terminated string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation(
@@ -879,16 +913,22 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_set_documentation
     unsafe { builder_mut(self_) }.documentation = Some(unsafe { c_str_to_option(documentation) });
 }
 
-/// `build()`: returns the owned options (freed with
-/// [`kafka_admin_ConfigEntryOptions_destroy`]), or stores the owned
-/// `IllegalArgumentException` translation in `*out_err` and returns `NULL`,
-/// naming the first mandatory parameter (`name`, `value`) that was not set. The
-/// builder stays usable.
+/// Builds the options from the parameters set so far. The builder stays usable.
+///
+/// # Returns
+///
+/// The options, or `NULL` on error.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` naming the first mandatory parameter
+///   (`name`, `value`) that was not set
 ///
 /// # Safety
 ///
-/// `self_` must be a valid builder handle that no other call uses at the same
-/// time, and `out_err` a valid slot pointing at null.
+/// `self_` must be a valid builder handle that no other call uses at the same time, and `out_err` a
+/// valid slot pointing at `NULL`. The options are owned by the caller, freed with
+/// `kafka_admin_ConfigEntryOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
@@ -907,11 +947,11 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntryOptionsBuilder_build(
     }
 }
 
-/// Frees an owned builder handle; null is a no-op.
+/// Frees an owned builder handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned builder handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned builder handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -1010,13 +1050,19 @@ pub(crate) unsafe fn destroy_config_entry_element(element: *mut c_void) {
     unsafe { kafka_admin_ConfigEntry_destroy(element as *mut kafka_admin_ConfigEntry_t) };
 }
 
-/// `new ConfigEntry(String name, String value)`: `value` may be `NULL`
-/// (Java's null); both are copied. Owned, freed with
-/// [`kafka_admin_ConfigEntry_destroy`].
+/// `new ConfigEntry(String name, String value)`: `value` may be `NULL` (Java's null); both are
+/// copied.
+///
+/// # Parameters
+///
+/// - `name` - the non-`NULL` config name
+/// - `value` - the config value or `NULL`
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `value` null or one.
+/// `name` must be a valid NUL-terminated string and `value` `NULL` or one.
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ConfigEntry_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
@@ -1031,17 +1077,19 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_new(
     }))
 }
 
-/// `new ConfigEntry(String name, String value, ConfigSource source, boolean
-/// isSensitive, boolean isReadOnly, List<ConfigSynonym> synonyms, ConfigType
-/// type, String documentation)`, Java's widest constructor, taking its
-/// parameters as the options built by
-/// [`kafka_admin_ConfigEntryOptionsBuilder_build`]; the options are copied,
-/// the caller keeps its handle. Owned, freed with
-/// [`kafka_admin_ConfigEntry_destroy`].
+/// `new ConfigEntry(String name, String value, ConfigSource source, boolean isSensitive, boolean
+/// isReadOnly, List<ConfigSynonym> synonyms, ConfigType type, String documentation)`, Java's widest
+/// constructor.
+///
+/// # Parameters
+///
+/// - `options` - Java's parameters, as built by `kafka_admin_ConfigEntryOptionsBuilder_build`;
+///   copied, the caller keeps its handle
 ///
 /// # Safety
 ///
-/// `options` must be a valid config-entry-options handle.
+/// `options` must be a valid config-entry-options handle. The entry is owned by the caller, freed
+/// with `kafka_admin_ConfigEntry_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
@@ -1053,12 +1101,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_with_options(
     box_config_entry(ConfigEntry::with_options(unsafe { config_entry_options_ref(options) }.clone()))
 }
 
-/// `name()`: a borrowed string valid as long as the entry, never passed to
-/// `kafka_string_destroy`.
+/// Returns the config name.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The string is borrowed, valid as long as the entry,
+/// and never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
@@ -1068,12 +1116,13 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_name(self_: *const kafka_admin_
     unsafe { entry_inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `value()`: a borrowed string valid as long as the entry, never passed to
-/// `kafka_string_destroy`; `NULL` when the config is unset or sensitive.
+/// Returns the value or `NULL`. `NULL` is returned if the config is unset or if `isSensitive` is
+/// true.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The string is borrowed, valid as long as the entry,
+/// and never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin_ConfigEntry_t) -> *const c_char {
@@ -1086,11 +1135,13 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_value(self_: *const kafka_admin
         .map_or(std::ptr::null(), |v| v.as_ptr())
 }
 
-/// `source()`: a borrowed source singleton.
+/// Returns the source of this configuration entry.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid config-entry handle.
+///
+/// The returned singleton is borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
@@ -1101,7 +1152,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_source(
     config_source_singleton(unsafe { config_entry_ref(self_) }.source())
 }
 
-/// `isDefault()`: whether the source is `DEFAULT_CONFIG`.
+/// Returns whether the config value is the default (1, the source being `DEFAULT_CONFIG`) or if
+/// it's been explicitly set (0).
 ///
 /// # Safety
 ///
@@ -1114,7 +1166,8 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_default(self_: *const kafka_
     i8::from(unsafe { config_entry_ref(self_) }.is_default())
 }
 
-/// `isSensitive()`.
+/// Returns whether the config value is sensitive (1) or not (0). The value is always set to `NULL`
+/// by the broker if the config value is sensitive.
 ///
 /// # Safety
 ///
@@ -1127,7 +1180,7 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_sensitive(self_: *const kafk
     i8::from(unsafe { config_entry_ref(self_) }.is_sensitive())
 }
 
-/// `isReadOnly()`.
+/// Returns whether the config is read-only and cannot be updated (1) or not (0).
 ///
 /// # Safety
 ///
@@ -1140,13 +1193,15 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_is_read_only(self_: *const kafk
     i8::from(unsafe { config_entry_ref(self_) }.is_read_only())
 }
 
-/// `synonyms()`: an owned list of owned
-/// `kafka_admin_ConfigEntry_ConfigSynonym_t *` copies, in order of
-/// precedence, freed together with `kafka_List_destroy`.
+/// Returns all config values that may be used as the value of this config along with their source,
+/// in the order of precedence. The list starts with the value returned in this ConfigEntry. The list
+/// is empty if synonyms were not requested using `kafka_admin_DescribeConfigsOptions_set_include_synonyms`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The list of owned
+/// `kafka_admin_ConfigEntry_ConfigSynonym_t *` copies is owned by the caller, freed together with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
@@ -1162,13 +1217,11 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_synonyms(
     box_list(elements, Some(destroy_config_synonym_element))
 }
 
-/// `type()`: a borrowed type singleton, or `NULL` for Java's `null` type,
-/// which the entries of a `createTopics` result carry
-/// (`kafka_admin_CreateTopicsResult_config`).
+/// Returns the config data type.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The type is a borrowed singleton.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
@@ -1181,12 +1234,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_type(
         .map_or(std::ptr::null(), config_type_singleton)
 }
 
-/// `documentation()`: a borrowed string valid as long as the entry, never
-/// passed to `kafka_string_destroy`; `NULL` when there is none.
+/// Returns the config documentation, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The string is borrowed, valid as long as the entry,
+/// and never passed to `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
@@ -1201,12 +1254,12 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_documentation(
         .map_or(std::ptr::null(), |d| d.as_ptr())
 }
 
-/// `toString()`, redacting a sensitive value, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the entry's string form, as Java's `toString()`, redacting a sensitive value.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-entry handle.
+/// `self_` must be a valid config-entry handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_admin_ConfigEntry_t) -> *mut c_char {
@@ -1215,11 +1268,11 @@ pub unsafe extern "C" fn kafka_admin_ConfigEntry_to_string(self_: *const kafka_a
     into_c_string(&unsafe { config_entry_ref(self_) }.to_string())
 }
 
-/// Frees an owned entry handle; null is a no-op.
+/// Frees an owned entry handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned entry handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned entry handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards. A borrowed
 /// entry handle (from `kafka_admin_Config_get` or
 /// `kafka_admin_AlterConfigOp_config_entry`) is never passed here.
@@ -1427,7 +1480,7 @@ mod tests {
     }
 
     /// New test, no Java original: Java's `type()` is `null` for the entries
-    /// of a `createTopics` result (`KafkaAdminClient.java:1992-2002`). A NULL
+    /// of a `createTopics` result (the `configEntry` helper of `KafkaAdminClient#getCreateTopicsCall`). A NULL
     /// type set through the builder reaches the entry as `None`, after an
     /// earlier non-null one, and the getter hands it back as NULL.
     #[test]

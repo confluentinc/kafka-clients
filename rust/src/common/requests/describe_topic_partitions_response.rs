@@ -109,7 +109,7 @@ impl DescribeTopicPartitionsResponse {
     /// Java dereferences `eligibleLeaderReplicas()` and `lastKnownElr()`
     /// unconditionally, so a null list (both fields are `nullableVersions: 0+`)
     /// would throw a `NullPointerException` there. A 4.3.1 broker always sends
-    /// a list (`KRaftMetadataCache.java:221-222`). Rust keeps a null list as
+    /// a list (`KRaftMetadataCache#partitionMetadataForDescribeTopicResponse`). Rust keeps a null list as
     /// `None`, the same "unavailable" value [`TopicPartitionInfo::elr`] reports
     /// for Java's four-argument constructor.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeTopicPartitionsResponse#partitionToTopicPartitionInfo")]

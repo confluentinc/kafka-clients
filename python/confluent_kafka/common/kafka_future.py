@@ -571,7 +571,7 @@ class _KafkaFutureBase(Generic[T]):
 def _checked_futures(futures: Any) -> list[Any]:
     """``allOf(KafkaFuture<?>... futures)``'s argument: Java's
     ``Arrays.stream(futures)`` dereferences a null array, and each null element
-    is dereferenced in turn (``KafkaFuture.java:76, 80``)."""
+    is dereferenced in turn (``org.apache.kafka.common.KafkaFuture#allOf``)."""
     if futures is None:
         raise TypeError("futures must not be None")
     sources = list(futures)

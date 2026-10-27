@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! The result of `Admin::list_config_resources`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListConfigResourcesResult`.
 
 use crate::common::KafkaFuture;
 use crate::common::config::ConfigResource;
 
 /// The result of the `Admin::list_config_resources` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListConfigResourcesResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult")]
 pub struct ListConfigResourcesResult {
@@ -35,8 +31,8 @@ impl ListConfigResourcesResult {
         Self { future }
     }
 
-    /// Returns a future that yields the collection of config resources in the
-    /// cluster.
+    /// Returns a future that yields either an error, or the full set of config resources. In the
+    /// event of a failure, the future yields nothing but the first error which occurred.
     #[doc(alias = "org.apache.kafka.clients.admin.ListConfigResourcesResult#all")]
     pub fn all(&self) -> KafkaFuture<Vec<ConfigResource>> {
         self.future.clone()

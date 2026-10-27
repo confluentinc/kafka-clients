@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_cluster`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeClusterResult`.
 
 use std::collections::BTreeSet;
 
@@ -22,8 +20,6 @@ use crate::common::acl::AclOperation;
 use crate::common::{KafkaFuture, Node};
 
 /// The result of the `Admin::describe_cluster` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult")]
 pub struct DescribeClusterResult {
@@ -51,9 +47,10 @@ impl DescribeClusterResult {
         self.nodes.clone()
     }
 
-    /// Returns a future which yields the current controller node in the cluster.
+    /// Returns a future which yields the current controller node, or `None` if there is no
+    /// current controller.
     ///
-    /// The value is `None` if there is no current controller.
+    /// When using `bootstrap.servers`, the controller refer to a random broker.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterResult#controller")]
     pub fn controller(&self) -> KafkaFuture<Option<Node>> {
         self.controller.clone()

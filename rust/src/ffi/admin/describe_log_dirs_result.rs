@@ -43,7 +43,7 @@ fn box_i32(broker_id: &i32) -> *mut c_void {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each be null or point at a readable, aligned
+/// `a` and `b` must each be `NULL` or point at a readable, aligned
 /// `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
@@ -99,16 +99,22 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeLogDirsResult_t) -> &'a R
     unsafe { result_ref(self_) }
 }
 
-/// `descriptions()`: an owned `kafka_Map_t` (freed with `kafka_Map_destroy`,
-/// which frees its keys and values) of owned `int32_t *` broker ids, sorted
-/// and compared by value in `kafka_Map_get`, to owned
-/// `kafka_common_KafkaFuture_t *` whose `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `char *` log-dir paths, sorted, to
-/// `kafka_admin_LogDirDescription_t *`.
+/// Return a map from brokerId to future which can be used to check the information of partitions on
+/// each individual broker. The result of the future is a map from broker log directory path to a
+/// description of that log directory.
+///
+/// # Returns
+///
+/// A `kafka_Map_t` of owned `int32_t *` broker ids, sorted and compared by value in `kafka_Map_get`, to owned
+/// `kafka_common_KafkaFuture_t *` whose `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `char *` log-dir paths, sorted, to `kafka_admin_LogDirDescription_t *`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees its keys
+/// and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
@@ -129,15 +135,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_descriptions(
         })
 }
 
-/// `allDescriptions()`: an owned future freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `int32_t *` broker ids, sorted and compared by
-/// value in `kafka_Map_get`, to the per-broker `kafka_Map_t *` described in
+/// Return a future which succeeds only if all the brokers have responded without error. The result
+/// of the future is a map from brokerId to a map from broker log directory path to a description of
+/// that log directory.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of `int32_t *` broker ids,
+/// sorted and compared by value in `kafka_Map_get`, to the per-broker `kafka_Map_t *` described in
 /// [`kafka_admin_DescribeLogDirsResult_descriptions`].
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
@@ -155,12 +167,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_all_descriptions(
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -18,16 +18,15 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Indicates that the streams group topology description plugin failed to process
-    /// a `StreamsGroupTopologyDescriptionUpdate` request. The accompanying error message
-    /// describes the underlying cause; the broker tracks the transient-vs-permanent
-    /// distinction internally and does not reflect it on the wire.
+    /// Indicates that the streams group topology description plugin failed to process a
+    /// StreamsGroupTopologyDescriptionUpdate request. The accompanying error message describes the
+    /// underlying cause; the broker tracks the transient-vs-permanent distinction internally and
+    /// does not reflect it on the wire.
     ///
-    /// Corresponds to Java's `StreamsTopologyDescriptionUpdateFailedException`, error code
-    /// `Errors::StreamsTopologyDescriptionUpdateFailed`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `StreamsTopologyDescriptionUpdateFailedException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::StreamsTopologyDescriptionUpdateFailed`. Java `extends` chain:
+    /// `StreamsTopologyDescriptionUpdateFailedException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.StreamsTopologyDescriptionUpdateFailedException")]
     StreamsTopologyDescriptionUpdateFailedError,
     code: Errors::StreamsTopologyDescriptionUpdateFailed,

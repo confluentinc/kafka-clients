@@ -23,8 +23,6 @@ use std::str::FromStr;
 ///
 /// Each protocol has a permanent, immutable numeric ID that matches the
 /// wire-protocol values used by the Java client.
-///
-/// Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol")]
@@ -74,7 +72,13 @@ impl SecurityProtocol {
 
     /// Looks up a security protocol by its numeric ID.
     ///
-    /// Returns `None` if no protocol has the given ID.
+    /// # Arguments
+    ///
+    /// - `id` - the protocol's numeric ID
+    ///
+    /// # Returns
+    ///
+    /// The protocol, or `None` if no protocol has the given ID.
     #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#forId")]
     pub fn for_id(id: i16) -> Option<Self> {
         match id {
@@ -86,9 +90,15 @@ impl SecurityProtocol {
         }
     }
 
-    /// Case-insensitive lookup by protocol name.
+    /// Case insensitive lookup by protocol name.
     ///
-    /// Returns `None` if no protocol matches the given name.
+    /// # Arguments
+    ///
+    /// - `name` - the protocol name
+    ///
+    /// # Returns
+    ///
+    /// The protocol, or `None` if no protocol matches the given name.
     #[doc(alias = "org.apache.kafka.common.security.auth.SecurityProtocol#forName")]
     pub fn for_name(name: &str) -> Option<Self> {
         let upper = name.to_uppercase();
@@ -111,7 +121,7 @@ impl fmt::Display for SecurityProtocol {
 impl FromStr for SecurityProtocol {
     type Err = String;
 
-    /// Parses a security protocol from its name (case-insensitive).
+    // Parses a security protocol from its name (case-insensitive).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         SecurityProtocol::for_name(s).ok_or_else(|| format!("No enum constant SecurityProtocol.{}", s))
     }

@@ -29,7 +29,7 @@ use crate::producer::internals::ProducerBatch;
 /// The tuple's derived `Ord` is lexicographic, which is exactly Java's
 /// comparator chain
 /// `comparingLong(producerId).thenComparingInt(producerEpoch).thenComparingInt(baseSequence)`
-/// (`TxnPartitionEntry.java:62-65`).
+/// (`TxnPartitionEntry#PRODUCER_BATCH_COMPARATOR`).
 pub(crate) type InFlightBatchKey = (i64, i16, i32);
 
 /// Idempotence and transaction state for a single topic-partition.
@@ -286,7 +286,7 @@ impl TxnPartitionEntry {
     /// Applies `reset` to every **tracked** in-flight batch in key order, then
     /// rebuilds the key set from the mutated batches.
     ///
-    /// Java (154-161) iterates **its own** `inflightBatchesBySequence` and
+    /// Java's `TxnPartitionEntry#resetSequenceNumbers` iterates **its own** `inflightBatchesBySequence` and
     /// re-adds exactly those elements to a fresh `TreeSet`: membership is
     /// invariant, only the sort keys change. This preserves that invariant.
     ///
@@ -306,20 +306,19 @@ impl TxnPartitionEntry {
     ///
     /// Both directions of mismatch are real rather than defensive:
     ///
-    /// **Pool ⊃ tracked** — `Sender.failBatch` calls `handleFailedBatch`
-    /// (`Sender.java:848`) *before* `maybeRemoveAndDeallocateBatch` (`:854`),
-    /// while `handleFailedBatch` removes the batch from the txn map at
-    /// `TransactionManager.java:790` and only then calls
-    /// `adjustSequencesDueToFailedBatch` at `:818`. So the failed batch is
+    /// **Pool ⊃ tracked** — `Sender#failBatch` calls `handleFailedBatch`
+    /// *before* `maybeRemoveAndDeallocateBatch`,
+    /// while `TransactionManager#handleFailedBatch` removes the batch from the txn map
+    /// and only then calls `adjustSequencesDueToFailedBatch`. So the failed batch is
     /// already untracked here but still owned by the Sender.
     ///
     /// **Tracked ⊃ one owner** — on the retry path the batch moves owners while
-    /// *staying* tracked. `Sender.reenqueueBatch` (`Sender.java:751-753`) calls
+    /// *staying* tracked. `Sender#reenqueueBatch` calls
     /// `accumulator.reenqueue(..)` and then `maybeRemoveFromInflightBatches(..)`,
-    /// but — unlike the `MESSAGE_TOO_LARGE` split path at `:685` — it does **not**
+    /// but — unlike the `MESSAGE_TOO_LARGE` split path in `Sender`'s five-argument
+    /// `completeBatch` — it does **not**
     /// call `transactionManager.removeInFlightBatch`. Java relies on this and
-    /// asserts it: `RecordAccumulator.insertInSequenceOrder`
-    /// (`RecordAccumulator.java:603-605`) throws
+    /// asserts it: `RecordAccumulator#insertInSequenceOrder` throws
     /// `IllegalStateException("We are re-enqueueing a batch which is not tracked
     /// as part of the in flight requests")` when the batch is *not* still
     /// tracked.
@@ -328,8 +327,8 @@ impl TxnPartitionEntry {
     /// lives** — `Sender::in_flight_batches` *and* the accumulator's deque. A
     /// reenqueued batch sits in the latter, and
     /// `bump_idempotent_producer_epoch` → `start_sequences_at_beginning`
-    /// (`TransactionManager.java:655`) exists precisely to rewrite it
-    /// (`:652-653`). Supplying only the Sender's map there would hit the error
+    /// (`TransactionManager#bumpIdempotentProducerEpoch`) exists precisely to rewrite it.
+    /// Supplying only the Sender's map there would hit the error
     /// below and break idempotent recovery.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.TxnPartitionEntry#resetSequenceNumbers")]
     fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), Error>
@@ -384,7 +383,7 @@ impl TxnPartitionEntry {
     ///
     /// Plain subtraction with an error on underflow — this deliberately does
     /// **not** use the wrapping `decrement_sequence` helper, because Java's
-    /// private `decrementSequence` (163-173) does plain subtraction and throws
+    /// private `TxnPartitionEntry#decrementSequence` does plain subtraction and throws
     /// `IllegalStateException`. Only `incrementSequence` delegates to
     /// `DefaultRecordBatch`. Wrapping here would silently produce a large
     /// positive sequence instead of an error. See
@@ -503,7 +502,7 @@ mod tests {
 
     /// The 3-key comparator exists so that batches sharing a base sequence
     /// across an epoch bump are distinct entries — the bug referenced by the
-    /// Java comment at TxnPartitionEntry.java:58-61.
+    /// Java comment on `TxnPartitionEntry#PRODUCER_BATCH_COMPARATOR`.
     #[test]
     fn test_ordering_distinguishes_epoch_at_same_base_sequence() {
         let mut entry = TxnPartitionEntry::new(tp());
@@ -722,10 +721,10 @@ mod tests {
     }
 
     /// Batches in the pool that this entry does not track must be IGNORED, not
-    /// inserted. This is the concrete Phase 4 shape: `Sender.failBatch` calls
-    /// `handleFailedBatch` (`Sender.java:848`) before removing the batch from
-    /// `Sender::in_flight_batches` (`:854`), while the txn map already dropped it
-    /// (`TransactionManager.java:790` then `:818`). So the pool legitimately
+    /// inserted. This is the concrete Phase 4 shape: `Sender#failBatch` calls
+    /// `handleFailedBatch` before removing the batch from
+    /// `Sender::in_flight_batches`, while the txn map already dropped it
+    /// (`TransactionManager#handleFailedBatch`). So the pool legitimately
     /// contains a batch the entry no longer tracks.
     #[test]
     fn test_untracked_batches_in_the_pool_are_ignored() {
@@ -757,12 +756,12 @@ mod tests {
     /// drawn from both owners.
     ///
     /// Regression test for Critic 41 second-pass finding. The first-pass audit
-    /// justified the `TransactionManager.java:655` call site as "those batches are
+    /// justified the `TransactionManager#bumpIdempotentProducerEpoch` call site as "those batches are
     /// in flight, so the Sender holds them" — false on this path.
-    /// `Sender.reenqueueBatch` (`Sender.java:751-753`) does **not** call
-    /// `transactionManager.removeInFlightBatch`, unlike the split path at `:685`,
-    /// and Java asserts the batch is still tracked
-    /// (`RecordAccumulator.java:603-605`).
+    /// `Sender#reenqueueBatch` does **not** call
+    /// `transactionManager.removeInFlightBatch`, unlike the split path in `Sender`'s
+    /// five-argument `completeBatch`, and Java asserts the batch is still tracked
+    /// (`RecordAccumulator#insertInSequenceOrder`).
     ///
     /// Both halves are pinned: supplying only one owner's batches errors, and
     /// supplying both succeeds. `bump_idempotent_producer_epoch` exists precisely
@@ -827,7 +826,8 @@ mod tests {
     #[test]
     fn test_reset_matrix_all_combinations() {
         // Case B: nothing tracked, but the pool has batches (the
-        // `TransactionManager.java:594` shape — that site is guarded by
+        // `org.apache.kafka.clients.producer.internals.TransactionManager#maybeUpdateProducerIdAndEpoch`
+        // shape — that site is guarded by
         // `!hasInflightBatches`, so the tracked set is empty while the Sender
         // may still hold batches). Extras must be left alone.
         {
@@ -870,7 +870,8 @@ mod tests {
             assert_eq!(entry.next_sequence(), 7);
         }
 
-        // The `:1048` shape: a single partition's in-flight batches rewritten
+        // The `org.apache.kafka.clients.producer.internals.TransactionManager#canRetry` shape: a
+        // single partition's in-flight batches rewritten
         // during produce-response handling. Sender still owns all of them.
         {
             let mut entry = TxnPartitionEntry::new(tp());
@@ -887,7 +888,8 @@ mod tests {
             assert_eq!(entry.inflight_batches_by_sequence.len(), 2);
         }
 
-        // The `:818` adjust shape, exhaustively: failed batch present in the pool
+        // The `org.apache.kafka.clients.producer.internals.TransactionManager#handleFailedBatch`
+        // adjust shape, exhaustively: failed batch present in the pool
         // but untracked; one batch below base_sequence; one at; one after.
         {
             let mut entry = TxnPartitionEntry::new(tp());

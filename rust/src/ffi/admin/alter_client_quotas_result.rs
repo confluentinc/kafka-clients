@@ -122,20 +122,20 @@ unsafe fn resolved_void_future(future: *const kafka_common_KafkaFuture_t) -> Kaf
     KafkaFuture::completed_future(unsafe { take_error(error) }.map_or(Ok(()), Err))
 }
 
-/// `new AlterClientQuotasResult(Map<ClientQuotaEntity, KafkaFuture<Void>> futures)`:
-/// `futures` is a borrowed map of `const kafka_common_quota_ClientQuotaEntity_t *`
-/// to `const kafka_common_KafkaFuture_t *`, copied during the call; the
-/// caller keeps ownership of the map, its keys and its futures. Only futures
-/// that are already complete (`kafka_common_KafkaFuture_is_done`) can be
-/// copied across the boundary: the outcome of each is taken as it stands,
-/// and a future still pending stands as one failed with the translation of
-/// `IllegalArgumentException`. Owned, freed with
-/// [`kafka_admin_AlterClientQuotasResult_destroy`].
+/// Maps an entity to its alteration result.
+///
+/// # Parameters
+///
+/// - `futures` - maps entity to its alteration result
 ///
 /// # Safety
 ///
-/// `futures` must be null or a valid map whose keys are valid
-/// client-quota-entity handles and whose values are valid future handles.
+/// `futures` must be `NULL` or a valid map whose keys are valid client-quota-entity handles and whose
+/// values are valid future handles. The caller keeps ownership of the map, its keys and its
+/// futures. Each future should already be complete (`kafka_common_KafkaFuture_is_done`): its
+/// outcome is copied as it stands, and one still pending stands as one failed with
+/// `kafka_common_Error_is_local_illegal_argument_error`. The returned handle is owned and freed
+/// with `kafka_admin_AlterClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_new(
@@ -162,16 +162,21 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_new(
     box_alter_client_quotas_result(AlterClientQuotasResult::new(futures), &FutureCtx::detached())
 }
 
-/// `AlterClientQuotasResult.values()`: an owned map, sorted by the entity's
-/// entries, of owned `kafka_common_quota_ClientQuotaEntity_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers
-/// `NULL`). Freed with `kafka_Map_destroy`, which frees the keys and the
-/// futures.
+/// Returns a map from quota entity to a future which can be used to check the status of the
+/// operation.
+///
+/// # Returns
+///
+/// A map, sorted by the entity's entries, of owned `kafka_common_quota_ClientQuotaEntity_t *` keys
+/// (compared by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_values(
@@ -191,13 +196,18 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_values(
     )
 }
 
-/// `AlterClientQuotasResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every quota alteration succeeded,
-/// freed with `kafka_common_KafkaFuture_destroy`.
+/// Returns a future which succeeds only if all quota alterations succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every quota alteration
+/// succeeded.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
@@ -209,12 +219,12 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -13,15 +13,8 @@
 // limitations under the License.
 
 //! State of an active producer as reported by `DescribeProducers`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ProducerState`.
 
 /// The state of an active producer for a partition.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ProducerState`. `producer_id`
-/// and `last_timestamp` are `i64` (Java `long`); `coordinator_epoch` and
-/// `current_transaction_start_offset` are optional (Java `OptionalInt` /
-/// `OptionalLong`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ProducerState")]
 pub struct ProducerState {
@@ -35,6 +28,16 @@ pub struct ProducerState {
 
 impl ProducerState {
     /// Creates a new `ProducerState`.
+    ///
+    /// # Arguments
+    ///
+    /// - `producer_id` - the producer id.
+    /// - `producer_epoch` - the producer epoch.
+    /// - `last_sequence` - the last sequence number written by this producer.
+    /// - `last_timestamp` - the timestamp of the last record written by this producer.
+    /// - `coordinator_epoch` - the epoch of the transaction coordinator, or `None` if not known.
+    /// - `current_transaction_start_offset` - the start offset of the producer's open
+    ///   transaction, or `None` if there is none.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#ProducerState")]
     pub fn new(
         producer_id: i64,
@@ -54,37 +57,37 @@ impl ProducerState {
         }
     }
 
-    /// The producer id.
+    /// Returns the producer id.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#producerId")]
     pub fn producer_id(&self) -> i64 {
         self.producer_id
     }
 
-    /// The producer epoch.
+    /// Returns the producer epoch.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#producerEpoch")]
     pub fn producer_epoch(&self) -> i32 {
         self.producer_epoch
     }
 
-    /// The last sequence number written by this producer.
+    /// Returns the last sequence number written by this producer.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#lastSequence")]
     pub fn last_sequence(&self) -> i32 {
         self.last_sequence
     }
 
-    /// The last timestamp written by this producer.
+    /// Returns the last timestamp written by this producer.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#lastTimestamp")]
     pub fn last_timestamp(&self) -> i64 {
         self.last_timestamp
     }
 
-    /// The offset of the first record in the current transaction, if any.
+    /// Returns the offset of the first record in the current transaction, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#currentTransactionStartOffset")]
     pub fn current_transaction_start_offset(&self) -> Option<i64> {
         self.current_transaction_start_offset
     }
 
-    /// The coordinator epoch, if any.
+    /// Returns the coordinator epoch, if any.
     #[doc(alias = "org.apache.kafka.clients.admin.ProducerState#coordinatorEpoch")]
     pub fn coordinator_epoch(&self) -> Option<i32> {
         self.coordinator_epoch

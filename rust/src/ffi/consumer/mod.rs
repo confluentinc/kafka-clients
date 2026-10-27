@@ -100,7 +100,7 @@ use crate::common::Error;
 use crate::consumer::{ConsumerHandle, KafkaConsumer, MockConsumer};
 use crate::ffi::callback_queue::{CallbackJob, CallbackQueue, SendPtr};
 use crate::ffi::callback_result::{CallbackResults, INVOKER_RESULTS};
-use crate::ffi::common::metrics::box_metrics_map;
+use crate::ffi::common::metrics::metrics_view::{box_metrics_view, kafka_common_metrics_MetricsView_t};
 use crate::ffi::common::partition_info::partition_info_list;
 use crate::ffi::common::topic_partition::{
     kafka_common_TopicPartition_t, list_topic_partitions, map_topic_partition_i64, sorted_topic_partition_list,
@@ -123,7 +123,7 @@ pub(crate) use crate::ffi::consumer::offset_and_metadata::{
     OffsetAndMetadataInner, box_offset_and_metadata, kafka_consumer_OffsetAndMetadata_destroy,
     kafka_consumer_OffsetAndMetadata_t, offset_and_metadata_ref,
 };
-use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, offset_and_metadata_map};
+use crate::ffi::consumer::offset_and_metadata::{map_offset_and_metadata, nullable_offset_and_metadata_map};
 use crate::ffi::consumer::offset_and_timestamp::offset_and_timestamp_map;
 use crate::ffi::consumer::offset_commit_callback::{commit_callback_adapter, kafka_consumer_OffsetCommitCallback_t};
 use crate::ffi::consumer::subscription_pattern::{kafka_consumer_SubscriptionPattern_t, subscription_pattern_ref};
@@ -134,7 +134,14 @@ use crate::ffi::util::{
     sorted_string_list,
 };
 
-/// Opaque handle to a `Consumer<K, V>` (see the module docs).
+/// Opaque handle to a `Consumer<K, V>`, keys and values being `void *`. It is
+/// never owned: it is the borrowed view returned by
+/// `kafka_consumer_KafkaConsumer__as_Consumer` or
+/// `kafka_consumer_MockConsumer__as_Consumer`, valid until that class handle
+/// is destroyed. As Java's `KafkaConsumer`, it is not safe for multi-threaded
+/// access: a call made while another call holds the consumer fails with
+/// `kafka_common_Error_is_local_concurrent_modification_error`; `wakeup`,
+/// `metrics` and the `ConsumerHandle` may be used at any time.
 #[repr(C)]
 pub struct kafka_consumer_Consumer_t {
     _private: [u8; 0],
@@ -171,8 +178,8 @@ impl ConsumerKind {
     }
 }
 
-/// How the interface methods an operation triggers reach C (CLAUDE.md §4
-/// rule 5): directly on the calling thread while a blocking operation runs,
+/// How the interface methods an operation triggers reach C:
+/// directly on the calling thread while a blocking operation runs,
 /// queued otherwise. Shared with the listener and callback adapters, which
 /// hold it instead of the [`Client`] so they never keep the consumer alive.
 pub(crate) struct Delivery {
@@ -376,7 +383,7 @@ impl Client {
 /// that unwind, leaving the flag set, and every later listener or
 /// `OffsetCommitCallback` would then run inline on whatever thread delivered
 /// it, a tokio worker for a `_cb` operation, instead of being queued for
-/// `__execute_callbacks` (CLAUDE.md §4).
+/// `__execute_callbacks`.
 struct BlockingGuard<'a>(&'a Delivery);
 
 impl<'a> BlockingGuard<'a> {
@@ -476,7 +483,7 @@ impl ConsumerClassHandle {
     /// be waiting for the report of a listener or commit-callback invocation
     /// that sits queued for `__execute_callbacks`, so awaiting it first would
     /// never return. Every pending callback thus fires exactly once, on the
-    /// destroying thread (CLAUDE.md §4 rule 5).
+    /// destroying thread.
     ///
     /// The handle is reached through shared references until then and freed
     /// only at the end, because those callbacks report through
@@ -597,7 +604,7 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 // ---------------------------------------------------------------------------
 
 /// Reports the result of an async interface method (`ConsumerRebalanceListener`,
-/// `OffsetCommitCallback`) invoked with `callback_id` (CLAUDE.md §4): once the
+/// `OffsetCommitCallback`) invoked with `callback_id`: once the
 /// callback finishes, the Rust task that invoked it completes with this
 /// report. The double underscore marks a function derived by convention, with
 /// no Java counterpart.
@@ -621,6 +628,13 @@ pub(crate) fn ms(timeout: i64) -> Result<Duration, Error> {
 /// runs the consumer's pending callbacks, but never once it returned. A
 /// second report for the same id, or one for an id the consumer did not
 /// issue, is ignored: its error is freed and its `result` is not taken.
+///
+/// # Parameters
+///
+/// - `callback_id` - the id the method was invoked with
+/// - `result` - the method's return value; ignored, as every method the consumer
+///   invokes is `void`: pass `NULL`
+/// - `error` - `NULL`, or the error the method raised
 ///
 /// # Safety
 ///
@@ -808,10 +822,21 @@ fn deliver_ptr<T, P>(
 /// `assign(Collection<TopicPartition>)`: `partitions` is a list of
 /// `kafka_common_TopicPartition_t *`, copied during the call.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions to assign this consumer
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If partitions is `NULL` or contains
+///   `NULL` or empty topics
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics or pattern (without a subsequent call to `kafka_consumer_Consumer_unsubscribe`)
 ///
 /// # Safety
 ///
@@ -845,9 +870,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
 pub type kafka_consumer_Consumer_assign_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions to assign this consumer
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If partitions is `NULL` or contains
+///   `NULL` or empty topics
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics or pattern (without a subsequent call to `kafka_consumer_Consumer_unsubscribe`)
 ///
 /// # Safety
 ///
@@ -889,10 +927,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign_cb(
 /// `char *`, copied during the call. Replaces the listener registered by
 /// an earlier `subscribe_*`, releasing its `self`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If topics is `NULL` or contains `NULL` or
+///   empty elements
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   pattern, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -924,9 +975,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics(
 pub type kafka_consumer_Consumer_subscribe_with_topics_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If topics is `NULL` or contains `NULL` or
+///   empty elements
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   pattern, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -968,10 +1034,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_cb(
 /// be destroyed afterwards); its `self` must stay alive until the next
 /// `subscribe_*`, `unsubscribe` or the consumer's destruction releases it.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+/// - `listener` - Non-`NULL` listener instance to get notifications on partition
+///   assignment/revocation for the subscribed topics
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If topics is `NULL` or contains `NULL` or
+///   empty elements, or if listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   pattern, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1014,9 +1095,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener(
 pub type kafka_consumer_Consumer_subscribe_with_topics_listener_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+/// - `listener` - Non-`NULL` listener instance to get notifications on partition
+///   assignment/revocation for the subscribed topics
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If topics is `NULL` or contains `NULL` or
+///   empty elements, or if listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   pattern, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1065,10 +1163,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_topics_listener_
 /// `subscribe(SubscriptionPattern pattern)`: the pattern is copied
 /// during the call.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `pattern` - Pattern to subscribe to
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If pattern or listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1100,9 +1210,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern(
 pub type kafka_consumer_Consumer_subscribe_with_pattern_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `pattern` - Pattern to subscribe to
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If pattern or listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1143,10 +1267,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_cb(
 /// `subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener listener)`;
 /// see `subscribe_with_topics_listener` for the listener's lifetime.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `pattern` - Pattern to subscribe to
+/// - `listener` - Non-`NULL` listener instance to get notifications on partition
+///   assignment/revocation for the subscribed topics
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If pattern or listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1189,9 +1327,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
 pub type kafka_consumer_Consumer_subscribe_with_pattern_listener_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `pattern` - Pattern to subscribe to
+/// - `listener` - Non-`NULL` listener instance to get notifications on partition
+///   assignment/revocation for the subscribed topics
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If pattern or listener is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` If `subscribe()` is called previously with
+///   topics, or assign is called previously (without a subsequent call to
+///   `kafka_consumer_Consumer_unsubscribe`), or if not configured at-least one partition assignment
+///   strategy
 ///
 /// # Safety
 ///
@@ -1241,10 +1395,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_pattern_listener
 /// `unsubscribe()`: releases the registered listener after invoking
 /// `onPartitionsLost` / `onPartitionsRevoked` as Java does.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. rebalance
+///   callback errors)
 ///
 /// # Safety
 ///
@@ -1266,9 +1425,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
 pub type kafka_consumer_Consumer_unsubscribe_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. rebalance
+///   callback errors)
 ///
 /// # Safety
 ///
@@ -1306,16 +1475,60 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe_cb(
 // ---------------------------------------------------------------------------
 
 /// `poll(Duration timeout)`: `timeout` in milliseconds (negative fails as
-/// Java's `IllegalArgumentException`); the records are owned by the
-/// caller (`kafka_consumer_ConsumerRecords_destroy`).
+/// Java's `IllegalArgumentException`).
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to block (must not be greater than `Long::MAX_VALUE`
+///   milliseconds)
+///
+/// # Returns
+///
+/// map of topic to records since the last fetch for the subscribed list of topics and partitions
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if the offset for a partition or set of
+///   partitions is undefined or out of range and no offset reset policy has been configured
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if caller lacks Read access to any of the
+///   subscribed topics or to the configured groupId. See the error for more details
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. invalid groupId
+///   or session timeout, errors deserializing key/value pairs, your rebalance callback thrown
+///   errors, or any new error cases in future versions)
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the timeout value is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer is not subscribed to any
+///   topics or manually assigned any partitions to consume from
+/// - `kafka_common_Error_is_invalid_topic_error` if the current subscription contains any invalid
+///   topic (per `Topic::validate`)
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature. Also, if the consumer attempts to
+///   subscribe to a SubscriptionPattern via `subscribe` or `subscribe` and the broker doesn't
+///   support this feature.
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer instance gets fenced by
+///   broker.
+///
+/// # Translation notes
+///
+/// WARNING: no `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot
+/// exceed `Long.MAX_VALUE` milliseconds.
 ///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
 /// their documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned records are owned by the caller, freed with
+/// `kafka_consumer_ConsumerRecords_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
@@ -1343,13 +1556,57 @@ pub type kafka_consumer_Consumer_poll_cb_t = unsafe extern "C" fn(
     opaque: *mut c_void,
 );
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time to block (must not be greater than `Long::MAX_VALUE`
+///   milliseconds)
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if the offset for a partition or set of
+///   partitions is undefined or out of range and no offset reset policy has been configured
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if caller lacks Read access to any of the
+///   subscribed topics or to the configured groupId. See the error for more details
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. invalid groupId
+///   or session timeout, errors deserializing key/value pairs, your rebalance callback thrown
+///   errors, or any new error cases in future versions)
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the timeout value is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer is not subscribed to any
+///   topics or manually assigned any partitions to consume from
+/// - `kafka_common_Error_is_invalid_topic_error` if the current subscription contains any invalid
+///   topic (per `Topic::validate`)
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature. Also, if the consumer attempts to
+///   subscribe to a SubscriptionPattern via `subscribe` or `subscribe` and the broker doesn't
+///   support this feature.
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer instance gets fenced by
+///   broker.
+///
+/// # Translation notes
+///
+/// WARNING: no `ArithmeticException`: `timeout` is an `int64_t` of milliseconds, so it cannot
+/// exceed `Long.MAX_VALUE` milliseconds.
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The records `cb` receives are owned by `cb`, freed with
+/// `kafka_consumer_ConsumerRecords_destroy`.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -1393,10 +1650,42 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_cb(
 
 /// `commitSync()`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This fatal error can only occur if you are using automatic group management with
+///   `subscribe`, or if there is an active group with the same `group.id` which is using group
+///   management. In such cases, when you are trying to commit to partitions that are no longer
+///   assigned to this consumer because the consumer is for example no longer part of the group this
+///   error would be thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout specified by `default.api.timeout.ms`
+///   expires before successful completion of the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
@@ -1418,9 +1707,46 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
 pub type kafka_consumer_Consumer_commit_sync_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This fatal error can only occur if you are using automatic group management with
+///   `subscribe`, or if there is an active group with the same `group.id` which is using group
+///   management. In such cases, when you are trying to commit to partitions that are no longer
+///   assigned to this consumer because the consumer is for example no longer part of the group this
+///   error would be thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout specified by `default.api.timeout.ms`
+///   expires before successful completion of the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
@@ -1455,10 +1781,46 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_cb(
 
 /// `commitSync(Duration timeout)`: `timeout` in milliseconds.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum amount of time to await completion of the offset commit
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1488,9 +1850,47 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout(
 pub type kafka_consumer_Consumer_commit_sync_with_timeout_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum amount of time to await completion of the offset commit
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1528,10 +1928,47 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_timeout_cb(
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`,
 /// copied during the call.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1569,9 +2006,48 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets(
 pub type kafka_consumer_Consumer_commit_sync_with_offsets_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1612,10 +2088,48 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_cb(
 
 /// `commitSync(Map<TopicPartition, OffsetAndMetadata> offsets, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+/// - `timeout` - The maximum amount of time to await completion of the offset commit
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1654,9 +2168,49 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
 pub type kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+/// - `timeout` - The maximum amount of time to await completion of the offset commit
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with `subscribe`, or
+///   if there is an active group with the same `group.id` which is using group management. In such
+///   cases, when you are trying to commit to partitions that are no longer assigned to this
+///   consumer because the consumer is for example no longer part of the group this error would be
+///   thrown.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the consumer instance is in the middle
+///   of a rebalance so it is not yet determined which partitions would be assigned to the consumer.
+///   In such cases you can first complete the rebalance by calling `kafka_consumer_Consumer_poll`
+///   and commit can be reconsidered afterwards. NOTE when you reconsider committing after the
+///   rebalance, the assigned partitions may have changed, and also for those partitions that are
+///   still assigned their fetch positions may have changed too if more records are returned from
+///   the `kafka_consumer_Consumer_poll` call, so when you retry committing you should consider
+///   updating the passed in `offset` parameter.
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the committed offset is negative
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the topic does not exist).
+/// - `kafka_common_Error_is_timeout_error` if the timeout expires before successful completion of
+///   the offset commit
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1698,10 +2252,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_with_offsets_timeou
 
 /// `commitAsync()`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1723,9 +2282,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
 pub type kafka_consumer_Consumer_commit_async_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1762,10 +2331,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_cb(
 /// registration is copied during the call; its `self` must stay alive
 /// until `onComplete` has fired (or the consumer is destroyed).
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `callback` - Callback to invoke when the commit completes
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1803,9 +2381,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 pub type kafka_consumer_Consumer_commit_async_with_callback_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `callback` - Callback to invoke when the commit completes
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1849,10 +2438,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback_cb(
 
 /// `commitAsync(Map<TopicPartition, OffsetAndMetadata> offsets, OffsetCommitCallback callback)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+/// - `callback` - Callback to invoke when the commit completes
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1899,9 +2499,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
 pub type kafka_consumer_Consumer_commit_async_with_offsets_callback_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `offsets` - A map of offsets by partition with associated metadata. This map will be copied
+///   internally, so it is safe to mutate the map after returning.
+/// - `callback` - Callback to invoke when the commit completes
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_fenced_instance_id_error` if this consumer is using the classic group
+///   protocol and this instance gets fenced by broker.
 ///
 /// # Safety
 ///
@@ -1955,10 +2568,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_offsets_callb
 
 /// `seek(TopicPartition partition, long offset)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partition` - the TopicPartition on which the seek will be performed.
+/// - `offset` - the next offset returned by poll().
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the provided offset is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
 ///
 /// # Safety
 ///
@@ -1993,9 +2617,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset(
 pub type kafka_consumer_Consumer_seek_with_offset_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - the TopicPartition on which the seek will be performed.
+/// - `offset` - the next offset returned by poll().
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the provided offset is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2036,10 +2673,22 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_cb(
 
 /// `seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partition` - the TopicPartition on which the seek will be performed.
+/// - `offset_and_metadata` - the next offset returned by poll(), with its
+///   leader epoch.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the provided offset is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2078,9 +2727,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata(
 pub type kafka_consumer_Consumer_seek_with_offset_and_metadata_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - the TopicPartition on which the seek will be performed.
+/// - `offset_and_metadata` - the next offset returned by poll(), with its
+///   leader epoch.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the provided offset is negative
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2125,10 +2788,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_offset_and_metadata_c
 
 /// `seekToBeginning(Collection<TopicPartition>)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to seek
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `partitions` is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2162,9 +2835,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
 pub type kafka_consumer_Consumer_seek_to_beginning_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to seek
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `partitions` is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2204,10 +2889,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning_cb(
 
 /// `seekToEnd(Collection<TopicPartition>)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to seek
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `partitions` is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2241,9 +2936,21 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
 pub type kafka_consumer_Consumer_seek_to_end_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to seek
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `partitions` is `NULL`
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -2283,8 +2990,36 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end_cb(
 
 /// `position(TopicPartition partition)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the value is returned; on failure the error
+/// Blocking; the value is returned; on failure the error
 /// is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partition` - The partition to get the position for
+///
+/// # Returns
+///
+/// The current position of the consumer (that is, the offset of the next record to be fetched)
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if no offset is currently defined for
+///   the partition
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the position cannot be determined before the timeout
+///   specified by `default.api.timeout.ms` expires
 ///
 /// # Safety
 ///
@@ -2314,9 +3049,35 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
 pub type kafka_consumer_Consumer_position_cb_t =
     unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - The partition to get the position for
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if no offset is currently defined for
+///   the partition
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the position cannot be determined before the timeout
+///   specified by `default.api.timeout.ms` expires
 ///
 /// # Safety
 ///
@@ -2356,8 +3117,35 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_cb(
 
 /// `position(TopicPartition partition, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the value is returned; on failure the error
+/// Blocking; the value is returned; on failure the error
 /// is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partition` - The partition to get the position for
+/// - `timeout` - The maximum amount of time to await determination of the current position
+///
+/// # Returns
+///
+/// The current position of the consumer (that is, the offset of the next record to be fetched)
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if no offset is currently defined for
+///   the partition
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_timeout_error` if the position cannot be determined before the passed
+///   timeout expires
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
@@ -2392,9 +3180,34 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout(
 pub type kafka_consumer_Consumer_position_with_timeout_cb_t =
     unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partition` - The partition to get the position for
+/// - `timeout` - The maximum amount of time to await determination of the current position
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the provided TopicPartition is not
+///   assigned to this consumer
+/// - `kafka_common_Error_is_consumer_invalid_offset_error` if no offset is currently defined for
+///   the partition
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_timeout_error` if the position cannot be determined before the passed
+///   timeout expires
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
@@ -2433,12 +3246,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
     }
 }
 
-/// `committed(Set<TopicPartition> partitions)`: an owned map of owned
-/// `kafka_common_TopicPartition_t *` to owned
-/// `kafka_consumer_OffsetAndMetadata_t *`.
+/// `committed(Set<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to check
+///
+/// # Returns
+///
+/// The latest committed offsets for the given partitions; `NULL` will be returned for the partition
+/// if there is no such message.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before the
+///   timeout specified by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
@@ -2446,6 +3284,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position_with_timeout_cb(
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
@@ -2462,7 +3303,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     let result = unsafe { run(self_, move |c| Box::pin(async move { c.committed(&partitions).await })) };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to write the
     // result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2470,13 +3311,40 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
 pub type kafka_consumer_Consumer_committed_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to check
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_unsupported_version_error` if the consumer attempts to fetch stable
+///   offsets when the broker doesn't support this feature
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before the
+///   timeout specified by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2506,7 +3374,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
             self_,
             move |c| Box::pin(async move { c.committed(&partitions).await }),
             move |client, result| {
-                deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets))
+                deliver_ptr(client, cb, opaque, result, move |offsets| {
+                    nullable_offset_and_metadata_map(&offsets)
+                })
             },
         )
     }
@@ -2514,8 +3384,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 
 /// `committed(Set<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to check
+/// - `timeout` - The maximum amount of time to await the latest committed offsets
+///
+/// # Returns
+///
+/// The latest committed offsets for the given partitions; `NULL` will be returned for the partition
+/// if there is no such message.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before
+///   expiration of the timeout
 ///
 /// # Safety
 ///
@@ -2523,6 +3416,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_cb(
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
@@ -2544,7 +3440,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
     };
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer to
     // write the result to, as `deliver_value` requires.
-    unsafe { deliver_value(result, out_err, |offsets| offset_and_metadata_map(&offsets)) }
+    unsafe { deliver_value(result, out_err, |offsets| nullable_offset_and_metadata_map(&offsets)) }
 }
 
 /// The completion of the `_cb` twin: the owned `value` on success,
@@ -2552,13 +3448,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout(
 pub type kafka_consumer_Consumer_committed_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions to check
+/// - `timeout` - The maximum amount of time to await the latest committed offsets
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the committed offset cannot be found before
+///   expiration of the timeout
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2589,7 +3509,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed_with_timeout_cb(
             self_,
             move |c| Box::pin(async move { c.committed_with_timeout(&partitions, ms(timeout)?).await }),
             move |client, result| {
-                deliver_ptr(client, cb, opaque, result, move |offsets| offset_and_metadata_map(&offsets))
+                deliver_ptr(client, cb, opaque, result, move |offsets| {
+                    nullable_offset_and_metadata_map(&offsets)
+                })
             },
         )
     }
@@ -2624,17 +3546,46 @@ unsafe fn destroy_list_element(element: *mut c_void) {
     unsafe { kafka_List_destroy(element as *mut kafka_List_t) }
 }
 
-/// `partitionsFor(String topic)`: an owned list of owned
-/// `kafka_common_PartitionInfo_t *`.
+/// `partitionsFor(String topic)`: a list of `kafka_common_PartitionInfo_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+///
+/// # Returns
+///
+/// The list of partitions, which will be empty when the given topic is not found. Note: when both
+/// the broker config `auto.create.topics.enable` and the consumer config `allow.auto.create.topics`
+/// are `true`, this method may return an empty list even though the topic is being auto-created in
+/// the background. Callers should not assume the topic does not exist based solely on an empty
+/// result.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
 /// their documented types. `topic` must be a NUL-terminated string. `out_err`
 /// must be a valid slot pointing at null.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
@@ -2658,13 +3609,38 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
 pub type kafka_consumer_Consumer_partitions_for_cb_t =
     unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The list `cb` receives is owned by `cb`, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2699,14 +3675,43 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_cb(
 
 /// `partitionsFor(String topic, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+/// - `timeout` - The maximum of time to await topic metadata
+///
+/// # Returns
+///
+/// The list of partitions, which will be empty when the given topic is not found. Note: when both
+/// the broker config `auto.create.topics.enable` and the consumer config `allow.auto.create.topics`
+/// are `true`, this method may return an empty list even though the topic is being auto-created in
+/// the background. Callers should not assume the topic does not exist based solely on an empty
+/// result.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_timeout_error` if topic metadata cannot be fetched before expiration of
+///   the passed timeout
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
 /// their documented types. `topic` must be a NUL-terminated string. `out_err`
 /// must be a valid slot pointing at null.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
@@ -2735,13 +3740,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout(
 pub type kafka_consumer_Consumer_partitions_for_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get partition metadata for
+/// - `timeout` - The maximum of time to await topic metadata
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the specified topic. See the
+///   error for more details
+/// - `kafka_common_Error_is_timeout_error` if topic metadata cannot be fetched before expiration of
+///   the passed timeout
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The list `cb` receives is owned by `cb`, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2775,16 +3804,34 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_with_timeout_cb(
     }
 }
 
-/// `listTopics()`: an owned map of owned `char *` to owned `kafka_List_t *`
-/// of owned `kafka_common_PartitionInfo_t *`.
+/// `listTopics()`: a map of `char *` to `kafka_List_t *` of
+/// `kafka_common_PartitionInfo_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Returns
+///
+/// The map of topics and its partitions
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
 /// their documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
@@ -2804,13 +3851,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
 pub type kafka_consumer_Consumer_list_topics_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2841,13 +3908,33 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_cb(
 
 /// `listTopics(Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time this operation will block to fetch topic metadata
+///
+/// # Returns
+///
+/// The map of topics and its partitions
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_timeout_error` if the topic metadata could not be fetched before
+///   expiration of the passed timeout
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
 /// `self_` must be a live consumer handle and the other parameters valid for
 /// their documented types. `out_err` must be a valid slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
@@ -2872,13 +3959,32 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout(
 pub type kafka_consumer_Consumer_list_topics_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `timeout` - The maximum time this operation will block to fetch topic metadata
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_timeout_error` if the topic metadata could not be fetched before
+///   expiration of the passed timeout
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values, the lists' elements included.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2909,12 +4015,36 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 }
 
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch)`: the
-/// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the owned
-/// result maps owned `kafka_common_TopicPartition_t *` to owned
-/// `kafka_consumer_OffsetAndTimestamp_t *`, unresolved partitions absent.
+/// input maps `kafka_common_TopicPartition_t *` to `int64_t *`; the result
+/// maps `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndTimestamp_t *`, `NULL` for an unresolved partition.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - the mapping from partition to the timestamp to look up.
+///
+/// # Returns
+///
+/// a mapping from partition to the timestamp and offset of the first message with timestamp greater
+/// than or equal to the target timestamp. If the timestamp and offset for a specific partition
+/// cannot be found within the default timeout, and no corresponding message exists, the entry in
+/// the returned map will be `NULL`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the target timestamp is negative
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
+///   the offsets by timestamp
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
@@ -2922,6 +4052,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics_with_timeout_cb(
 /// their documented types. `timestamps_to_search` must be a valid map of
 /// `kafka_common_TopicPartition_t *` to `int64_t *`. `out_err` must be a valid
 /// slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
@@ -2950,13 +4083,37 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
 pub type kafka_consumer_Consumer_offsets_for_times_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+/// `cb` receives the map of the blocking form, `NULL` for an unresolved partition.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - the mapping from partition to the timestamp to look up.
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the target timestamp is negative
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires.
+/// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
+///   the offsets by timestamp
+/// - `kafka_common_Error_is_bootstrap_resolution_error` if DNS resolution of the bootstrap servers
+///   fails within `bootstrap.resolve.timeout.ms`
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -2994,8 +4151,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 
 /// `offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - the mapping from partition to the timestamp to look up.
+/// - `timeout` - The maximum amount of time to await retrieval of the offsets
+///
+/// # Returns
+///
+/// a mapping from partition to the timestamp and offset of the first message with timestamp greater
+/// than or equal to the target timestamp. If the timestamp and offset for a specific partition
+/// cannot be found within timeout, and no corresponding message exists, the entry in the returned
+/// map will be `NULL`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the target timestamp is negative
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the passed timeout
+/// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
+///   the offsets by timestamp
 ///
 /// # Safety
 ///
@@ -3003,6 +4183,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_cb(
 /// their documented types. `timestamps_to_search` must be a valid map of
 /// `kafka_common_TopicPartition_t *` to `int64_t *`. `out_err` must be a valid
 /// slot pointing at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
@@ -3032,13 +4215,36 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout(
 pub type kafka_consumer_Consumer_offsets_for_times_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+/// `cb` receives the map of the blocking form, `NULL` for an unresolved partition.
+///
+/// # Parameters
+///
+/// - `timestamps_to_search` - the mapping from partition to the timestamp to look up.
+/// - `timeout` - The maximum amount of time to await retrieval of the offsets
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the target timestamp is negative
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the passed timeout
+/// - `kafka_common_Error_is_unsupported_version_error` if the broker does not support looking up
+///   the offsets by timestamp
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -3077,11 +4283,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
     }
 }
 
-/// `beginningOffsets(Collection<TopicPartition> partitions)`: an owned
-/// map of owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
+/// `beginningOffsets(Collection<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the earliest offsets.
+///
+/// # Returns
+///
+/// The earliest available offsets for the given partitions
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the configured `default.api.timeout.ms`
 ///
 /// # Safety
 ///
@@ -3089,6 +4311,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times_with_timeout_
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
@@ -3113,13 +4338,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
 pub type kafka_consumer_Consumer_beginning_offsets_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the earliest offsets.
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the configured `default.api.timeout.ms`
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -3157,8 +4400,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 
 /// `beginningOffsets(Collection<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the earliest offsets
+/// - `timeout` - The maximum amount of time to await retrieval of the beginning offsets
+///
+/// # Returns
+///
+/// The earliest available offsets for the given partitions, and it will return empty map if zero
+/// timeout is provided
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the passed timeout
 ///
 /// # Safety
 ///
@@ -3166,6 +4427,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_cb(
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
@@ -3195,13 +4459,32 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout(
 pub type kafka_consumer_Consumer_beginning_offsets_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the earliest offsets
+/// - `timeout` - The maximum amount of time to await retrieval of the beginning offsets
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before
+///   expiration of the passed timeout
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -3238,11 +4521,27 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
     }
 }
 
-/// `endOffsets(Collection<TopicPartition> partitions)`: an owned map of
-/// owned `kafka_common_TopicPartition_t *` to owned `int64_t *`.
+/// `endOffsets(Collection<TopicPartition> partitions)`: a map of
+/// `kafka_common_TopicPartition_t *` to `int64_t *`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the end offsets.
+///
+/// # Returns
+///
+/// The end offsets for the given partitions.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires
 ///
 /// # Safety
 ///
@@ -3250,6 +4549,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets_with_timeout_
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
@@ -3274,13 +4576,31 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
 pub type kafka_consumer_Consumer_end_offsets_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the end offsets.
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offset metadata could not be fetched before the
+///   amount of time allocated by `default.api.timeout.ms` expires
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -3318,8 +4638,26 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 
 /// `endOffsets(Collection<TopicPartition> partitions, Duration timeout)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5); the owned value is returned; on failure the
-/// error is stored in `*out_err`.
+/// Blocking; on failure the error is stored in `*out_err`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the end offsets.
+/// - `timeout` - The maximum amount of time to await retrieval of the end offsets
+///
+/// # Returns
+///
+/// The end offsets for the given partitions, and it will return empty map if zero timeout is
+/// provided
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offsets could not be fetched before expiration of
+///   the passed timeout
 ///
 /// # Safety
 ///
@@ -3327,6 +4665,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_cb(
 /// their documented types. `partitions` must be a valid list of
 /// `kafka_common_TopicPartition_t *`. `out_err` must be a valid slot pointing
 /// at null.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
@@ -3356,13 +4697,32 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout(
 pub type kafka_consumer_Consumer_end_offsets_with_timeout_cb_t =
     unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions to get the end offsets.
+/// - `timeout` - The maximum amount of time to await retrieval of the end offsets
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_authentication_error` if authentication fails. See the error for more
+///   details
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic(s). See the error
+///   for more details
+/// - `kafka_common_Error_is_timeout_error` if the offsets could not be fetched before expiration of
+///   the passed timeout
 ///
 /// # Safety
 ///
 /// As the blocking form; `cb` must stay valid until it fires.
+///
+/// The map `cb` receives is owned by `cb`, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard(on_panic = |err| {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `completion_sink`
     // requires. The guard runs this only when the body did not return. Reading the arguments comes
@@ -3405,10 +4765,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets_with_timeout_cb(
 
 /// `pause(Collection<TopicPartition>)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions which should be paused
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -3442,9 +4811,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
 pub type kafka_consumer_Consumer_pause_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions which should be paused
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -3484,10 +4864,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause_cb(
 
 /// `resume(Collection<TopicPartition>)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions which should be resumed
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -3521,9 +4910,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
 pub type kafka_consumer_Consumer_resume_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `partitions` - The partitions which should be resumed
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if any of the provided partitions are not
+///   currently assigned to this consumer
 ///
 /// # Safety
 ///
@@ -3563,10 +4963,15 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_cb(
 
 /// `enforceRebalance()`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer does not use group
+///   subscription
 ///
 /// # Safety
 ///
@@ -3593,9 +4998,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
 pub type kafka_consumer_Consumer_enforce_rebalance_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer does not use group
+///   subscription
 ///
 /// # Safety
 ///
@@ -3630,10 +5045,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_cb(
 
 /// `enforceRebalance(String reason)`.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `reason` - The reason why the new rebalance is needed.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer does not use group
+///   subscription
 ///
 /// # Safety
 ///
@@ -3667,9 +5091,20 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason(
 pub type kafka_consumer_Consumer_enforce_rebalance_with_reason_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `reason` - The reason why the new rebalance is needed.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the consumer does not use group
+///   subscription
 ///
 /// # Safety
 ///
@@ -3709,10 +5144,19 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance_with_reason_c
 /// `close()`: `close(CloseOptions)` with the defaults. The handle stays
 /// valid, to be destroyed afterwards.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other error during close (e.g., errors thrown from
+///   rebalance callbacks or commit callbacks from previous asynchronous commits)
 ///
 /// # Safety
 ///
@@ -3734,9 +5178,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
 pub type kafka_consumer_Consumer_close_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other error during close (e.g., errors thrown from
+///   rebalance callbacks or commit callbacks from previous asynchronous commits)
 ///
 /// # Safety
 ///
@@ -3771,10 +5229,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_cb(
 
 /// `close(CloseOptions options)`: the options are copied during the call.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): the interface methods it triggers
+/// Blocking: the interface methods it triggers
 /// run on the calling thread. A call while another operation is in
 /// flight fails with the `ConcurrentModificationException`
 /// translation (`LocalConcurrentModification`).
+///
+/// # Parameters
+///
+/// - `options` - see `kafka_consumer_CloseOptions_t`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the `option` timeout is negative
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other error during close (e.g., errors thrown from
+///   rebalance callbacks or commit callbacks from previous asynchronous commits)
 ///
 /// # Safety
 ///
@@ -3807,9 +5279,25 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_options(
 pub type kafka_consumer_Consumer_close_with_options_cb_t =
     unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `options` - see `kafka_consumer_CloseOptions_t`
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the `option` timeout is negative
+/// - `kafka_common_Error_is_wakeup_error` if `kafka_consumer_Consumer_wakeup` is called before or
+///   while this function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_kafka_error` for any other error during close (e.g., errors thrown from
+///   rebalance callbacks or commit callbacks from previous asynchronous commits)
 ///
 /// # Safety
 ///
@@ -3869,14 +5357,24 @@ unsafe fn read<T>(self_: *mut kafka_consumer_Consumer_t, f: impl FnOnce(&mut Dyn
     Ok(f(guard.consumer_mut()))
 }
 
-/// `assignment()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted by topic and partition; stores `LOCAL_CONCURRENT_MODIFICATION` in
-/// `*out_err` and returns `NULL` while another call holds the consumer, as
-/// Java's `acquire()` throws `ConcurrentModificationException`.
+/// Get the set of partitions currently assigned to this consumer.
+///
+/// # Returns
+///
+/// An immutable snapshot of the set of partitions currently assigned to this consumer,
+/// sorted by topic and partition
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_concurrent_modification_error` while another call
+///   holds the consumer, as Java's `acquire()` fails
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is closed:
+///   the Rust panic, caught
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null. The
+/// list of `kafka_common_TopicPartition_t *` is owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
@@ -3891,14 +5389,23 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     unsafe { deliver_value(assignment, out_err, |a| sorted_topic_partition_list(a.iter())) }
 }
 
-/// `subscription()`: an owned list of owned `char *`, sorted; stores
-/// `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns `NULL` while
-/// another call holds the consumer, as Java's `acquire()` throws
-/// `ConcurrentModificationException`.
+/// Get the current subscription.
+///
+/// # Returns
+///
+/// An immutable snapshot of the set of topics currently subscribed to, sorted
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_concurrent_modification_error` while another call
+///   holds the consumer, as Java's `acquire()` fails
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is closed:
+///   the Rust panic, caught
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null. The
+/// list of `char *` is owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
@@ -3913,14 +5420,24 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscription(
     unsafe { deliver_value(subscription, out_err, |s| sorted_string_list(s.iter())) }
 }
 
-/// `paused()`: an owned list of owned `kafka_common_TopicPartition_t *`,
-/// sorted; stores `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns
-/// `NULL` while another call holds the consumer, as Java's `acquire()` throws
-/// `ConcurrentModificationException`.
+/// Get the set of partitions that were previously paused by a call to
+/// `kafka_consumer_Consumer_pause`.
+///
+/// # Returns
+///
+/// The set of paused partitions, sorted
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_concurrent_modification_error` while another call
+///   holds the consumer, as Java's `acquire()` fails
+/// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is closed:
+///   the Rust panic, caught
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null. The
+/// list of `kafka_common_TopicPartition_t *` is owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
@@ -3935,19 +5452,35 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_paused(
     unsafe { deliver_value(paused, out_err, |p| sorted_topic_partition_list(p.iter())) }
 }
 
-/// `currentLag(TopicPartition topicPartition)`: Java's `OptionalLong`
-/// (`Consumer.java:259`) as a presence flag: 1 with the lag stored in
-/// `*out_lag`, or 0 for `OptionalLong.empty()`, leaving `*out_lag` unwritten.
-/// The lag can be negative (a position past the log end), so no value of it
-/// can stand for "empty".
+/// Get the consumer's current lag on the partition. Returns an "empty" lag if
+/// the lag is not known, for example if there is no position yet, or if the end
+/// offset is not known yet.
 ///
-/// Blocking (CLAUDE.md §4 rule 5): it waits for the consumer's background task
-/// to answer its `CurrentLagEvent`, as Java's `addAndGet`. On failure the error
-/// is stored in `*out_err` and 0 returned, `*out_lag` unwritten:
-/// `LOCAL_CONCURRENT_MODIFICATION` while another call holds the consumer, as
-/// Java's `acquire()` throws `ConcurrentModificationException`,
-/// `LOCAL_ILLEGAL_STATE` for a closed consumer or an unassigned partition. The
-/// caller tells an empty lag from a failure by `*out_err`.
+/// This method uses locally cached metadata. If the log end offset is not known
+/// yet, it triggers a request to fetch the log end offset, but returns
+/// immediately.
+///
+/// # Parameters
+///
+/// - `topic_partition` - The partition to get the lag for.
+/// - `out_lag` - receives the lag, when it is known
+///
+/// # Returns
+///
+/// This `Consumer` instance's current lag for the given partition: 1 with the lag
+/// in `*out_lag`, or 0 for an empty lag (or a failure), `*out_lag` then left
+/// unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the `topicPartition` is
+///   not assigned, or the consumer is closed
+/// - `kafka_common_Error_is_local_concurrent_modification_error` while another call
+///   holds the consumer, as Java's `acquire()` fails
+///
+/// # Translation notes
+///
+/// The lag can be negative, so a flag tells an empty one from a value.
 ///
 /// # Safety
 ///
@@ -3962,6 +5495,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
     out_lag: *mut i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
+    // Blocking: it waits for the background task to answer its `CurrentLagEvent`, as Java's
+    // `addAndGet`.
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // alive for this expression, the only use of the reference, as `topic_partition_ref` requires;
     // the value is cloned.
@@ -3997,9 +5532,19 @@ pub(crate) unsafe fn present_lag(lag: Option<i64>, out_lag: *mut i64) -> i8 {
 pub type kafka_consumer_Consumer_current_lag_cb_t =
     unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
 
-/// The non-blocking twin (CLAUDE.md §4 rule 5): the operation runs
+/// The non-blocking twin: the operation runs
 /// on the client's runtime, the interface methods it triggers and
 /// `cb` itself are queued for `kafka_consumer_Consumer__execute_callbacks`.
+///
+/// # Parameters
+///
+/// - `topic_partition` - The partition to get the lag for.
+/// - `cb` - the completion, receiving the value and the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_state_error` if the `topicPartition` is not assigned
 ///
 /// # Safety
 ///
@@ -4037,33 +5582,53 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag_cb(
     }
 }
 
-/// `metrics()`: an owned `kafka_Map_t` of owned `kafka_common_MetricName_t *`
-/// to owned `kafka_common_metrics_KafkaMetric_t *`, names compared by value
-/// in `kafka_Map_get`. Read through the consumer's handle, not the
-/// single-owner flag, so it answers while another call holds the consumer:
-/// Java's `AsyncKafkaConsumer.metrics()` takes no `acquire()`.
+/// Get the metrics kept by the consumer.
+///
+/// The returned map is an unmodifiable live view of the metrics. Changes to the
+/// underlying metrics will be reflected in the returned map.
+///
+/// # Returns
+///
+/// An unmodifiable live view of the map of metrics currently maintained by the
+/// consumer, from `kafka_common_MetricName_t *` to
+/// `kafka_common_metrics_KafkaMetric_t *`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The returned view is owned by the caller,
+/// freed with `kafka_common_metrics_MetricsView_destroy`, and stays valid after
+/// the consumer is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(self_: *const kafka_consumer_Consumer_t) -> *mut kafka_Map_t {
+pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
+    self_: *const kafka_consumer_Consumer_t,
+) -> *mut kafka_common_metrics_MetricsView_t {
+    // Read through the consumer's handle, not the single-owner flag, so it answers while another
+    // call holds the consumer: Java's `AsyncKafkaConsumer.metrics()` takes no `acquire()`.
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // as `client_ref` requires; the handle it reads through is shared state, never the consumer an
     // operation may be borrowing.
-    box_metrics_map(unsafe { client_ref(self_) }.handle().metrics())
+    box_metrics_view(unsafe { client_ref(self_) }.handle().metrics())
 }
 
-/// `groupMetadata()`: an owned handle freed with
-/// `kafka_consumer_ConsumerGroupMetadata_destroy`; stores
-/// `LOCAL_CONCURRENT_MODIFICATION` in `*out_err` and returns `NULL` while
-/// another call holds the consumer, as Java's `acquire()` throws
-/// `ConcurrentModificationException`.
+/// Return the current group metadata associated with this consumer.
+///
+/// # Returns
+///
+/// consumer group metadata
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_concurrent_modification_error` while another call
+///   holds the consumer, as Java's `acquire()` fails
+/// - `kafka_common_Error_is_local_illegal_state_error` once closed, or with
+///   `InvalidGroupIdError`'s message without a group (a caught panic)
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle and `out_err` a valid slot pointing at null. The
+/// metadata is owned by the caller, freed with
+/// `kafka_consumer_ConsumerGroupMetadata_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_group_metadata(
@@ -4093,10 +5658,9 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
     unsafe { client_ref(self_) }.handle.wakeup();
 }
 
-/// `handle()`: the reentrancy handle a listener calls the consumer back
-/// through (consumer-threading.md §31, §41), owned by the caller
-/// (`kafka_consumer_ConsumerHandle_destroy`) and usable after the consumer
-/// is destroyed, when its operations fail.
+/// Returns the reentrancy handle a listener calls the consumer back
+/// through, usable after the consumer is destroyed, when its operations
+/// fail.
 ///
 /// The handle is outside the consumer's single-owner flag but has its own
 /// guard: on a `KafkaConsumer` its async operations are admitted only while
@@ -4109,6 +5673,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(self_: *const kafka_cons
 /// # Safety
 ///
 /// `self_` must be a live handle.
+///
+/// The returned handle is owned by the caller, freed with `kafka_consumer_ConsumerHandle_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
@@ -4129,9 +5695,12 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_handle(
 /// [`kafka_consumer_Consumer__execute_callbacks`], never run callbacks.
 pub type kafka_consumer_Consumer_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
 
-/// Runs every queued callback serially on the calling thread and returns
-/// how many ran. Concurrent calls are serialized; a nested call from inside
-/// a callback returns 0.
+/// Runs the queued callbacks serially on the calling thread. Concurrent calls are
+/// serialized.
+///
+/// # Returns
+///
+/// How many callbacks ran; 0 for a nested call from inside a callback.
 ///
 /// # Safety
 ///
@@ -4149,6 +5718,11 @@ pub unsafe extern "C" fn kafka_consumer_Consumer__execute_callbacks(self_: *cons
 /// Installs the hook fired once each time the callback vector goes from
 /// empty to non-empty (see
 /// [`kafka_consumer_Consumer_callbacks_notify_fn_t`]).
+///
+/// # Parameters
+///
+/// - `notify` - the hook
+/// - `opaque` - passed to `notify`
 ///
 /// # Safety
 ///

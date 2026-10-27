@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The supplied topology epoch is invalid.
     ///
-    /// Corresponds to Java's `StreamsInvalidTopologyEpochException`, error code `Errors::StreamsInvalidTopologyEpoch`.
-    ///
-    /// Java `extends` chain:
-    ///    `StreamsInvalidTopologyEpochException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::StreamsInvalidTopologyEpoch`. Java `extends` chain:
+    /// `StreamsInvalidTopologyEpochException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException")]
     StreamsInvalidTopologyEpochError,
     code: Errors::StreamsInvalidTopologyEpoch,

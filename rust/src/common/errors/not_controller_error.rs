@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// This is not the correct controller for this cluster.
     ///
-    /// Corresponds to Java's `NotControllerException`, error code `Errors::NotController`.
-    ///
-    /// Java `extends` chain:
-    ///    `NotControllerException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::NotController`. Java `extends` chain: `NotControllerException` ->
+    /// `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NotControllerException")]
     NotControllerError,
     code: Errors::NotController,

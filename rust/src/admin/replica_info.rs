@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! A description of a replica on a particular broker.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ReplicaInfo`.
 
 /// A description of a replica on a particular broker.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ReplicaInfo`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo")]
 pub struct ReplicaInfo {
@@ -29,12 +25,18 @@ pub struct ReplicaInfo {
 
 impl ReplicaInfo {
     /// Creates a new `ReplicaInfo`.
+    ///
+    /// # Arguments
+    ///
+    /// - `size` - the total size of the log segments in this replica in bytes.
+    /// - `offset_lag` - the lag of the log's LEO with respect to the partition's high watermark.
+    /// - `is_future` - whether this replica has been created by an `AlterReplicaLogDirsRequest`.
     #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#ReplicaInfo")]
     pub fn new(size: i64, offset_lag: i64, is_future: bool) -> Self {
         Self { size, offset_lag, is_future }
     }
 
-    /// The total size of the log segments in this replica in bytes.
+    /// Returns the total size of the log segments in this replica in bytes.
     ///
     /// This value does not include the size of data stored in remote storage.
     #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#size")]
@@ -42,7 +44,7 @@ impl ReplicaInfo {
         self.size
     }
 
-    /// The lag of the log's LEO with respect to the partition's high watermark
+    /// Returns the lag of the log's LEO with respect to the partition's high watermark
     /// (if it is the current log for the partition) or the current replica's LEO
     /// (if it is the future log for the partition).
     #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#offsetLag")]
@@ -52,6 +54,11 @@ impl ReplicaInfo {
 
     /// Whether this replica has been created by an `AlterReplicaLogDirsRequest`
     /// but has not yet replaced the current replica on the broker.
+    ///
+    /// # Returns
+    ///
+    /// true if this log is created by AlterReplicaLogDirsRequest and will replace the current log
+    /// of the replica at some time in the future.
     #[doc(alias = "org.apache.kafka.clients.admin.ReplicaInfo#isFuture")]
     pub fn is_future(&self) -> bool {
         self.is_future

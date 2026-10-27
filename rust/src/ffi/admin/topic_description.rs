@@ -119,7 +119,7 @@ unsafe fn destroy_topic_partition_info_element(element: *mut c_void) {
 
 /// A Java `Set<AclOperation>` as an owned list of borrowed
 /// `const kafka_common_acl_AclOperation_t *` singletons (the list owns no
-/// element), or null for Java's null set.
+/// element), or `NULL` for Java's null set.
 pub(crate) fn acl_operation_list(operations: Option<&BTreeSet<AclOperation>>) -> *mut kafka_List_t {
     match operations {
         Some(operations) => {
@@ -134,11 +134,11 @@ pub(crate) fn acl_operation_list(operations: Option<&BTreeSet<AclOperation>>) ->
 }
 
 /// Reads a list of `const kafka_common_acl_AclOperation_t *` singletons into a
-/// Java `Set<AclOperation>`; a null list is Java's null set.
+/// Java `Set<AclOperation>`; a `NULL` list is Java's null set.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are ACL-operation
+/// `list` must be `NULL` or a valid list whose elements are ACL-operation
 /// singletons.
 pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BTreeSet<AclOperation>> {
     if list.is_null() {
@@ -158,11 +158,11 @@ pub(crate) unsafe fn list_acl_operations(list: *const kafka_List_t) -> Option<BT
 }
 
 /// Reads a list of `const kafka_common_TopicPartitionInfo_t *` into owned
-/// copies; null reads as empty.
+/// copies; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are valid
+/// `list` must be `NULL` or a valid list whose elements are valid
 /// topic-partition-info handles, all kept alive and not mutated for this
 /// call.
 unsafe fn list_topic_partition_infos(list: *const kafka_List_t) -> Vec<TopicPartitionInfo> {
@@ -180,18 +180,25 @@ unsafe fn list_topic_partition_infos(list: *const kafka_List_t) -> Vec<TopicPart
         .collect()
 }
 
-/// `new TopicDescription(String name, boolean internal,
-/// List<TopicPartitionInfo> partitions)`: `partitions` is a borrowed list of
-/// `const kafka_common_TopicPartitionInfo_t *`, copied (null reads as empty);
-/// the authorized operations are the empty set and the topic id
-/// `Uuid.ZERO_UUID`, as in Java. Owned, freed with
-/// [`kafka_admin_TopicDescription_destroy`].
+/// `new TopicDescription(String name, boolean internal, List<TopicPartitionInfo> partitions)`:
+/// `partitions` is a borrowed list of `const kafka_common_TopicPartitionInfo_t *`, copied (`NULL`
+/// reads as empty); the authorized operations are the empty set and the topic id `Uuid.ZERO_UUID`,
+/// as in Java.
+///
+/// # Parameters
+///
+/// - `name` - The topic name
+/// - `internal` - Whether the topic is internal to Kafka
+/// - `partitions` - A list of partitions where the index represents the partition id and the
+///   element contains leadership and replica information for that partition.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string and `partitions` null or a
+/// `name` must be a valid NUL-terminated string and `partitions` `NULL` or a
 /// valid list whose elements are valid topic-partition-info handles, all
 /// kept alive and not mutated for this call.
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_TopicDescription_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
@@ -212,12 +219,21 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_new(
 /// List<TopicPartitionInfo> partitions, Set<AclOperation>
 /// authorizedOperations)`: as [`kafka_admin_TopicDescription_new`], plus a
 /// borrowed list of `const kafka_common_acl_AclOperation_t *` singletons,
-/// copied; a null list is Java's null set.
+/// copied; a `NULL` list is Java's null set.
+///
+/// # Parameters
+///
+/// - `name` - The topic name
+/// - `internal` - Whether the topic is internal to Kafka
+/// - `partitions` - A list of partitions where the index represents the partition id and the
+///   element contains leadership and replica information for that partition.
+/// - `authorized_operations` - authorized operations for this topic, or empty set if this is not
+///   known.
 ///
 /// # Safety
 ///
 /// As [`kafka_admin_TopicDescription_new`], plus `authorized_operations`
-/// null or a valid list of ACL-operation singletons.
+/// `NULL` or a valid list of ACL-operation singletons.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations(
@@ -247,6 +263,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
 /// authorizedOperations, Uuid topicId)`: as
 /// [`kafka_admin_TopicDescription_with_authorized_operations`], plus the
 /// topic id, copied.
+///
+/// # Parameters
+///
+/// - `name` - The topic name
+/// - `internal` - Whether the topic is internal to Kafka
+/// - `partitions` - A list of partitions where the index represents the partition id and the
+///   element contains leadership and replica information for that partition.
+/// - `authorized_operations` - authorized operations for this topic, or empty set if this is not
+///   known.
+/// - `topic_id` - the topic id
 ///
 /// # Safety
 ///
@@ -284,11 +310,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_with_authorized_operations
     ))
 }
 
-/// `name()`: borrowed from the handle.
+/// Returns the name of the topic.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-description handle.
+/// `self_` must be a valid topic-description handle. The returned string is borrowed, valid as
+/// long as the description.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
@@ -300,7 +327,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_name(
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `isInternal()`.
+/// Whether the topic is internal to Kafka. An example of an internal topic is the offsets and
+/// group management topic: __consumer_offsets.
+///
+/// # Returns
+///
+/// 1 if the topic is internal, else 0.
 ///
 /// # Safety
 ///
@@ -313,11 +345,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_is_internal(self_: *const 
     i8::from(unsafe { topic_description_ref(self_) }.is_internal())
 }
 
-/// `topicId()`: an owned copy, freed with `kafka_common_Uuid_destroy`.
+/// Returns the id of the topic.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-description handle.
+/// `self_` must be a valid topic-description handle. The returned id is an owned copy, freed with
+/// `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
@@ -328,12 +361,17 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_topic_id(
     box_uuid(unsafe { topic_description_ref(self_) }.topic_id())
 }
 
-/// `partitions()`: an owned list of owned `kafka_common_TopicPartitionInfo_t *`
-/// copies, in partition order, freed with `kafka_List_destroy`.
+/// A list of partitions where the index represents the partition id and the element contains
+/// leadership and replica information for that partition.
+///
+/// # Returns
+///
+/// A list of `kafka_common_TopicPartitionInfo_t *` copies, in partition order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-description handle.
+/// `self_` must be a valid topic-description handle. The returned list is owned, freed together
+/// with its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
@@ -349,13 +387,16 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partitions(
     box_list(elements, Some(destroy_topic_partition_info_element))
 }
 
-/// `authorizedOperations()`: an owned list (freed with `kafka_List_destroy`)
-/// of borrowed `const kafka_common_acl_AclOperation_t *` singletons, or null
-/// when the broker did not report them (Java's null).
+/// authorized operations for this topic, or `NULL` if this is not known.
+///
+/// # Returns
+///
+/// A list of `const kafka_common_acl_AclOperation_t *` singletons, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-description handle.
+/// `self_` must be a valid topic-description handle. The returned list is owned, freed with
+/// `kafka_List_destroy`; its singletons are borrowed and never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
@@ -366,11 +407,12 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operations(
     acl_operation_list(unsafe { topic_description_ref(self_) }.authorized_operations())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the description.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-description handle.
+/// `self_` must be a valid topic-description handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
@@ -381,11 +423,11 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_to_string(
     into_c_string(&unsafe { topic_description_ref(self_) }.to_string())
 }
 
-/// Frees an owned topic-description handle; null is a no-op.
+/// Frees an owned topic-description handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

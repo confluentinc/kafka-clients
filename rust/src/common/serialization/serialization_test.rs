@@ -41,7 +41,7 @@
 //!   `stringSerdeConfigureThrowsOnUnknownEncoding`: the Rust String serdes are
 //!   UTF-8 only and keep the trait's no-op `configure`, so they read no
 //!   `*.encoding` config. Java rejects an unknown charset by throwing from
-//!   `configure` (`StringSerializer.java:47`, `StringDeserializer.java:50`);
+//!   `configure` (`StringSerializer#configure`, `StringDeserializer#configure`);
 //!   the Rust `configure` returns `()`, so it has no way to report it. The
 //!   UTF-8 case is translated below.
 //! - Every `listSerde*` test: there is no `ListSerializer` /
@@ -73,7 +73,7 @@ fn wrap(serialized: &[u8]) -> Bytes {
 }
 
 /// The `String` entry of Java's `allSerdesShouldRoundtripInput`
-/// (`SerializationTest.java:72-91`), through both deserializer overloads.
+/// (`SerializationTest#allSerdesShouldRoundtripInput`), through both deserializer overloads.
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldRoundtripInput")]
 async fn all_serdes_should_roundtrip_input_with_string() {
@@ -89,11 +89,11 @@ async fn all_serdes_should_roundtrip_input_with_string() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original String after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original String after serialization and deserialization"
@@ -118,11 +118,11 @@ async fn all_serdes_should_roundtrip_input_with_byte_array() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers(TOPIC, &headers, value)
+            .deserialize_with_headers(TOPIC, &mut headers, value)
             .await
             .expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
@@ -130,7 +130,7 @@ async fn all_serdes_should_roundtrip_input_with_byte_array() {
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original byte[] after serialization and deserialization"
@@ -153,11 +153,11 @@ async fn all_serdes_should_roundtrip_input_with_bytes() {
         deserializer.deserialize(TOPIC, &serialized).await.expect("deserialize"),
         "Should get the original Bytes after serialization and deserialization"
     );
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         value,
         deserializer
-            .deserialize_with_headers_bytes(TOPIC, &headers, &wrap(&serialized))
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &wrap(&serialized))
             .await
             .expect("deserialize"),
         "Should get the original Bytes after serialization and deserialization"
@@ -165,7 +165,7 @@ async fn all_serdes_should_roundtrip_input_with_bytes() {
 }
 
 /// The serializer half of Java's `allSerdesShouldSupportNull`
-/// (`SerializationTest.java:93-105`) for the String and byte[] serdes (the
+/// (`SerializationTest#allSerdesShouldSupportNull`) for the String and byte[] serdes (the
 /// latter also serializes Java's `Bytes`).
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#allSerdesShouldSupportNull")]
@@ -201,7 +201,7 @@ async fn all_serdes_should_support_null() {
 }
 
 /// The UTF-8 case of Java's `stringSerdeShouldSupportDifferentEncodings`
-/// (`SerializationTest.java:119-132`), configured through `key.*.encoding` as
+/// (`SerializationTest#stringSerdeShouldSupportDifferentEncodings`), configured through `key.*.encoding` as
 /// Java's `getStringSerde` does.
 #[tokio::test]
 #[doc(alias = "org.apache.kafka.common.serialization.SerializationTest#stringSerdeShouldSupportDifferentEncodings")]
@@ -209,10 +209,12 @@ async fn string_serde_should_support_different_encodings() {
     let value = "my string";
     let mut serializer = StringSerializer::new();
     let serializer_configs = [("key.serializer.encoding".to_string(), "UTF-8".to_string())].into();
-    Serializer::<str>::configure(&mut serializer, &serializer_configs, true).await;
+    Serializer::<str>::configure(&mut serializer, &serializer_configs, true)
+        .await
+        .expect("configure");
     let mut deserializer = StringDeserializer::new();
     let deserializer_configs = [("key.deserializer.encoding".to_string(), "UTF-8".to_string())].into();
-    deserializer.configure(&deserializer_configs, true).await;
+    deserializer.configure(&deserializer_configs, true).await.expect("configure");
     let serialized = Serializer::<str>::serialize(&serializer, TOPIC, Some(value))
         .await
         .expect("serialize")
@@ -224,7 +226,7 @@ async fn string_serde_should_support_different_encodings() {
     );
 }
 
-/// Java's `stringDeserializerSupportByteBuffer` (`SerializationTest.java:393-407`):
+/// Java's `stringDeserializerSupportByteBuffer` (`SerializationTest#stringDeserializerSupportByteBuffer`):
 /// the KIP-863 overload decodes only the buffer's readable part, here a slice
 /// of a buffer twice its size, as Java's heap buffer of
 /// `serializedBytes.length << 1`.
@@ -240,11 +242,11 @@ async fn string_deserializer_support_byte_buffer() {
     let mut backing = vec![0u8; serialized.len() << 1];
     backing[..serialized.len()].copy_from_slice(&serialized);
     let heap_buff = Bytes::from(backing).slice(..serialized.len());
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         data,
         StringDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &heap_buff)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &heap_buff)
             .await
             .expect("deserialize")
     );
@@ -257,23 +259,23 @@ async fn string_deserializer_support_byte_buffer() {
 async fn test_deserialize_with_headers_bytes_reads_only_the_record_slice() {
     let buffer = Bytes::from_static(b"<<my string>>");
     let record = buffer.slice(2..11);
-    let headers = RecordHeaders::new();
+    let mut headers = RecordHeaders::new();
     assert_eq!(
         "my string",
         StringDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
             .await
             .expect("deserialize")
     );
     assert_eq!(
         b"my string".to_vec(),
         ByteArrayDeserializer::new()
-            .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+            .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
             .await
             .expect("deserialize")
     );
     let bytes = BytesDeserializer::new()
-        .deserialize_with_headers_bytes(TOPIC, &headers, &record)
+        .deserialize_with_headers_bytes(TOPIC, &mut headers, &record)
         .await
         .expect("deserialize");
     assert_eq!(&b"my string"[..], &bytes[..]);

@@ -67,8 +67,8 @@ struct InFlightCall {
 /// background task.
 pub(crate) struct ShutdownSignal {
     /// Java's `AdminClientRunnable.closing`: set only once the I/O task's loop
-    /// has exited (`run()`'s `finally`, `KafkaAdminClient.java:1550-1551`), never
-    /// by `close()`. While it is set `fail_call` does not retry.
+    /// has exited (the `finally` of `KafkaAdminClient.AdminClientRunnable#run`),
+    /// never by `close()`. While it is set `fail_call` does not retry.
     pub(crate) closing: AtomicBool,
     /// Java's `hardShutdownTimeMs`: the hard-shutdown deadline in epoch ms, or
     /// [`KafkaAdminClient::NO_HARD_SHUTDOWN`]. `close()` publishes it; once set,
@@ -85,20 +85,24 @@ impl ShutdownSignal {
         }
     }
 
-    /// The rejection half of `AdminClientRunnable.call`
-    /// (`KafkaAdminClient.java:1706-1717`): returns the call when it may be
-    /// enqueued, and otherwise fails it and returns `None`.
+    /// The rejection half of `KafkaAdminClient.AdminClientRunnable#call`:
+    /// returns the call when it may be enqueued, and otherwise fails it and
+    /// returns `None`.
     ///
     /// Every new call passes this gate: user calls, driver and `listGroups`
     /// follow-ups (through `CallSender::call` in `kafka_admin_client.rs`) and the
     /// quota-retry follow-ups a response hook returns as [`HandleResult::NewCall`]
-    /// (Java's `runnable.call(call, now)` at `:1988`, `:2133`, `:2206`, `:3365`).
+    /// (Java's `runnable.call(call, now)` in
+    /// `KafkaAdminClient#getCreateTopicsCall`,
+    /// `KafkaAdminClient#getDeleteTopicsCall`,
+    /// `KafkaAdminClient#getDeleteTopicsWithIdsCall` and
+    /// `KafkaAdminClient#getCreatePartitionsCall`).
     ///
     /// 1. Once `close()` has published the hard-shutdown deadline, reject with
     ///    `IllegalStateException("Cannot accept new calls when AdminClient is
-    ///    closing.")` (`:1707-1709`).
+    ///    closing.")`.
     /// 2. Reject a call whose endpoint a `bootstrap.controllers` client cannot
-    ///    serve (`:1710-1713`).
+    ///    serve.
     ///    Like Java's `call.fail(now, ..)`, a call whose deadline has already
     ///    passed gets a `TimeoutException` caused by the rejection.
     pub(crate) fn admit_new_call(
@@ -130,12 +134,13 @@ impl ShutdownSignal {
             let error = Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
                 "This Admin API is not yet supported when communicating directly with the controller quorum.",
             ));
-            // Java hands it to `call.fail(now, ..)` (`KafkaAdminClient.java:970-1008`).
-            // A new call has no node, and the error is neither an
-            // `UnsupportedVersionException` nor retriable, so the branches that
-            // can be reached are: fail outright once the runnable is `closing`;
-            // otherwise count the try and fail with `handleTimeoutFailure` if the
-            // deadline has passed (`timeoutMs <= 0`) or with `handleFailure` if not.
+            // Java hands it to `call.fail(now, ..)`
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.Call#fail`). A new call
+            // has no node, and the error is neither an `UnsupportedVersionException`
+            // nor retriable, so the branches that can be reached are: fail outright
+            // once the runnable is `closing`; otherwise count the try and fail with
+            // `handleTimeoutFailure` if the deadline has passed (`timeoutMs <= 0`) or
+            // with `handleFailure` if not.
             if self.closing.load(Ordering::Acquire) {
                 call.handle_failure(&error);
                 return None;
@@ -155,17 +160,16 @@ impl ShutdownSignal {
     }
 }
 
-/// The max-retries check at the top of `AdminClientRunnable.enqueue`
-/// (`KafkaAdminClient.java:1669-1674`): returns the call when it may be queued,
-/// and otherwise fails it and returns `None`.
+/// The max-retries check at the top of
+/// `KafkaAdminClient.AdminClientRunnable#enqueue`: returns the call when it may
+/// be queued, and otherwise fails it and returns `None`.
 ///
 /// Java runs it for every call `runnable.call` admits, after the closing and
-/// `bootstrap.controllers` checks of [`ShutdownSignal::admit_new_call`]. The
-/// app-side path is `CallSender::call`; this is the same check for the
-/// follow-ups a response hook issues inside the loop, where a call re-queued
-/// with `HandleResult::CallAgain` carries its `tries` over. Java's `handleTimeoutFailure` passes a
-/// `TimeoutException` cause straight to `handleFailure` (`:1040-1042`), which is
-/// what is invoked here.
+/// `bootstrap.controllers` checks of [`ShutdownSignal::admit_new_call`]. The app-side path is
+/// `CallSender::call`; this is the same check for the follow-ups a response hook issues inside the
+/// loop, where a call re-queued with `HandleResult::CallAgain` carries its `tries` over. Java's
+/// `KafkaAdminClient.Call#handleTimeoutFailure` passes a `TimeoutException` cause straight to
+/// `handleFailure`, which is what is invoked here.
 pub(crate) fn enqueue_within_max_retries(max_retries: i32, log_context: &LogContext, mut call: Call) -> Option<Call> {
     if call.tries > max_retries {
         kafka_debug!(log_context, "Max retries {} for {} reached", max_retries, call.call_name);
@@ -216,8 +220,9 @@ pub(crate) struct AdminClientRunnable<C: KafkaClient> {
 impl<C: KafkaClient> AdminClientRunnable<C> {
     /// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
     ///
-    /// Java writes the literal inline in `AdminClientRunnable.run()`
-    /// (`KafkaAdminClient.java:1512`) rather than naming a static.
+    /// Java writes the literal inline in
+    /// `KafkaAdminClient.AdminClientRunnable#processRequests` rather than
+    /// naming a static.
     const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
 
     /// Creates a new runnable.
@@ -314,13 +319,14 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
         kafka_debug!(self.log_context, "Starting the Kafka admin client I/O task.");
 
-        // Java wraps the loop in `try { processRequests(); } finally { ... }`
-        // (`KafkaAdminClient.java:1546-1570`), and it is the `finally` that
-        // guarantees every pending call is failed — however `processRequests`
-        // terminated. Straight-line code after the loop is NOT that guarantee: a
-        // panic anywhere inside an iteration skipped both `fail_all_remaining` and
-        // `client.close()`, leaving every outstanding `KafkaFuture` hanging forever
-        // with no error ever delivered and the socket open.
+        // Java wraps the loop in `try { processRequests(); } finally { ... }` in
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#run`,
+        // and it is the `finally` that guarantees every pending call is failed —
+        // however `processRequests` terminated. Straight-line code after the loop
+        // is NOT that guarantee: a panic anywhere inside an iteration skipped both
+        // `fail_all_remaining` and `client.close()`, leaving every outstanding
+        // `KafkaFuture` hanging forever with no error ever delivered and the socket
+        // open.
         //
         // `AssertUnwindSafe` is needed because `&mut Self` is not `UnwindSafe`; the
         // only thing done with `self` afterwards is the cleanup Java's `finally`
@@ -334,17 +340,18 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             );
         }
 
-        // finally: `closing = true` (`KafkaAdminClient.java:1551`), which makes
-        // `enqueue` reject every later call with "The AdminClient thread has
-        // exited." (`:1679-1695`). Closing the receiver is that flag: from here
-        // on a send fails, so `CallSender::call` fails the call at once. That
-        // covers a call submitted while `client.close()` below is awaited, and a
-        // follow-up that a failure hook run by `fail_all_remaining` issues when
-        // the loop ended without `close()` having set the closing gate (a panic).
-        // Without it such a call is queued after the final drain, the runnable
-        // is dropped with it still in the channel, and its future never
-        // resolves. Calls already buffered can still be drained, so
-        // `fail_all_remaining` fails them as Java's
+        // finally: `closing = true`
+        // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#run`),
+        // which makes `KafkaAdminClient.AdminClientRunnable#enqueue` reject every
+        // later call with "The AdminClient thread has exited." Closing the
+        // receiver is that flag: from here on a send fails, so `CallSender::call`
+        // fails the call at once. That covers a call submitted while
+        // `client.close()` below is awaited, and a follow-up that a failure hook
+        // run by `fail_all_remaining` issues when the loop ended without
+        // `close()` having set the closing gate (a panic). Without it such a call
+        // is queued after the final drain, the runnable is dropped with it still
+        // in the channel, and its future never resolves. Calls already buffered
+        // can still be drained, so `fail_all_remaining` fails them as Java's
         // `handleTimeouts(newCalls, ..)` does.
         self.admin_rx.close();
 
@@ -355,14 +362,15 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
     }
 
-    /// The `try` body of Java's `AdminClientRunnable.run` — `processRequests()`
-    /// (`KafkaAdminClient.java:1549`). Split out so [`run`](Self::run) can wrap it
-    /// and still reach its `finally` after a panic.
+    /// The `try` body of Java's `KafkaAdminClient.AdminClientRunnable#run` —
+    /// `processRequests()`. Split out so [`run`](Self::run) can wrap it and still
+    /// reach its `finally` after a panic.
     ///
-    /// The phase order is Java's (`KafkaAdminClient.java:1575-1581`): each
-    /// iteration drains `newCalls` into `pendingCalls` and **then immediately**
-    /// asks `threadShouldExit`, before any timeout handling, node assignment,
-    /// send or network poll. A call submitted while the task was parked in the
+    /// The phase order is Java's
+    /// (`KafkaAdminClient.AdminClientRunnable#processRequests`): each iteration
+    /// drains `newCalls` into `pendingCalls` and **then immediately** asks
+    /// `threadShouldExit`, before any timeout handling, node assignment, send
+    /// or network poll. A call submitted while the task was parked in the
     /// previous iteration's poll is therefore already pending — an active
     /// external call — when the exit decision is made, so `close(timeout)`
     /// gives it its chance to complete. Checking after the poll instead would
@@ -382,10 +390,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             }
 
             self.process_pending_calls(now).await;
-            // Java's `break` out of `processRequests` once a permanent bootstrap
-            // failure has failed every call (`KafkaAdminClient.java:1621-1629`):
-            // the I/O thread exits, and `enqueue` fails later calls with the
-            // same error.
+            // Java's `break` out of
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#processRequests`
+            // once a permanent bootstrap failure has failed every call: the I/O
+            // thread exits, and `enqueue` fails later calls with the same error.
             if self.bootstrap_failure_handled {
                 break;
             }
@@ -394,7 +402,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
     /// Whether the loop should terminate: `processRequests`'
     /// `curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME && threadShouldExit(now,
-    /// curHardShutdownTimeMs)` (`KafkaAdminClient.java:1578-1581`, `:1532-1543`).
+    /// curHardShutdownTimeMs)` (`KafkaAdminClient.AdminClientRunnable#processRequests`,
+    /// `KafkaAdminClient.AdminClientRunnable#threadShouldExit`).
     ///
     /// It keys off the hard-shutdown deadline `close()` publishes, not
     /// `ShutdownSignal::closing`: Java sets `closing` only once the loop has
@@ -461,8 +470,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// `threadShouldExit` check: timeouts, node assignment, metadata refresh,
     /// send, network poll, unassignment and response handling.
     ///
-    /// Translated from `AdminClientRunnable.processRequests`
-    /// (`KafkaAdminClient.java:1583-1636`) — phase ordering is the Java contract.
+    /// Translated from `KafkaAdminClient.AdminClientRunnable#processRequests` —
+    /// phase ordering is the Java contract.
     ///
     /// Phase 1 (drain) and the exit check run in the caller, so numbering here
     /// starts at 2.
@@ -475,7 +484,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         // `should_exit` no later than that deadline. Without this an in-flight
         // external call keeps `should_exit` false while the poll itself waits on
         // the (far larger) call deadline, and `close(timeout)` overruns by up to
-        // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1589-1592`.
+        // `request.timeout.ms`. Mirrors
+        // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#processRequests`.
         let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
         if hard_shutdown_deadline_ms != KafkaAdminClient::NO_HARD_SHUTDOWN {
             poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
@@ -542,11 +552,11 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// `AdminClientRunnable.call(call, now)` for a call issued from inside the
     /// loop by a response hook ([`HandleResult::NewCall`] or
     /// [`HandleResult::CallAgain`]): the [`ShutdownSignal::admit_new_call`] gate,
-    /// then `enqueue` (`KafkaAdminClient.java:1668-1696`).
+    /// then `KafkaAdminClient.AdminClientRunnable#enqueue`.
     ///
     /// `enqueue` accepts the call only while the runnable is not `closing`, and
     /// otherwise fails it with `TimeoutException("The AdminClient thread has
-    /// exited.")` (`:1679-1695`). Response hooks run inside the loop, before
+    /// exited.")`. Response hooks run inside the loop, before
     /// [`fail_all_remaining`](Self::fail_all_remaining) sets `closing`, so that
     /// branch is not reached today. It is checked anyway, as Java does, so that a
     /// follow-up issued after the final drain fails instead of sitting in
@@ -755,11 +765,12 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     Err(err) => {
                         // `new KafkaException(String.format("Internal error sending %s
                         // to %s.", call.callName, node), t)`
-                        // (`KafkaAdminClient.java:1295-1297`): a bare `KafkaException`
-                        // — so `is_kafka_error()` is `true` and `is_api_error()` is
-                        // `false` — carrying the original as its cause. Neither the
-                        // class nor the cause survived being flattened into an
-                        // `LocalIllegalState` with the message text appended.
+                        // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#sendEligibleCalls`):
+                        // a bare `KafkaException` — so `is_kafka_error()` is `true`
+                        // and `is_api_error()` is `false` — carrying the original as
+                        // its cause. Neither the class nor the cause survived being
+                        // flattened into an `LocalIllegalState` with the message text
+                        // appended.
                         let wrapped = Error::kafka_message_source(
                             format!("Internal error sending {} to {}.", call.call_name, node),
                             err,
@@ -846,8 +857,9 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));
                 let err = match auth_error {
                     // Java: `call.fail(now, client.authenticationException(node))`
-                    // (`KafkaAdminClient.java:1373-1376`) — the object the channel
-                    // raised, whichever `AuthenticationException` subclass that was.
+                    // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`) —
+                    // the object the channel raised, whichever
+                    // `AuthenticationException` subclass that was.
                     // `KafkaClient::authentication_error` now hands that object
                     // over, so it is forwarded unchanged: rebuilding it here as the
                     // base class (or worse, hardcoding `SaslAuthenticationFailed`,
@@ -855,11 +867,11 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     // on a connection that never performed a SASL exchange.
                     Some(error) => error,
                     // `new DisconnectException(...)`
-                    // (`KafkaAdminClient.java:1377-1379`). Not `Errors::NetworkError`:
-                    // this is a purely client-side event, and `DisconnectError`'s own
-                    // file documents that it therefore carries no protocol code.
-                    // Reporting code 13 to the user meant a caller matching
-                    // `Error::Disconnect(_)` never fired.
+                    // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`).
+                    // Not `Errors::NetworkError`: this is a purely client-side event,
+                    // and `DisconnectError`'s own file documents that it therefore
+                    // carries no protocol code. Reporting code 13 to the user meant a
+                    // caller matching `Error::Disconnect(_)` never fired.
                     None => Error::Disconnect(DisconnectError::new(format!(
                         "Cancelled {} request with correlation id {} due to node {} being disconnected",
                         call.call_name, correlation_id, node_id_string
@@ -951,8 +963,9 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Fails all remaining calls (finally-block on shutdown).
     fn fail_all_remaining(&mut self, now: i64) {
         let msg = "The AdminClient thread has exited.";
-        // finally: `closing = true` (`KafkaAdminClient.java:1551`). This is the
-        // only place it is set; from here on `fail_call` does not retry.
+        // The `finally` of `KafkaAdminClient.AdminClientRunnable#run`:
+        // `closing = true`. This is the only place it is set; from here on
+        // `fail_call` does not retry.
         self.shutdown.closing.store(true, Ordering::Release);
 
         // Java fails `newCalls` under `synchronized (this)` after setting
@@ -1014,7 +1027,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client uses `bootstrap.controllers`, [`make_broker_metadata_call`]
     /// otherwise.
     ///
-    /// Translated from `makeMetadataCall` (`KafkaAdminClient.java:1722-1728`).
+    /// Translated from `KafkaAdminClient.AdminClientRunnable#makeMetadataCall`.
     ///
     /// [`make_controller_metadata_call`]: Self::make_controller_metadata_call
     /// [`make_broker_metadata_call`]: Self::make_broker_metadata_call
@@ -1030,8 +1043,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client: a `DescribeCluster` request for the CONTROLLER endpoint, as
     /// KIP-919 specifies.
     ///
-    /// Translated from `makeControllerMetadataCall`
-    /// (`KafkaAdminClient.java:1730-1770`).
+    /// Translated from
+    /// `KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`.
     fn make_controller_metadata_call(&self, now: i64) -> Call {
         // Use DescribeCluster here, as specified by KIP-919.
         let deadline = now + self.request_timeout_ms as i64;
@@ -1049,7 +1062,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 Ok(Box::new(describe_cluster_request::Builder::new(data)) as Box<dyn RequestBuilder>)
             }),
             Box::new(move |response, now, _cur_node| {
-                // Java casts unguarded (`KafkaAdminClient.java:1743`); a mismatch
+                // Java's `handleResponse` casts unguarded; a mismatch
                 // reaches `call.fail` through the response loop's `catch`, as
                 // for the broker metadata call.
                 let ConcreteResponse::DescribeCluster(describe_cluster_response) = response else {
@@ -1062,8 +1075,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     Ok(cluster) => cluster,
                     Err(error) => {
                         // `catch (ApiException e) { handleFailure(e); return; }`
-                        // (`:1747-1750`): this call's `handleFailure`, and no
-                        // unassignment.
+                        // in Java's `handleResponse`: this call's
+                        // `handleFailure`, and no unassignment.
                         mm_ok.update_failed(error);
                         return HandleResult::Done;
                     },
@@ -1087,8 +1100,8 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// client. We use `MetadataRequest` here so that we can continue to support
     /// brokers that are too old to handle `DescribeCluster`.
     ///
-    /// Translated from `makeBrokerMetadataCall`
-    /// (`KafkaAdminClient.java:1772-1813`).
+    /// Translated from
+    /// `KafkaAdminClient.AdminClientRunnable#makeBrokerMetadataCall`.
     fn make_broker_metadata_call(&self, now: i64) -> Call {
         let deadline = now + self.request_timeout_ms as i64;
         let mm_ok = self.metadata_manager.clone();
@@ -1106,8 +1119,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 )) as Box<dyn RequestBuilder>)
             }),
             Box::new(move |response, now, _cur_node| {
-                // Java does `(MetadataResponse) abstractResponse` unguarded
-                // (`KafkaAdminClient.java:1789`) and relies on the response loop's
+                // Java does `(MetadataResponse) abstractResponse` unguarded in
+                // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#makeBrokerMetadataCall`
+                // and relies on
+                // `KafkaAdminClient.AdminClientRunnable#handleResponses`'s
                 // `catch (Throwable t)` → `call.fail(now, t)` →
                 // `metadataManager.updateFailed(e)` to leave `UPDATE_PENDING`.
                 //

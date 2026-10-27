@@ -147,9 +147,11 @@ static void test_then_apply_runs_the_function_once_and_borrows_its_result(void) 
     kafka_common_KafkaFuture_BaseFunction_t *function = kafka_common_KafkaFuture_BaseFunction_new(&doubler, double_apply);
 
     // `then_apply` consumes the function handle; `self` must outlive the
-    // derived future.
+    // derived future. The source is complete, so the function runs inside
+    // `then_apply`.
     kafka_common_KafkaFuture_t *derived = kafka_common_KafkaFuture_then_apply(source, function);
-    TEST_ASSERT_EQUAL_INT(0, doubler.calls);
+    TEST_ASSERT_EQUAL_INT(1, doubler.calls);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_KafkaFuture_is_done(derived));
 
     kafka_common_Error_t *error = NULL;
     void *out = kafka_common_KafkaFuture_get(derived, &error);
@@ -208,6 +210,70 @@ static void test_then_apply_fails_with_the_functions_error_or_the_sources(void) 
     kafka_common_KafkaFuture_destroy(source);
     kafka_common_KafkaFuture_destroy(from_failed);
     kafka_common_KafkaFuture_destroy(failed_source);
+}
+
+// A C `BaseFunction` over a record future: reads the offset of the
+// `RecordMetadata` behind `a`, counting its calls.
+typedef struct {
+    int64_t offset;
+    int calls;
+} offset_reader_t;
+
+static void *read_offset(void *self, const void *a, kafka_common_Error_t **out_err) {
+    (void)out_err;
+    offset_reader_t *reader = self;
+    reader->calls++;
+    reader->offset = kafka_producer_RecordMetadata_offset(a);
+    return &reader->offset;
+}
+
+// Over a client's pending future, `then_apply`'s function runs once, when the
+// source completes: queued on the client, since C code never runs on a Rust
+// task, and run by its `__execute_callbacks`, which completes the dependant.
+// Reading the dependant again does not run it again; over a source already
+// complete it runs inline.
+static void test_then_apply_runs_the_function_once_when_the_source_completes(void) {
+    kafka_producer_MockProducer_t *mock = kafka_producer_MockProducer_with_auto_complete(0);
+    const kafka_producer_Producer_t *producer = kafka_producer_MockProducer__as_Producer(mock);
+    kafka_common_Error_t *error = NULL;
+    kafka_producer_ProducerRecord_t *record =
+        kafka_producer_ProducerRecord_with_partition_key("topic", 0, NULL, NULL, &error);
+    TEST_ASSERT_NULL(error);
+    kafka_common_KafkaFuture_t *source = kafka_producer_Producer_send(producer, record, &error);
+    TEST_ASSERT_NULL(error);
+    kafka_producer_ProducerRecord_destroy(record);
+    kafka_producer_Producer__execute_callbacks(producer);
+
+    offset_reader_t reader = {-1, 0};
+    kafka_common_KafkaFuture_t *derived =
+        kafka_common_KafkaFuture_then_apply(source, kafka_common_KafkaFuture_BaseFunction_new(&reader, read_offset));
+    TEST_ASSERT_EQUAL_INT8(0, kafka_common_KafkaFuture_is_done(derived));
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(mock));
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_KafkaFuture_is_done(source));
+    TEST_ASSERT_EQUAL_INT(0, reader.calls);
+    TEST_ASSERT_EQUAL_INT8(0, kafka_common_KafkaFuture_is_done(derived));
+
+    TEST_ASSERT_TRUE(kafka_producer_Producer__execute_callbacks(producer) >= 1);
+    TEST_ASSERT_EQUAL_INT(1, reader.calls);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_KafkaFuture_is_done(derived));
+    for (int i = 0; i < 3; i++) {
+        void *out = kafka_common_KafkaFuture_get(derived, &error);
+        TEST_ASSERT_NULL(error);
+        TEST_ASSERT_EQUAL_PTR(&reader.offset, out);
+        TEST_ASSERT_EQUAL_INT64(0, *(int64_t *)out);
+    }
+    TEST_ASSERT_EQUAL_INT(1, reader.calls);
+
+    kafka_common_KafkaFuture_t *inline_derived =
+        kafka_common_KafkaFuture_then_apply(source, kafka_common_KafkaFuture_BaseFunction_new(&reader, read_offset));
+    TEST_ASSERT_EQUAL_INT(2, reader.calls);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_KafkaFuture_is_done(inline_derived));
+
+    kafka_common_KafkaFuture_destroy(inline_derived);
+    kafka_common_KafkaFuture_destroy(derived);
+    kafka_common_KafkaFuture_destroy(source);
+    kafka_producer_MockProducer_destroy(mock);
 }
 
 #ifdef __linux__
@@ -319,6 +385,7 @@ int main(void) {
     RUN_TEST(test_base_function_is_reached_through_the_invoker);
     RUN_TEST(test_then_apply_runs_the_function_once_and_borrows_its_result);
     RUN_TEST(test_then_apply_fails_with_the_functions_error_or_the_sources);
+    RUN_TEST(test_then_apply_runs_the_function_once_when_the_source_completes);
     RUN_TEST(test_a_future_without_a_client_starts_no_thread);
     return UNITY_END();
 }

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::alter_replica_log_dirs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterReplicaLogDirsResult`.
 
 use std::collections::HashMap;
 
@@ -26,8 +24,6 @@ use crate::common::TopicPartitionReplica;
 /// To retrieve the detailed result per specified [`TopicPartitionReplica`], use
 /// [`values`](Self::values). To retrieve the overall result only, use
 /// [`all`](Self::all).
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterReplicaLogDirsResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult")]
 pub struct AlterReplicaLogDirsResult {
@@ -41,13 +37,26 @@ impl AlterReplicaLogDirsResult {
         Self { futures }
     }
 
-    /// Returns a map from [`TopicPartitionReplica`] to a [`KafkaFuture`] which
-    /// holds the status of an individual replica movement.
+    /// Returns a map from [`TopicPartitionReplica`] to [`KafkaFuture`] which holds the status of
+    /// individual replica movement. To check the result of individual replica movement, call
+    /// [`KafkaFuture::get`] from the value contained in the returned map. If there is no error,
+    /// it will return silently; if not, it returns an error like the following:
     ///
-    /// Awaiting a value future returns silently on success; otherwise it yields
-    /// one of `ClusterAuthorizationFailed`, `InvalidTopicException`,
-    /// `LogDirNotFound`, `ReplicaNotAvailable`, `KafkaStorageError`, or
-    /// `UnknownServerError`.
+    /// - `Error::is_cluster_authorization_error`: Authorization failed.
+    ///   (`CLUSTER_AUTHORIZATION_FAILED`, 31)
+    /// - `Error::is_invalid_topic_error`: The specified topic name is too long.
+    ///   (`INVALID_TOPIC_EXCEPTION`, 17)
+    /// - `Error::is_log_dir_not_found_error`: The specified log directory is not found in the
+    ///   broker. (`LOG_DIR_NOT_FOUND`, 57)
+    /// - `Error::is_replica_not_available_error`: The replica does not exist on the broker.
+    ///   (`REPLICA_NOT_AVAILABLE`, 9)
+    /// - `Error::is_kafka_storage_error`: Disk error occurred. (`KAFKA_STORAGE_ERROR`, 56)
+    /// - `Error::is_unknown_server_error`: Unknown. (`UNKNOWN_SERVER_ERROR`, -1)
+    ///
+    /// # Translation notes
+    ///
+    /// [`KafkaFuture::get`] returns the cause itself: it has no cancellation, interruption or
+    /// execution wrapper.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#values")]
     pub fn values(&self) -> &HashMap<TopicPartitionReplica, KafkaFuture<()>> {
         &self.futures
@@ -56,8 +65,6 @@ impl AlterReplicaLogDirsResult {
     /// Returns a future which succeeds if all the replica movements have
     /// succeeded, otherwise yields the first error described in
     /// [`values`](Self::values).
-    ///
-    /// Corresponds to `AlterReplicaLogDirsResult.all`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterReplicaLogDirsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

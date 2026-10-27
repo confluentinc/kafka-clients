@@ -397,7 +397,7 @@ impl Builder {
     ///
     /// Mirrors Java's `Builder.forTopicIdsOrNames(TxnOffsetCommitRequestData, boolean)`.
     /// Java deliberately passes the unstable-inclusive
-    /// `ApiKeys.TXN_OFFSET_COMMIT.latestVersion()` (`TxnOffsetCommitRequest.java:94`),
+    /// `ApiKeys.TXN_OFFSET_COMMIT.latestVersion()`,
     /// so this is [`ApiKeys::latest_version`], not the released-only accessor
     /// (`producer-transactions.md` §12). v6 is stable in 4.4 (b9945c8e84), so the
     /// two accessors agree today.
@@ -492,7 +492,7 @@ impl RequestBuilder for Builder {
 mod tests {
     use super::*;
 
-    // Fixture values of `OffsetCommitRequestTest` (Java 49-62), which
+    // Fixture values of `org.apache.kafka.common.requests.OffsetCommitRequestTest`, which
     // `TxnOffsetCommitRequestTest` extends.
     const GROUP_ID: &str = "groupId";
     const MEMBER_ID: &str = "consumerId";
@@ -517,7 +517,7 @@ mod tests {
         }
     }
 
-    /// Java's `OFFSETS` (`TxnOffsetCommitRequestTest.setUp`, Java 59-68).
+    /// Java's `OFFSETS` (`org.apache.kafka.common.requests.TxnOffsetCommitRequestTest#setUp`).
     fn java_offsets() -> HashMap<TopicPartition, CommittedOffset> {
         HashMap::from([
             (
@@ -531,7 +531,7 @@ mod tests {
         ])
     }
 
-    /// Java's `builder` (`setUp`, Java 70-75): no group metadata.
+    /// Java's `builder` (`TxnOffsetCommitRequestTest#setUp`): no group metadata.
     fn java_builder() -> Builder {
         let mut data = TxnOffsetCommitRequestData::new();
         data.set_transactional_id("transactionalId".to_string())
@@ -542,7 +542,7 @@ mod tests {
         Builder::for_topic_names(data, true)
     }
 
-    /// Java's `builderWithGroupMetadata` (`setUp`, Java 77-87).
+    /// Java's `builderWithGroupMetadata` (`TxnOffsetCommitRequestTest#setUp`).
     fn java_builder_with_group_metadata() -> Builder {
         let mut data = TxnOffsetCommitRequestData::new();
         data.set_transactional_id("transactionalId".to_string())
@@ -563,7 +563,7 @@ mod tests {
     }
 
     /// The data of `testForTopicIdsOrNamesWithTopicNameOnly` /
-    /// `...WithTopicIdOnly` (Java 179-226): one topic with one partition.
+    /// `testForTopicIdsOrNamesWithTopicIdOnly`: one topic with one partition.
     fn single_topic_data(name: &str, topic_id: Uuid) -> TxnOffsetCommitRequestData {
         let mut topic = TxnOffsetCommitRequestTopic::new();
         topic

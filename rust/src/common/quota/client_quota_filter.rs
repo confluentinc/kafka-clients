@@ -19,8 +19,6 @@
 use crate::common::quota::ClientQuotaFilterComponent;
 
 /// Describes a client quota entity filter.
-///
-/// Corresponds to `org.apache.kafka.common.quota.ClientQuotaFilter`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter")]
 pub struct ClientQuotaFilter {
@@ -42,7 +40,9 @@ impl ClientQuotaFilter {
     /// components. Matching entities with entity types that are not specified by
     /// a component will also be included in the result.
     ///
-    /// Mirrors `ClientQuotaFilter.contains`.
+    /// # Arguments
+    ///
+    /// - `components` - the components for the filter
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#contains")]
     pub fn contains(components: Vec<ClientQuotaFilterComponent>) -> Self {
         Self::new(components, false)
@@ -52,7 +52,9 @@ impl ClientQuotaFilter {
     /// components. Matching entities with entity types that are not specified by
     /// a component will *not* be included in the result.
     ///
-    /// Mirrors `ClientQuotaFilter.containsOnly`.
+    /// # Arguments
+    ///
+    /// - `components` - the components for the filter
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#containsOnly")]
     pub fn contains_only(components: Vec<ClientQuotaFilterComponent>) -> Self {
         Self::new(components, true)
@@ -60,16 +62,14 @@ impl ClientQuotaFilter {
 
     /// Constructs and returns a quota filter that matches all configured
     /// entities.
-    ///
-    /// Mirrors `ClientQuotaFilter.all`.
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#all")]
     pub fn all() -> Self {
         Self::new(Vec::new(), false)
     }
 
-    /// Returns the filter's components.
+    /// # Returns
     ///
-    /// Mirrors `ClientQuotaFilter.components()`.
+    /// the filter's components
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#components")]
     pub fn components(&self) -> &[ClientQuotaFilterComponent] {
         &self.components
@@ -77,8 +77,6 @@ impl ClientQuotaFilter {
 
     /// Returns whether the filter is strict, i.e. only includes specified
     /// components.
-    ///
-    /// Mirrors `ClientQuotaFilter.strict()`.
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilter#strict")]
     pub fn strict(&self) -> bool {
         self.strict

@@ -17,16 +17,11 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// The connection to the broker was lost before a response arrived.
+    /// Server disconnected before a request could be completed.
     ///
-    /// Raised client-side, so it carries no protocol code.
+    /// # Translation notes
     ///
-    /// Corresponds to Java's `DisconnectException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
-    ///
-    /// Java `extends` chain:
-    ///    `DisconnectException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// No protocol code.
     #[doc(alias = "org.apache.kafka.common.errors.DisconnectException")]
     DisconnectError,
     extends: [

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! Public SASL/SCRAM mechanism representation.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ScramMechanism`.
 
 /// Representation of a SASL/SCRAM Mechanism.
 ///
@@ -59,7 +57,9 @@ impl ScramMechanism {
     /// Returns the instance corresponding to the given type indicator, otherwise
     /// [`ScramMechanism::Unknown`].
     ///
-    /// Mirrors `ScramMechanism.fromType(byte)`.
+    /// # Arguments
+    ///
+    /// - `r#type` - the type indicator.
     #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#fromType")]
     pub fn from_type(r#type: i8) -> ScramMechanism {
         for mechanism in ScramMechanism::VALUES {
@@ -73,7 +73,9 @@ impl ScramMechanism {
     /// Returns the mechanism corresponding to the SASL SCRAM mechanism name,
     /// otherwise [`ScramMechanism::Unknown`].
     ///
-    /// Mirrors `ScramMechanism.fromMechanismName(String)`.
+    /// # Arguments
+    ///
+    /// - `mechanism_name` - the SASL SCRAM mechanism name
     #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#fromMechanismName")]
     pub fn from_mechanism_name(mechanism_name: &str) -> ScramMechanism {
         ScramMechanism::VALUES
@@ -82,12 +84,13 @@ impl ScramMechanism {
             .unwrap_or(ScramMechanism::Unknown)
     }
 
-    /// Returns the SASL SCRAM mechanism name (e.g. `SCRAM-SHA-256`).
+    /// Returns the corresponding SASL SCRAM mechanism name: `SCRAM-SHA-256`, `SCRAM-SHA-512`, or
+    /// `UNKNOWN`.
     ///
-    /// Derived from the variant name with `_` replaced by `-`, matching Java's
-    /// `toString().replace('_', '-')`.
+    /// # See also
     ///
-    /// Mirrors `ScramMechanism.mechanismName()`.
+    /// - [Salted Challenge Response Authentication Mechanism (SCRAM) SASL and GSS-API Mechanisms,
+    ///   Section 4](https://tools.ietf.org/html/rfc5802#section-4)
     #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#mechanismName")]
     pub fn mechanism_name(self) -> &'static str {
         match self {
@@ -98,8 +101,6 @@ impl ScramMechanism {
     }
 
     /// Returns the type indicator for this SASL SCRAM mechanism.
-    ///
-    /// Mirrors `ScramMechanism.type()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ScramMechanism#type")]
     pub fn r#type(self) -> i8 {
         match self {

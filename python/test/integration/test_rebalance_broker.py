@@ -21,11 +21,12 @@
 - ``close()`` with ``CloseOptions`` ``LEAVE_GROUP`` hands the leaving member's
   partition to the other member at once, while a dynamic member closing with
   ``REMAIN_IN_GROUP`` sends no leave heartbeat
-  (``ConsumerHeartbeatRequestManager.java:220-222``), so its partition stays
+  (``org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow``),
+  so its partition stays
   assigned to it until the session times out;
 - a static member (``group.instance.id``) closing with ``REMAIN_IN_GROUP``
   leaves temporarily (``LEAVE_GROUP_STATIC_MEMBER_EPOCH``,
-  ``ConsumerMembershipManager.java:510-515``) and rejoining keeps its
+  ``org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#leaveGroupEpoch``) and rejoining keeps its
   partitions.
 
 Skips without Docker (``kafka_broker``).

@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use crate::common::CompletionCallback;
 use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::KafkaFutureOps;
@@ -37,10 +38,6 @@ struct Completable<T: Clone + Send + Sync + 'static> {
     inner: Mutex<CompletableInner<T>>,
     notify: Notify,
 }
-
-/// A completion callback registered on a [`Completable`], invoked with a
-/// reference to the result when the future completes.
-type CompletionCallback<T> = Box<dyn FnOnce(&Result<T, Error>) + Send>;
 
 struct CompletableInner<T: Clone + Send + Sync + 'static> {
     result: Option<Result<T, Error>>,
@@ -80,9 +77,7 @@ impl<T: Clone + Send + Sync + 'static> Completable<T> {
 
     /// Register a callback to run when this future completes. If the future is
     /// already complete, the callback runs immediately on the calling task.
-    ///
-    /// Only reached via [`KafkaFutureImpl::when_complete`].
-    fn on_complete(&self, callback: CompletionCallback<T>) {
+    fn register(&self, callback: CompletionCallback<T>) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(result) = guard.result.clone() {
             drop(guard);
@@ -116,8 +111,8 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
                 // `java.util.concurrent.TimeoutException`, which is what
-                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
-                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `Future.get(timeout, unit)` declares and what
+                // `org.apache.kafka.common.KafkaFuture` imports, not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
                 Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",
@@ -129,6 +124,10 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
 
     fn is_done(&self) -> bool {
         self.inner.lock().unwrap().result.is_some()
+    }
+
+    fn on_complete(self: Arc<Self>, callback: CompletionCallback<T>) {
+        self.register(callback);
     }
 }
 
@@ -178,6 +177,13 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
         self.state.set(Err(error))
     }
 
+    /// [`complete`](Self::complete) or [`complete_with_error`](Self::complete_with_error),
+    /// as `result` holds a value or an error. Returns `true` if this call
+    /// completed the future.
+    pub(crate) fn complete_result(&self, result: Result<T, Error>) -> bool {
+        self.state.set(result)
+    }
+
     /// Whether this future is complete.
     #[doc(alias = "org.apache.kafka.common.internals.KafkaFutureImpl#isDone")]
     pub(crate) fn is_done(&self) -> bool {
@@ -195,7 +201,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     where
         F: FnOnce(&Result<T, Error>) + Send + 'static,
     {
-        self.state.on_complete(Box::new(action));
+        self.state.register(Box::new(action));
     }
 
     /// The public [`KafkaFuture`] view of this handle. Cloneable and awaitable

@@ -52,7 +52,7 @@ use crate::common::utils::internals::BufferSupplier;
 /// `available()`: [`Read`] has no such query to pass on to `R`, and Java's one
 /// use of it, ending [`Read::read`] before the bytes asked for are read, saves
 /// nothing for a caller that reads on until it has them, as every caller does
-/// (Java's too: `Utils.readFully`, `DefaultRecord.java:303`).
+/// (Java's too: `Utils.readFully`, `DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`).
 ///
 /// The buffer goes back to the supplier when the stream is closed, as Java's
 /// `close()` releases it, and dropping the stream closes it.

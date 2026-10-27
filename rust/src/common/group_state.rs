@@ -21,9 +21,22 @@ use std::fmt;
 
 use crate::common::GroupType;
 
-/// The state of a group.
+/// The group state.
 ///
-/// Corresponds to `org.apache.kafka.common.GroupState`.
+/// The following table shows the correspondence between the group states and
+/// types.
+///
+/// | State | Classic group | Consumer group | Share group | Streams group |
+/// | --- | --- | --- | --- | --- |
+/// | UNKNOWN | Yes | Yes | Yes | Yes |
+/// | PREPARING_REBALANCE | Yes | Yes |  |  |
+/// | COMPLETING_REBALANCE | Yes | Yes |  |  |
+/// | STABLE | Yes | Yes | Yes | Yes |
+/// | DEAD | Yes | Yes | Yes | Yes |
+/// | EMPTY | Yes | Yes | Yes | Yes |
+/// | ASSIGNING |  | Yes |  | Yes |
+/// | RECONCILING |  | Yes |  | Yes |
+/// | NOT_READY |  |  |  | Yes |
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupState")]
@@ -49,7 +62,7 @@ pub enum GroupState {
 }
 
 impl GroupState {
-    /// The name of this enum constant, exactly as declared in Java
+    /// Returns the name of this enum constant, exactly as declared in Java
     /// (`PREPARING_REBALANCE`).
     ///
     /// Java's `Enum.name()`, which `GroupState` inherits. The text Java's
@@ -72,8 +85,13 @@ impl GroupState {
 
     /// Case-insensitive group state lookup by string name.
     ///
-    /// Returns [`GroupState::Unknown`] if the name is unrecognized, mirroring
-    /// Java's `parse`.
+    /// # Arguments
+    ///
+    /// - `name` - the state name
+    ///
+    /// # Returns
+    ///
+    /// The state, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.GroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
@@ -92,17 +110,18 @@ impl GroupState {
 
     /// Returns the set of group states applicable to the given group type.
     ///
-    /// Mirrors `GroupState.groupStatesForType`.
+    /// # Arguments
+    ///
+    /// - `group_type` - the group type
     ///
     /// # Panics
     ///
     /// Panics with `Group type not known` if `group_type` is
     /// [`GroupType::Unknown`], where Java throws
-    /// `IllegalArgumentException("Group type not known")`
-    /// (`GroupState.java:79-91`). A group listing reports `Unknown` for a type
+    /// `IllegalArgumentException("Group type not known")`. A group listing reports `Unknown` for a type
     /// this client does not know, such as one a newer broker added, so check
     /// for it before calling. The lookup otherwise always succeeds, so its
-    /// signature stays a plain `HashSet` (CLAUDE.md §12.5).
+    /// signature stays a plain `HashSet`.
     #[doc(alias = "org.apache.kafka.common.GroupState#groupStatesForType")]
     pub fn group_states_for_type(group_type: GroupType) -> HashSet<GroupState> {
         match group_type {
@@ -144,7 +163,7 @@ impl GroupState {
 
 /// Java's `toString()`, which returns the private `name` field: the text
 /// (`PreparingRebalance`) the broker sends and [`GroupState::parse`] reads, not
-/// the constant name [`GroupState::name`] returns (`GroupState.java:51-97`).
+/// the constant name [`GroupState::name`] returns (the constants of `GroupState`).
 impl fmt::Display for GroupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -181,7 +200,7 @@ mod tests {
 
     /// New test, no Java original (Java has no `GroupStateTest`): every
     /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
-    /// `toString()` (`GroupState.java:51-60, 93-96`), and `parse` reads the `toString()` text back.
+    /// `toString()` (`GroupState#toString`), and `parse` reads the `toString()` text back.
     #[test]
     fn name_and_display_match_java_for_every_constant() {
         for (state, name, display) in [
@@ -202,7 +221,7 @@ mod tests {
     }
 
     /// New test, no Java original: Java's `parse` looks the upper-cased text up
-    /// among the upper-cased `toString()` texts (`GroupState.java:62-77`), so a
+    /// among the upper-cased `toString()` texts (`GroupState#parse`), so a
     /// constant name with an underscore is not found and parses as `UNKNOWN`.
     #[test]
     fn parse_does_not_read_constant_names_with_an_underscore() {

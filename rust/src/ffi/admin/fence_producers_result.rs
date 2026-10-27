@@ -53,14 +53,20 @@ unsafe fn handle<'a>(self_: *const kafka_admin_FenceProducersResult_t) -> &'a Re
     unsafe { result_ref(self_) }
 }
 
-/// `fencedProducers()`: an owned `kafka_Map_t` (freed with
-/// `kafka_Map_destroy`, which frees its keys and values) of owned `char *`
-/// transactional ids, sorted, to owned `kafka_common_KafkaFuture_t *` of
-/// `Void` (`get` delivers `NULL` once that producer has been fenced).
+/// Return a map from transactional ID to futures which can be used to check the status of
+/// individual fencings.
+///
+/// # Returns
+///
+/// A `kafka_Map_t` of owned `char *` transactional ids, sorted, to owned `kafka_common_KafkaFuture_t *` of `Void`
+/// (`get` delivers `NULL` once that producer has been fenced).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees its keys
+/// and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
@@ -73,15 +79,26 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_fenced_producers(
     h.ctx.string_keyed_future_map(fenced.iter(), |ctx, f| ctx.void_future(f))
 }
 
-/// `producerId(String transactionalId)`: returns an owned future (freed with
-/// `kafka_common_KafkaFuture_destroy`) whose `get` yields an `int64_t *` owned
-/// by the future, or stores the owned `IllegalArgumentError` in `*out_err` and
-/// returns `NULL` when `transactional_id` was not part of the request.
+/// Returns a future that provides the producer ID generated while initializing the given
+/// transaction when the request completes.
+///
+/// # Parameters
+///
+/// - `transactional_id` - the transactional id
+///
+/// # Returns
+///
+/// A future whose `get` yields an `int64_t *` owned by the future, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `transactional_id` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_err` a valid slot pointing at null.
+/// NUL-terminated string and `out_err` a valid slot pointing at `NULL`. The
+/// returned future is owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
@@ -99,15 +116,26 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_producer_id(
     unsafe { deliver_value(h.result.producer_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
 
-/// `epochId(String transactionalId)`: returns an owned future (freed with
-/// `kafka_common_KafkaFuture_destroy`) whose `get` yields an `int16_t *` owned
-/// by the future, or stores the owned `IllegalArgumentError` in `*out_err` and
-/// returns `NULL` when `transactional_id` was not part of the request.
+/// Returns a future that provides the epoch ID generated while initializing the given transaction
+/// when the request completes.
+///
+/// # Parameters
+///
+/// - `transactional_id` - the transactional id
+///
+/// # Returns
+///
+/// A future whose `get` yields an `int16_t *` owned by the future, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `transactional_id` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_err` a valid slot pointing at null.
+/// NUL-terminated string and `out_err` a valid slot pointing at `NULL`. The
+/// returned future is owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
@@ -125,13 +153,18 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_epoch_id(
     unsafe { deliver_value(h.result.epoch_id(&transactional_id), out_err, |f| h.ctx.value_future(&f)) }
 }
 
-/// `all()`: an owned `KafkaFuture<Void>` freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers `NULL` once every
-/// producer has been fenced, or the first failure.
+/// Return a future which succeeds only if all the producer fencings succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>`; its `get` delivers `NULL` once every producer has been fenced, or the
+/// first failure.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
@@ -143,12 +176,12 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -142,7 +142,7 @@ impl MetadataResponse {
     /// Returns a `LocalIllegalStateError` with Java's message, "Use errors() when
     /// managing topic using topic name", if any topic has the zero topic id; use
     /// [`errors`](Self::errors) instead. Java throws `IllegalStateException`
-    /// (`MetadataResponse.java:118-120`), and a 4.x broker does send the zero id
+    /// (`MetadataResponse#errorsByTopicId`), and a 4.x broker does send the zero id
     /// for a topic deleted while a by-id request is being answered, so the
     /// caller must be able to recover.
     #[doc(alias = "org.apache.kafka.common.requests.MetadataResponse#errorsByTopicId")]
@@ -747,8 +747,8 @@ mod tests {
 
     /// `errorsByTopicId()` maps each non-`NONE` topic error by id, and throws
     /// `IllegalStateException("Use errors() when managing topic using topic
-    /// name")` on a zero id (`MetadataResponse.java:115-125`). The Rust
-    /// translation returns that as an `Err` instead of panicking.
+    /// name")` on a zero id. The Rust translation returns that as an `Err`
+    /// instead of panicking.
     #[test]
     fn test_errors_by_topic_id() {
         let ok_id = Uuid::new(1, 1);

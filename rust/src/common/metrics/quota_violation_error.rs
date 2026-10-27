@@ -17,32 +17,26 @@
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::{Error, MetricName};
 
-/// Raised when a sensor records a value that takes a metric outside the bounds
-/// configured as its quota.
+/// Thrown when a sensor records a value that causes a metric to go outside the bounds configured
+/// as its quota
 ///
-/// Corresponds to Java's `QuotaViolationException`. It has no entry in `Errors`,
-/// so it carries no protocol code.
+/// # Translation notes
 ///
-/// Java `extends` chain:
-///    `QuotaViolationException` -> `KafkaException`
-///
-/// Hand-written rather than declared with `kafka_error_type!` because it adds
-/// subclass state (the metric, the recorded value and the bound) and overrides
-/// `toString()` instead of taking the generated
-/// `"<TypeName>: <message>"` form.
-///
-/// Two deliberate deviations from the Java class:
-///
-///  - Java holds the `KafkaMetric` itself and exposes it as `metric()`. This
-///    holds the metric's [`MetricName`], because `KafkaMetric` owns a
-///    `Box<dyn Measurable>` and so is neither `Clone` nor `Debug` — both of
-///    which [`Error`] requires. Nothing is lost for a client: Java's own
-///    `toString()` uses only `metric.metricName()`, and the client has no caller
-///    of `metric()` (the broker's `ClientQuotaManager` is the only one in the
-///    Kafka tree).
-///  - Java overrides `fillInStackTrace()` to skip capturing a stack trace, since
-///    quota violations are frequent and the trace is never read. Rust errors do
-///    not capture one at all, so there is nothing to suppress.
+/// No protocol code; keeps only the metric name.
+// Hand-written rather than declared with `kafka_error_type!` because it adds subclass state (the
+// metric, the recorded value and the bound) and overrides `toString()` instead of taking the
+// generated `"<TypeName>: <message>"` form.
+//
+// Two deliberate deviations from the Java class:
+//
+// - Java holds the `KafkaMetric` itself and exposes it as `metric()`. This holds the metric's
+//   `MetricName`, because `KafkaMetric` owns a `Box<dyn Measurable>` and so is neither `Clone` nor
+//   `Debug`, both of which `Error` requires. Nothing is lost for a client: Java's own `toString()`
+//   uses only `metric.metricName()`, and the client has no caller of `metric()` (the broker's
+//   `ClientQuotaManager` is the only one in the Kafka tree).
+// - Java overrides `fillInStackTrace()` to skip capturing a stack trace, since quota violations
+//   are frequent and the trace is never read. Rust errors do not capture one at all, so there is
+//   nothing to suppress.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException")]
 pub struct QuotaViolationError {
@@ -53,36 +47,38 @@ pub struct QuotaViolationError {
 }
 
 impl QuotaViolationError {
-    /// Create the error, mirroring Java's
-    /// `QuotaViolationException(KafkaMetric metric, double value, double bound)`.
+    /// Creates the error.
+    ///
+    /// # Arguments
+    ///
+    /// - `metric_name` - the name of the metric that violated its quota
+    /// - `value` - the value that was recorded
+    /// - `bound` - the quota bound that was crossed
     #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#QuotaViolationException")]
     pub fn new(metric_name: MetricName, value: f64, bound: f64) -> Self {
         Self { metric_name, value, bound, source: None }
     }
 
-    /// The name of the metric that violated its quota.
-    ///
-    /// Stands in for Java's `metric()` — see the type-level note.
+    /// Returns the name of the metric that violated its quota.
     // stands in for Java's metric(), keeping only the KafkaMetric's name
     #[doc(alias = "rust-only")]
     pub fn metric_name(&self) -> &MetricName {
         &self.metric_name
     }
 
-    /// The value that was recorded. Mirrors Java's `value()`.
+    /// Returns the value that was recorded.
     #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#value")]
     pub fn value(&self) -> f64 {
         self.value
     }
 
-    /// The quota bound that was crossed. Mirrors Java's `bound()`.
+    /// Returns the quota bound that was crossed.
     #[doc(alias = "org.apache.kafka.common.metrics.QuotaViolationException#bound")]
     pub fn bound(&self) -> f64 {
         self.bound
     }
 
-    /// The underlying cause, if any. Mirrors Java's `getCause()`.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause, if any: Java's `getCause()`.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()

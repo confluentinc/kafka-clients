@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! A new partition reassignment target.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.NewPartitionReassignment`.
 
 use crate::common::Error;
 
 /// A new partition reassignment, which can be applied via
 /// `Admin::alter_partition_reassignments`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.NewPartitionReassignment`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment")]
 pub struct NewPartitionReassignment {
@@ -29,14 +25,15 @@ pub struct NewPartitionReassignment {
 }
 
 impl NewPartitionReassignment {
-    /// Creates a new partition reassignment for the given target replicas.
+    /// Creates a reassignment.
     ///
-    /// Mirrors the `NewPartitionReassignment(List<Integer>)` constructor.
+    /// # Arguments
+    ///
+    /// - `target_replicas` - the target replicas.
     ///
     /// # Errors
     ///
-    /// Returns an error (invalid argument) if no replicas are supplied,
-    /// mirroring Java's `IllegalArgumentException`.
+    /// - `Error::is_local_illegal_argument_error` if no replicas are supplied.
     #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment#NewPartitionReassignment")]
     pub fn new(target_replicas: Vec<i32>) -> Result<Self, Error> {
         if target_replicas.is_empty() {
@@ -48,8 +45,6 @@ impl NewPartitionReassignment {
     }
 
     /// Returns the target replicas of this reassignment.
-    ///
-    /// Mirrors `targetReplicas()`.
     #[doc(alias = "org.apache.kafka.clients.admin.NewPartitionReassignment#targetReplicas")]
     pub fn target_replicas(&self) -> &[i32] {
         &self.target_replicas

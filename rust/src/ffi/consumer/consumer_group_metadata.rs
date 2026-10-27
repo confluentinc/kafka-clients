@@ -198,12 +198,20 @@ impl ConsumerGroupMetadata for CGroupMetadata {
     }
 }
 
-/// Registers a C implementation (CLAUDE.md §4 rule 3): the caller owns
-/// `self_` and keeps it alive until the handle is destroyed and every
-/// operation the handle was passed to has completed: an operation may keep
-/// the implementation after it returns, as a `_cb` one does until its
-/// callback has fired. All four methods are abstract in Java, so none of the
-/// pointers may be `NULL`. They may be called from any thread, concurrently.
+/// Registers a C implementation of `ConsumerGroupMetadata`. All four methods are abstract in
+/// Java, so none of the pointers may be `NULL`. They may be called from any thread,
+/// concurrently.
+///
+/// # Parameters
+///
+/// - `group_id` - `groupId`
+/// - `generation_id` - `generationId`
+/// - `member_id` - `memberId`
+/// - `group_instance_id` - `groupInstanceId`
+///
+/// # Returns
+///
+/// The handle.
 ///
 /// # Safety
 ///
@@ -211,6 +219,10 @@ impl ConsumerGroupMetadata for CGroupMetadata {
 /// function returns alive and unmodified, until the handle is destroyed and
 /// every operation it was passed to has completed; the functions must be
 /// safe to call from any thread, concurrently.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_ConsumerGroupMetadata_destroy`. The caller owns `self_`; an operation may keep
+/// the implementation after it returns, as a `_cb` one does until its callback has fired.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
@@ -229,11 +241,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_new(
     }))
 }
 
-/// `groupId()`: borrowed from the handle.
+/// `groupId()`.
+///
+/// # Returns
+///
+/// The group ID
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
@@ -248,6 +266,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_id(
 
 /// `generationId()`.
 ///
+/// # Returns
+///
+/// The generation ID
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
@@ -261,11 +283,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_generation_id(
     unsafe { inner_ref(self_) }.meta.generation_id()
 }
 
-/// `memberId()`: borrowed from the handle.
+/// `memberId()`.
+///
+/// # Returns
+///
+/// The member ID
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
@@ -281,12 +309,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_member_id(
         .as_ptr()
 }
 
-/// `groupInstanceId()`: borrowed from the handle, or `NULL` for
-/// `Optional.empty()`.
+/// `groupInstanceId()`, or `NULL` for `Optional.empty()`.
+///
+/// # Returns
+///
+/// The group instance ID, or empty if this is a dynamic member
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(

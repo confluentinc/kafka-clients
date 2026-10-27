@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Requested snapshot was not found.
     ///
-    /// Corresponds to Java's `SnapshotNotFoundException`, error code `Errors::SnapshotNotFound`.
-    ///
-    /// Java `extends` chain:
-    ///    `SnapshotNotFoundException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::SnapshotNotFound`. Java `extends` chain: `SnapshotNotFoundException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.SnapshotNotFoundException")]
     SnapshotNotFoundError,
     code: Errors::SnapshotNotFound,

@@ -664,7 +664,7 @@ def _empty_input_rows() -> list[tuple[str, dict[str, Any], str | None]]:
         ("delete_topics", {"topics": no_ids}, None),
         ("delete_topics", {"topics": TopicCollection.of_topic_ids(topics=[Uuid.ZERO_UUID])}, None),
         ("describe_topics", {"topic_names": []}, None),
-        # By ids Java reads options unconditionally (KafkaAdminClient:2495).
+        # By ids Java reads options unconditionally (KafkaAdminClient#handleDescribeTopicsByIds).
         ("describe_topics", {"topics": no_ids}, "options must not be None"),
         ("describe_configs", {"resources": []}, None),
         ("describe_configs", {"resources": [None]}, "resources must not contain None"),
@@ -674,7 +674,7 @@ def _empty_input_rows() -> list[tuple[str, dict[str, Any], str | None]]:
         ("alter_replica_log_dirs", {"replica_assignment": {None: "/d"}},
          "replica_assignment must not contain None"),
         ("describe_log_dirs", {"brokers": []}, None),
-        # options is read before the broker id is unboxed (KafkaAdminClient:3128-3129).
+        # options is read before the broker id is unboxed (KafkaAdminClient#describeLogDirs).
         ("describe_log_dirs", {"brokers": [None]}, "options must not be None"),
         ("describe_replica_log_dirs", {"replicas": []}, None),
         ("describe_replica_log_dirs", {"replicas": [None]}, "replicas must not contain None"),
@@ -728,8 +728,9 @@ async def test_async_options_none_where_java_returns_before_reading_it() -> None
 
 def test_create_delegation_token_renewers_none(admin: Admin) -> None:
     """``CreateDelegationTokenOptions.renewers(null)`` stores the null
-    (CreateDelegationTokenOptions:36-38); ``createDelegationToken`` iterates it
-    (KafkaAdminClient:3402, MockAdminClient:646)."""
+    (CreateDelegationTokenOptions#renewers(List)); ``createDelegationToken`` iterates it
+    (KafkaAdminClient#createDelegationToken,
+    MockAdminClient#createDelegationToken)."""
     from confluent_kafka.admin import CreateDelegationTokenOptions
 
     options = CreateDelegationTokenOptions().renewers(renewers=None)
@@ -757,8 +758,8 @@ async def test_async_create_delegation_token_renewers_none() -> None:
 
 
 def test_log_dir_description_stores_none_replica_infos() -> None:
-    """Java stores ``replicaInfos`` (LogDirDescription:50); ``replicaInfos()`` is
-    ``unmodifiableMap(null)``; ``toString`` prints ``null``."""
+    """Java stores ``replicaInfos`` (the full LogDirDescription constructor);
+    ``replicaInfos()`` is ``unmodifiableMap(null)``; ``toString`` prints ``null``."""
     from confluent_kafka.admin import LogDirDescription
 
     description = LogDirDescription(error=None, replica_infos=None)  # type: ignore[arg-type]
@@ -769,8 +770,8 @@ def test_log_dir_description_stores_none_replica_infos() -> None:
 
 
 def test_topic_description_stores_none_partitions() -> None:
-    """Java stores ``partitions`` (TopicDescription:98): ``partitions()`` returns the
-    null, ``equals`` / ``hashCode`` take it, ``toString`` dereferences it (:139)."""
+    """Java stores ``partitions`` (the full TopicDescription constructor): ``partitions()``
+    returns the null, ``equals`` / ``hashCode`` take it, ``toString`` dereferences it."""
     from confluent_kafka.admin import TopicDescription
 
     description = TopicDescription(name="t", internal=False,
@@ -838,7 +839,7 @@ def _round_two_rows() -> list[tuple[str, dict[str, Any], type[Exception] | None,
         ("create_topics", {"new_topics": [NewTopic(name=None, num_partitions=1,  # type: ignore[arg-type]
                                                    replication_factor=1)]},
          TypeError, "new_topics must not contain a NewTopic with a None name"),
-        # Item 11: later-path ids (CoordinatorStrategy:97-99), after options.
+        # Item 11: later-path ids (CoordinatorStrategy#handleResponse), after options.
         ("describe_consumer_groups", {"group_ids": [None]},
          TypeError, "group_ids must not contain None"),
         ("describe_consumer_groups", {"group_ids": [None], "options": None},

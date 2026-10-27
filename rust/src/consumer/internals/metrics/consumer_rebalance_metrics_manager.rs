@@ -263,7 +263,9 @@ impl ConsumerRebalanceMetricsManager {
     pub(crate) fn record_rebalance_ended(&self, now_ms: i64) {
         self.last_rebalance_end_ms.store(now_ms, Ordering::SeqCst);
         let latency = now_ms - self.last_rebalance_start_ms.load(Ordering::SeqCst);
-        self.successful_rebalance_sensor.record_with_value(latency as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.successful_rebalance_sensor.record_with_value(latency as f64);
     }
 
     /// Java: `maybeRecordRebalanceFailed()`. A rebalance failed only if a start
@@ -274,7 +276,7 @@ impl ConsumerRebalanceMetricsManager {
         if start <= end {
             return;
         }
-        self.failed_rebalance_sensor.record();
+        let _ = self.failed_rebalance_sensor.record();
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

@@ -22,26 +22,67 @@
 //!
 //! In Rust, `KafkaFuture<T>` serves as the concrete return type that hides
 //! internal implementations behind a public, type-erased interface.
+//!
+//! [`KafkaFuture::then_apply`] takes a [`BaseFunction`]: a closure, or a value
+//! from [`BaseFunction_new`]. Rust infers a closure's parameter type only from
+//! an `Fn` bound, not from a trait the closure gets through a blanket impl,
+//! so a closure whose body calls a method on its argument writes the
+//! argument's type out (`|v: T| ..`). A function held as a trait object
+//! (`Box<dyn BaseFunction<T, R>>`, `Arc<..>`) is not itself a
+//! `BaseFunction`; it is passed as `move |v| f.apply(v)`:
+//!
+//! ```
+//! use confluent_kafka::common::KafkaFuture;
+//! use confluent_kafka::common::kafka_future::{self, BaseFunction};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() {
+//! let future = KafkaFuture::completed_future(Ok("four".to_string()));
+//!
+//! // The body calls `len()` on `v`, so its type is written out.
+//! let len = future.then_apply(|v: String| Ok(v.len()));
+//! assert_eq!(len.get().await.unwrap(), 4);
+//!
+//! // A stored function is forwarded to through a closure.
+//! let f: Box<dyn BaseFunction<String, usize>> = Box::new(kafka_future::BaseFunction_new(|v: String| Ok(v.len())));
+//! let len = future.then_apply(move |v| f.apply(v));
+//! assert_eq!(len.get().await.unwrap(), 4);
+//! # }
+//! ```
 
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use futures_util::FutureExt;
+
 use crate::common::Error;
+use crate::common::internals::KafkaFutureImpl;
 
 /// A function which takes objects of type `A` and returns objects of type `B`.
 ///
-/// Java's `KafkaFuture.BaseFunction<A, B>`, a functional interface: every
-/// `Fn(A) -> Result<B, Error> + Send + Sync` closure implements it, so
-/// [`KafkaFuture::then_apply`] takes a closure where Java takes a lambda, its
-/// parameter type written out when the body calls a method on it (see
-/// `then_apply`). [`BaseFunction_new`] makes one from a function explicitly.
+/// # Translation notes
+///
+/// Any closure `Fn(A) -> Result<B, Error> + Send + Sync` implements it.
 #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction")]
 pub trait BaseFunction<A, B>: Send + Sync {
     /// Applies this function to `a`.
     ///
-    /// Java's `apply` may throw, failing the future `thenApply` returned; an
-    /// `Err` returned here fails it the same way.
+    /// # Arguments
+    ///
+    /// - `a` - the value to transform
+    ///
+    /// # Returns
+    ///
+    /// The transformed value.
+    ///
+    /// # Errors
+    ///
+    /// Any error the function returns; it fails the future `then_apply`
+    /// returned, as a throwing Java `apply` does.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture$BaseFunction#apply")]
     fn apply(&self, a: A) -> Result<B, Error>;
 }
@@ -56,12 +97,11 @@ where
 }
 
 /// A [`BaseFunction`] that calls `function`, standing in for a Java lambda
-/// implementing `KafkaFuture.BaseFunction`: `function` is
-/// [`apply`](BaseFunction::apply). A method Java adds later as an overload of
-/// `apply` gets its own factory, `BaseFunction_with_<parameter>`.
+/// implementing `KafkaFuture.BaseFunction`. A method Java adds later as an
+/// overload of `apply` gets its own factory, `BaseFunction_with_<parameter>`.
 ///
 /// `BaseFunction` is nested in `KafkaFuture`, so its factory lives in this
-/// module with the interface's name as a prefix (CLAUDE.md §2). `A` is a
+/// module with the interface's name as a prefix. `A` is a
 /// parameter of this function, not of the caller's, so the closure's
 /// parameter type must be written out:
 ///
@@ -71,6 +111,14 @@ where
 /// let len = kafka_future::BaseFunction_new(|s: String| Ok(s.len()));
 /// assert_eq!(len.apply("four".to_string()).unwrap(), 4);
 /// ```
+///
+/// # Arguments
+///
+/// - `function` - the body of [`apply`](BaseFunction::apply)
+///
+/// # Returns
+///
+/// A `BaseFunction` whose `apply` calls `function`.
 // stands in for a Java lambda implementing `KafkaFuture.BaseFunction` (CLAUDE.md §3)
 #[doc(alias = "rust-only")]
 #[expect(non_snake_case)]
@@ -109,20 +157,28 @@ pub(crate) trait KafkaFutureOps<T: Send>: Send + Sync {
 
     /// Whether this future is complete.
     fn is_done(&self) -> bool;
+
+    /// Registers `callback` to run once with this future's result: on the
+    /// code path that completes the future, after the result is stored, or at
+    /// once on the calling task when the future is already complete. This is
+    /// the hook behind the dependants of a future (`then_apply`, `all_of`),
+    /// which Java's `CompletableFuture` completes the same way.
+    fn on_complete(self: Arc<Self>, callback: CompletionCallback<T>);
 }
 
-/// A flexible future which supports async result retrieval.
+/// A callback registered with [`KafkaFutureOps::on_complete`], invoked with a
+/// reference to the future's result when it completes.
+pub(crate) type CompletionCallback<T> = Box<dyn FnOnce(&Result<T, Error>) + Send>;
+
+/// A flexible future which supports call chaining and other asynchronous
+/// programming patterns.
 ///
-/// Translated from `org.apache.kafka.common.KafkaFuture`.
+/// # Translation notes
 ///
-/// In Java, `KafkaFuture<T>` implements `Future<T>` and provides methods like
-/// `get()`, `get(timeout, unit)`, and `isDone()`. In Rust, this struct wraps
-/// an internal implementation and provides equivalent async methods.
-///
-/// This type is used as the return type for `Producer.send()`, hiding the
-/// internal `FutureRecordMetadata` behind a public interface — matching how
-/// Java's `Producer.send()` returns `Future<RecordMetadata>` rather than the
-/// internal implementation type.
+/// Java's `get()`, `get(timeout, unit)` and `isDone()` come from `Future<T>`;
+/// here `get` and `get_with_timeout` are async. This type is also what
+/// `Producer::send` returns, where Java returns `Future<RecordMetadata>`.
+/// `toCompletionStage` is not translated.
 #[doc(alias = "org.apache.kafka.common.KafkaFuture")]
 pub struct KafkaFuture<T: Send + 'static> {
     inner: Arc<dyn KafkaFutureOps<T>>,
@@ -134,16 +190,15 @@ impl<T: Send + 'static> KafkaFuture<T> {
         Self { inner }
     }
 
-    /// Create a `KafkaFuture` that is already resolved with the given result.
+    /// Returns a new `KafkaFuture` that is already completed with the given value.
     ///
-    /// Useful when the result is known at the time the future is constructed —
-    /// for example when implementing the [`Producer`](crate::producer::Producer)
-    /// trait by awaiting a remote call and wrapping the response in a future
-    /// to satisfy the trait's return type. Analogous to [`std::future::ready`].
+    /// # Arguments
     ///
-    /// Both [`get`](Self::get) and [`get_with_timeout`](Self::get_with_timeout) resolve
-    /// immediately with a clone of the result; [`is_done`](Self::is_done)
-    /// returns `true`.
+    /// - `result` - the value, or the error the future fails with
+    ///
+    /// # Translation notes
+    ///
+    /// `result` may also be an error.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#completedFuture")]
     pub fn completed_future(result: Result<T, Error>) -> Self
     where
@@ -152,118 +207,158 @@ impl<T: Send + 'static> KafkaFuture<T> {
         Self { inner: Arc::new(CompletedFuture { result }) }
     }
 
-    /// Await the result of this future.
+    /// Waits if necessary for this future to complete, and then returns its result.
     ///
-    /// This is the Rust equivalent of Java's `Future.get()`.
+    /// # Returns
+    ///
+    /// The future's value.
     ///
     /// # Errors
     ///
-    /// Returns the error from the underlying operation if it failed.
+    /// The error the underlying operation failed with.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
     pub fn get(&self) -> impl Future<Output = Result<T, Error>> + Send {
         async move { self.inner.get().await }
     }
 
-    /// Await the result of this future with a timeout.
-    ///
-    /// This is the Rust equivalent of Java's `Future.get(timeout, unit)`.
+    /// Waits if necessary for at most the given time for this future to
+    /// complete, and then returns its result, if available.
     ///
     /// # Arguments
     ///
-    /// * `timeout` - The maximum time to wait
+    /// - `timeout` - the maximum time to wait
+    ///
+    /// # Returns
+    ///
+    /// The future's value.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalTimeout`] if the timeout elapses before the
-    /// result is available — Java's `java.util.concurrent.TimeoutException`,
-    /// which `Future.get(timeout, unit)` declares, not the retriable
-    /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
-    /// the underlying operation if it failed.
+    /// - [`Error::is_local_timeout_error`] if the wait timed out: Java's
+    ///   `java.util.concurrent.TimeoutException`, not the retriable
+    ///   `org.apache.kafka.common.errors.TimeoutException`.
+    /// - The error the underlying operation failed with.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#get")]
     pub fn get_with_timeout(&self, timeout: Duration) -> impl Future<Output = Result<T, Error>> + Send {
         async move { self.inner.get_with_timeout(timeout).await }
     }
 
-    /// Whether this future is complete.
-    ///
-    /// This is the Rust equivalent of Java's `Future.isDone()`.
+    /// Returns true if completed in any fashion: normally, exceptionally, or via
+    /// cancellation.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#isDone")]
     pub fn is_done(&self) -> bool {
         self.inner.is_done()
     }
 
     /// Returns a new `KafkaFuture` that is completed when all the given futures
-    /// have completed. If any future completes exceptionally, the returned
-    /// future returns that error. If multiple futures fail, which error gets
-    /// returned is arbitrarily chosen (the first encountered while awaiting in
-    /// order).
+    /// have completed. If any future fails, the returned future returns its
+    /// error. If multiple futures fail, which error gets returned is
+    /// arbitrarily chosen.
     ///
-    /// Translated from `org.apache.kafka.common.KafkaFuture.allOf`. Unlike
-    /// Java's variadic `allOf(KafkaFuture<?>...)`, this Rust version is
-    /// homogeneous (`Vec<KafkaFuture<T>>`), which is all the admin `*Result`
-    /// types require (they combine per-key futures of a single type).
+    /// # Arguments
+    ///
+    /// - `futures` - the futures to wait for
+    ///
+    /// # Translation notes
+    ///
+    /// Unlike Java's variadic `allOf`, the futures share one type `T`. The
+    /// error is the first failed future's in `futures`.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#allOf")]
     pub fn all_of(futures: Vec<KafkaFuture<T>>) -> KafkaFuture<()>
     where
         T: Clone + Sync,
     {
-        KafkaFuture::new(Arc::new(AllOfFuture { futures }))
+        let all = KafkaFutureImpl::new();
+        if futures.is_empty() {
+            all.complete(());
+            return all.future();
+        }
+        // The number of futures still pending, and the first failure by
+        // position, as `CompletableFuture.allOf` relays the leftmost one.
+        let state = Arc::new(Mutex::new((futures.len(), None::<(usize, Error)>)));
+        for (index, future) in futures.into_iter().enumerate() {
+            let state = Arc::clone(&state);
+            let all = all.clone();
+            future.on_complete(move |result| {
+                let outcome = {
+                    let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let (remaining, first_error) = &mut *guard;
+                    if let Err(error) = result
+                        && first_error.as_ref().is_none_or(|(first, _)| index < *first)
+                    {
+                        *first_error = Some((index, error.clone()));
+                    }
+                    *remaining -= 1;
+                    (*remaining == 0).then(|| first_error.take())
+                };
+                // Completed outside the lock: `all`'s own dependants run here.
+                match outcome {
+                    Some(None) => _ = all.complete(()),
+                    Some(Some((_, error))) => _ = all.complete_with_error(error),
+                    None => {},
+                }
+            });
+        }
+        all.future()
     }
 
     /// Returns a future that completes when all the given keyed futures
-    /// complete, yielding a map from each key to its resolved value. If any
-    /// future completes exceptionally, the returned future yields that error.
+    /// complete, yielding a map from each key to its value. As soon as one
+    /// future fails, the returned future fails with its error.
     ///
     /// This is the combinator behind the admin `*Result` aggregators
     /// (`DescribeTopicsResult::all_topic_names`, etc.). Java expresses the same
     /// thing inline as `KafkaFuture.allOf(...).thenApply(v -> collect each
-    /// future.get())`; the Rust port names it because the get-driven model
-    /// cannot call `.get()` synchronously inside a `then_apply` closure.
-    pub(crate) fn join_map<K>(entries: Vec<(K, KafkaFuture<T>)>) -> KafkaFuture<std::collections::HashMap<K, T>>
+    /// future.get())`, or, in `ListTransactionsResult.allByBrokerId`, with one
+    /// `whenComplete` per future, which this is.
+    pub(crate) fn join_map<K>(entries: Vec<(K, KafkaFuture<T>)>) -> KafkaFuture<HashMap<K, T>>
     where
         T: Clone + Sync,
-        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+        K: Hash + Eq + Clone + Send + Sync + 'static,
     {
-        KafkaFuture::new(Arc::new(JoinMapFuture { entries }))
+        let joined = KafkaFutureImpl::new();
+        if entries.is_empty() {
+            joined.complete(HashMap::new());
+            return joined.future();
+        }
+        let state = Arc::new(Mutex::new((entries.len(), HashMap::with_capacity(entries.len()))));
+        for (key, future) in entries {
+            let state = Arc::clone(&state);
+            let joined = joined.clone();
+            future.on_complete(move |result| match result {
+                Err(error) => _ = joined.complete_with_error(error.clone()),
+                Ok(value) => {
+                    let map = {
+                        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+                        let (remaining, map) = &mut *guard;
+                        map.insert(key, value.clone());
+                        *remaining -= 1;
+                        (*remaining == 0).then(|| std::mem::take(map))
+                    };
+                    // Completed outside the lock: `joined`'s own dependants run here.
+                    if let Some(map) = map {
+                        joined.complete(map);
+                    }
+                },
+            });
+        }
+        joined.future()
     }
 
     /// Returns a new `KafkaFuture` that, when this future completes normally,
-    /// is completed with the result of applying `function` to this future's
-    /// value. If this future completes exceptionally, the returned future
-    /// completes with the same exception.
+    /// is executed with this future's result as the argument to the supplied
+    /// function. The function may be invoked by the task that calls
+    /// `then_apply` or it may be invoked by the task that completes the future.
     ///
-    /// Java's `BaseFunction.apply` may throw, failing the returned future; here
-    /// `function` returns `Err` instead (e.g. the
-    /// `CreateTopicsResult.TopicMetadataAndConfig` accessors, which call
-    /// `ensureSuccess()` and rethrow a stored exception). A transform that
-    /// cannot fail returns `Ok`.
+    /// # Arguments
     ///
-    /// `function` is a [`BaseFunction`]: a closure, or a value from
-    /// [`BaseFunction_new`]. Rust infers a closure's parameter type only from
-    /// an `Fn` bound, not from a trait the closure gets through a blanket impl,
-    /// so a closure whose body calls a method on its argument writes the
-    /// argument's type out (`|v: T| ..`). A function held as a trait object
-    /// (`Box<dyn BaseFunction<T, R>>`, `Arc<..>`) is not itself a
-    /// `BaseFunction`; it is passed as `move |v| f.apply(v)`:
+    /// - `function` - a closure or a [`BaseFunction_new`] value; the module
+    ///   docs show how to write one
     ///
-    /// ```
-    /// use confluent_kafka::common::KafkaFuture;
-    /// use confluent_kafka::common::kafka_future::{self, BaseFunction};
+    /// # Translation notes
     ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let future = KafkaFuture::completed_future(Ok("four".to_string()));
-    ///
-    /// // The body calls `len()` on `v`, so its type is written out.
-    /// let len = future.then_apply(|v: String| Ok(v.len()));
-    /// assert_eq!(len.get().await.unwrap(), 4);
-    ///
-    /// // A stored function is forwarded to through a closure.
-    /// let f: Box<dyn BaseFunction<String, usize>> = Box::new(kafka_future::BaseFunction_new(|v: String| Ok(v.len())));
-    /// let len = future.then_apply(move |v| f.apply(v));
-    /// assert_eq!(len.get().await.unwrap(), 4);
-    /// # }
-    /// ```
+    /// An `Err` from `function`, or a panic in it, fails the returned future,
+    /// as a Java throw does.
     #[doc(alias = "org.apache.kafka.common.KafkaFuture#thenApply")]
     pub fn then_apply<R, F>(&self, function: F) -> KafkaFuture<R>
     where
@@ -271,8 +366,106 @@ impl<T: Send + 'static> KafkaFuture<T> {
         R: Clone + Send + Sync + 'static,
         F: BaseFunction<T, R> + 'static,
     {
-        KafkaFuture::new(Arc::new(ThenApplyFuture { source: self.clone(), function: Arc::new(function) }))
+        let applied = KafkaFutureImpl::new();
+        let completer = applied.clone();
+        self.on_complete(move |result| match result {
+            Ok(value) => _ = completer.complete_result(apply_function(&function, value.clone())),
+            // Java's `CompletableFuture.thenApply` skips the function and
+            // fails the dependant with the source's failure.
+            Err(error) => _ = completer.complete_with_error(error.clone()),
+        });
+        applied.future()
     }
+
+    /// Registers `callback` to run once with this future's result, on the
+    /// code path completing it, or at once on the calling task when it is
+    /// already complete (see [`KafkaFutureOps::on_complete`]).
+    pub(crate) fn on_complete<F>(&self, callback: F)
+    where
+        F: FnOnce(&Result<T, Error>) + Send + 'static,
+    {
+        Arc::clone(&self.inner).on_complete(Box::new(callback));
+    }
+
+    /// The result of this future when it is already complete, read without
+    /// waiting, as Java's `getNow` reads a future that `allOf` has completed;
+    /// `None` while it is pending.
+    pub(crate) fn result_if_done(&self) -> Option<Result<T, Error>> {
+        if !self.is_done() {
+            return None;
+        }
+        self.inner.get().now_or_never()
+    }
+
+    /// A view of this future whose value is `map` applied to this one's, each
+    /// time it is read: by every `get`, and for every completion callback.
+    ///
+    /// Not `then_apply`, which runs its function once, eagerly: the C binding
+    /// maps every future it hands out to its C value with this, a pure
+    /// conversion that has no reason to run, nor to allocate the C value, for
+    /// a future nobody reads (a producer record's, one per record). No Java
+    /// counterpart (DoD #7): Java hands out its futures as they are.
+    /// Crate-internal, and only the `ffi` feature names it.
+    #[cfg(feature = "ffi")]
+    pub(crate) fn map_lazily<R, F>(&self, map: F) -> KafkaFuture<R>
+    where
+        T: Clone,
+        R: Send + 'static,
+        F: Fn(T) -> R + Send + Sync + 'static,
+    {
+        KafkaFuture::new(Arc::new(LazyMapFuture { source: self.clone(), map: Arc::new(map) }))
+    }
+}
+
+/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::map_lazily`].
+#[cfg(feature = "ffi")]
+struct LazyMapFuture<T: Send + 'static, R> {
+    source: KafkaFuture<T>,
+    map: Arc<dyn Fn(T) -> R + Send + Sync>,
+}
+
+#[cfg(feature = "ffi")]
+impl<T: Clone + Send + 'static, R: Send + 'static> KafkaFutureOps<R> for LazyMapFuture<T, R> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
+        Box::pin(async move { self.source.get().await.map(&*self.map) })
+    }
+
+    fn get_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
+        Box::pin(async move { self.source.get_with_timeout(timeout).await.map(&*self.map) })
+    }
+
+    fn is_done(&self) -> bool {
+        self.source.is_done()
+    }
+
+    fn on_complete(self: Arc<Self>, callback: CompletionCallback<R>) {
+        let map = Arc::clone(&self.map);
+        self.source.on_complete(move |result| match result {
+            Ok(value) => callback(&Ok(map(value.clone()))),
+            Err(error) => callback(&Err(error.clone())),
+        });
+    }
+}
+
+/// Applies a [`KafkaFuture::then_apply`] function, turning a panic into the
+/// error the dependant fails with: the function runs on the code path that
+/// completes the source (the admin client's background task, for instance),
+/// which a panicking function must not unwind, as a Java function that throws
+/// only fails its dependant.
+fn apply_function<T, R>(function: &dyn BaseFunction<T, R>, value: T) -> Result<R, Error> {
+    std::panic::catch_unwind(AssertUnwindSafe(|| function.apply(value))).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        Err(Error::local_illegal_state(format!(
+            "KafkaFuture.then_apply function panicked: {message}"
+        )))
+    })
 }
 
 impl<T: Send + 'static> Clone for KafkaFuture<T> {
@@ -313,144 +506,9 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for CompletedFuture<T> 
     fn is_done(&self) -> bool {
         true
     }
-}
 
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::all_of`].
-///
-/// Lazily awaits every input future when `get()` is called; there is no eager
-/// completion, which matches the way the admin `*Result::all()` methods are
-/// consumed (the caller awaits the aggregate).
-struct AllOfFuture<T: Clone + Send + Sync + 'static> {
-    futures: Vec<KafkaFuture<T>>,
-}
-
-impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>> {
-        Box::pin(async move {
-            for future in &self.futures {
-                future.get().await?;
-            }
-            Ok(())
-        })
-    }
-
-    fn get_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>> {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                // `java.util.concurrent.TimeoutException`, which is what
-                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
-                // imports (`KafkaFuture.java:27`) — not the retriable
-                // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::local_timeout(format!(
-                    "Timed out waiting for KafkaFuture.all_of after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.futures.iter().all(KafkaFuture::is_done)
-    }
-}
-
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::then_apply`].
-struct ThenApplyFuture<T, R>
-where
-    T: Clone + Send + Sync + 'static,
-    R: Clone + Send + Sync + 'static,
-{
-    source: KafkaFuture<T>,
-    function: Arc<dyn BaseFunction<T, R>>,
-}
-
-impl<T, R> KafkaFutureOps<R> for ThenApplyFuture<T, R>
-where
-    T: Clone + Send + Sync + 'static,
-    R: Clone + Send + Sync + 'static,
-{
-    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
-        Box::pin(async move {
-            let value = self.source.get().await?;
-            self.function.apply(value)
-        })
-    }
-
-    fn get_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<R, Error>> + Send + '_>> {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                // `java.util.concurrent.TimeoutException`, which is what
-                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
-                // imports (`KafkaFuture.java:27`) — not the retriable
-                // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::local_timeout(format!(
-                    "Timed out waiting for KafkaFuture.then_apply after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.source.is_done()
-    }
-}
-
-/// Internal `KafkaFutureOps` impl backing [`KafkaFuture::join_map`].
-struct JoinMapFuture<K, T>
-where
-    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-{
-    entries: Vec<(K, KafkaFuture<T>)>,
-}
-
-impl<K, T> KafkaFutureOps<std::collections::HashMap<K, T>> for JoinMapFuture<K, T>
-where
-    K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
-    T: Clone + Send + Sync + 'static,
-{
-    fn get(
-        &self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, Error>> + Send + '_>> {
-        Box::pin(async move {
-            let mut map = std::collections::HashMap::with_capacity(self.entries.len());
-            for (key, future) in &self.entries {
-                map.insert(key.clone(), future.get().await?);
-            }
-            Ok(map)
-        })
-    }
-
-    fn get_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<std::collections::HashMap<K, T>, Error>> + Send + '_>> {
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, self.get()).await {
-                Ok(result) => result,
-                // `java.util.concurrent.TimeoutException`, which is what
-                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
-                // imports (`KafkaFuture.java:27`) — not the retriable
-                // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::local_timeout(format!(
-                    "Timed out waiting for KafkaFuture.join_map after {} ms",
-                    timeout.as_millis()
-                ))),
-            }
-        })
-    }
-
-    fn is_done(&self) -> bool {
-        self.entries.iter().all(|(_, f)| f.is_done())
+    fn on_complete(self: Arc<Self>, callback: CompletionCallback<T>) {
+        callback(&self.result);
     }
 }
 
@@ -460,6 +518,7 @@ mod tests {
     use crate::common::internals::KafkaFutureImpl;
     use crate::common::protocol::Errors;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn completed_resolves_with_ok_value() {
@@ -528,7 +587,7 @@ mod tests {
             other => panic!("expected a timeout, got {other:?}"),
         };
         // Java throws `java.util.concurrent.TimeoutException`
-        // (`KafkaFuture.java:27`), a checked exception beside the Kafka
+        // (`org.apache.kafka.common.KafkaFuture#get`), a checked exception beside the Kafka
         // hierarchy — so none of the predicates hold and there is no wire code.
         // `Error::Timeout` would be
         // `org.apache.kafka.common.errors.TimeoutException`: retriable, an
@@ -670,5 +729,239 @@ mod tests {
             .then_apply(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
         handle.complete(1);
         assert!(matches!(mapped.get().await, Err(Error::LocalIllegalState(_))));
+    }
+
+    /// The value of a completed future, read without waiting, as Java's
+    /// `getNow(valueIfAbsent)`.
+    fn get_now<T: Clone + Send + 'static>(future: &KafkaFuture<T>, value_if_absent: T) -> Result<T, Error> {
+        future.result_if_done().unwrap_or(Ok(value_if_absent))
+    }
+
+    /// Asserts that `future` failed with `message` and, when given, a source
+    /// error carrying `source_message`, as Java's `awaitAndAssertFailure`.
+    async fn await_and_assert_failure<T: std::fmt::Debug + Send + 'static>(
+        future: &KafkaFuture<T>,
+        message: &str,
+        source_message: Option<&str>,
+    ) {
+        assert!(future.is_done());
+        let error = future.get().await.expect_err("the future failed");
+        assert_eq!(error.message(), message);
+        assert_eq!(error.source().map(Error::message), source_message);
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnSucceededFuture`
+    #[test]
+    fn test_then_apply_on_succeeded_future() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let doubled_future = future.future().then_apply(|integer| Ok(2 * integer));
+        assert!(!doubled_future.is_done());
+        let tripled_future = future.future().then_apply(|integer| Ok(3 * integer));
+        assert!(!tripled_future.is_done());
+        future.complete(21);
+        assert_eq!(get_now(&future.future(), -1).unwrap(), 21);
+        assert_eq!(get_now(&doubled_future, -1).unwrap(), 42);
+        assert_eq!(get_now(&tripled_future, -1).unwrap(), 63);
+        let quadrupled_future = future.future().then_apply(|integer| Ok(4 * integer));
+        assert_eq!(get_now(&quadrupled_future, -1).unwrap(), 84);
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnFailedFuture`
+    #[tokio::test]
+    async fn test_then_apply_on_failed_future() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future.future().then_apply(|integer| Ok(2 * integer));
+        future.complete_with_error(Error::kafka_message("We require more vespene gas"));
+        await_and_assert_failure(&future.future(), "We require more vespene gas", None).await;
+        await_and_assert_failure(&dependant_future, "We require more vespene gas", None).await;
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnFailedFutureTricky`:
+    /// Java's `CompletionException` wrapping a cause has no Rust counterpart;
+    /// its shape here is an error with a source, which the dependant receives
+    /// unchanged, source included.
+    #[tokio::test]
+    async fn test_then_apply_on_failed_future_tricky() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future.future().then_apply(|integer| Ok(2 * integer));
+        future.complete_with_error(Error::kafka_message_source(
+            "java.lang.RuntimeException: We require more vespene gas",
+            Error::kafka_message("We require more vespene gas"),
+        ));
+        let message = "java.lang.RuntimeException: We require more vespene gas";
+        await_and_assert_failure(&future.future(), message, Some("We require more vespene gas")).await;
+        await_and_assert_failure(&dependant_future, message, Some("We require more vespene gas")).await;
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnFailedFutureTricky2`:
+    /// the wrapped cause is one without a message, as Java's
+    /// `CancellationException()`.
+    #[tokio::test]
+    async fn test_then_apply_on_failed_future_tricky2() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future.future().then_apply(|integer| Ok(2 * integer));
+        future.complete_with_error(Error::kafka_message_source(
+            "java.util.concurrent.CancellationException",
+            Error::kafka_message(""),
+        ));
+        let message = "java.util.concurrent.CancellationException";
+        await_and_assert_failure(&future.future(), message, Some("")).await;
+        await_and_assert_failure(&dependant_future, message, Some("")).await;
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnSucceededFutureAndFunctionThrows`
+    #[tokio::test]
+    async fn test_then_apply_on_succeeded_future_and_function_throws() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future
+            .future()
+            .then_apply(|_integer| Err::<i32, _>(Error::kafka_message("We require more vespene gas")));
+        future.complete(21);
+        assert_eq!(future.future().get().await.unwrap(), 21);
+        await_and_assert_failure(&dependant_future, "We require more vespene gas", None).await;
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnSucceededFutureAndFunctionThrowsCompletionException`
+    #[tokio::test]
+    async fn test_then_apply_on_succeeded_future_and_function_throws_completion_exception() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future.future().then_apply(|_integer| {
+            Err::<i32, _>(Error::kafka_message_source(
+                "java.lang.RuntimeException: We require more vespene gas",
+                Error::kafka_message("We require more vespene gas"),
+            ))
+        });
+        future.complete(21);
+        assert_eq!(future.future().get().await.unwrap(), 21);
+        await_and_assert_failure(
+            &dependant_future,
+            "java.lang.RuntimeException: We require more vespene gas",
+            Some("We require more vespene gas"),
+        )
+        .await;
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testThenApplyOnFailedFutureFunctionNotCalled`
+    #[tokio::test]
+    async fn test_then_apply_on_failed_future_function_not_called() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_function = Arc::clone(&ran);
+        let dependant_future = future.future().then_apply(move |_integer| {
+            // Because the top level future failed, this should never be called.
+            ran_in_function.store(true, Ordering::SeqCst);
+            Ok(0)
+        });
+        future.complete_with_error(Error::kafka_message("We require more minerals"));
+        await_and_assert_failure(&future.future(), "We require more minerals", None).await;
+        await_and_assert_failure(&dependant_future, "We require more minerals", None).await;
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    /// The function runs once, when the source completes, with nobody waiting
+    /// on the dependant; later reads answer the stored result without running
+    /// it again.
+    #[tokio::test]
+    async fn then_apply_runs_the_function_once_at_completion() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let dependant_future = future.future().then_apply(move |integer| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(2 * integer)
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!dependant_future.is_done());
+        future.complete(21);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "run by complete(), not by a get");
+        assert!(dependant_future.is_done());
+        for _ in 0..3 {
+            assert_eq!(dependant_future.get().await.unwrap(), 42);
+            assert_eq!(dependant_future.get_with_timeout(Duration::from_secs(1)).await.unwrap(), 42);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Over a future already complete, the function runs inside `then_apply`.
+    #[test]
+    fn then_apply_runs_the_function_inline_when_the_source_is_done() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let dependant_future = KafkaFuture::completed_future(Ok(21)).then_apply(move |integer: i32| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(2 * integer)
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(dependant_future.is_done());
+        assert_eq!(get_now(&dependant_future, -1).unwrap(), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The function runs on the task completing the source, so a chain of
+    /// dependants completes from one `complete`.
+    #[test]
+    fn then_apply_chain_completes_from_the_completing_call() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let chained = future
+            .future()
+            .then_apply(|integer| Ok(integer + 1))
+            .then_apply(|integer| Ok(integer * 10));
+        assert!(!chained.is_done());
+        future.complete(1);
+        assert_eq!(get_now(&chained, -1).unwrap(), 20);
+    }
+
+    /// A panic in the function fails the dependant instead of unwinding the
+    /// code path that completes the source.
+    #[test]
+    fn then_apply_function_panic_fails_the_dependant() {
+        let future: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
+        let dependant_future = future.future().then_apply(|_integer| -> Result<i32, Error> { panic!("boom") });
+        assert!(future.complete(21));
+        let error = get_now(&dependant_future, -1).expect_err("the function panicked");
+        assert!(error.is_local_illegal_state_error(), "got {error:?}");
+        assert_eq!(error.message(), "KafkaFuture.then_apply function panicked: boom");
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testAllOfFuturesHandlesZeroFutures`
+    #[tokio::test]
+    async fn test_all_of_futures_handles_zero_futures() {
+        let all_future = KafkaFuture::<i32>::all_of(Vec::new());
+        assert!(all_future.is_done());
+        all_future.get().await.unwrap();
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testAllOfFuturesWithFailure`
+    /// shape: `all_of` completes only once every future has, and then with the
+    /// failure of the first failed one in the list, as Java's
+    /// `CompletableFuture.allOf`.
+    #[test]
+    fn all_of_waits_for_every_future_and_fails_with_the_first_failure() {
+        let futures: Vec<KafkaFutureImpl<i32>> = (0..5).map(|_| KafkaFutureImpl::new()).collect();
+        let all_future = KafkaFuture::all_of(futures.iter().map(KafkaFutureImpl::future).collect());
+        futures[3].complete_with_error(Error::kafka_message("Fourth one failed"));
+        futures[1].complete_with_error(Error::kafka_message("Second one failed"));
+        futures[0].complete(0);
+        futures[2].complete(2);
+        assert!(!all_future.is_done(), "waits for the last future despite the failures");
+        futures[4].complete(4);
+        let error = get_now(&all_future, ()).expect_err("two futures failed");
+        assert_eq!(error.message(), "Second one failed");
+    }
+
+    /// `org.apache.kafka.common.KafkaFutureTest#testAllOfFutures` shape: a
+    /// dependant of `all_of` completes from the last source's completion,
+    /// without anyone waiting.
+    #[test]
+    fn all_of_completes_its_dependants_from_the_last_completion() {
+        let futures: Vec<KafkaFutureImpl<i32>> = (0..5).map(|_| KafkaFutureImpl::new()).collect();
+        let sources: Vec<KafkaFuture<i32>> = futures.iter().map(KafkaFutureImpl::future).collect();
+        let sum = KafkaFuture::all_of(sources.clone())
+            .then_apply(move |()| sources.iter().map(|future| get_now(future, -1)).sum::<Result<i32, Error>>());
+        for (index, future) in futures.iter().enumerate() {
+            assert!(!sum.is_done());
+            future.complete(index as i32);
+        }
+        assert_eq!(get_now(&sum, -1).unwrap(), 10);
     }
 }

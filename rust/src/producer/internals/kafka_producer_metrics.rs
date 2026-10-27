@@ -137,7 +137,9 @@ impl KafkaProducerMetrics {
     /// Java: `recordFlush(long duration)`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordFlush")]
     pub(crate) fn record_flush(&self, duration: i64) {
-        self.flush_time_sensor.record_with_value(duration as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.flush_time_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordInit(long duration)`.
@@ -145,7 +147,7 @@ impl KafkaProducerMetrics {
     /// Recorded by [`KafkaProducer::init_transactions`](crate::producer::KafkaProducer::init_transactions).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordInit")]
     pub(crate) fn record_init(&self, duration: i64) {
-        self.init_time_sensor.record_with_value(duration as f64);
+        let _ = self.init_time_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordBeginTxn(long duration)`.
@@ -153,7 +155,7 @@ impl KafkaProducerMetrics {
     /// Recorded by [`KafkaProducer::begin_transaction`](crate::producer::KafkaProducer::begin_transaction).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordBeginTxn")]
     pub(crate) fn record_begin_txn(&self, duration: i64) {
-        self.begin_txn_time_sensor.record_with_value(duration as f64);
+        let _ = self.begin_txn_time_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordSendOffsets(long duration)`.
@@ -161,7 +163,7 @@ impl KafkaProducerMetrics {
     /// Recorded by [`KafkaProducer::send_offsets_to_transaction`](crate::producer::KafkaProducer::send_offsets_to_transaction).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordSendOffsets")]
     pub(crate) fn record_send_offsets(&self, duration: i64) {
-        self.send_offsets_sensor.record_with_value(duration as f64);
+        let _ = self.send_offsets_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordCommitTxn(long duration)`.
@@ -169,7 +171,7 @@ impl KafkaProducerMetrics {
     /// Recorded by [`KafkaProducer::commit_transaction`](crate::producer::KafkaProducer::commit_transaction).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordCommitTxn")]
     pub(crate) fn record_commit_txn(&self, duration: i64) {
-        self.commit_txn_sensor.record_with_value(duration as f64);
+        let _ = self.commit_txn_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordAbortTxn(long duration)`.
@@ -177,7 +179,7 @@ impl KafkaProducerMetrics {
     /// Recorded by [`KafkaProducer::abort_transaction`](crate::producer::KafkaProducer::abort_transaction).
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordAbortTxn")]
     pub(crate) fn record_abort_txn(&self, duration: i64) {
-        self.abort_txn_sensor.record_with_value(duration as f64);
+        let _ = self.abort_txn_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordPrepareTxn(long duration)`.
@@ -189,13 +191,13 @@ impl KafkaProducerMetrics {
     #[expect(dead_code)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordPrepareTxn")]
     pub(crate) fn record_prepare_txn(&self, duration: i64) {
-        self.prepare_txn_sensor.record_with_value(duration as f64);
+        let _ = self.prepare_txn_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordMetadataWait(long duration)`.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.KafkaProducerMetrics#recordMetadataWait")]
     pub(crate) fn record_metadata_wait(&self, duration: i64) {
-        self.metadata_wait_sensor.record_with_value(duration as f64);
+        let _ = self.metadata_wait_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes all 8 latency sensors.

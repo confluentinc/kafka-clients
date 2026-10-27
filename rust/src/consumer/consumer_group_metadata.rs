@@ -35,47 +35,61 @@ const UNKNOWN_GENERATION_ID: i32 = -1;
 #[cfg(test)]
 const UNKNOWN_MEMBER_ID: &str = "";
 
-/// The consumer group information: group id, generation id, member id and
-/// group instance id.
+/// A metadata struct containing the consumer group information.
 ///
-/// Corresponds to Java's
-/// `org.apache.kafka.clients.consumer.ConsumerGroupMetadata`.
+/// Note: Any change to this class is considered public and requires a KIP.
 ///
-/// Java has deprecated both public constructors since 4.2
-/// (`@Deprecated(since = "4.2", forRemoval = true)`): "please use
-/// `KafkaConsumer#groupMetadata()` instead. This class will be an interface in
-/// Kafka 5.0." The Rust client translates the class directly in its 5.0 shape,
-/// a trait, so the deprecated constructors are never public. The only way to
-/// obtain a value is [`Consumer::group_metadata`](super::Consumer::group_metadata),
-/// which returns the implementation owned by the consumer. The trait is
-/// dyn-compatible, so `send_offsets_to_transaction` accepts the metadata of any
-/// consumer implementation, including a future classic-protocol one.
+/// # Translation notes
 ///
-/// [`Display`](fmt::Display) on `dyn ConsumerGroupMetadata` renders Java's
-/// `toString()`.
+/// A trait, as in Kafka 5.0: see
+/// [`Consumer::group_metadata`](super::Consumer::group_metadata).
+// Java has deprecated both public constructors since 4.2
+// (`@Deprecated(since = "4.2", forRemoval = true)`): "please use
+// `KafkaConsumer#groupMetadata()` instead. This class will be an interface in
+// Kafka 5.0." The Rust client translates the class directly in its 5.0 shape,
+// a trait, so the deprecated constructors are never public. The trait is
+// dyn-compatible, so `send_offsets_to_transaction` accepts the metadata of any
+// consumer implementation, including a future classic-protocol one.
+// `Display` on `dyn ConsumerGroupMetadata` renders Java's `toString()`.
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata")]
 pub trait ConsumerGroupMetadata: Send + Sync + fmt::Debug + 'static {
     /// The consumer group ID.
+    ///
+    /// # Returns
+    ///
+    /// The group ID
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupId")]
     fn group_id(&self) -> &str;
 
     /// The current generation ID, or `-1` (`UNKNOWN_GENERATION_ID`) if unknown.
+    ///
+    /// # Returns
+    ///
+    /// The generation ID
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#generationId")]
     fn generation_id(&self) -> i32;
 
     /// The member ID, or an empty string (`UNKNOWN_MEMBER_ID`) if unknown.
+    ///
+    /// # Returns
+    ///
+    /// The member ID
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#memberId")]
     fn member_id(&self) -> &str;
 
     /// The group instance ID, if the consumer is a static member.
+    ///
+    /// # Returns
+    ///
+    /// The group instance ID, or empty if this is a dynamic member
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerGroupMetadata#groupInstanceId")]
     fn group_instance_id(&self) -> Option<&str>;
 }
 
 impl fmt::Display for dyn ConsumerGroupMetadata {
-    /// Matches Java's
-    /// `String.format("GroupMetadata(groupId = %s, generationId = %d, memberId = %s, groupInstanceId = %s)", …)`
-    /// where `groupInstanceId` is replaced with an empty string if absent.
+    // Matches Java's
+    // `String.format("GroupMetadata(groupId = %s, generationId = %d, memberId = %s, groupInstanceId = %s)", …)`
+    // where `groupInstanceId` is replaced with an empty string if absent.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 
-use crate::common::metrics::KafkaMetric;
-use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
+use crate::common::metrics::MetricsView;
+use crate::common::{Error, PartitionInfo, TopicPartition};
 use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::StrategyType;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
@@ -57,32 +57,15 @@ use crate::metadata::LeaderAndEpoch;
 /// the outer struct.
 pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 
-/// A mock of the [`Consumer`] interface, intended
-/// for testing code that uses Kafka.
+/// A mock of the [`Consumer`] interface you can use for testing code that
+/// uses Kafka. This class is *not threadsafe*. However, you can use the
+/// [`Self::schedule_poll_task`] method to write multithreaded tests where a
+/// driver thread waits for [`Consumer::poll`] to be called by a background
+/// thread and then can safely perform operations during a callback.
 ///
-/// Translated from
-/// `org.apache.kafka.clients.consumer.MockConsumer`.
+/// # Translation notes
 ///
-/// This struct is NOT thread-safe. However, you can use
-/// [`MockConsumer::schedule_poll_task`] to write multi-task tests where one
-/// task waits for [`Consumer::poll`] to be
-/// called by another task and can safely perform operations during a
-/// callback.
-///
-/// # Java mapping
-///
-/// Java's `MockConsumer(String offsetResetStrategy)` is [`MockConsumer::new`].
-/// The deprecated `MockConsumer(OffsetResetStrategy)` and the deprecated
-/// `OffsetResetStrategy` enum are not translated (CLAUDE.md §3); that
-/// constructor only forwards `offsetResetStrategy.toString()`, so Rust callers
-/// pass the `auto.offset.reset` string (`"earliest"`, `"latest"`, `"none"`) to
-/// [`MockConsumer::new`] instead.
-///
-/// # Threads
-///
-/// Like [`KafkaConsumer`](crate::consumer::KafkaConsumer), the mock is `Send`
-/// but not `Sync` (`consumer-threading.md` §2): it can move to another task,
-/// but it cannot be shared between them. Another task reaches it through
+/// The mock is `Send` but not `Sync`: another task reaches it through
 /// [`Consumer::handle`].
 ///
 /// ```compile_fail,E0277
@@ -91,6 +74,12 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 /// fn assert_sync<T: Sync>() {}
 /// assert_sync::<MockConsumer<String, String>>();
 /// ```
+// Java's `MockConsumer(String offsetResetStrategy)` is `MockConsumer::new`. The
+// deprecated `MockConsumer(OffsetResetStrategy)` and the deprecated
+// `OffsetResetStrategy` enum are not translated (CLAUDE.md §3); that constructor
+// only forwards `offsetResetStrategy.toString()`, so Rust callers pass the
+// `auto.offset.reset` string to `MockConsumer::new` instead. Like `KafkaConsumer`,
+// the mock is `Send` but not `Sync` (`consumer-threading.md` §2).
 #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer")]
 pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
@@ -143,8 +132,8 @@ pub struct MockConsumer<K, V> {
 }
 
 impl<K, V> std::fmt::Debug for MockConsumer<K, V> {
-    /// Whether the mock is closed; the records and offsets it holds are not
-    /// printed.
+    // Whether the mock is closed; the records and offsets it holds are not
+    // printed.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockConsumer")
             .field("closed", &self.closed())
@@ -156,9 +145,18 @@ impl<K, V> MockConsumer<K, V> {
     /// A mock consumer is instantiated by providing
     /// `ConsumerConfig::AUTO_OFFSET_RESET_CONFIG` value as the input.
     ///
-    /// Returns an `IllegalArgumentError` when `offset_reset_strategy` is not
-    /// a valid `auto.offset.reset` value, as Java's
-    /// `AutoOffsetResetStrategy.fromString` throws.
+    /// # Arguments
+    ///
+    /// - `offset_reset_strategy` - the offset reset strategy to use
+    ///
+    /// # Returns
+    ///
+    /// The new mock consumer.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if `offset_reset_strategy` is not a valid
+    ///   `auto.offset.reset` value
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)")]
     pub fn new(offset_reset_strategy: &str) -> Result<Self, Error> {
         Ok(Self::with_auto_offset_reset_strategy(AutoOffsetResetStrategy::from_string(
@@ -193,14 +191,15 @@ impl<K, V> MockConsumer<K, V> {
 
     // ── Driver methods (mock-specific) ──────────────────────────────────
 
-    /// Add a record to the buffer that the next [`Consumer::poll`]
-    /// call will return. The record's `(topic, partition)` must already be
-    /// assigned to the consumer.
+    /// Adds a record to be returned when [`Consumer::poll`] is called.
     ///
-    /// Translates Java's `addRecord(ConsumerRecord<K, V>)`
-    /// (`MockConsumer.java:358`). Returns
-    /// [`Error::LocalIllegalState`] if the partition is not assigned —
-    /// Java throws `IllegalStateException` in that case.
+    /// # Arguments
+    ///
+    /// - `record` - the record to add
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_state_error` if the partition is not assigned to the consumer
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#addRecord")]
     pub fn add_record(&mut self, record: ConsumerRecord<K, V>) -> Result<(), Error> {
         self.ensure_not_closed()?;
@@ -214,19 +213,21 @@ impl<K, V> MockConsumer<K, V> {
         Ok(())
     }
 
-    /// Update the beginning offsets used for `seekToBeginning` resets.
+    /// Updates the beginning offsets for the specified partitions.
     ///
-    /// Translates Java's `updateBeginningOffsets(Map<TopicPartition, Long>)`.
+    /// # Arguments
+    ///
+    /// - `offsets` - the beginning offsets to set
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateBeginningOffsets")]
     pub fn update_beginning_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.beginning_offsets.extend(offsets);
     }
 
-    /// Update the end offsets used for `seekToEnd` resets and for
-    /// [`Consumer::end_offsets`] /
-    /// [`Consumer::current_lag`].
+    /// Updates the end offsets for the specified partitions.
     ///
-    /// Translates Java's `updateEndOffsets(Map<TopicPartition, Long>)`.
+    /// # Arguments
+    ///
+    /// - `offsets` - the end offsets to set
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateEndOffsets")]
     pub fn update_end_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.end_offsets_lock().extend(offsets);
@@ -237,20 +238,26 @@ impl<K, V> MockConsumer<K, V> {
         self.end_offsets.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Update the duration-based reset offsets used when the reset strategy
-    /// is `by_duration:<ISO-8601>`.
+    /// Updates the duration-based reset offsets for the specified partitions.
     ///
-    /// Translates Java's `updateDurationOffsets(Map<TopicPartition, Long>)`.
+    /// # Arguments
+    ///
+    /// - `offsets` - the duration offsets to set
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateDurationOffsets")]
     pub fn update_duration_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
         self.duration_reset_offsets.extend(offsets);
     }
 
-    /// Configure the [`PartitionInfo`] list for a topic, used by
-    /// [`Consumer::partitions_for`]
-    /// and [`Consumer::list_topics`].
+    /// Updates the partition information for the specified topic.
     ///
-    /// Translates Java's `updatePartitions(String, List<PartitionInfo>)`.
+    /// # Arguments
+    ///
+    /// - `topic` - the topic to update
+    /// - `partitions` - the partition information
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_state_error` if the consumer is closed
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updatePartitions")]
     pub fn update_partitions(&mut self, topic: &str, partitions: Vec<PartitionInfo>) -> Result<(), Error> {
         self.ensure_not_closed()?;
@@ -258,36 +265,36 @@ impl<K, V> MockConsumer<K, V> {
         Ok(())
     }
 
-    /// Inject an exception to be returned by the next
-    /// [`Consumer::poll`] call. The
-    /// exception is taken (cleared) on use; `None` clears a pending one.
+    /// Sets an exception to throw when [`Consumer::poll`] is called.
     ///
-    /// Translates Java's `setPollException(KafkaException)`, whose `null`
-    /// argument clears the field.
+    /// # Arguments
+    ///
+    /// - `error` - the exception to throw; `None` clears a pending one
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setPollException")]
     pub fn set_poll_error(&mut self, error: Option<Error>) {
         self.poll_error = error;
     }
 
-    /// Inject an exception to be returned by the next
-    /// [`Consumer::beginning_offsets`] /
-    /// [`Consumer::end_offsets`]
-    /// call. The exception is taken (cleared) on use; `None` clears a pending
-    /// one.
+    /// Sets an exception to throw when offset-related methods are called.
     ///
-    /// Translates Java's `setOffsetsException(KafkaException)`, whose `null`
-    /// argument clears the field.
+    /// # Arguments
+    ///
+    /// - `error` - the exception to throw; `None` clears a pending one
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException")]
     pub fn set_offsets_error(&mut self, error: Option<Error>) {
         self.offsets_error = error;
     }
 
-    /// Set the maximum number of records returned in a single
-    /// [`Consumer::poll`] call.
+    /// Sets the maximum number of records returned in a single call to
+    /// [`Consumer::poll`].
     ///
-    /// Translates Java's `setMaxPollRecords(long)`. Returns
-    /// [`Error::LocalIllegalArgument`] when `max_poll_records < 1`, matching
-    /// Java's `IllegalArgumentException`.
+    /// # Arguments
+    ///
+    /// - `max_poll_records` - the max.poll.records.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::is_local_illegal_argument_error` if `max_poll_records` is less than 1
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#setMaxPollRecords")]
     pub fn set_max_poll_records(&mut self, max_poll_records: i64) -> Result<(), Error> {
         if max_poll_records < 1 {
@@ -297,15 +304,18 @@ impl<K, V> MockConsumer<K, V> {
         Ok(())
     }
 
-    /// Simulate a rebalance event: compute revoked / added partitions
-    /// against the current assignment, invoke any registered
-    /// [`ConsumerRebalanceListener`]
-    /// callbacks, and replace the assignment.
+    /// Simulate a rebalance event.
     ///
-    /// Translates Java's `rebalance(Collection<TopicPartition>)`. Async
-    /// because the Rust listener methods are `async fn` (per
-    /// `consumer-threading.md` §31 / Phase 2); Java's listener methods
-    /// are sync.
+    /// # Arguments
+    ///
+    /// - `new_assignment` - the new assignment
+    ///
+    /// # Errors
+    ///
+    /// - The error the listener returns.
+    /// - `Error::is_local_illegal_argument_error` if a partition is not of a subscribed topic
+    // Async because the Rust listener methods are `async fn`
+    // (`consumer-threading.md` §31); Java's listener methods are sync.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#rebalance")]
     pub fn rebalance(&mut self, new_assignment: &[TopicPartition]) -> impl Future<Output = Result<(), Error>> + Send
     where
@@ -327,10 +337,10 @@ impl<K, V> MockConsumer<K, V> {
                 .cloned()
                 .collect();
 
-            // Clear buffered records (Java: `records.clear()` at line 137).
+            // Clear buffered records (Java: `records.clear()`).
             self.records.clear();
 
-            // Invoke onPartitionsRevoked first (Java line 140-142). Per
+            // Invoke onPartitionsRevoked first. Per
             // consumer-threading.md §16, clone the Arc out before awaiting.
             let listener = self.subs().rebalance_listener();
             if !removed.is_empty()
@@ -339,11 +349,11 @@ impl<K, V> MockConsumer<K, V> {
                 listener.on_partitions_revoked(&removed).await?;
             }
 
-            // Replace assignment (Java line 143:
+            // Replace assignment (Java:
             // `subscriptions.assignFromSubscribed(newAssignment)`).
             self.subs().assign_from_subscribed(new_assignment)?;
 
-            // Invoke onPartitionsAssigned (Java line 144). Java passes only the
+            // Invoke onPartitionsAssigned. Java passes only the
             // *added* partitions, not the full new assignment.
             let listener = self.subs().rebalance_listener();
             if let Some(listener) = listener {
@@ -364,20 +374,19 @@ impl<K, V> MockConsumer<K, V> {
     /// Only records belonging to the lost partitions are cleared; records for
     /// retained partitions are unaffected.
     ///
-    /// Translates Java's `losePartitions(Collection<TopicPartition>)`
-    /// (`MockConsumer.java:159-173`, KAFKA-20575). Async for the same reason as [`Self::rebalance`]: the
-    /// Rust listener methods are `async fn`. Java hands the listener a `Set`;
-    /// the lost partitions are passed deduplicated, in the order given.
+    /// # Arguments
+    ///
+    /// - `partitions_lost` - the partitions to lose; all must be currently assigned
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalState`] (Java's `IllegalStateException`)
-    /// if any partition is not currently assigned, before any state changes,
-    /// and propagates an error returned by the listener (the assignment is
-    /// then left unchanged, as when Java's listener throws).
+    /// - `Error::is_local_illegal_state_error` if any partition is not currently assigned
+    /// - The error the listener returns; the assignment is then left unchanged.
     ///
     /// [`ConsumerRebalanceListener::on_partitions_lost`]: crate::consumer::ConsumerRebalanceListener::on_partitions_lost
     /// [`ConsumerRebalanceListener::on_partitions_revoked`]: crate::consumer::ConsumerRebalanceListener::on_partitions_revoked
+    // Async for the same reason as `rebalance`. Java hands the listener a
+    // `Set`; the lost partitions are passed deduplicated, in the order given.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#losePartitions")]
     pub fn lose_partitions(
         &mut self,
@@ -422,26 +431,24 @@ impl<K, V> MockConsumer<K, V> {
         }
     }
 
-    /// Schedule a task to run on the next
-    /// [`Consumer::poll`] call. One task
-    /// is consumed per `poll` invocation, in FIFO order.
+    /// Schedule a task to be executed during a poll(). One enqueued task will
+    /// be executed per [`Consumer::poll`] invocation. You can use this
+    /// repeatedly to mock out multiple responses to poll invocations.
     ///
-    /// Translates Java's `schedulePollTask(Runnable)`. Java's `Runnable`
-    /// captures `MockConsumer` implicitly via closure; Rust closures cannot
-    /// capture the outer struct safely, so the task is invoked with
-    /// `&mut MockConsumer<K, V>` explicitly. Callers write
-    /// `consumer.schedule_poll_task(Box::new(|c| { c.add_record(...).unwrap(); }));`.
+    /// # Arguments
+    ///
+    /// - `task` - the task to be executed
+    ///
+    /// # Translation notes
+    ///
+    /// The task is called with the mock, `&mut MockConsumer<K, V>`, which a
+    /// Rust closure cannot capture.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#schedulePollTask")]
     pub fn schedule_poll_task(&mut self, task: PollTask<K, V>) {
         self.poll_tasks.push_back(task);
     }
 
-    /// Schedule a task that does nothing to run on the next
-    /// [`Consumer::poll`] call: it takes that call's slot in the FIFO, so a
-    /// task scheduled after it runs one `poll` later.
-    ///
-    /// Translates Java's `scheduleNopPollTask()`, which schedules
-    /// `() -> { }` through `schedulePollTask`.
+    /// Schedules a no-op task to be executed during a poll invocation.
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask")]
     pub fn schedule_nop_poll_task(&mut self) {
         self.schedule_poll_task(Box::new(|_| {}));
@@ -449,7 +456,9 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Return whether the consumer has been closed.
     ///
-    /// Translates Java's `closed()`.
+    /// # Returns
+    ///
+    /// true if closed, false otherwise
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#closed")]
     pub fn closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
@@ -457,25 +466,25 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Return whether an `enforceRebalance` request is pending.
     ///
-    /// Translates Java's `shouldRebalance()`.
+    /// # Returns
+    ///
+    /// true if rebalance is pending, false otherwise
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#shouldRebalance")]
     pub fn should_rebalance(&self) -> bool {
         self.should_rebalance.load(Ordering::SeqCst)
     }
 
-    /// Reset the rebalance-pending flag after handling it.
-    ///
-    /// Translates Java's `resetShouldRebalance()`.
+    /// Resets the rebalance flag set by [`Consumer::enforce_rebalance`].
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#resetShouldRebalance")]
     pub fn reset_should_rebalance(&mut self) {
         self.should_rebalance.store(false, Ordering::SeqCst);
     }
 
-    /// The timeout passed to the most recent
-    /// [`Consumer::poll`] call, or `None`
-    /// if `poll` has not been called yet.
+    /// Returns the timeout used in the last [`Consumer::poll`] call.
     ///
-    /// Translates Java's `lastPollTimeout()`.
+    /// # Returns
+    ///
+    /// the last poll timeout, or None if poll has not been called
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#lastPollTimeout")]
     pub fn last_poll_timeout(&self) -> Option<Duration> {
         *self.last_poll_timeout.lock().unwrap_or_else(PoisonError::into_inner)
@@ -505,7 +514,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's private
     /// `subscribe(Collection<String>, Optional<ConsumerRebalanceListener>)`
-    /// (`MockConsumer.java:226-230`).
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#subscribe`).
     fn subscribe_internal_topics(
         &mut self,
         topics: Vec<String>,
@@ -518,7 +527,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     // Java's private `subscribe(Pattern, Optional<ConsumerRebalanceListener>)`
-    // (`MockConsumer.java:202-222`) has no Rust counterpart: the two public
+    // (`org.apache.kafka.clients.consumer.MockConsumer#subscribe`) has no Rust counterpart: the two public
     // `subscribe(Pattern ...)` overloads it serves are deliberately NOT
     // implemented (see `Consumer`), so the client-side matching loop it
     // contained has no caller. Only the `SubscriptionPattern` form below is
@@ -526,13 +535,13 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Mirrors Java's private
     /// `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`
-    /// (`MockConsumer.java:210-216`).
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#subscribe`).
     fn subscribe_internal_subscription_pattern(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) -> Result<(), Error> {
-        // Java line 211-212: an empty pattern is rejected. Java also rejects
+        // Java rejects an empty pattern. Java also rejects
         // `null`, which Rust's non-`Option` parameter makes unrepresentable,
         // so only the "empty" half of the message can be produced.
         if pattern.pattern().is_empty() {
@@ -545,7 +554,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Mirrors Java's `updateFetchPosition(TopicPartition)`
-    /// (`MockConsumer.java:705-714`).
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#updateFetchPosition`).
     #[doc(alias = "org.apache.kafka.clients.consumer.MockConsumer#updateFetchPosition")]
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         if self.subs().is_offset_reset_needed(tp)? {
@@ -563,7 +572,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Mirrors Java's `resetOffsetPosition(TopicPartition)`
-    /// (`MockConsumer.java:716-735`). Picks the source map by the
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#resetOffsetPosition`). Picks the source map by the
     /// partition's reset strategy and `seek`s to the configured offset.
     /// Returns [`Error::LocalIllegalState`] when the map does not have an
     /// entry for the partition (Java throws `IllegalStateException`), or
@@ -607,7 +616,7 @@ impl<K, V> MockConsumer<K, V> {
 /// outlive the mock; Java's garbage collector frees the same graph. The
 /// release waits for the drop rather than `close()`, because Java's
 /// `rebalance` and `losePartitions` still run the listener on a closed mock
-/// (`MockConsumer.java:129-172` make no `ensureNotClosed()` check).
+/// (`org.apache.kafka.clients.consumer.MockConsumer#rebalance` and `org.apache.kafka.clients.consumer.MockConsumer#losePartitions` make no `ensureNotClosed()` check).
 impl<K, V> Drop for MockConsumer<K, V> {
     fn drop(&mut self) {
         self.subs().register_rebalance_listener(None);
@@ -636,7 +645,7 @@ where
     }
 
     fn paused(&mut self) -> HashSet<TopicPartition> {
-        // Java line 613-615: returns a copy of `paused`.
+        // Java's `MockConsumer#paused` returns a copy of `paused`.
         self.paused.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
@@ -644,33 +653,33 @@ where
         mock_group_metadata()
     }
 
-    /// Translates Java's
-    /// `synchronized Map<MetricName, ? extends Metric> metrics()`
-    /// (`MockConsumer.java:565-568`).
-    ///
-    /// Java: `ensureNotClosed(); return Collections.emptyMap();`. The mock
-    /// has no metrics registry, so the Rust port returns an empty map,
-    /// matching Java.
+    /// Returns an empty view: the mock keeps no metrics.
     ///
     /// # Panics
     ///
     /// Panics with `"This consumer has already been closed."` on a closed
     /// mock, where Java's `ensureNotClosed()` throws `IllegalStateException`:
     /// calling it after `close()` is a programming error.
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    fn metrics(&self) -> MetricsView {
         if let Err(error) = self.ensure_not_closed() {
             panic!("{}", error.message());
         }
-        HashMap::new()
+        MetricsView::default()
     }
 
-    /// Translates Java's
-    /// `OptionalLong currentLag(TopicPartition)`
-    /// (`MockConsumer.java:764-771`): `endOffsets.get(tp) - position(tp)` when
-    /// the test set an end offset, else `0`, the test modelling being caught
-    /// up. `position(tp)` is the mock's own, so it returns its errors (a closed
-    /// mock, an unassigned partition) and seeds a missing position as Java's
-    /// `updateFetchPosition` does.
+    /// Returns the end offset set by [`MockConsumer::update_end_offsets`] minus
+    /// the position, or `0` when no end offset was set.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic_partition` - The partition to get the lag for.
+    ///
+    /// # Errors
+    ///
+    /// - The error of [`Consumer::position`] (a closed mock, an unassigned partition).
+    // `org.apache.kafka.clients.consumer.MockConsumer#currentLag`:
+    // `endOffsets.get(tp) - position(tp)`, `position(tp)` seeding a missing
+    // position as Java's `updateFetchPosition` does.
     async fn current_lag(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, Error> {
         let end = self.end_offsets_lock().get(topic_partition).copied();
         match end {
@@ -708,7 +717,7 @@ where
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
-        // Java line 235-239.
+        // Java `MockConsumer#assign`.
         self.ensure_not_closed()?;
         self.lock_committed().clear();
         self.subs().assign_from_user(partitions.into_iter().collect())?;
@@ -716,7 +725,7 @@ where
     }
 
     async fn unsubscribe(&mut self) -> Result<(), Error> {
-        // Java line 242-246.
+        // Java `MockConsumer#unsubscribe`.
         self.ensure_not_closed()?;
         self.lock_committed().clear();
         self.subs().unsubscribe();
@@ -725,22 +734,22 @@ where
 
     // ── Poll ────────────────────────────────────────────────────────────
 
-    /// Translates Java's `poll(Duration)` (`MockConsumer.java:249-320`).
+    // `org.apache.kafka.clients.consumer.MockConsumer#poll(Duration)`.
     async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, Error> {
-        // Step 1: ensureNotClosed (Java line 250).
+        // Step 1: ensureNotClosed.
         self.ensure_not_closed()?;
 
-        // Step 2: record the timeout (Java line 252).
+        // Step 2: record the timeout.
         *self.last_poll_timeout.lock().unwrap_or_else(PoisonError::into_inner) = Some(timeout);
 
-        // Step 3: drain one queued poll task (Java line 256-260). Pop with
+        // Step 3: drain one queued poll task. Pop with
         // pop_front then invoke with &mut self — the task may schedule more
         // tasks, but only one is consumed per poll call.
         if let Some(task) = self.poll_tasks.pop_front() {
             task(self);
         }
 
-        // Step 4: check wakeup flag and clear it (Java line 262-265).
+        // Step 4: check wakeup flag and clear it.
         if self
             .wakeup
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -749,13 +758,13 @@ where
             return Err(Error::wakeup("Mock consumer was woken up"));
         }
 
-        // Step 5: take poll exception (Java line 267-271).
+        // Step 5: take poll exception.
         if let Some(error) = self.poll_error.take() {
             return Err(error);
         }
 
         // Step 6: update fetch positions for newly-assigned partitions that
-        // do not yet have a valid position (Java line 274-276).
+        // do not yet have a valid position.
         let assigned: Vec<TopicPartition> = self.subs().assigned_partitions().into_iter().collect();
         for tp in &assigned {
             if !self.subs().has_valid_position(tp) {
@@ -763,7 +772,7 @@ where
             }
         }
 
-        // Step 7: drain records up to max_poll_records (Java line 279-317).
+        // Step 7: drain records up to max_poll_records.
         // Java iterates `records.entrySet()` with mutation; we collect the
         // partition keys first to avoid simultaneous mutable borrows.
         let mut results: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>> = IndexMap::new();
@@ -820,7 +829,7 @@ where
                     break;
                 };
 
-                // OffsetOutOfRange check (Java line 297-299): if a beginning
+                // OffsetOutOfRange check: if a beginning
                 // offset is configured and position is before it, throw.
                 if let Some(&begin) = self.beginning_offsets.get(&tp)
                     && begin > position
@@ -848,14 +857,14 @@ where
                     // Push the record onto the result list.
                     results.entry(tp.clone()).or_default().push(rec);
 
-                    // Update the partition's fetch position (Java line
-                    // 303-306). Java uses `subscriptions.position(entry, fp)`
+                    // Update the partition's fetch position, as Java's
+                    // `MockConsumer#poll` does. Java uses `subscriptions.position(entry, fp)`
                     // (not `seek`), which requires a valid current position.
                     let leader_and_epoch = LeaderAndEpoch::new(None, leader_epoch);
                     let new_position = FetchPosition::with_leader(next_offset, leader_epoch, leader_and_epoch);
                     self.subs().set_position(&tp, new_position)?;
 
-                    // Build the next-offsets entry (Java line 307).
+                    // Build the next-offsets entry.
                     let oam = OffsetAndMetadata::with_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
                     next_offset_and_metadata.insert(tp.clone(), oam);
 
@@ -867,7 +876,7 @@ where
                 }
             }
 
-            // Java line 313-315: drop empty entries from the records map.
+            // Drop empty entries from the records map, as Java does.
             if !kept.is_empty() {
                 self.records.insert(tp, kept);
             }
@@ -881,10 +890,10 @@ where
     // ── Commit ─────────────────────────────────────────────────────────
 
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        // Java's `commitSync()` (MockConsumer.java:424-426) reads
+        // Java's `commitSync()` (`org.apache.kafka.clients.consumer.MockConsumer#commitSync`) reads
         // `allConsumed()` BEFORE the closed check —
-        // `commitSync(allConsumed())` → line 408-410 →
-        // `commitAsync(offsets, null)` at line 399-404 where
+        // `commitSync(allConsumed())` → `commitSync(Map)` →
+        // `commitAsync(offsets, null)`, where
         // `ensureNotClosed()` is finally called. We tighten by checking
         // closed first: end behavior is identical (both error when the
         // consumer is closed) but Rust skips the wasted subscription-map
@@ -895,7 +904,7 @@ where
     }
 
     async fn commit_sync_with_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
-        // Java line 429-431: ignores the timeout.
+        // Java's `commitSync(Duration)` ignores the timeout.
         self.commit_sync().await
     }
 
@@ -903,7 +912,7 @@ where
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        // Java line 408-410: delegates to commitAsync.
+        // Java's `commitSync(Map)` delegates to `commitAsync`.
         self.commit_async_impl(offsets, None).await
     }
 
@@ -912,12 +921,12 @@ where
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _timeout: Duration,
     ) -> Result<(), Error> {
-        // Java line 434-436: ignores the timeout.
+        // Java's `commitSync(Map, Duration)` ignores the timeout.
         self.commit_sync_with_offsets(offsets).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
-        // Java line 413-415 → line 418-421 which `ensureNotClosed()`s BEFORE
+        // Java's `commitAsync()` → `commitAsync(OffsetCommitCallback)`, which `ensureNotClosed()`s BEFORE
         // reading `allConsumed()`. Mirror that ordering so a closed consumer
         // errors out without traversing the subscription map.
         self.ensure_not_closed()?;
@@ -926,7 +935,7 @@ where
     }
 
     async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
-        // Java line 418-421 calls `ensureNotClosed()` BEFORE `allConsumed()`.
+        // Java's `commitAsync(OffsetCommitCallback)` calls `ensureNotClosed()` BEFORE `allConsumed()`.
         // Rust relies on `commit_async_impl`'s check at the cost of a wasted
         // `all_consumed()` traversal when the consumer is already closed.
         // Keeping the check only in `commit_async_impl` removes the redundant
@@ -943,14 +952,14 @@ where
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        // Java line 399-405.
+        // Java `MockConsumer#commitAsync(Map, OffsetCommitCallback)`.
         self.commit_async_impl(offsets, Some(callback)).await
     }
 
     // ── Seek ───────────────────────────────────────────────────────────
 
     async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
-        // Java line 393-396.
+        // Java `MockConsumer#seek(TopicPartition, long)`.
         self.ensure_not_closed()?;
         self.subs().seek(&partition, offset)?;
         Ok(())
@@ -961,14 +970,14 @@ where
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
     ) -> Result<(), Error> {
-        // Java line 398-402.
+        // Java `MockConsumer#seek(TopicPartition, OffsetAndMetadata)`.
         self.ensure_not_closed()?;
         self.subs().seek(&partition, offset_and_metadata.offset())?;
         Ok(())
     }
 
     async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Java line 438-441.
+        // Java `MockConsumer#seekToBeginning`.
         self.ensure_not_closed()?;
         self.subs()
             .request_offset_reset_all(partitions, AutoOffsetResetStrategy::EARLIEST)?;
@@ -976,7 +985,7 @@ where
     }
 
     async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Java line 448-451.
+        // Java `MockConsumer#seekToEnd`.
         self.ensure_not_closed()?;
         self.subs()
             .request_offset_reset_all(partitions, AutoOffsetResetStrategy::LATEST)?;
@@ -986,7 +995,7 @@ where
     // ── Position / committed ───────────────────────────────────────────
 
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, Error> {
-        // Java line 420-430.
+        // Java `MockConsumer#position(TopicPartition)`.
         self.ensure_not_closed()?;
         if !self.subs().is_assigned(partition) {
             return Err(Error::local_illegal_argument(POSITION_NOT_ASSIGNED_MSG));
@@ -1006,15 +1015,15 @@ where
     }
 
     async fn position_with_timeout(&mut self, partition: &TopicPartition, _timeout: Duration) -> Result<i64, Error> {
-        // Java line 433-435: ignores the timeout.
+        // Java's `position(TopicPartition, Duration)` ignores the timeout.
         self.position(partition).await
     }
 
     async fn committed(
         &mut self,
         partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        // Java line 405-412.
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
+        // Java `MockConsumer#committed(Set)`.
         self.ensure_not_closed()?;
         let mut result = HashMap::new();
         let committed = self.lock_committed();
@@ -1028,7 +1037,7 @@ where
                     // `OffsetAndMetadata::new(0)` is infallible for offset=0.
                     OffsetAndMetadata::new(0).expect("0 is non-negative")
                 };
-                result.insert(tp.clone(), value);
+                result.insert(tp.clone(), Some(value));
             }
         }
         Ok(result)
@@ -1038,15 +1047,15 @@ where
         &mut self,
         partitions: &[TopicPartition],
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        // Java line 415-417: ignores the timeout.
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
+        // Java's `committed(Set, Duration)` ignores the timeout.
         self.committed(partitions).await
     }
 
     // ── Metadata ───────────────────────────────────────────────────────
 
     async fn partitions_for(&mut self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
-        // Java line 502-505.
+        // Java `MockConsumer#partitionsFor(String)`.
         self.ensure_not_closed()?;
         Ok(self.partitions.get(topic).cloned().unwrap_or_default())
     }
@@ -1056,12 +1065,12 @@ where
         topic: &str,
         _timeout: Duration,
     ) -> Result<Vec<PartitionInfo>, Error> {
-        // Java line 655-657.
+        // Java `MockConsumer#partitionsFor(String, Duration)`.
         self.partitions_for(topic).await
     }
 
     async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
-        // Java line 508-511. Java returns the internal map reference; Rust
+        // Java `MockConsumer#listTopics()` returns the internal map reference; Rust
         // returns a clone so the caller is not exposed to subsequent
         // mutations of the mock's state.
         self.ensure_not_closed()?;
@@ -1072,16 +1081,16 @@ where
         &mut self,
         _timeout: Duration,
     ) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
-        // Java line 660-662.
+        // Java `MockConsumer#listTopics(Duration)`.
         self.list_topics().await
     }
 
     async fn offsets_for_times(
         &mut self,
         _timestamps_to_search: HashMap<TopicPartition, i64>,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
         // Java throws UnsupportedOperationException("Not implemented yet.")
-        // (`MockConsumer.java:611`), translated as Error::LocalUnsupportedOperation
+        // (`org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes`), translated as Error::LocalUnsupportedOperation
         // (`admin-client.md` §9). DoD #3 makes the message text part of the
         // contract, so the text is Java's verbatim rather than a Rust-side
         // restatement.
@@ -1092,8 +1101,8 @@ where
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         _timeout: Duration,
-    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
-        // Java line 665-668: delegates to the no-timeout variant.
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
+        // Java's `offsetsForTimes(Map, Duration)` delegates to the no-timeout variant.
         self.offsets_for_times(timestamps_to_search).await
     }
 
@@ -1101,7 +1110,7 @@ where
         &mut self,
         partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        // Java line 540-554.
+        // Java `MockConsumer#beginningOffsets(Collection)`.
         if let Some(error) = self.offsets_error.take() {
             return Err(error);
         }
@@ -1120,12 +1129,12 @@ where
         partitions: &[TopicPartition],
         _timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        // Java line 671-673.
+        // Java `MockConsumer#beginningOffsets(Collection, Duration)`.
         self.beginning_offsets(partitions).await
     }
 
     async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
-        // Java line 557-571.
+        // Java `MockConsumer#endOffsets(Collection)`.
         if let Some(error) = self.offsets_error.take() {
             return Err(error);
         }
@@ -1145,14 +1154,14 @@ where
         partitions: &[TopicPartition],
         _timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        // Java line 676-678.
+        // Java `MockConsumer#endOffsets(Collection, Duration)`.
         self.end_offsets(partitions).await
     }
 
     // ── Pause / resume ─────────────────────────────────────────────────
 
     async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Java line 519-524.
+        // Java `MockConsumer#pause`.
         for tp in partitions {
             self.subs().pause(tp)?;
             self.paused.lock().unwrap_or_else(PoisonError::into_inner).insert(tp.clone());
@@ -1161,7 +1170,7 @@ where
     }
 
     async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Java line 527-532.
+        // Java `MockConsumer#resume`.
         for tp in partitions {
             self.subs().resume(tp)?;
             self.paused.lock().unwrap_or_else(PoisonError::into_inner).remove(tp);
@@ -1172,7 +1181,7 @@ where
     // ── Lifecycle ──────────────────────────────────────────────────────
 
     async fn enforce_rebalance(&mut self) -> Result<(), Error> {
-        // Java line 697-699: `enforceRebalance()` forwards to
+        // Java's `enforceRebalance()` forwards to
         // `enforceRebalance(null)`; Rust's suffixed form takes a non-null
         // `&str`, so the flag is set directly here instead.
         self.should_rebalance.store(true, Ordering::SeqCst);
@@ -1180,13 +1189,13 @@ where
     }
 
     async fn enforce_rebalance_with_reason(&mut self, _reason: &str) -> Result<(), Error> {
-        // Java line 702-704: sets the flag; the reason is ignored.
+        // Java's `enforceRebalance(String)` sets the flag; the reason is ignored.
         self.should_rebalance.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), Error> {
-        // Java line 574-576: `close()` delegates to
+        // Java's `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
         self.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(
             crate::consumer::internals::ConsumerUtils::DEFAULT_CLOSE_TIMEOUT_MS as u64,
@@ -1195,13 +1204,13 @@ where
     }
 
     async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // Java line 594-596: ignores the options.
+        // Java's `close(CloseOptions)` ignores the options.
         self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn wakeup(&self) {
-        // Java line 589-591: sets the flag.
+        // Java's `wakeup()` sets the flag.
         self.wakeup.store(true, Ordering::SeqCst);
     }
 
@@ -1235,7 +1244,7 @@ impl<K, V> MockConsumer<K, V> {
 /// `MockConsumer.position(TopicPartition)` throws for an unassigned partition.
 const POSITION_NOT_ASSIGNED_MSG: &str = "You can only check the position for partitions assigned to this consumer.";
 
-/// Java's `ensureNotClosed()` (`MockConsumer.java:700-703`) over the mock's
+/// Java's `ensureNotClosed()` (`org.apache.kafka.clients.consumer.MockConsumer#ensureNotClosed`) over the mock's
 /// shared `closed` flag, so a [`ConsumerHandle`] obtained from the mock
 /// checks it too.
 fn ensure_mock_not_closed(closed: &AtomicBool) -> Result<(), Error> {
@@ -1246,7 +1255,7 @@ fn ensure_mock_not_closed(closed: &AtomicBool) -> Result<(), Error> {
     }
 }
 
-/// Java's `groupMetadata()` (`MockConsumer.java:692-693`): hard-coded
+/// Java's `groupMetadata()` (`org.apache.kafka.clients.consumer.MockConsumer#groupMetadata`): hard-coded
 /// sentinel values, returned by the mock and by every [`ConsumerHandle`]
 /// obtained from it.
 pub(crate) fn mock_group_metadata() -> Arc<dyn ConsumerGroupMetadata> {
@@ -1258,7 +1267,7 @@ pub(crate) fn mock_group_metadata() -> Arc<dyn ConsumerGroupMetadata> {
     ))
 }
 
-/// Java's `currentLag(TopicPartition)` (`MockConsumer.java:764-771`) over
+/// Java's `currentLag(TopicPartition)` (`org.apache.kafka.clients.consumer.MockConsumer#currentLag`) over
 /// the mock's shared state, for a [`ConsumerHandle`] obtained from the mock:
 /// `endOffsets.get(tp) - position(tp)` when an end offset is set, else `0`
 /// ("caught up"). Java's `position(tp)` checks that the mock is open and that
@@ -1289,7 +1298,7 @@ pub(crate) fn mock_current_lag(
     Ok(subs.position_or_null(topic_partition).map(|position| end - position.offset))
 }
 
-/// Java's `commitAsync(Map, OffsetCommitCallback)` (`MockConsumer.java:399-404`)
+/// Java's `commitAsync(Map, OffsetCommitCallback)` (`org.apache.kafka.clients.consumer.MockConsumer#commitAsync`)
 /// over the mock's shared state: the commit path of the mock and of every
 /// [`ConsumerHandle`] obtained from it.
 ///
@@ -1355,7 +1364,7 @@ mod tests {
     }
 
     /// Java's `MockConsumer.metrics()` calls `ensureNotClosed()`
-    /// (`MockConsumer.java:566`), which throws `IllegalStateException`.
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#metrics`), which throws `IllegalStateException`.
     #[tokio::test]
     #[should_panic(expected = "This consumer has already been closed.")]
     async fn test_metrics_panics_after_close() {
@@ -1386,7 +1395,7 @@ mod tests {
     }
 
     /// Java `MockConsumer.metrics()` returns `Collections.emptyMap()`
-    /// (`MockConsumer.java:565-568`). The Rust port returns an empty map.
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#metrics`). The Rust port returns an empty map.
     #[test]
     fn test_metrics_returns_empty_map() {
         let c: MockConsumer<String, String> =
@@ -1414,7 +1423,7 @@ mod tests {
     }
 
     /// Java's `scheduleNopPollTask()` queues `() -> { }` like any other poll
-    /// task (`MockConsumer.java:692-694`): it consumes one `poll`, so the
+    /// task (`org.apache.kafka.clients.consumer.MockConsumer#scheduleNopPollTask`): it consumes one `poll`, so the
     /// task scheduled after it runs on the next one.
     #[tokio::test]
     async fn schedule_nop_poll_task_takes_one_poll() {
@@ -1432,7 +1441,7 @@ mod tests {
     }
 
     /// Java's `setPollException(null)` clears a pending poll exception
-    /// (`MockConsumer.java:385-387`): the next `poll` then succeeds.
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#setPollException`): the next `poll` then succeeds.
     #[tokio::test]
     async fn set_poll_error_none_clears_the_pending_error() {
         let mut c: MockConsumer<String, String> =
@@ -1455,7 +1464,7 @@ mod tests {
     }
 
     /// Java's `setOffsetsException(null)` clears a pending offsets exception
-    /// (`MockConsumer.java:394-396`).
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#setOffsetsException`).
     #[tokio::test]
     async fn set_offsets_error_none_clears_the_pending_error() {
         let mut c: MockConsumer<String, String> =
@@ -1498,7 +1507,7 @@ mod tests {
 
     /// Java's `MockConsumer.offsetsForTimes` throws
     /// `UnsupportedOperationException("Not implemented yet.")`
-    /// (`MockConsumer.java:611`), translated as
+    /// (`org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes`), translated as
     /// [`Error::LocalUnsupportedOperation`]. The message text is part of the
     /// contract (DoD #3), so it must be Java's, not a Rust-side restatement.
     #[tokio::test]
@@ -1519,6 +1528,11 @@ mod tests {
         HashMap::from([(tp.clone(), OffsetAndMetadata::new(offset).expect("non-negative"))])
     }
 
+    /// `offsets`, as `committed()` returns them.
+    fn committed_offsets(tp: &TopicPartition, offset: i64) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        HashMap::from([(tp.clone(), Some(OffsetAndMetadata::new(offset).expect("non-negative")))])
+    }
+
     /// Java's `MockConsumer.commitSync(Map)` records the offsets in the
     /// mock's `committed` map; through a handle it records them in the same
     /// map, so the consumer's `committed()` returns them.
@@ -1533,7 +1547,7 @@ mod tests {
         handle.commit_sync_with_offsets(offsets(&tp, 5)).await.expect("commit sync");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 5)
+            committed_offsets(&tp, 5)
         );
 
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1544,7 +1558,7 @@ mod tests {
             .expect("commit async");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 6)
+            committed_offsets(&tp, 6)
         );
         assert_eq!(*seen.lock().unwrap(), vec![("async", offsets(&tp, 6))]);
     }
@@ -1616,7 +1630,7 @@ mod tests {
         );
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 9)
+            committed_offsets(&tp, 9)
         );
     }
 
@@ -1647,14 +1661,14 @@ mod tests {
         handle.commit_sync().await.expect("commit sync");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 1)
+            committed_offsets(&tp, 1)
         );
 
         consume(&mut c, &tp, 1, 2).await;
         handle.commit_async().await.expect("commit async");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
 
         consume(&mut c, &tp, 3, 1).await;
@@ -1670,7 +1684,7 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![("cb", offsets(&tp, 4))]);
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 4)
+            committed_offsets(&tp, 4)
         );
     }
 
@@ -1765,7 +1779,7 @@ mod tests {
 
     /// A listener that captured the mock's handle is freed with the mock, and
     /// until the drop it still runs on a closed mock, as Java's `rebalance`
-    /// makes no `ensureNotClosed()` check (`MockConsumer.java:129-145`).
+    /// makes no `ensureNotClosed()` check (`org.apache.kafka.clients.consumer.MockConsumer#rebalance`).
     #[tokio::test]
     async fn listener_capturing_the_handle_is_freed_with_the_mock() {
         struct Sentinel(Arc<AtomicBool>);
@@ -1850,14 +1864,14 @@ mod tests {
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 2)
+            committed_offsets(&tp, 2)
         );
 
         let err = c.commit_async_with_callback(Arc::new(Raising)).await.expect_err("propagates");
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
 
         let handle = c.handle();
@@ -1873,7 +1887,7 @@ mod tests {
         assert_eq!(err.message(), "callback failed");
         assert_eq!(
             c.committed(std::slice::from_ref(&tp)).await.expect("committed"),
-            offsets(&tp, 3)
+            committed_offsets(&tp, 3)
         );
     }
 

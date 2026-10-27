@@ -19,28 +19,34 @@ use crate::common::metrics::MetricConfig;
 
 /// A measurable quantity that can be registered as a metric.
 ///
-/// In Java this `extends MetricValueProvider<Double>` whose default `value(...)`
-/// delegates to `measure(...)`; here a blanket impl makes every `Measurable` a
-/// [`crate::common::metrics::MetricValueProvider`] whose `value` is
-/// `measure`, so a `Measurable` only needs to provide `measure`.
+/// # Translation notes
+///
+/// Blanket-implements [`MetricValueProvider`](crate::common::metrics::MetricValueProvider).
+// Java's `Measurable extends MetricValueProvider<Double>` with a default
+// `value` delegating to `measure`; the blanket impl makes every `Measurable` a
+// `MetricValueProvider` whose `value` is `measure`.
 #[doc(alias = "org.apache.kafka.common.metrics.Measurable")]
 pub trait Measurable: Send + Sync {
-    /// Measure this quantity and return the result as an `f64`.
+    /// Measure this quantity and return the result as a double.
     ///
-    /// * `config` - The configuration for this metric
-    /// * `now` - The POSIX time in milliseconds the measurement is being taken
+    /// # Arguments
+    ///
+    /// - `config` - The configuration for this metric
+    /// - `now` - The POSIX time in milliseconds the measurement is being taken
+    ///
+    /// # Returns
+    ///
+    /// The measured value
     #[doc(alias = "org.apache.kafka.common.metrics.Measurable#measure")]
     fn measure(&self, config: &MetricConfig, now: i64) -> f64;
 
-    /// The provider's type name, as `KafkaMetric`'s `Display` reports it, or
-    /// `None` for a provider that is a closure.
+    /// Returns the provider's type name, as `KafkaMetric`'s `Display` reports
+    /// it, or `None` for a provider that is a closure.
     ///
-    /// No Java counterpart (DoD #7): Java's `KafkaMetric.toString` (Kafka 4.4,
-    /// 46ad599a6e) reads `metricValueProvider.getClass().getName()` reflectively
-    /// and omits it when the class `isSynthetic() || isAnonymousClass()` — a
-    /// lambda. Rust has no reflection, so the provider reports it: the default is
-    /// the implementing type's [`std::any::type_name`], and the closure adapters
-    /// answer `None`, as Java's lambdas do.
+    /// Java's `KafkaMetric.toString` reads the provider's class name
+    /// reflectively and omits it for a lambda. Rust has no reflection, so the
+    /// provider reports it: the default is the implementing type's
+    /// [`std::any::type_name`], and the closure adapters answer `None`.
     // stands in for Java's reflective `getClass().getName()` in `KafkaMetric.toString`
     #[doc(alias = "rust-only")]
     fn type_name(&self) -> Option<&'static str> {
@@ -74,7 +80,11 @@ impl<F> ClosureMeasurable<F>
 where
     F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,
 {
-    /// Wrap a closure as a measurable.
+    /// Wraps a closure as a measurable.
+    ///
+    /// # Arguments
+    ///
+    /// - `f` - the closure computing the value from the config and the time in milliseconds
     pub fn new(f: F) -> Self {
         Self(f)
     }
@@ -84,7 +94,7 @@ impl<F> std::fmt::Debug for ClosureMeasurable<F>
 where
     F: Fn(&MetricConfig, i64) -> f64 + Send + Sync,
 {
-    /// A closure has nothing to print.
+    // A closure has nothing to print.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClosureMeasurable").finish_non_exhaustive()
     }
@@ -98,7 +108,7 @@ where
         (self.0)(config, now)
     }
 
-    /// A closure is Rust's lambda, which Java's `KafkaMetric.toString` omits.
+    // A closure is Rust's lambda, which Java's `KafkaMetric.toString` omits.
     fn type_name(&self) -> Option<&'static str> {
         None
     }

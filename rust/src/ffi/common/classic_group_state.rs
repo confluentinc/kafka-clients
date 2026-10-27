@@ -45,7 +45,7 @@ pub enum kafka_common_ClassicGroupState_e {
 }
 
 /// One static instance per value, indexed by
-/// [`kafka_common_ClassicGroupState_e`].
+/// `kafka_common_ClassicGroupState_e`.
 static VARIANTS: [ClassicGroupState; 6] = [
     ClassicGroupState::Unknown,
     ClassicGroupState::PreparingRebalance,
@@ -92,49 +92,49 @@ pub(crate) unsafe fn value_of(state: *const kafka_common_ClassicGroupState_t) ->
     unsafe { *(state as *const ClassicGroupState) }
 }
 
-/// `ClassicGroupState.UNKNOWN`.
+/// Returns `ClassicGroupState.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_unknown() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Unknown)
 }
 
-/// `ClassicGroupState.PREPARING_REBALANCE`.
+/// Returns `ClassicGroupState.PREPARING_REBALANCE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_preparing_rebalance() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::PreparingRebalance)
 }
 
-/// `ClassicGroupState.COMPLETING_REBALANCE`.
+/// Returns `ClassicGroupState.COMPLETING_REBALANCE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_completing_rebalance() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::CompletingRebalance)
 }
 
-/// `ClassicGroupState.STABLE`.
+/// Returns `ClassicGroupState.STABLE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_stable() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Stable)
 }
 
-/// `ClassicGroupState.DEAD`.
+/// Returns `ClassicGroupState.DEAD`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_dead() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Dead)
 }
 
-/// `ClassicGroupState.EMPTY`.
+/// Returns `ClassicGroupState.EMPTY`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ClassicGroupState_empty() -> *const kafka_common_ClassicGroupState_t {
     singleton(ClassicGroupState::Empty)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_ClassicGroupState_UNKNOWN`.
 ///
@@ -151,13 +151,13 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name()`: Java's `Enum.name()`, the constant name (`PREPARING_REBALANCE`), as a
-/// static string, never freed. The text `parse` reads (`PreparingRebalance`) is
-/// `toString()`'s.
+/// Returns the name of this enum constant, exactly as declared in Java (`PREPARING_REBALANCE`), Java's
+/// `Enum.name()`. The text `kafka_common_ClassicGroupState_parse` reads (`PreparingRebalance`) is `kafka_common_ClassicGroupState_to_string`'s.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_name(
@@ -169,12 +169,19 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_name(
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `ClassicGroupState.parse(String name)`: case-insensitive, `UNKNOWN` for an
-/// unrecognised name, as in Java.
+/// Case-insensitive classic group state lookup by string name.
+///
+/// # Parameters
+///
+/// - `name` - the state's name
+///
+/// # Returns
+///
+/// The state, or `UNKNOWN` for an unrecognised name.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string.
+/// `name` must be a valid NUL-terminated string. The returned singleton is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
@@ -186,12 +193,12 @@ pub unsafe extern "C" fn kafka_common_ClassicGroupState_parse(
     singleton(ClassicGroupState::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// `toString()`: the text the broker sends and `parse` reads (`PreparingRebalance`), as
-/// an owned string freed with `kafka_string_destroy`.
+/// Returns the state's name, the text the broker sends and `kafka_common_ClassicGroupState_parse` reads (`PreparingRebalance`).
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClassicGroupState_to_string(
