@@ -8276,8 +8276,8 @@ typedef struct {
 
 // `AbstractOptions.timeoutMs(Integer)`: None is Java's null (`-1` in the C
 // API: `default.api.timeout.ms` applies); a given negative value crosses as 0,
-// as Java's `calcDeadlineMs` takes `Math.max(0, timeoutMs)`; one above
-// INT32_MAX (Java's `Integer`) raises OverflowError.
+// as Java's `calcDeadlineMs` takes `Math.max(0, timeoutMs)`; one outside
+// Java's `Integer` raises OverflowError.
 static int admin_option_timeout(PyObject* value, int32_t* out) {
     if (value == Py_None) { *out = -1; return 0; }
     long long t = PyLong_AsLongLong(value);
@@ -8285,6 +8285,11 @@ static int admin_option_timeout(PyObject* value, int32_t* out) {
     if (t > INT32_MAX) {
         PyErr_Format(PyExc_OverflowError, "timeout of %lld ms does not fit a 32-bit signed int (max %d ms)",
                      t, (int)INT32_MAX);
+        return -1;
+    }
+    if (t < INT32_MIN) {
+        PyErr_Format(PyExc_OverflowError, "timeout of %lld ms does not fit a 32-bit signed int (min %d ms)",
+                     t, (int)INT32_MIN);
         return -1;
     }
     *out = t < 0 ? 0 : (int32_t)t;
