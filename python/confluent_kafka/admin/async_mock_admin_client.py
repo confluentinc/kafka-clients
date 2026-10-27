@@ -713,13 +713,21 @@ class AsyncMockAdminClient(MockAdminClientCore, AsyncAdmin):
         self, *,
         options: ListPartitionReassignmentsOptions,
     ) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition] | None,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Async]: ...
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
             options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`MockAdminClient.list_partition_reassignments`."""
-        if partitions is MISSING:  # Java's listPartitionReassignments(options): Optional.empty()
+        # Java's listPartitionReassignments(options), and its (Optional<Set>, options)
+        # with Optional.empty(): every partition.
+        if partitions is MISSING or (partitions is None and options is not MISSING):
             return self._list_partition_reassignments(None)
         _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
         return self._list_partition_reassignments(partitions)

@@ -45,7 +45,7 @@ RPC_STUBS: dict[str, int] = {
     "describe_delegation_token": 2, "describe_consumer_groups": 2,
     "list_consumer_group_offsets": 4, "delete_consumer_groups": 2,
     "delete_consumer_group_offsets": 2, "list_groups": 2, "elect_leaders": 2,
-    "alter_partition_reassignments": 2, "list_partition_reassignments": 4,
+    "alter_partition_reassignments": 2, "list_partition_reassignments": 5,
     "alter_consumer_group_offsets": 2, "list_offsets": 2, "describe_client_quotas": 2,
     "alter_client_quotas": 2, "describe_user_scram_credentials": 3,
     "alter_user_scram_credentials": 2, "describe_features": 2, "update_features": 2,
