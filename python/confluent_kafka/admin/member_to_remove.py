@@ -39,6 +39,10 @@ class MemberToRemove:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, MemberToRemove):
+            if self._group_instance_id is None:
+                # Java's this.groupInstanceId.equals(...) dereferences it (Types);
+                # its hashCode is null-safe.
+                raise TypeError("group_instance_id must not be None")
             return self._group_instance_id == other._group_instance_id
         return NotImplemented
 

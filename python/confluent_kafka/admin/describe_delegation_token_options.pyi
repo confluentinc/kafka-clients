@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from typing import overload
 
 from confluent_kafka.admin.abstract_options import AbstractOptions
-from confluent_kafka.common import KafkaPrincipal
+from confluent_kafka.common.security.auth import KafkaPrincipal
 
 __all__ = ["DescribeDelegationTokenOptions"]
 

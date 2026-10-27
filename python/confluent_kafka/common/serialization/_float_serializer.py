@@ -33,7 +33,7 @@ from typing import Any
 import math
 import struct
 
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 # Java Double.doubleToLongBits canonical NaN, big-endian.
 _CANONICAL_DOUBLE_NAN = b"\x7f\xf8\x00\x00\x00\x00\x00\x00"

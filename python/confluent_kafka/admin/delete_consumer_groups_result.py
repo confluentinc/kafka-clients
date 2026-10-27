@@ -52,7 +52,7 @@ class DeleteConsumerGroupsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> DeleteConsumerGroupsResult[Any]:
         """Java's package-private ``DeleteConsumerGroupsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

@@ -159,7 +159,8 @@ from confluent_kafka import (
     ConcurrentModificationError, IllegalArgumentError, IllegalStateError,
     UnsupportedOperationError,
 )
-from confluent_kafka.common import Headers, KafkaError, TopicPartition
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common import KafkaError, TopicPartition
 from confluent_kafka.common.config import ConfigError
 from confluent_kafka.common.errors import BootstrapResolutionError
 from confluent_kafka.common.errors import InvalidGroupIdError, WakeupError
@@ -171,6 +172,18 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.consumer import _base as consumer_base
 from confluent_kafka.consumer._base import poll_timeout_ms
+
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
 
 
 def _caller(deserializer: Any) -> Any:
@@ -691,6 +704,22 @@ def test_invalid_group_metadata() -> None:
     with pytest.raises(IllegalStateError) as e:
         consumer.group_metadata()
     assert str(e.value) == CLOSED
+
+
+def test_metrics_from_another_thread_while_polling() -> None:
+    # Java's metrics() takes no acquire() (AsyncKafkaConsumer.metrics()), so a
+    # metrics-reporter thread reads while the owner thread is inside poll().
+    consumer = new_consumer()
+    consumer.subscribe(topics=[TOPIC])
+    worker, outcome = _poll_in_background(consumer)
+    try:
+        names = {metric_name.name() for metric_name in consumer.metrics()}
+        assert "last-poll-seconds-ago" in names
+        consumer.wakeup()
+    finally:
+        worker.join(WAIT)
+    assert isinstance(outcome.get("error"), WakeupError)
+    consumer.close(option=CloseOptions.timeout(timeout=0))
 
 
 # Java's BootstrapResolutionException message (KIP-909), for a 3000 ms budget.
@@ -1555,7 +1584,7 @@ def test_two_threads_closing_at_once_tear_down_once() -> None:
 
 def test_close_releases_the_listener() -> None:
     consumer = new_consumer()
-    listener = ConsumerRebalanceListener()
+    listener = _NoOpListener()
     ref = weakref.ref(listener)
     consumer.subscribe(topics=[TOPIC], callback=listener)
     del listener
@@ -1568,7 +1597,7 @@ def test_close_releases_the_listener() -> None:
 
 def test_a_listenerless_subscribe_releases_the_listener() -> None:
     with new_consumer() as consumer:
-        listener = ConsumerRebalanceListener()
+        listener = _NoOpListener()
         ref = weakref.ref(listener)
         consumer.subscribe(topics=[TOPIC], callback=listener)
         del listener
@@ -1653,7 +1682,7 @@ def _listener_consumer() -> KafkaConsumer[bytes, bytes]:
     callbacks the branch C API does run go through the waiting call's drain on
     its caller's thread, so there is no helper thread."""
     consumer = new_consumer()
-    consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+    consumer.subscribe(topics=[TOPIC], callback=_NoOpListener())
     return consumer
 
 
@@ -1968,6 +1997,9 @@ class AssignedRecorder(ConsumerRebalanceListener):
         self.assigned.append(set(partitions))
         if self.failure is not None:
             raise self.failure
+
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
 
 
 def test_ctrl_c_before_the_listener_runs_is_raised_to_the_trampoline() -> None:
@@ -3089,7 +3121,7 @@ def test_sync_consumer_never_calls_a_blocking_entry_point(
     committed: list[Any] = []
     consumer = new_consumer(**{"default.api.timeout.ms": 200})
     try:
-        consumer.subscribe(topics=[TOPIC], callback=ConsumerRebalanceListener())
+        consumer.subscribe(topics=[TOPIC], callback=_NoOpListener())
         assert consumer.subscription() == {TOPIC}
         consumer.unsubscribe()
         consumer.subscribe(pattern=SubscriptionPattern(pattern="te.*"))

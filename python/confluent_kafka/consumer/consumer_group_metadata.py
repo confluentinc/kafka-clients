@@ -27,6 +27,9 @@ from typing import Any
 
 __all__ = ["ConsumerGroupMetadata"]
 
+_NOT_COPYABLE = ("ConsumerGroupMetadata cannot be copied or pickled; use the consumer's "
+                 "group_metadata()")
+
 
 class ConsumerGroupMetadata:
     """A metadata struct containing the consumer group information. Note: Any
@@ -94,7 +97,15 @@ class ConsumerGroupMetadata:
         return hash((self._group_id, self._generation_id, self._member_id,
                      self._group_instance_id))
 
+    # Java's class is neither ``Cloneable`` nor ``Serializable``, and a consumer's
+    # instance holds the core's handle: ``copy``, ``deepcopy`` and ``pickle`` are
+    # refused, for the mock's metadata and the real consumer's alike (CLAUDE.md,
+    # Python Binding Conventions, Types, the ``java.io.Serializable`` row).
+    def __copy__(self) -> ConsumerGroupMetadata:
+        raise TypeError(_NOT_COPYABLE)
+
     def __deepcopy__(self, memo: dict[int, Any]) -> ConsumerGroupMetadata:
-        # Immutable, and the core's handle cannot be copied: a deep copy is the
-        # object itself.
-        return self
+        raise TypeError(_NOT_COPYABLE)
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise TypeError(_NOT_COPYABLE)

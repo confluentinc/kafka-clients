@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 from ._encoding import decode, normalize_encoding
 

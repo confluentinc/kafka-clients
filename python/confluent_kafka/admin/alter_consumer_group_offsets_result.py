@@ -86,6 +86,12 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
     def partition_result(self, *, partition: TopicPartition) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which can be used to check the result for a given partition."""
         if self._client_partition_result is not None:
+            if partition is None:
+                # *(deviation: Java's future fails after the request, with the
+                # request's error or with "Alter offset for partition \"null\" was
+                # not attempted". Why: a null partition cannot cross the FFI, and the
+                # C result hands out no request-level future to wait on; exception 4)*
+                raise TypeError("partition must not be None")
             return self._client_partition_result(partition)  # type: ignore[no-any-return]
         result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 

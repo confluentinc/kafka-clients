@@ -44,7 +44,8 @@ from its error and raises it, as Java surfaces the callback's own ``Throwable``
 (``_raise_error``).
 
 ``KafkaConsumer`` is not thread-safe: a call while another thread is inside the
-consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted — refused by
+consumer raises ``ConcurrentModificationError``, ``wakeup()`` and ``metrics()``
+excepted, as Java leaves both outside ``acquire()`` — refused by
 the per-thread use count, as Java's ``acquire()``, before it reaches the FFI's
 single-owner guard (which still rejects a call from another task of the same
 thread). Every native call runs inside a counted use of the handle,
@@ -661,6 +662,26 @@ class _ConsumerState:
         with self._use() as h:
             return fn(h, *args)
 
+    @contextlib.contextmanager
+    def _hold(self) -> Iterator[int]:
+        """A use of the handle without Java's ``acquire()``, for the methods Java
+        leaves outside its lock (``metrics()``; ``wakeup()`` has its own form, a
+        no-op once closed): it is not refused while another thread is inside the
+        consumer. ``close()`` still waits for it before freeing the handle; a
+        closed consumer raises (Behaviour with no other home)."""
+        with self._lifecycle:
+            if self._state == _CLOSED or self._h == 0:
+                raise IllegalStateError(message=CLOSED_MESSAGE)
+            self._uses += 1
+            h = self._h
+        try:
+            yield h
+        finally:
+            with self._lifecycle:
+                self._uses -= 1
+                if self._uses == 0:
+                    self._lifecycle.notify_all()
+
     def _is_closed(self) -> bool:
         """Whether ``close()`` has run: a second ``close()`` returns before its
         own argument checks (CLAUDE.md, Python Binding Conventions,
@@ -846,9 +867,9 @@ class _ConsumerState:
         token = self._enter_callback()
         try:
             if method == _REVOKED:
-                result: object = listener.on_partitions_revoked(partitions)  # type: ignore[func-returns-value]
+                result: object = listener.on_partitions_revoked(partitions)
             elif method == _ASSIGNED:
-                result = listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
+                result = listener.on_partitions_assigned(partitions)
             else:
                 result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
             if inspect.isawaitable(result):
@@ -1577,9 +1598,11 @@ class _ConsumerState:
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_metrics(self) -> dict[MetricName, Metric]:
-        # Java's metrics() takes no acquire(): the core answers while a call is
-        # in flight.
-        raw = self._call(_lib.Consumer_metrics)
+        # Java's metrics() takes no acquire() (AsyncKafkaConsumer.metrics()): it
+        # answers from any thread while a call is in flight, so it holds the
+        # handle without the use guard (Threads and callbacks).
+        with self._hold() as h:
+            raw = _lib.Consumer_metrics(h)
         return to_metrics_map(raw)
 
     def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:

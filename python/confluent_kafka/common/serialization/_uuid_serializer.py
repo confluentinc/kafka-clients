@@ -26,7 +26,7 @@ from typing import Any
 import uuid
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 from ._encoding import encode
 

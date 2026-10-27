@@ -70,6 +70,18 @@ from confluent_kafka.producer import KafkaProducer, ProducerRecord
 
 from .conftest import create_topic
 
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
 DEADLINE = 60.0
 
 
@@ -132,6 +144,9 @@ def test_commit_inside_on_partitions_revoked_succeeds(kafka_broker: Any) -> None
             consumer.commit(offsets={tp: OffsetAndMetadata(offset=3)})
             seen["committed"] = True
 
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     try:
         consumer.subscribe(topics=[topic], callback=CommitOnRevoke())
         assert _poll_until(consumer, lambda v: len(v) >= 3) == ["a", "b", "c"]
@@ -160,6 +175,9 @@ def test_rebalance_does_not_advance_until_the_listener_returns(kafka_broker: Any
             inside["position"] = consumer.position(partition=tp)
             entered.set()
             assert release.wait(DEADLINE)
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer.subscribe(topics=[topic], callback=Blocking())
     outcome: dict[str, Any] = {}
@@ -205,6 +223,9 @@ def test_async_commit_inside_an_async_on_partitions_revoked_succeeds(kafka_broke
                 await consumer.commit(offsets={tp: OffsetAndMetadata(offset=2)})
                 seen["committed"] = threading.get_ident()
 
+            def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
         try:
             await consumer.subscribe(topics=[topic], callback=CommitOnRevoke())
             assert await _poll_until_async(consumer, lambda v: len(v) >= 2) == ["a", "b"]
@@ -234,6 +255,9 @@ def test_async_rebalance_does_not_advance_until_the_listener_returns(kafka_broke
                     return
                 entered.set()
                 await release.wait()
+
+            def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
 
         await consumer.subscribe(topics=[topic], callback=Blocking())
         polling = asyncio.ensure_future(_poll_until_async(consumer, lambda v: len(v) >= 1))
@@ -608,6 +632,9 @@ def test_async_rejected_call_does_not_stall_the_polling_task(kafka_broker: Any) 
                 if partitions:
                     revoked.set()
 
+            def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
         member: _Member | None = None
         stop = asyncio.Event()
         try:
@@ -652,6 +679,9 @@ def _raising_listener(raised: BaseException) -> ConsumerRebalanceListener:
         def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
             if partitions:
                 raise raised
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     return Raising()
 
@@ -708,6 +738,9 @@ def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None
             if partitions:
                 raise raised
 
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     async def main() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
             configs=_configs(kafka_broker))
@@ -740,6 +773,9 @@ def test_close_wraps_a_listener_kafka_error(kafka_broker: Any) -> None:
         def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
             if partitions:
                 raise raised
+
+        def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
     consumer.subscribe(topics=[topic], callback=Raising())
@@ -1151,7 +1187,7 @@ def test_subscription_on_invalid_topic(kafka_broker: Any) -> None:
     invalid_topic_name = "topic abc"  # Invalid topic name due to space
     consumer: KafkaConsumer[bytes, bytes] = KafkaConsumer(configs=_configs(kafka_broker))
     try:
-        consumer.subscribe(topics={invalid_topic_name}, callback=ConsumerRebalanceListener())
+        consumer.subscribe(topics={invalid_topic_name}, callback=_NoOpListener())
         error = _poll_eventually_raises(consumer)
         assert isinstance(error, InvalidTopicError)
     finally:

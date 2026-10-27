@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING, Any, Generic
 from confluent_kafka.admin._futures import Async, KindT, Sync
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclOperation, Node
+    from confluent_kafka.common import Node
+    from confluent_kafka.common.acl import AclOperation
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeClusterResult"]
