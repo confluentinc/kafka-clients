@@ -35,12 +35,6 @@ pub struct DescribeClusterRequest {
 }
 
 impl DescribeClusterRequest {
-    /// The `EndpointType.BROKER` id (KIP-919).
-    pub const ENDPOINT_TYPE_BROKER: i8 = 1;
-
-    /// The `EndpointType.CONTROLLER` id (KIP-919).
-    pub const ENDPOINT_TYPE_CONTROLLER: i8 = 2;
-
     /// Creates a new `DescribeClusterRequest` from data and version.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeClusterRequest#DescribeClusterRequest")]
     pub fn new(data: DescribeClusterRequestData, version: i16) -> Self {
@@ -146,6 +140,7 @@ impl RequestBuilder for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::EndpointType;
 
     #[test]
     fn get_error_response_sets_error() {
@@ -163,13 +158,13 @@ mod tests {
     fn serialize_parse_round_trip() {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
-        data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
+        data.set_endpoint_type(EndpointType::Broker.id());
         let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::protocol::ByteBufferAccessor::new(bytes.into_buffer());
         let parsed = DescribeClusterRequest::parse(&mut readable, 1).unwrap();
         assert!(parsed.data().include_cluster_authorized_operations);
-        assert_eq!(parsed.data().endpoint_type, DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
+        assert_eq!(parsed.data().endpoint_type, EndpointType::Broker.id());
     }
 
     /// Byte-level encoding test against a known vector. DescribeCluster v1 is
@@ -181,7 +176,7 @@ mod tests {
     fn serialize_known_byte_vector_v1() {
         let mut data = DescribeClusterRequestData::new();
         data.set_include_cluster_authorized_operations(true);
-        data.set_endpoint_type(DescribeClusterRequest::ENDPOINT_TYPE_BROKER);
+        data.set_endpoint_type(EndpointType::Broker.id());
         let mut request = AbstractRequest::DescribeCluster(DescribeClusterRequest::new(data, 1));
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

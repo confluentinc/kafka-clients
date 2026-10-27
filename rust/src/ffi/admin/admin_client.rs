@@ -31,8 +31,10 @@ use crate::ffi::ffi_guard;
 /// # Errors
 ///
 /// Returns NULL and sets `out_err` to a Kafka error, `Failed to create new
-/// KafkaAdminClient`, whose cause is the failure: the bootstrap addresses
-/// cannot be resolved, the channel builder cannot be created, or
+/// KafkaAdminClient`, whose cause is the failure: neither or both of
+/// `bootstrap.servers` and `bootstrap.controllers` are set (a config error, as
+/// Java's `KafkaAdminClient.determineBootstrapType` throws), the bootstrap
+/// addresses cannot be resolved, the channel builder cannot be created, or
 /// `default.api.timeout.ms` is set explicitly below `request.timeout.ms` (a
 /// config error, as Java's `KafkaAdminClient.configureDefaultApiTimeoutMs`
 /// throws).

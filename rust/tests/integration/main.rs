@@ -23,6 +23,7 @@
 mod common;
 
 mod admin_acls_test;
+mod admin_bootstrap_controllers_test;
 mod admin_cluster_configs_test;
 mod admin_controllers_test;
 mod admin_delegation_tokens_test;

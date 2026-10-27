@@ -60,6 +60,7 @@ from confluent_kafka.common.errors import (
     InvalidTopicError,
     TopicAuthorizationError,
     UnknownServerError,
+    UnsupportedEndpointTypeError,
 )
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 
@@ -213,9 +214,8 @@ def test_config_key_must_be_a_string() -> None:
 
 def test_config_values_checked_by_admin_client_config() -> None:
     """``AdminClientConfig``'s ``ConfigDef`` types: a wrong Python type for an
-    ``INT`` raises Java's message; a ``LIST`` may be given as a list;
-    ``bootstrap.controllers`` is an admin key of Java's ``ConfigDef``, so its type is
-    checked although the core leaves it undefined; a ``None`` value is not set."""
+    ``INT`` raises Java's message; a ``LIST`` may be given as a list, and
+    ``bootstrap.controllers`` is one; a ``None`` value is not set."""
     with pytest.raises(ConfigError) as info:
         _admin(**{"request.timeout.ms": 1.5})
     assert str(info.value) == (
@@ -229,21 +229,35 @@ def test_config_values_checked_by_admin_client_config() -> None:
                           "client.id": None}).close()
     with pytest.raises(ConfigError) as info:
         Admin.create(configs={"bootstrap.controllers": 5})
-    assert "bootstrap.controllers" in str(info.value)
+    assert str(info.value) == (
+        "Invalid value 5 for configuration bootstrap.controllers: Expected a comma separated list.")
 
 
 def test_config_without_bootstrap() -> None:
     """The core fails the client; ``Admin_AdminClient_new`` hands its error back
-    as an owned handle, raised as its class with its cause (``from_ffi_error``).
-    ``bootstrap.controllers`` is not defined by the core, so an empty
-    ``bootstrap.servers`` fails in ``ClientUtils.parseAndValidateAddresses``
-    *(deviation: Java's ``determineBootstrapType`` fails first with "You must set
-    either bootstrap.servers or bootstrap.controllers")*."""
-    with pytest.raises(KafkaError) as info:
-        Admin.create(configs={})
-    assert str(info.value) == "Failed to create new KafkaAdminClient"
-    assert type(info.value.__cause__) is ConfigError
-    assert str(info.value.__cause__) == "No resolvable bootstrap urls given in bootstrap.servers"
+    as an owned handle, raised as its class with its cause (``from_ffi_error``):
+    Java's ``determineBootstrapType`` message, for neither and for both of
+    ``bootstrap.servers`` and ``bootstrap.controllers``."""
+    for configs, message in [
+        ({}, "You must set either bootstrap.servers or bootstrap.controllers"),
+        ({"bootstrap.servers": "localhost:1", "bootstrap.controllers": "localhost:2"},
+         "You cannot set both bootstrap.servers and bootstrap.controllers"),
+    ]:
+        with pytest.raises(KafkaError) as info:
+            Admin.create(configs=configs)
+        assert str(info.value) == "Failed to create new KafkaAdminClient"
+        assert type(info.value.__cause__) is ConfigError
+        assert str(info.value.__cause__) == message
+
+
+def test_config_with_bootstrap_controllers_alone() -> None:
+    """``bootstrap.controllers`` alone builds a client that talks to the
+    controller quorum (KIP-919): a broker-only API fails at once with Java's
+    ``UnsupportedEndpointTypeException``, before anything is sent."""
+    with Admin.create(configs={"bootstrap.controllers": "localhost:1"}) as admin:
+        error = assert_future_throws(admin.list_topics().names(), UnsupportedEndpointTypeError)
+        assert str(error) == ("This Admin API is not yet supported when communicating "
+                              "directly with the controller quorum.")
 
 
 # ---- close ------------------------------------------------------------------

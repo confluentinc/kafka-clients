@@ -95,6 +95,7 @@ org.apache.kafka.clients.admin.DescribeUserScramCredentialsOptions
 org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult
 org.apache.kafka.clients.admin.ElectLeadersOptions
 org.apache.kafka.clients.admin.ElectLeadersResult
+org.apache.kafka.clients.admin.EndpointType
 org.apache.kafka.clients.admin.ExpireDelegationTokenOptions
 org.apache.kafka.clients.admin.ExpireDelegationTokenResult
 org.apache.kafka.clients.admin.FeatureMetadata
