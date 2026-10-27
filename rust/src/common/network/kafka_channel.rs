@@ -447,12 +447,17 @@ impl KafkaChannel {
         self.send.is_some()
     }
 
-    /// Returns `true` if the transport layer has buffered ciphertext or other
-    /// pending bytes that need to be flushed to the socket. Used by the
-    /// selector to decide whether to register write-interest for a handshaking
-    /// channel.
+    /// Returns `true` if the channel has output it could not write yet, which
+    /// the selector must flush on write readiness: ciphertext the transport
+    /// layer buffers (TLS), or, while the channel is not ready, a request the
+    /// authenticator could not write in full. The authenticator flags the
+    /// latter with `OP_WRITE`, as Java's `flushNetOutBufferAndUpdateInterestOps`
+    /// does, and Java's selector then selects the channel for write. Used by
+    /// the selector to decide whether to register write-interest for a
+    /// handshaking channel.
     pub(crate) fn has_pending_writes(&self) -> bool {
         self.transport_layer.has_pending_writes()
+            || (!self.ready() && self.transport_layer.interest_ops().contains(InterestOps::OP_WRITE))
     }
 
     /// Sets the send for this channel.
@@ -851,7 +856,7 @@ impl KafkaChannel {
     /// Returns a mutable reference to the transport layer.
     ///
     /// This is used by the Selector for non-blocking I/O operations.
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn transport_layer(&mut self) -> &mut dyn TransportLayer {
         &mut *self.transport_layer
     }
@@ -1010,6 +1015,10 @@ mod tests {
 
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.interest_ops = self.interest_ops.remove(ops);
+        }
+
+        fn interest_ops(&self) -> InterestOps {
+            self.interest_ops
         }
 
         fn is_mute(&self) -> bool {
@@ -1533,5 +1542,44 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// A channel that is still authenticating has output to flush when its
+    /// authenticator set `OP_WRITE`, as Java's
+    /// `flushNetOutBufferAndUpdateInterestOps` does for a request the socket
+    /// did not take; the selector then arms it for write. A ready channel's
+    /// `OP_WRITE` belongs to its queued send, which the selector tracks itself.
+    #[tokio::test]
+    async fn test_unwritten_authentication_output_is_a_pending_write() {
+        let mut flagged = MockTransportLayer::new();
+        flagged.add_interest_ops(InterestOps::OP_WRITE);
+        let authenticating = KafkaChannel::new(
+            "0",
+            Box::new(flagged),
+            Box::new(MockAuthenticator::new(false)),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert!(authenticating.has_pending_writes());
+
+        let unflagged = KafkaChannel::new(
+            "1",
+            Box::new(MockTransportLayer::new()),
+            Box::new(MockAuthenticator::new(false)),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert!(!unflagged.has_pending_writes());
+
+        let mut flagged = MockTransportLayer::new();
+        flagged.add_interest_ops(InterestOps::OP_WRITE);
+        let ready = KafkaChannel::new(
+            "2",
+            Box::new(flagged),
+            Box::new(MockAuthenticator::new(true)),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert!(!ready.has_pending_writes());
     }
 }

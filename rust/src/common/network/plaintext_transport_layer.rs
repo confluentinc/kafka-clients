@@ -144,6 +144,10 @@ impl TransportLayer for PlaintextTransportLayer {
         self.interest_ops = self.interest_ops.remove(ops);
     }
 
+    fn interest_ops(&self) -> InterestOps {
+        self.interest_ops
+    }
+
     /// Returns `true` if this channel is muted (not interested in read operations).
     fn is_mute(&self) -> bool {
         !self.interest_ops.contains(InterestOps::OP_READ)

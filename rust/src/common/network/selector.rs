@@ -756,9 +756,11 @@ impl Selector {
             // (finish_connect transition, and/or the post-handshake ready
             // transition — order preserved relative to the original code).
             let mut push_connected: u8 = 0;
-            // Whether the channel finished re-authenticating, which flips its
-            // interest from read (handshaking) to write (its queued send).
-            let mut reauthenticated = false;
+            // Whether the channel's interest may have flipped: it finished
+            // re-authenticating (from the handshake's reads to its queued
+            // send), or an authentication step left output the socket did not
+            // take, which wants write readiness.
+            let mut interest_may_have_changed = false;
             // A channel takes at most one completed receive per poll, and a
             // re-authenticating channel's `prepare` may read a response to an
             // earlier request, which is handed out below. Java's single
@@ -783,6 +785,7 @@ impl Selector {
                 let reauthenticating = channel.successful_authentications() > 0;
                 if channel.is_connected() && !channel.ready() && !(reauthenticating && has_completed_receive) {
                     channel.prepare().await?;
+                    interest_may_have_changed |= !channel.ready();
                 }
 
                 if !was_ready && channel.ready() {
@@ -801,7 +804,7 @@ impl Selector {
                     // client fetch its API versions anew. Java reports a channel
                     // as connected once, when its socket connects.
                     if is_reauthentication {
-                        reauthenticated = true;
+                        interest_may_have_changed = true;
                     } else {
                         push_connected += 1;
                     }
@@ -813,7 +816,7 @@ impl Selector {
                     channel.poll_response_received_during_reauthentication()
                 };
             }
-            if reauthenticated {
+            if interest_may_have_changed {
                 let key = self.intern_id(channel_id);
                 self.mark_interest_dirty(&key);
             }
@@ -2922,6 +2925,297 @@ mod tests {
         selector.close().await;
     }
 
+    /// Holds a transport's writes back until the test opens it, as a full
+    /// socket send buffer does while the broker is not reading.
+    #[derive(Default)]
+    struct WriteGate {
+        open: AtomicBool,
+        /// The waker the selector registered for write readiness while closed.
+        waker: StdMutex<Option<std::task::Waker>>,
+    }
+
+    impl WriteGate {
+        fn closed(&self) -> bool {
+            !self.open.load(Ordering::SeqCst)
+        }
+
+        /// The socket drains: writes go through again, and the selector is
+        /// told the channel is writable.
+        fn open(&self) {
+            self.open.store(true, Ordering::SeqCst);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    /// A plaintext transport that, once connected, takes nothing while its
+    /// [`WriteGate`] is closed: the synchronous write would block, the
+    /// asynchronous one never completes, and the socket is not writable.
+    struct GatedTransportLayer {
+        inner: PlaintextTransportLayer,
+        gate: Arc<WriteGate>,
+    }
+
+    impl GatedTransportLayer {
+        fn held_back(&self) -> bool {
+            self.inner.is_connected() && self.gate.closed()
+        }
+    }
+
+    impl TransportLayer for GatedTransportLayer {
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.peer_addr()
+        }
+        fn ready(&self) -> bool {
+            self.inner.ready()
+        }
+        fn finish_connect(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<bool>> + Send + '_>> {
+            self.inner.finish_connect()
+        }
+        fn disconnect(&mut self) {
+            self.inner.disconnect()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn handshake(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.handshake()
+        }
+        fn add_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.add_interest_ops(ops)
+        }
+        fn remove_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.remove_interest_ops(ops)
+        }
+        fn interest_ops(&self) -> InterestOps {
+            self.inner.interest_ops()
+        }
+        fn is_mute(&self) -> bool {
+            self.inner.is_mute()
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            self.inner.has_bytes_buffered()
+        }
+        fn has_pending_writes(&self) -> bool {
+            self.inner.has_pending_writes()
+        }
+        fn is_open(&self) -> bool {
+            self.inner.is_open()
+        }
+        fn close(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.close()
+        }
+        fn read<'a>(
+            &'a mut self,
+            dst: &'a mut [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            self.inner.read(dst)
+        }
+        fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            self.inner.try_read(dst)
+        }
+        fn supports_try_read(&self) -> bool {
+            self.inner.supports_try_read()
+        }
+        fn write<'a>(
+            &'a mut self,
+            src: &'a [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.write(src)
+        }
+        fn readable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.readable()
+        }
+        fn writable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.writable()
+        }
+        fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            self.inner.poll_readable(cx)
+        }
+        fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            if self.held_back() {
+                *self.gate.waker.lock().unwrap() = Some(cx.waker().clone());
+                // The test may have opened the gate meanwhile.
+                if self.gate.closed() {
+                    return std::task::Poll::Pending;
+                }
+            }
+            self.inner.poll_writable(cx)
+        }
+        fn write_vectored<'a>(
+            &'a mut self,
+            srcs: &'a [io::IoSlice<'a>],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            if self.held_back() {
+                return Box::pin(std::future::pending());
+            }
+            self.inner.write_vectored(srcs)
+        }
+        fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            if self.held_back() {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            self.inner.try_write_vectored(srcs)
+        }
+    }
+
+    /// Builds what `SaslChannelBuilder` builds for SASL_PLAINTEXT, the real
+    /// `SaslClientAuthenticator` over a plaintext transport, with the
+    /// transport behind a [`WriteGate`].
+    struct GatedSaslChannelBuilder {
+        gate: Arc<WriteGate>,
+    }
+
+    impl ChannelBuilder for GatedSaslChannelBuilder {
+        fn build_channel(
+            &self,
+            id: &str,
+            stream: tokio::net::TcpStream,
+            peer_host: &str,
+            max_receive_size: i32,
+            metadata_registry: Box<dyn ChannelMetadataRegistry>,
+        ) -> io::Result<KafkaChannel> {
+            let transport_layer = Box::new(GatedTransportLayer {
+                inner: PlaintextTransportLayer::new(stream),
+                gate: Arc::clone(&self.gate),
+            });
+            let authenticator = Box::new(crate::common::security::authenticator::SaslClientAuthenticator::new(
+                "PLAIN",
+                "alice",
+                "secret",
+                id,
+                peer_host,
+                "test-client",
+                Arc::new(SystemTime),
+                LogContext::empty(),
+            ));
+            Ok(KafkaChannel::new(
+                id,
+                transport_layer,
+                authenticator,
+                max_receive_size,
+                metadata_registry,
+            ))
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// Java's SASL client writes to a non-blocking channel: a request the
+    /// socket does not take stays in `netOutBuffer` with `OP_WRITE` set, the
+    /// selector selects the channel for write, and the next `prepare()` writes
+    /// the rest (`SaslClientAuthenticator.flushNetOutBufferAndUpdateInterestOps`,
+    /// `Selector.pollSelectionKeys`). This runs that through `Selector::poll`,
+    /// with the real `SaslClientAuthenticator` against the fake broker, over a
+    /// transport that takes nothing until the test opens it.
+    ///
+    /// While the transport takes nothing, the channel is armed for write and
+    /// polls return on time. Once the transport drains, the write readiness
+    /// wakes the selector and the channel authenticates. Without the write
+    /// interest nothing would wake it: the broker has received nothing, so it
+    /// sends nothing to read either.
+    #[tokio::test]
+    async fn test_sasl_request_the_socket_does_not_take_arms_the_channel_for_write() {
+        use std::time::Duration;
+
+        let broker = crate::test_fake_broker::FakeBroker::start("cluster", "topic").await;
+        let gate = Arc::new(WriteGate::default());
+        let channel_builder = Box::new(GatedSaslChannelBuilder { gate: Arc::clone(&gate) });
+        let mut selector = Selector::new(super::NetworkReceive::UNLIMITED, CONNECTION_MAX_IDLE_MS, channel_builder);
+        let addr: SocketAddr = broker.bootstrap().parse().unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
+
+        // The connection completes, and the authenticator's first request
+        // (ApiVersions) is held back, with `OP_WRITE` set.
+        let mut polls = 0;
+        while !selector
+            .channels
+            .get_mut("0")
+            .is_some_and(|channel| channel.transport_layer().interest_ops().contains(InterestOps::OP_WRITE))
+        {
+            assert!(polls < 50, "the first SASL request was never held back");
+            selector.poll(10).await.unwrap();
+            polls += 1;
+        }
+        let channel = &selector.channels["0"];
+        assert!(channel.is_connected());
+        assert!(!channel.ready());
+        assert!(channel.has_pending_writes(), "the held-back request is a pending write");
+
+        // Each poll returns on time and leaves the channel armed for write.
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), selector.poll(50))
+                .await
+                .expect("a poll must not wait for the socket")
+                .unwrap();
+            assert!(selector.arming["0"].armed_write, "the channel is armed for write");
+            assert!(!selector.is_channel_ready("0"));
+        }
+        assert!(selector.channels.contains_key("0"), "the channel stays open");
+
+        gate.open();
+        wait_for_channel_ready(&mut selector, "0").await;
+        assert_eq!(broker.sasl_authentications(), 1);
+        let channel = selector.channels.get_mut("0").unwrap();
+        assert_eq!(channel.successful_authentications(), 1);
+        assert!(!channel.has_pending_writes());
+        assert!(!channel.transport_layer().interest_ops().contains(InterestOps::OP_WRITE));
+        selector.close().await;
+    }
+
+    /// Only the channels pass 1 processed are re-armed after a pass by
+    /// default. The buffered-read pass also runs `prepare()` on a channel, and
+    /// a step there that leaves output the socket did not take must mark the
+    /// channel's interest dirty, or the next wait never arms it for write.
+    /// This visits the channel as that pass does and re-arms with nothing
+    /// processed.
+    #[tokio::test]
+    async fn test_prepare_outside_pass_one_still_arms_the_channel_for_write() {
+        let broker = crate::test_fake_broker::FakeBroker::start("cluster", "topic").await;
+        let gate = Arc::new(WriteGate::default());
+        let builder = GatedSaslChannelBuilder { gate: Arc::clone(&gate) };
+        let mut selector = create_selector().await;
+        let stream = tokio::net::TcpStream::connect(broker.bootstrap()).await.unwrap();
+        let channel = builder
+            .build_channel(
+                "0",
+                stream,
+                "localhost",
+                BUFFER_SIZE,
+                Box::new(crate::common::network::DefaultChannelMetadataRegistry::new()),
+            )
+            .unwrap();
+        let key: Arc<str> = Arc::from("0");
+        selector.channels.insert(Arc::clone(&key), channel);
+        selector.register_arming(&key);
+        // Registration marks a new channel dirty; start from a clean set.
+        selector.interest_dirty.clear();
+
+        selector.poll_channel_reads("0", false, 0).await;
+        assert!(!selector.channels["0"].ready());
+        assert!(selector.channels["0"].has_pending_writes());
+
+        let mut ready = FxHashSet::default();
+        selector.arm_rearm_set(&[], &mut ready);
+        assert!(
+            selector.arming["0"].armed_write,
+            "a channel holding back authentication output is armed for write"
+        );
+        selector.close().await;
+    }
+
     struct FailingChannelBuilder;
 
     impl ChannelBuilder for FailingChannelBuilder {
@@ -3608,6 +3902,9 @@ mod tests {
         }
         fn remove_interest_ops(&mut self, ops: InterestOps) {
             self.inner.remove_interest_ops(ops)
+        }
+        fn interest_ops(&self) -> InterestOps {
+            self.inner.interest_ops()
         }
         fn is_mute(&self) -> bool {
             self.inner.is_mute()
