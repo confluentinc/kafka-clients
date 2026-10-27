@@ -945,8 +945,8 @@ def test_an_error_java_cannot_serialize_refuses_pickle_and_deepcopy(
 
 def test_a_core_record_deserialization_error_refuses_pickle_and_deepcopy(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    # Built without its constructor (the core reports no record), it still
-    # refuses: Java's class cannot be serialized whatever it holds.
+    # Built without its constructor (no payload reported), it still refuses:
+    # Java's class cannot be serialized whatever it holds.
     monkeypatch.setattr(errmod, "_lib", _fake_lib(
         RecordDeserializationError._ffi_id, "bad record",
         source={1: (TopicAuthorizationError._ffi_id, "inner")}))
@@ -960,6 +960,41 @@ def test_a_core_record_deserialization_error_refuses_pickle_and_deepcopy(
     assert type(shallow) is RecordDeserializationError and str(shallow) == "bad record"
     assert shallow.__cause__ is err.__cause__
     assert type(shallow.__cause__) is TopicAuthorizationError
+
+
+_RDE_PAYLOAD: dict[str, Any] = {
+    "origin": "VALUE", "topic_partition": ("t", 0), "offset": 7, "timestamp": 1234,
+    "timestamp_type": 1, "key_buffer": b"k", "value_buffer": None,
+    "headers": [("h", b"v"), ("n", None)],
+}
+
+
+def test_a_core_record_deserialization_error_carries_its_payload(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The C extension reads the record_deserialization view: Java's getters
+    # answer the record the core failed on; the cause is the core's source.
+    monkeypatch.setattr(errmod, "_lib", _fake_lib(
+        RecordDeserializationError._ffi_id, "bad record", _RDE_PAYLOAD,
+        source={1: (TopicAuthorizationError._ffi_id, "inner")}))
+    err = from_ffi_error(0)
+    assert type(err) is RecordDeserializationError and str(err) == "bad record"
+    assert err.origin() is RecordDeserializationError.DeserializationExceptionOrigin.VALUE
+    assert err.topic_partition() == _TP
+    assert (err.offset(), err.timestamp()) == (7, 1234)
+    assert err.timestamp_type() is TimestampType.LOG_APPEND_TIME
+    assert bytes(err.key_buffer() or b"") == b"k" and err.value_buffer() is None
+    assert [(h.key(), None if h.value() is None else bytes(h.value()))  # type: ignore[arg-type]
+            for h in err.headers()] == [("h", b"v"), ("n", None)]
+    assert type(err.__cause__) is TopicAuthorizationError
+    for refuse in (pickle.dumps, copy.deepcopy):
+        with pytest.raises(TypeError) as refused:
+            refuse(err)
+        assert str(refused.value) == _RDE_REFUSED
+    # A borrowed error (an admin result's, a delivery callback's) is built the same way.
+    borrowed = from_borrowed_ffi_error((RecordDeserializationError._ffi_id, "bad record",
+                                        False, False, _RDE_PAYLOAD, False, None))
+    assert type(borrowed) is RecordDeserializationError
+    assert borrowed.offset() == 7 and borrowed.topic_partition() == _TP
 
 
 # ----------------------------------------------------------------------------
