@@ -249,8 +249,8 @@ def test_module_exports() -> None:
 
     assert module.__all__ == ["AsyncKafkaProducer", "AsyncMockProducer", "AsyncProducer",
                               "Callback", "KafkaProducer", "MockProducer", "Partitioner",
-                              "Producer", "ProducerRecord", "RecordMetadata",
-                              "BufferExhaustedError"]
+                              "Producer", "ProducerConfig", "ProducerRecord",
+                              "RecordMetadata", "BufferExhaustedError"]
     assert not hasattr(module, "DeliveryCallback")
     assert Partitioner is object
     # A Protocol of Java's onCompletion parameters, keyword-only plus **kwargs.
