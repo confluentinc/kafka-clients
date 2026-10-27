@@ -1335,7 +1335,7 @@ impl Renderer<'_> {
                     "    def __init__(self, *args: Any, **kwargs: Any) -> None:".to_string(),
                     format!("        if type(self) is {}:", self.name()),
                     format!(
-                        "            raise TypeError(\"{} is an abstract class; use one of its subclasses\")",
+                        "            raise TypeError(\"{} cannot be constructed directly; use one of its subclasses\")",
                         self.name()
                     ),
                 ];

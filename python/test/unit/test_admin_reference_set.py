@@ -147,7 +147,7 @@ async def _await(future: Any) -> Any:
 
 class TestAbstractOptions:
     def test_construction_raises_type_error(self) -> None:
-        with pytest.raises(TypeError, match=r"^AbstractOptions is an abstract class; "
+        with pytest.raises(TypeError, match=r"^AbstractOptions cannot be constructed directly; "
                                             r"use one of its subclasses$"):
             AbstractOptions()
 
