@@ -648,8 +648,11 @@ class Producer(Generic[K, V], _ProducerState):
         to ``close(timeout=0)``: no further sending would happen while it
         blocks the producer's completion thread.
 
-        Closing twice is harmless; any other call after it raises
-        ``IllegalStateError``. A negative ``timeout`` raises
+        Closing twice is harmless. On ``KafkaProducer`` any other call after it
+        raises ``IllegalStateError``, ``flush()``, ``partitions_for()`` and
+        ``metrics()`` included *(deviation: Java makes no closed check there, since
+        its object outlives ``close()``; here the native handle does not)*; a
+        ``MockProducer`` answers after ``close()`` as Java's mock does. A negative ``timeout`` raises
         ``IllegalArgumentError``, except that a second ``close()`` returns
         before checking it *(deviation)*. A ``None`` ``timeout`` raises
         ``TypeError``, Java's ``timeout.toMillis()`` on a null, with the same
