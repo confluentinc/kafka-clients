@@ -1059,10 +1059,15 @@ impl CommitRequestManager {
             guard.pending.unsent_offset_commits.push_back(request);
         }
         // Java queues this request on the network thread before the managers
-        // are polled in the same `runOnce`, so it goes out at once. Rust
-        // reaches here from the spawned AsyncPoll task (reconcile), i.e. while
-        // the bg loop is parked in its network poll: wake it so the commit is
-        // sent now rather than after the poll timeout or an unrelated wake.
+        // are polled in the same `runOnce`, so it goes out at once. Rust does
+        // the same: the only caller is `reconcile` step 8a, which queues a
+        // request only with auto-commit enabled, and then only the AsyncPoll
+        // reconcile (run on the bg task during the Phase 1 event drain, before
+        // the commit manager's Phase 2 poll) gets that far — Phase 2.5's
+        // `reconcile(now, false)` stops at the KAFKA-20106 gate. So the request
+        // is sent in the same `run_once`. The wake is defensive: it only
+        // stores a permit, costing at most one extra loop iteration per
+        // rebalance.
         wake_background_task(&self.inner);
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         // A `Weak`: see "Retry drivers" below.
@@ -6162,9 +6167,10 @@ mod tests {
             s.seek(&tp, 100).expect("seek");
         }
         let _public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
-        // The initial enqueue wakes the bg task too (it is reached from the
-        // spawned AsyncPoll task's reconcile); consume that permit so only the
-        // retry's own wake can satisfy the wait below.
+        // The initial enqueue wakes the bg task too (a defensive wake: the
+        // AsyncPoll reconcile that reaches it runs on the bg task before the
+        // commit manager's poll); consume that permit so only the retry's own
+        // wake can satisfy the wait below.
         tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
             .await
             .expect("queuing the pre-rebalance auto-commit must wake the bg task");
