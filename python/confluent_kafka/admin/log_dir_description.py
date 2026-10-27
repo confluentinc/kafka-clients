@@ -14,10 +14,12 @@
 
 """``LogDirDescription``: Java's ``org.apache.kafka.clients.admin.LogDirDescription``.
 
-Java's constructors ``(error, replicaInfos)`` and ``(error, replicaInfos,
-totalBytes, usableBytes)`` are one keyword-only constructor matched by
-``java_forms``: the shorter passes ``UNKNOWN_VOLUME_BYTES`` (``-1``) for both
-sizes, which, like Java, are then empty (``None``).
+Java's constructors ``(error, replicaInfos)``, ``(error, replicaInfos,
+totalBytes, usableBytes)`` and ``(error, replicaInfos, totalBytes, usableBytes,
+isCordoned)`` are one keyword-only constructor matched by ``java_forms``: the
+first passes ``UNKNOWN_VOLUME_BYTES`` (``-1``) for both sizes, which, like Java,
+are then empty (``None``), and both shorter ones pass ``false`` for
+``isCordoned``.
 
 Java declares no ``equals`` / ``hashCode``, so equality is identity.
 """
