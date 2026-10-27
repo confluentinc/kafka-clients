@@ -42,6 +42,18 @@ from confluent_kafka.consumer import (
     MockConsumer,
 )
 
+
+class _NoOpListener(ConsumerRebalanceListener):
+    """A listener whose callbacks do nothing, as Java's tests'
+    ``NoOpConsumerRebalanceListener``."""
+
+    def on_partitions_revoked(self, partitions: object) -> None:
+        pass
+
+    def on_partitions_assigned(self, partitions: object) -> None:
+        pass
+
+
 UNREACHABLE = {"bootstrap.servers": "localhost:1"}
 CONSUMER = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer", "group.id": "g"}
 STRINGS: list[Any] = ["orders", b"orders", bytearray(b"orders")]
@@ -78,7 +90,7 @@ def test_kafka_consumer_subscribe_rejects_str(value: Any) -> None:
     with KafkaConsumer(configs=CONSUMER) as consumer:
         rejects(consumer.subscribe, "topics", value)
         with pytest.raises(TypeError):
-            consumer.subscribe(topics=value, callback=ConsumerRebalanceListener())
+            consumer.subscribe(topics=value, callback=_NoOpListener())
 
 
 def test_kafka_consumer_subscribe_rejects_str_when_closed() -> None:
@@ -118,7 +130,7 @@ def test_mock_consumer_subscribe_takes_any_other_iterable() -> None:
     assert consumer.subscription() == {"a", "b"}
     consumer.subscribe(topics=iter(["c"]))
     assert consumer.subscription() == {"c"}
-    consumer.subscribe(topics={"d"}, callback=ConsumerRebalanceListener())
+    consumer.subscribe(topics={"d"}, callback=_NoOpListener())
     assert consumer.subscription() == {"d"}
     consumer.close()
 
