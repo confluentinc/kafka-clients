@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config_consts;
 use crate::java_parse::{parse_expr, strip_comments, Expr};
 
 type Res<T> = anyhow::Result<T>;
@@ -42,6 +43,14 @@ const SASL_CONFIGS: &str = "org.apache.kafka.common.config.SaslConfigs";
 const TYPES: &[&str] = &[
     "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD",
 ];
+
+/// One key of a `ConfigDef`: its type, the class whose source defines it and
+/// its validator's source, if any.
+struct KeyDef {
+    ty: String,
+    class: String,
+    validator: Option<String>,
+}
 
 /// A Java source file: its package, imports, superclass and `String`
 /// constants.
@@ -113,7 +122,7 @@ impl Reader {
 
     /// The keys and types a `ConfigDef` chain in `text` (read in class `fqn`)
     /// defines, in order.
-    fn defines(&mut self, fqn: &str, text: &str, out: &mut BTreeMap<String, String>) -> Res<()> {
+    fn defines(&mut self, fqn: &str, text: &str, out: &mut BTreeMap<String, KeyDef>) -> Res<()> {
         let mut i = 0;
         while let Some(at) = next_call(text, i) {
             let (method, args_start) = at;
@@ -121,7 +130,7 @@ impl Reader {
             let args = &text[args_start..args_end];
             match method {
                 "define" | "defineInternal" => {
-                    let parts = first_args(args, 2);
+                    let parts = first_args(args, usize::MAX);
                     if parts.len() < 2 {
                         anyhow::bail!("config types: `{method}({args})` in `{fqn}` has no type argument");
                     }
@@ -130,7 +139,18 @@ impl Reader {
                     if !TYPES.contains(&ty.as_str()) {
                         anyhow::bail!("config types: `{name}` in `{fqn}` has unknown type `{}`", parts[1].trim());
                     }
-                    out.insert(name, ty);
+                    // `ConfigDef.define(name, type, [default, [validator,]] importance, ...)`:
+                    // the validator is the argument between the default and the importance.
+                    let importance = parts
+                        .iter()
+                        .position(|p| p.contains("Importance."))
+                        .ok_or_else(|| anyhow::anyhow!("config types: `{name}` in `{fqn}` has no importance"))?;
+                    let validator = match importance {
+                        2 | 3 => None,
+                        4 => Some(parts[3].split_whitespace().collect::<Vec<_>>().join(" ")),
+                        _ => anyhow::bail!("config types: `{name}` in `{fqn}` has an unknown `{method}` form"),
+                    };
+                    out.insert(name, KeyDef { ty, class: fqn.to_string(), validator });
                 },
                 // ConfigDef.withClientSslSupport() / withClientSaslSupport() call
                 // SslConfigs.addClientSslSupport(this) / SaslConfigs.addClientSaslSupport(this).
@@ -143,7 +163,7 @@ impl Reader {
         Ok(())
     }
 
-    fn support_in(&mut self, fqn: &str, method: &str, out: &mut BTreeMap<String, String>) -> Res<()> {
+    fn support_in(&mut self, fqn: &str, method: &str, out: &mut BTreeMap<String, KeyDef>) -> Res<()> {
         let text = self.load(fqn)?.text.clone();
         let marker = format!("static void {method}(");
         let at = text
@@ -320,7 +340,7 @@ fn first_args(args: &str, n: usize) -> Vec<&str> {
 }
 
 /// Every key of a client's `ConfigDef`, with its type.
-fn client_types(reader: &mut Reader, fqn: &str) -> Res<BTreeMap<String, String>> {
+fn client_types(reader: &mut Reader, fqn: &str) -> Res<BTreeMap<String, KeyDef>> {
     let text = reader.load(fqn)?.text.clone();
     let at = text
         .find("CONFIG = new ConfigDef()")
@@ -334,6 +354,208 @@ fn client_types(reader: &mut Reader, fqn: &str) -> Res<BTreeMap<String, String>>
     Ok(out)
 }
 
+/// What Java's `ConfigDef.parseValue` does with an explicit `null` for a key:
+/// it runs the key's validator on it (CLAUDE.md, Python Binding Conventions,
+/// Configuration).
+#[derive(Clone, Debug, PartialEq)]
+enum NullRule {
+    /// No validator, or one that accepts `null`: Java holds `null`.
+    Allowed,
+    /// `ConfigException(name, null, message)`.
+    Named { kind: &'static str, message: String },
+    /// `ConfigException(message)` (the one-argument form).
+    Plain { kind: &'static str, message: String },
+}
+
+/// The body of the first `{...}` block after `marker` in `text`.
+fn block_after<'a>(text: &'a str, marker: &str) -> Res<&'a str> {
+    let at = text
+        .find(marker)
+        .ok_or_else(|| anyhow::anyhow!("config types: no `{marker}`"))?;
+    let open = text[at..]
+        .find('{')
+        .map(|o| at + o)
+        .ok_or_else(|| anyhow::anyhow!("config types: no body after `{marker}`"))?;
+    let close = closing_brace(text, open + 1)?;
+    Ok(&text[open + 1..close])
+}
+
+/// The strings an `in(...)` argument list evaluates to: each argument a
+/// string, or an array of them (`Utils.enumOptions(X.class)`).
+fn valid_strings(consts: &mut config_consts::Reader, class: &str, args: &str) -> Res<Vec<String>> {
+    let mut out = Vec::new();
+    for a in first_args(args, usize::MAX) {
+        match consts.eval_src(class, a.trim())? {
+            config_consts::Value::Str(s) => out.push(s),
+            config_consts::Value::List(items) => {
+                for i in items {
+                    let config_consts::Value::Str(s) = i else {
+                        anyhow::bail!("config types: `in({args})` holds a non-string")
+                    };
+                    out.push(s);
+                }
+            },
+            v => anyhow::bail!("config types: `in({args})` holds {v:?}"),
+        }
+    }
+    Ok(out)
+}
+
+/// The argument list of `call(...)` when `src` is exactly that call.
+fn call_args<'a>(src: &'a str, call: &str) -> Option<&'a str> {
+    let rest = src.strip_prefix(call)?.trim_start().strip_prefix('(')?;
+    rest.strip_suffix(')')
+}
+
+/// The iteration order of a Java `HashSet` built by adding `values` in order
+/// (default capacity 16, doubled while the size passes three quarters of it):
+/// by bucket (`hash ^ (hash >>> 16)` masked by the table size, `hash` being
+/// `String.hashCode` over UTF-16), insertion order within a bucket. The same
+/// order as the core's `common::config::config_def::java_hash_set_order`.
+fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut distinct: Vec<String> = Vec::new();
+    for v in values {
+        if !distinct.contains(&v) {
+            distinct.push(v);
+        }
+    }
+    let mut capacity: usize = 16;
+    while distinct.len() * 4 > capacity * 3 {
+        capacity *= 2;
+    }
+    let bucket = |s: &String| {
+        let h = s
+            .encode_utf16()
+            .fold(0i32, |h, unit| h.wrapping_mul(31).wrapping_add(i32::from(unit)));
+        let spread = (h ^ ((h as u32) >> 16) as i32) as u32;
+        spread as usize & (capacity - 1)
+    };
+    distinct.sort_by_key(bucket);
+    distinct
+}
+
+/// The null rule of a key from its validator's source, read as Java's
+/// `ConfigDef` validators treat `null`. An unknown validator kind stops
+/// generation.
+fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str, def: &KeyDef) -> Res<NullRule> {
+    let Some(src) = def.validator.as_deref() else {
+        return Ok(NullRule::Allowed);
+    };
+    let src = src.trim();
+    let bare = src.replace("ConfigDef.", "").replace(" .", ".");
+    let bare = bare.as_str();
+    if bare == "null" {
+        return Ok(NullRule::Allowed);
+    }
+    // `Range.atLeast` / `Range.between` (also statically imported).
+    for call in ["atLeast", "between", "Range.atLeast", "Range.between"] {
+        if call_args(bare, call).is_some() {
+            return Ok(NullRule::Named { kind: "Range", message: "Value must be non-null".into() });
+        }
+    }
+    // `ValidString.in(...)` (statically imported as `in`).
+    for call in ["in", "ValidString.in"] {
+        if let Some(args) = call_args(bare, call) {
+            let strings = valid_strings(consts, &def.class, args)?;
+            return Ok(NullRule::Named {
+                kind: "ValidString",
+                message: format!("String must be one of: {}", strings.join(", ")),
+            });
+        }
+    }
+    if let Some(args) = call_args(bare, "CaseInsensitiveValidString.in") {
+        // Java collects the upper-cased strings with `Collectors.toSet()`, a
+        // `HashSet`, and joins them in its iteration order (`ConfigDef.java`
+        // `CaseInsensitiveValidString`), as the core's `java_hash_set_order` does.
+        let strings = java_hash_set_order(valid_strings(consts, &def.class, args)?.iter().map(|s| s.to_uppercase()));
+        return Ok(NullRule::Named {
+            kind: "CaseInsensitiveValidString",
+            message: format!("String must be one of (case insensitive): {}", strings.join(", ")),
+        });
+    }
+    if let Some(args) = call_args(bare, "ValidList.anyNonDuplicateValues") {
+        let flags = first_args(args, usize::MAX);
+        let null_allowed = match flags.get(1).map(|f| f.trim()) {
+            Some("true") => true,
+            Some("false") => false,
+            other => anyhow::bail!("config types: `{key}`: ValidList null flag {other:?}"),
+        };
+        return Ok(if null_allowed {
+            NullRule::Allowed
+        } else {
+            NullRule::Plain {
+                kind: "ValidList",
+                message: format!("Configuration '{key}' values must not be null."),
+            }
+        });
+    }
+    if call_args(bare, "ValidList.in").is_some() {
+        return Ok(NullRule::Plain {
+            kind: "ValidList",
+            message: format!("Configuration '{key}' values must not be null."),
+        });
+    }
+    if bare == "new NonEmptyString()" {
+        return Ok(NullRule::Allowed);
+    }
+    // `CompressionType.X.levelValidator()`: the constant's own validator, a
+    // `Range` or a lambda refusing `null` as `Range` does.
+    if let Some(rest) = bare.strip_suffix(".levelValidator()") {
+        if let Some((owner, constant)) = rest.rsplit_once('.') {
+            let fqn = reader.qualify(&def.class, owner)?;
+            let text = reader.load(&fqn)?.text.clone();
+            let body = block_after(&text, &format!("{constant}("))?;
+            let method = block_after(body, "levelValidator()")?;
+            let range = method.contains("between(") || method.contains("atLeast(");
+            let lambda = method.contains("if (value == null)")
+                && method.contains("throw new ConfigException(name, null, \"Value must be non-null\")");
+            if range || lambda {
+                return Ok(NullRule::Named { kind: "Range", message: "Value must be non-null".into() });
+            }
+        }
+        anyhow::bail!("config types: `{key}`: unknown level validator `{src}`")
+    }
+    // `new X.Validator()`: an enum's validator that parses the string in a
+    // `try` and throws `ConfigException(name, value, message)` from the `catch`;
+    // `null` reaches the `catch` when the parser rejects `null`.
+    if let Some(owner) = bare.strip_prefix("new ").and_then(|r| r.strip_suffix(".Validator()")) {
+        let fqn = reader.qualify(&def.class, owner)?;
+        let text = reader.load(&fqn)?.text.clone();
+        let validator = block_after(&text, "class Validator")?;
+        let ensure = block_after(validator, "ensureValid(String name, Object value)")?;
+        let stmts: Vec<&str> = ensure.split(';').map(str::trim).collect();
+        let local = stmts
+            .first()
+            .and_then(|s| s.strip_prefix("String "))
+            .and_then(|s| s.strip_suffix("= (String) value").or_else(|| s.split_once('=').map(|(l, _)| l)))
+            .map(str::trim)
+            .ok_or_else(|| anyhow::anyhow!("config types: `{fqn}.Validator` does not cast the value"))?;
+        let try_body = block_after(ensure, "try")?;
+        let parser = try_body.trim().split('(').next().unwrap_or_default().trim().to_string();
+        let catch = block_after(ensure, "catch (Exception e)")?;
+        let throw = catch
+            .trim()
+            .strip_prefix("throw new ConfigException(name, value,")
+            .and_then(|r| r.trim_end().strip_suffix(");"))
+            .ok_or_else(|| anyhow::anyhow!("config types: `{fqn}.Validator` throws an unknown form"))?;
+        // The parser must reject null with an explicit check.
+        let parser_body = block_after(&text, &format!(" {parser}("))?;
+        let first = parser_body.trim();
+        let rejects_null = first.starts_with("if (")
+            && first.split_once(')').is_some_and(|(cond, rest)| {
+                cond.trim_start_matches("if (").trim().ends_with("== null")
+                    && rest.trim_start().trim_start_matches('{').trim_start().starts_with("throw ")
+            });
+        if !rejects_null {
+            anyhow::bail!("config types: `{fqn}.{parser}` does not reject null");
+        }
+        // The message as Python builds it, `null` spelled `None` (Types).
+        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, "None"), ("name", key)])?;
+        return Ok(NullRule::Named { kind: "custom Validator", message });
+    }
+    anyhow::bail!("config types: `{key}` in `{}` has an unknown validator `{src}`", def.class)
+}
+
 /// The clients whose tables are generated: the Python table name and the Java config class.
 const CLIENTS: [(&str, &str); 3] = [
     ("PRODUCER", "org.apache.kafka.clients.producer.ProducerConfig"),
@@ -341,7 +563,9 @@ const CLIENTS: [(&str, &str); 3] = [
     ("ADMIN", "org.apache.kafka.clients.admin.AdminClientConfig"),
 ];
 
-fn render(tables: &[(&str, BTreeMap<String, String>)]) -> String {
+type Table = BTreeMap<String, (String, NullRule)>;
+
+fn render(tables: &[(&str, Table)]) -> String {
     let mut out = String::from(
         "# Copyright 2025 Confluent Inc.\n\
          #\n\
@@ -360,22 +584,48 @@ fn render(tables: &[(&str, BTreeMap<String, String>)]) -> String {
          # GENERATED by `cargo xtask generate-error-codes` from Java's ProducerConfig,\n\
          # ConsumerConfig and AdminClientConfig -- DO NOT EDIT.\n\
          \n\
-         \"\"\"The ``ConfigDef`` type of every producer, consumer and admin config key.\n\
+         \"\"\"The ``ConfigDef`` type of every producer, consumer and admin config key,\n\
+         and what its validator does with ``null``.\n\
          \n\
          Java's ``ProducerConfig`` / ``ConsumerConfig`` / ``AdminClientConfig`` define\n\
          these keys, with ``withClientSslSupport()`` / ``withClientSaslSupport()``;\n\
          ``_config`` checks a value's Python type against its key's type and passes\n\
          every other key to the core as given.\n\
+         \n\
+         ``<CLIENT>_NULL`` maps each key whose ``ConfigDef`` validator rejects an explicit\n\
+         ``null`` (``ConfigDef.parseValue`` runs the validator on it) to the\n\
+         ``ConfigException`` Java throws: ``(\"named\", message)`` for\n\
+         ``ConfigException(name, null, message)``, ``(\"plain\", message)`` for\n\
+         ``ConfigException(message)``. A key that is not there holds ``null`` in Java.\n\
          \"\"\"\n\
          \n\
          from __future__ import annotations\n\
          \n\
-         __all__ = [\"ADMIN\", \"CONSUMER\", \"PRODUCER\"]\n",
+         from typing import Literal\n\
+         \n\
+         __all__ = [\"ADMIN\", \"ADMIN_NULL\", \"CONSUMER\", \"CONSUMER_NULL\", \"PRODUCER\", \"PRODUCER_NULL\"]\n",
     );
     for (name, map) in tables {
         out.push_str(&format!("\n{name}: dict[str, str] = {{\n"));
-        for (key, ty) in map {
+        for (key, (ty, _)) in map {
             out.push_str(&format!("    \"{key}\": \"{ty}\",\n"));
+        }
+        out.push_str("}\n");
+    }
+    for (name, map) in tables {
+        out.push_str(&format!(
+            "\n{name}_NULL: dict[str, tuple[Literal[\"named\", \"plain\"], str]] = {{\n"
+        ));
+        for (key, (_, rule)) in map {
+            let (form, kind, message) = match rule {
+                NullRule::Allowed => continue,
+                NullRule::Named { kind, message } => ("named", kind, message),
+                NullRule::Plain { kind, message } => ("plain", kind, message),
+            };
+            out.push_str(&format!(
+                "    \"{key}\": (\"{form}\", {}),  # {kind}\n",
+                config_consts::py_str(message)
+            ));
         }
         out.push_str("}\n");
     }
@@ -385,9 +635,15 @@ fn render(tables: &[(&str, BTreeMap<String, String>)]) -> String {
 /// The generated file and its content.
 pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
+    let mut consts = config_consts::Reader::new(repo_root);
     let mut tables = Vec::with_capacity(CLIENTS.len());
     for (name, fqn) in CLIENTS {
-        tables.push((name, client_types(&mut reader, fqn)?));
+        let mut table = Table::new();
+        for (key, def) in client_types(&mut reader, fqn)? {
+            let rule = null_rule(&mut reader, &mut consts, &key, &def)?;
+            table.insert(key, (def.ty, rule));
+        }
+        tables.push((name, table));
     }
     Ok((repo_root.join(OUTPUT), render(&tables)))
 }
@@ -450,6 +706,24 @@ mod tests {
         ] {
             assert!(content.contains(line), "missing {line}");
         }
+    }
+
+    #[test]
+    fn test_reads_java_validators_null_rules() {
+        let (_, content) = generated_output(&repo_root()).unwrap();
+        for line in [
+            "    \"acks\": (\"named\", \"String must be one of: all, -1, 0, 1\"),  # ValidString",
+            "    \"linger.ms\": (\"named\", \"Value must be non-null\"),  # Range",
+            "    \"compression.gzip.level\": (\"named\", \"Value must be non-null\"),  # Range",
+            "    \"bootstrap.servers\": (\"plain\", \"Configuration 'bootstrap.servers' values must not be null.\"),  # ValidList",
+            "    \"security.protocol\": (\"named\", \"String must be one of (case insensitive): SASL_SSL, PLAINTEXT, SSL, SASL_PLAINTEXT\"),  # CaseInsensitiveValidString",
+        ] {
+            assert!(content.contains(line), "missing {line}");
+        }
+        // NonEmptyString and keys without a validator accept null.
+        let producer_null = content.split("\nPRODUCER_NULL:").nth(1).unwrap().split("\n}").next().unwrap();
+        assert!(!producer_null.contains("\"transactional.id\""));
+        assert!(!producer_null.contains("\"client.id\""));
     }
 
     #[test]

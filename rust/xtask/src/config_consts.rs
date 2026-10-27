@@ -298,6 +298,16 @@ impl Reader {
         Ok(None)
     }
 
+    /// Evaluate the `String` expression `src` in class `fqn` with string locals.
+    pub fn eval_src_with(&mut self, fqn: &str, src: &str, locals: &[(&str, &str)]) -> Res<String> {
+        let ast = parse(src)?;
+        let locals = locals.iter().map(|(k, v)| (k.to_string(), Value::Str(v.to_string()))).collect();
+        match self.eval(fqn, &ast, &locals)? {
+            Value::Str(s) => Ok(s),
+            v => anyhow::bail!("config constants: `{src}` is {v:?}, not a string"),
+        }
+    }
+
     /// Evaluate the Java expression `src` in class `fqn`.
     pub fn eval_src(&mut self, fqn: &str, src: &str) -> Res<Value> {
         let ast = parse(src)?;
