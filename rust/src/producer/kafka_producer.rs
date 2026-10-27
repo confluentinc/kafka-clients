@@ -9917,6 +9917,134 @@ mod tests {
         assert_eq!(0, metadata.offset());
     }
 
+    /// A broker with `connections.max.reauth.ms` set gives each SASL session a
+    /// lifetime and closes a connection whose session has expired when it next
+    /// receives a request other than a re-authentication. Java's client
+    /// re-authenticates the connection before then (KIP-368), so its requests
+    /// keep flowing over the same connection. This client used to ignore the
+    /// lifetime: the broker closed its connection every lifetime, and the
+    /// requests in flight failed and were retried.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sasl_producer_reauthenticates_before_its_session_expires() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "reauthentication-topic";
+        const SESSION_LIFETIME_MS: u64 = 500;
+        let broker = FakeBroker::start_acknowledging_produce("fake-cluster", TOPIC).await;
+        broker.set_sasl_session_lifetime_ms(SESSION_LIFETIME_MS as i64);
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            // Non-idempotent, so the Sender does not first wait on an
+            // InitProducerId the fake never answers.
+            ("enable.idempotence".to_string(), "false".to_string()),
+            // A record whose connection is closed under it fails instead of
+            // being retried, so a lost connection shows up as a failed send too.
+            ("retries".to_string(), "0".to_string()),
+            ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+            (
+                "sasl.jaas.config".to_string(),
+                "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password=\"p\";"
+                    .to_string(),
+            ),
+        ]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("constructs against the fake broker");
+
+        // One record at a time for four session lifetimes.
+        let deadline = std::time::Instant::now() + Duration::from_millis(4 * SESSION_LIFETIME_MS);
+        let mut sent = 0;
+        while std::time::Instant::now() < deadline {
+            producer
+                .send(ProducerRecord::new(TOPIC.to_string(), Some(format!("value-{sent}"))))
+                .await
+                .expect("metadata arrives from the fake broker")
+                .get_with_timeout(Duration::from_secs(10))
+                .await
+                .unwrap_or_else(|e| panic!("record {sent} must be acknowledged: {e:?}"));
+            sent += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        producer.close().await.expect("close");
+
+        assert_eq!(
+            0,
+            broker.expired_connections_killed(),
+            "the broker had to close a connection whose session expired; {sent} records sent"
+        );
+        // The bootstrap and the leader connection each authenticated once; the
+        // leader connection, used throughout, re-authenticated about once a
+        // lifetime.
+        let authentications = broker.sasl_authentications();
+        assert!(
+            authentications >= 2 + 3,
+            "{authentications} SASL authentications in four session lifetimes"
+        );
+    }
+
+    /// As [`a_sasl_producer_reauthenticates_before_its_session_expires`], with
+    /// up to five requests in flight on the leader's connection when its
+    /// session falls due, so responses to them arrive while it re-authenticates.
+    /// The authenticator sets each aside and the selector hands it to the
+    /// network client, at most one per channel per pass, as Java's does once
+    /// per `poll()`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sasl_producer_with_requests_in_flight_reauthenticates() {
+        use crate::producer::Producer;
+        use crate::test_fake_broker::FakeBroker;
+
+        const TOPIC: &str = "reauthentication-in-flight-topic";
+        const SESSION_LIFETIME_MS: u64 = 500;
+        let broker = FakeBroker::start_acknowledging_produce("fake-cluster", TOPIC).await;
+        broker.set_sasl_session_lifetime_ms(SESSION_LIFETIME_MS as i64);
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), broker.bootstrap()),
+            ("enable.idempotence".to_string(), "false".to_string()),
+            ("retries".to_string(), "0".to_string()),
+            ("linger.ms".to_string(), "0".to_string()),
+            ("batch.size".to_string(), "16".to_string()),
+            ("max.in.flight.requests.per.connection".to_string(), "5".to_string()),
+            ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+            ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+            (
+                "sasl.jaas.config".to_string(),
+                "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"u\" password=\"p\";"
+                    .to_string(),
+            ),
+        ]);
+        let config = ProducerConfig::new(&props).expect("valid config");
+        let producer = KafkaProducer::<String, String>::new(config, StringSerializer, StringSerializer)
+            .expect("constructs against the fake broker");
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(4 * SESSION_LIFETIME_MS);
+        let mut sent = 0;
+        while std::time::Instant::now() < deadline {
+            // A burst of one-record batches, each its own request.
+            let mut futures = Vec::new();
+            for _ in 0..20 {
+                futures.push(
+                    producer
+                        .send(ProducerRecord::new(TOPIC.to_string(), Some(format!("value-{sent}"))))
+                        .await
+                        .expect("metadata arrives from the fake broker"),
+                );
+                sent += 1;
+            }
+            for future in futures {
+                future
+                    .get_with_timeout(Duration::from_secs(10))
+                    .await
+                    .unwrap_or_else(|e| panic!("every record must be acknowledged: {e:?}"));
+            }
+        }
+        producer.close().await.expect("close");
+
+        assert_eq!(0, broker.expired_connections_killed(), "{sent} records sent");
+        assert!(broker.sasl_authentications() >= 2 + 3, "{}", broker.sasl_authentications());
+    }
+
     /// `buffer.memory=0` builds a producer, as Java's `atLeast(0)` validator
     /// and `BufferPool` constructor allow, and each send fails in
     /// `ensureValidRecordSize` (`KafkaProducer.java:1243-1253`) with Java's
