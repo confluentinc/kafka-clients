@@ -41,6 +41,7 @@ from confluent_kafka import (
     ExecutionError,
     IllegalArgumentError,
     IllegalStateError,
+    IndexOutOfBoundsError,
     NoSuchElementError,
     UnsupportedOperationError,
 )
@@ -149,6 +150,7 @@ _JDK: dict[str, tuple[type[BaseException], ...]] = {
     "java.util.concurrent.TimeoutException": (builtins.TimeoutError,),
     "java.util.concurrent.ExecutionException": (Exception,),
     "java.util.NoSuchElementException": (RuntimeError,),
+    "java.lang.IndexOutOfBoundsException": (IndexError, RuntimeError),
     "java.lang.UnsupportedOperationException": (NotImplementedError,),
 }
 
@@ -213,12 +215,13 @@ def test_every_python_error_class_is_a_java_class() -> None:
     defined = walk(KafkaError)
     for root in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
                  RootTimeoutError, NoSuchElementError, ExecutionError,
-                 UnsupportedOperationError):
+                 UnsupportedOperationError, IndexOutOfBoundsError):
         defined |= walk(root)
     assert defined == set(error_classes())
     expected = set(_bridge().values()) | {
         "org.apache.kafka.common.KafkaException",
         "java.util.NoSuchElementException",
+        "java.lang.IndexOutOfBoundsException",
         "java.util.concurrent.ExecutionException",
         "java.lang.UnsupportedOperationException",
         "org.apache.kafka.common.errors.RetriableException",
@@ -228,7 +231,7 @@ def test_every_python_error_class_is_a_java_class() -> None:
         "org.apache.kafka.clients.consumer.InvalidOffsetException",
     }
     assert set(_BY_JAVA) == expected
-    assert len(_BY_JAVA) == 174
+    assert len(_BY_JAVA) == 175
 
 
 def test_only_an_exception_suffix_becomes_error() -> None:
@@ -265,14 +268,16 @@ def test_each_error_lives_in_the_module_of_its_java_package() -> None:
 def test_the_root_exports_duration_and_the_java_built_ins_only() -> None:
     assert sorted(confluent_kafka.__all__) == sorted([
         "Duration", "ConcurrentModificationError", "ExecutionError", "IllegalArgumentError",
-        "IllegalStateError", "NoSuchElementError", "TimeoutError", "UnsupportedOperationError"])
+        "IllegalStateError", "IndexOutOfBoundsError", "NoSuchElementError", "TimeoutError",
+        "UnsupportedOperationError"])
     assert issubclass(RootTimeoutError, builtins.TimeoutError)
     # A Java built-in Python has a builtin for subclasses that builtin (CLAUDE.md, Types).
     assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert IndexOutOfBoundsError.__bases__ == (IndexError, RuntimeError)
     assert issubclass(UnsupportedOperationError, RuntimeError)
     assert not issubclass(UnsupportedOperationError, KafkaError)
     for cls in (IllegalStateError, IllegalArgumentError, ConcurrentModificationError,
-                NoSuchElementError, UnsupportedOperationError):
+                NoSuchElementError, UnsupportedOperationError, IndexOutOfBoundsError):
         assert issubclass(cls, RuntimeError)
         assert not issubclass(cls, KafkaError)
     # ExecutionException is checked: an Exception, not a RuntimeError.
@@ -334,6 +339,8 @@ def test_built_ins_the_core_does_not_model_have_no_id() -> None:
     # UnsupportedOperationError has the core's LOCAL_UNSUPPORTED_OPERATION id
     # (test_unsupported_operation_error_is_java_unsupported_operation_exception).
     assert not hasattr(NoSuchElementError, "_ffi_id")
+    assert not hasattr(IndexOutOfBoundsError, "_ffi_id")
+    assert to_ffi_id(IndexOutOfBoundsError(message="x")) == -1
     assert to_ffi_id(NoSuchElementError(message="x")) == -1
     assert not hasattr(ExecutionError, "_ffi_id")
     assert to_ffi_id(ExecutionError(cause=ValueError("x"))) == -1
@@ -1087,6 +1094,7 @@ def test_unsupported_operation_error_is_a_not_implemented_error() -> None:
     # does not provide; NotImplementedError subclasses RuntimeError, so Java's
     # RuntimeException chain is kept.
     assert UnsupportedOperationError.__bases__ == (NotImplementedError,)
+    assert IndexOutOfBoundsError.__bases__ == (IndexError, RuntimeError)
     assert issubclass(UnsupportedOperationError, RuntimeError)
     assert not issubclass(UnsupportedOperationError, KafkaError)
     for caught in (NotImplementedError, RuntimeError):
