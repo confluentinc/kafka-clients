@@ -18,14 +18,15 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Messages are written to the log, but to fewer in-sync replicas than
-    /// required.
+    /// Number of insync replicas for the partition is lower than min.insync.replicas This error is
+    /// raised when the low ISR size is discovered *after* the message was already appended to the
+    /// log. Producer retries will cause duplicates.
     ///
-    /// Corresponds to Java's `NotEnoughReplicasAfterAppendException`, error code `Errors::NotEnoughReplicasAfterAppend`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `NotEnoughReplicasAfterAppendException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::NotEnoughReplicasAfterAppend`. Java `extends` chain:
+    /// `NotEnoughReplicasAfterAppendException` -> `RetriableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException")]
     NotEnoughReplicasAfterAppendError,
     code: Errors::NotEnoughReplicasAfterAppend,

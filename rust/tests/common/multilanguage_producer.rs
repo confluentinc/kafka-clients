@@ -50,11 +50,12 @@ use confluent_kafka::common::errors::AuthorizationError;
 use confluent_kafka::common::errors::AuthorizerNotReadyError;
 use confluent_kafka::common::errors::BootstrapResolutionError;
 use confluent_kafka::common::errors::DisconnectError;
+use confluent_kafka::common::errors::GroupAuthorizationError;
 use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::{KafkaMetric, Metrics, gauge};
+use confluent_kafka::common::metrics::{KafkaMetric, Metrics, MetricsView, gauge};
 use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
@@ -298,12 +299,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     ///
     /// Each entry is rebuilt locally as a `gauge::new` gauge returning the value the
     /// backend measured while serving the RPC. That is snapshot, not live,
-    /// semantics — which is exactly what `Producer::metrics` documents.
-    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+    /// semantics: a live cross-process view would need an RPC per read.
+    fn metrics(&self) -> MetricsView {
         let mut client = self.client.clone();
         let id = self.producer_id;
         let backend = self.backend;
-        self.block(async move {
+        MetricsView::from(self.block(async move {
             let resp = client
                 .metrics(MetricsRequest { producer_id: id })
                 .await
@@ -319,7 +320,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
                 },
                 None => HashMap::new(),
             }
-        })
+        }))
     }
 
     async fn close(&self) -> Result<(), Error> {
@@ -452,8 +453,9 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
             Error::topic_authorization_message(p.unauthorized_topics.into_iter().collect(), p.message)
         },
         INVALID_TOPIC_ERROR => Error::invalid_topics_message(p.invalid_topics.into_iter().collect(), p.message),
-        GROUP_AUTHORIZATION_FAILED => {
-            Error::group_authorization_with_message(p.group_id.unwrap_or_default(), p.message)
+        GROUP_AUTHORIZATION_FAILED => match p.group_id {
+            Some(group_id) => Error::group_authorization_with_message(group_id, p.message),
+            None => Error::GroupAuthorization(GroupAuthorizationError::new(p.message)),
         },
 
         // Classes only the client raises, so `Errors` has no code for them and

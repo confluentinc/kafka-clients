@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::create_partitions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsResult`.
 
 use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 
 /// The result of `Admin::create_partitions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreatePartitionsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult")]
 pub struct CreatePartitionsResult {
@@ -36,14 +32,14 @@ impl CreatePartitionsResult {
         Self { values }
     }
 
-    /// Return a map from topic names to futures, which can be used to check the
+    /// Returns a map from topic names to futures, which can be used to check the
     /// status of individual partition creations.
     #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.values
     }
 
-    /// Return a future which succeeds if all the partition creations succeed.
+    /// Returns a future which succeeds if all the partition creations succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.CreatePartitionsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.values.values().cloned().collect())

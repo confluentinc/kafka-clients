@@ -18,13 +18,15 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The message format version on the broker does not support the request.
+    /// The message format version does not support the requested function. For example, if
+    /// idempotence is requested and the topic is using a message format older than 0.11.0.0, then
+    /// this error will be returned.
     ///
-    /// Corresponds to Java's `UnsupportedForMessageFormatException`, error code `Errors::UnsupportedForMessageFormat`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnsupportedForMessageFormatException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnsupportedForMessageFormat`. Java `extends` chain:
+    /// `UnsupportedForMessageFormatException` -> `InvalidConfigurationException` -> `ApiException`
+    /// -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedForMessageFormatException")]
     UnsupportedForMessageFormatError,
     code: Errors::UnsupportedForMessageFormat,

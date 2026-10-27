@@ -43,16 +43,16 @@ pub struct RequestHeader {
 }
 
 /// The parameters of Java's
-/// `RequestHeader(ApiKeys, short, String, int)` (`RequestHeader.java:38`).
+/// `RequestHeader(ApiKeys, short, String, int)`.
 ///
-/// Java's two `RequestHeader` constructors (`:38`, `:47`) share no parameter
-/// name, so all four of `:38`'s reach its derived name. CLAUDE.md §2 caps that
+/// Java's two `RequestHeader#RequestHeader` constructors share no parameter
+/// name, so all four of this one's reach its derived name. CLAUDE.md §2 caps that
 /// at three and makes this struct the method's *only* parameter, so all four
 /// live here. This struct has no Java counterpart: it exists solely to satisfy
 /// that naming rule (DoD #7).
 ///
 /// It deliberately has **no** `Default`. Java's other `RequestHeader` overload
-/// (`:47`) takes an already-built `RequestHeaderData`, so it supplies none of
+/// (`RequestHeader(RequestHeaderData, short)`) takes an already-built `RequestHeaderData`, so it supplies none of
 /// these four on the caller's behalf — none has a Java-derived default, and a
 /// synthesised `correlationId` of `0` would silently produce a header that
 /// cannot be matched to its response. Construct it with
@@ -160,8 +160,7 @@ impl<'a> RequestHeaderOptionsBuilder<'a> {
 impl RequestHeader {
     /// Creates a new `RequestHeader` with the given API key, version, client id, and correlation id.
     ///
-    /// Corresponds to Java's `RequestHeader(ApiKeys, short, String, int)`
-    /// (`RequestHeader.java:38`).
+    /// Corresponds to Java's `RequestHeader(ApiKeys, short, String, int)`.
     ///
     /// # Errors
     ///
@@ -180,8 +179,7 @@ impl RequestHeader {
 
     /// Creates a new `RequestHeader` from existing data and a header version.
     ///
-    /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`
-    /// (`RequestHeader.java:47`).
+    /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`.
     #[doc(alias = "org.apache.kafka.common.requests.RequestHeader#RequestHeader")]
     pub fn with_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
@@ -560,10 +558,10 @@ mod tests {
         assert_eq!(size_calculated, size_from_cache);
     }
 
-    /// Java's `RequestHeader.toString()` interpolates `apiKey()` — an `ApiKeys`
+    /// Java's `RequestHeader#toString` interpolates `apiKey()` — an `ApiKeys`
     /// enum value that overrides no `toString()` — so `apiKey=` carries the enum
     /// **constant**, not the specification spelling held by the public `name`
-    /// field (`RequestHeader.java:163-170`). Pin the whole string, since the
+    /// field. Pin the whole string, since the
     /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {

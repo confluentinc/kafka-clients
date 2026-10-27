@@ -125,7 +125,7 @@ impl RequestManagers {
     /// Constructs a `RequestManagers` container with every in-scope
     /// slot.
     ///
-    /// Java's constructor (`RequestManagers.java:67`) takes
+    /// Java's consumer constructor of `RequestManagers` takes
     /// `OffsetsRequestManager` and `FetchRequestManager` as
     /// non-`Optional` parameters; Rust accepts them as `Option<_>` to
     /// keep test construction symmetric with the other slots. The
@@ -191,7 +191,7 @@ impl RequestManagers {
 
     /// Returns the managers in deterministic registration order
     /// (`consumer-threading.md` §10), matching Java's
-    /// `RequestManagers.java:91-101` order:
+    /// `RequestManagers#entries` order:
     ///
     /// `(coordinator skipped) → (commit skipped) → heartbeat →
     /// (membership skipped) → offsets → topic_metadata → (fetch skipped)`.
@@ -241,7 +241,7 @@ impl RequestManagers {
             closed: _,
         } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
-        // Order matches Java (`RequestManagers.java:91-101`) minus the
+        // Order matches Java (the `RequestManagers` constructor) minus the
         // three Arc-shared slots and the fetch slot: (coordinator skipped)
         // → (commit skipped) → heartbeat → (membership skipped) → offsets
         // → topic_metadata → (fetch, polled by the bg task with the

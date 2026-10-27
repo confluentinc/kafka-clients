@@ -36,7 +36,7 @@ pub struct kafka_common_resource_ResourcePatternFilter_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_resource_ResourcePatternFilter_t`] points at: the
+/// What a `kafka_common_resource_ResourcePatternFilter_t` points at: the
 /// filter plus the NUL-terminated name its getter borrows out (`None` for
 /// Java's null).
 pub(crate) struct ResourcePatternFilterInner {
@@ -86,7 +86,7 @@ pub(crate) unsafe fn resource_pattern_filter_ref<'a>(
 }
 
 /// Hands `filter` to C as an owned handle, freed with
-/// [`kafka_common_resource_ResourcePatternFilter_destroy`].
+/// `kafka_common_resource_ResourcePatternFilter_destroy`.
 pub(crate) fn box_resource_pattern_filter(
     filter: ResourcePatternFilter,
 ) -> *mut kafka_common_resource_ResourcePatternFilter_t {
@@ -94,14 +94,25 @@ pub(crate) fn box_resource_pattern_filter(
         as *mut kafka_common_resource_ResourcePatternFilter_t
 }
 
-/// `new ResourcePatternFilter(ResourceType resourceType, String name, PatternType patternType)`:
-/// a null `name` matches any name. Owned, freed with
-/// [`kafka_common_resource_ResourcePatternFilter_destroy`].
+/// Create a filter using the supplied parameters.
+///
+/// # Parameters
+///
+/// - `resource_type` - non-`NULL` resource type. If `ANY`, the filter will ignore the resource type
+///   of the pattern. If any other resource type, the filter will match only patterns with the same
+///   type.
+/// - `name` - resource name or `NULL`. If `NULL`, the filter will ignore the name of resources. If
+///   `WILDCARD_RESOURCE` (`*`), will match only wildcard patterns.
+/// - `pattern_type` - non-`NULL` resource pattern type. If `ANY`, the filter will match patterns
+///   regardless of pattern type. If `MATCH`, the filter will match patterns that would match the
+///   supplied `name`, including a matching prefixed and wildcards patterns. If any other resource
+///   pattern type, the filter will match only patterns with the same type.
 ///
 /// # Safety
 ///
 /// `resource_type` and `pattern_type` must be singletons of their enums and
-/// `name` null or a valid NUL-terminated string.
+/// `name` `NULL` or a valid NUL-terminated string, copied. The returned filter is
+/// owned, freed with `kafka_common_resource_ResourcePatternFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
@@ -125,8 +136,16 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_new(
     ))
 }
 
-/// `ResourcePatternFilter.ANY`: a filter matching every pattern. Owned, as
-/// every handle of this type.
+/// Matches any resource pattern.
+///
+/// # Returns
+///
+/// The filter.
+///
+/// # Safety
+///
+/// The returned filter is owned, freed with
+/// `kafka_common_resource_ResourcePatternFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_ResourcePatternFilter_any() -> *mut kafka_common_resource_ResourcePatternFilter_t
@@ -134,8 +153,11 @@ pub extern "C" fn kafka_common_resource_ResourcePatternFilter_any() -> *mut kafk
     box_resource_pattern_filter(ResourcePatternFilter::any())
 }
 
-/// `isUnknown()`: whether the resource type or the pattern type is
-/// `UNKNOWN`.
+/// `isUnknown()`.
+///
+/// # Returns
+///
+/// 1 if this filter has any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -150,11 +172,16 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_is_unknown(
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.is_unknown())
 }
 
-/// `resourceType()`: the borrowed `ResourceType` singleton.
+/// `resourceType()`.
+///
+/// # Returns
+///
+/// the specific resource type this pattern matches
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_type(
@@ -166,11 +193,16 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_resource_ty
     resource_type_singleton(unsafe { resource_pattern_filter_ref(self_) }.resource_type())
 }
 
-/// `name()`: borrowed from the handle, or null for Java's null.
+/// `name()`.
+///
+/// # Returns
+///
+/// the resource name.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+/// The returned string is `NULL` (Java's `null`) or borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
@@ -182,11 +214,16 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_name(
     unsafe { inner_ref(self_) }.name_c.as_ref().map_or(ptr::null(), |s| s.as_ptr())
 }
 
-/// `patternType()`: the borrowed `PatternType` singleton.
+/// `patternType()`.
+///
+/// # Returns
+///
+/// the resource pattern type.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_pattern_type(
@@ -198,14 +235,20 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_pattern_typ
     pattern_type_singleton(unsafe { resource_pattern_filter_ref(self_) }.pattern_type())
 }
 
-/// `matches(ResourcePattern pattern)`: whether the filter matches
-/// `pattern`, with Java's `MATCH` semantics for prefixed and wildcard
-/// patterns.
+/// `matches(ResourcePattern)`.
+///
+/// # Parameters
+///
+/// - `pattern` - The pattern to match.
+///
+/// # Returns
+///
+/// 1 if this filter matches the given pattern, else 0.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid resource-pattern-filter handle and `pattern` a
-/// valid resource-pattern handle.
+/// `self_` must be a valid resource-pattern-filter handle. `pattern` must be a valid
+/// resource-pattern handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
@@ -218,7 +261,12 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches(
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.matches(unsafe { resource_pattern_ref(pattern) }))
 }
 
-/// `matchesAtMostOne()`: whether the filter can match at most one pattern.
+/// `matchesAtMostOne()`.
+///
+/// # Returns
+///
+/// 1 if this filter could only match one pattern, else 0. In other words, if there are no ANY or
+/// UNKNOWN fields.
 ///
 /// # Safety
 ///
@@ -233,13 +281,16 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_matches_at_
     i8::from(unsafe { resource_pattern_filter_ref(self_) }.matches_at_most_one())
 }
 
-/// `findIndefiniteField()`: a description of the first field that keeps
-/// the filter from matching at most one pattern, as an owned string freed
-/// with `kafka_string_destroy`, or null when there is none.
+/// `findIndefiniteField()`.
+///
+/// # Returns
+///
+/// a string describing any ANY or UNKNOWN field, or `NULL` if there is no such field.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefinite_field(
@@ -253,11 +304,12 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_find_indefi
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource-pattern-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_ResourcePatternFilter_to_string(

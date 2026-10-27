@@ -13,17 +13,11 @@
 // limitations under the License.
 
 //! The result of `Admin::create_delegation_token`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.CreateDelegationTokenResult`.
 
 use crate::common::KafkaFuture;
 use crate::common::security::token::delegation::DelegationToken;
 
 /// The result of the `Admin::create_delegation_token` call.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.CreateDelegationTokenResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult")]
 pub struct CreateDelegationTokenResult {
@@ -38,8 +32,6 @@ impl CreateDelegationTokenResult {
     }
 
     /// Returns a future which yields a delegation token.
-    ///
-    /// Mirrors `CreateDelegationTokenResult.delegationToken()`.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateDelegationTokenResult#delegationToken")]
     pub fn delegation_token(&self) -> &KafkaFuture<DelegationToken> {
         &self.delegation_token

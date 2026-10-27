@@ -17,17 +17,12 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// Any exception the broker can report through the protocol.
+    /// Any API error that is part of the public protocol and should be a subclass of this class and
+    /// be part of this package.
     ///
-    /// The concrete base of the API family: Java throws it directly when no more
-    /// specific subclass applies. Being an intermediate class it is also the
-    /// subject of [`is_api_error`](crate::common::Error::is_api_error).
+    /// # Translation notes
     ///
-    /// Corresponds to Java's `ApiException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
-    ///
-    /// Java `extends` chain:
-    ///    `ApiException` -> `KafkaException`
+    /// No protocol code. Java `extends` chain: `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ApiException")]
     ApiError,
     extends: [

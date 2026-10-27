@@ -404,7 +404,7 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncConsumerFetchInvalidOffset` (line 92).
+/// Translates Java's `testAsyncConsumerFetchInvalidOffset`.
 ///
 /// With `auto.offset.reset=none`, a fresh `poll()` after `assign(...)`
 /// surfaces `NoOffsetForPartition`; after `seek(tp, outOfRangePos)`,
@@ -437,14 +437,16 @@ async fn test_async_consumer_fetch_invalid_offset() {
 
     // poll should fail because there is no offset reset strategy set.
     // we fail only when resetting positions after coordinator is known,
-    // so using a long timeout — mirrors Java line 109.
+    // so using a long timeout — mirrors the `poll(Duration.ofMillis(15000))` of
+    // org.apache.kafka.clients.consumer.PlaintextConsumerFetchTest#testFetchInvalidOffset.
     let err = consumer
         .poll(Duration::from_millis(15_000))
         .await
         .expect_err("poll should fail with NoOffsetForPartition");
     // Java: `assertThrows(NoOffsetForPartitionException.class, ...)`. The
-    // exception is raised by `SubscriptionState.resetInitializingPositions`
-    // (SubscriptionState.java:882) via the `Collection` constructor, whose
+    // exception is raised by
+    // `org.apache.kafka.clients.consumer.internals.SubscriptionState#resetInitializingPositions(Predicate)`
+    // via the `Collection` constructor, whose
     // message is "Undefined offset with no reset policy for partitions: " +
     // the set's `toString()`.
     match &err {
@@ -468,7 +470,8 @@ async fn test_async_consumer_fetch_invalid_offset() {
         .poll(Duration::from_millis(20_000))
         .await
         .expect_err("poll should fail with OffsetOutOfRange");
-    // Java lines 114-118: `OffsetOutOfRangeException` whose
+    // org.apache.kafka.clients.consumer.PlaintextConsumerFetchTest#testFetchInvalidOffset
+    // asserts an `OffsetOutOfRangeException` whose
     // `offsetOutOfRangePartitions()` is exactly `{tp: outOfRangePos}`.
     match &err {
         Error::ConsumerOffsetOutOfRange(e) => {
@@ -476,7 +479,8 @@ async fn test_async_consumer_fetch_invalid_offset() {
                 e.offset_out_of_range_partitions(),
                 &HashMap::from([(tp.clone(), out_of_range_pos)])
             );
-            // Message built at FetchCollector.java:346:
+            // Message built in
+            // org.apache.kafka.clients.consumer.internals.FetchCollector#handleInitializeErrors:
             // "Fetch position " + position + " is out of range for partition " + tp.
             // The middle of `FetchPosition.toString()` carries the broker's
             // leader id and epoch, which the test cannot know, so only the
@@ -494,8 +498,8 @@ async fn test_async_consumer_fetch_invalid_offset() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigEarliest`
-/// (line 128). After consuming all records and seeking past the end,
+/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigEarliest`.
+/// After consuming all records and seeking past the end,
 /// the next `poll()` resets to position 0 (`auto.offset.reset=earliest`)
 /// and reads from offset 0 again.
 #[tokio::test(flavor = "multi_thread")]
@@ -532,15 +536,16 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
         .await
         .expect("seek should succeed");
     // assert that poll resets to the beginning position — only one
-    // record needed to prove the reset (Java line 148).
+    // record needed to prove the reset (the last `consumeAndVerifyRecords` of
+    // org.apache.kafka.clients.consumer.PlaintextConsumerFetchTest#testFetchOutOfRangeOffsetResetConfigEarliest).
     consume_and_verify_records_bytes(&mut consumer, &tp, 1, 0, 0, starting_timestamp, -1).await;
 
     consumer.close().await.expect("consumer close should succeed");
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigLatest`
-/// (line 158). After consuming half the records and seeking past the
+/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigLatest`.
+/// After consuming half the records and seeking past the
 /// end, the next `poll()` empties to the latest position (no records
 /// available); after producing 10 more records, the next `poll()`
 /// surfaces the first newly-produced record at offset
@@ -629,8 +634,8 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigByDuration`
-/// (line 198). Exercises the `by_duration:PT1H` reset strategy in two
+/// `testAsyncConsumerFetchOutOfRangeOffsetResetConfigByDuration`.
+/// Exercises the `by_duration:PT1H` reset strategy in two
 /// scenarios:
 ///
 /// 1. All records produced within the last hour: a poll past the end
@@ -741,7 +746,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchRecordLargerThanFetchMaxBytes` (line 279).
+/// `testAsyncConsumerFetchRecordLargerThanFetchMaxBytes`.
 /// A single record larger than `fetch.max.bytes` should still be
 /// fetched (KIP-74 guarantee).
 #[tokio::test(flavor = "multi_thread")]
@@ -756,8 +761,8 @@ async fn test_async_consumer_fetch_record_larger_than_fetch_max_bytes() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchRecordLargerThanMaxPartitionFetchBytes`
-/// (line 297). A single record larger than `max.partition.fetch.bytes`
+/// `testAsyncConsumerFetchRecordLargerThanMaxPartitionFetchBytes`.
+/// A single record larger than `max.partition.fetch.bytes`
 /// should still be fetched (KIP-74 guarantee).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes() {
@@ -770,8 +775,8 @@ async fn test_async_consumer_fetch_record_larger_than_max_partition_fetch_bytes(
     .await;
 }
 
-/// Translates Java's `checkLargeRecord(config, producerRecordSize)`
-/// (line 309). Produces one record of `producer_record_size` bytes,
+/// Translates Java's `checkLargeRecord(config, producerRecordSize)`.
+/// Produces one record of `producer_record_size` bytes,
 /// then consumes 1 record and asserts key/value/topic/partition/offset.
 async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record_size: usize, group_base_name: &str) {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -822,8 +827,8 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchHonoursFetchSizeIfLargeRecordNotFirst`
-/// (line 341). When a small record precedes a large one in the log,
+/// `testAsyncConsumerFetchHonoursFetchSizeIfLargeRecordNotFirst`.
+/// When a small record precedes a large one in the log,
 /// the consumer only returns the small one on the first poll —
 /// honoring `fetch.max.bytes`.
 #[tokio::test(flavor = "multi_thread")]
@@ -838,8 +843,8 @@ async fn test_async_consumer_fetch_honours_fetch_size_if_large_record_not_first(
 }
 
 /// Translates Java's
-/// `testAsyncConsumerFetchHonoursMaxPartitionFetchBytesIfLargeRecordNotFirst`
-/// (line 359). Same as above but for `max.partition.fetch.bytes`.
+/// `testAsyncConsumerFetchHonoursMaxPartitionFetchBytesIfLargeRecordNotFirst`.
+/// Same as above but for `max.partition.fetch.bytes`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_record_not_first() {
     let max_fetch_bytes = 10 * 1024;
@@ -853,7 +858,7 @@ async fn test_async_consumer_fetch_honours_max_partition_fetch_bytes_if_large_re
 
 /// Translates Java's
 /// `checkFetchHonoursSizeIfLargeRecordNotFirst(config,
-/// largeProducerRecordSize)` (line 371).
+/// largeProducerRecordSize)`.
 async fn check_fetch_honours_size_if_large_record_not_first(
     consumer_overrides: &[(&str, &str)],
     large_producer_record_size: usize,
@@ -926,7 +931,7 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 }
 
 /// Translates Java's
-/// `testAsyncConsumerLowMaxFetchSizeForRequestAndPartition` (line 414).
+/// `testAsyncConsumerLowMaxFetchSizeForRequestAndPartition`.
 /// With very small `fetch.max.bytes` (500) and very small
 /// `max.partition.fetch.bytes` (100), and 90 partitions to fetch from
 /// (3 topics × 30 partitions), the consumer must still eventually
@@ -937,9 +942,9 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let group_id = ctx.group_id("g_low_max_fetch_size");
 
-    // Three distinct topics, each with 30 partitions. Java:
-    // `cluster.createTopic(topicName, partitionCount, (short) BROKER_COUNT)`
-    // (`PlaintextConsumerFetchTest.java:441`).
+    // Three distinct topics, each with 30 partitions. Java's
+    // org.apache.kafka.clients.consumer.PlaintextConsumerFetchTest#testLowMaxFetchSizeForRequestAndPartition:
+    // `cluster.createTopic(topicName, partitionCount, (short) BROKER_COUNT)`.
     let topic1 = ctx.topic("topic1");
     let topic2 = ctx.topic("topic2");
     let topic3 = ctx.topic("topic3");
@@ -1059,12 +1064,11 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
-/// Java `PlaintextConsumerFetchTest.BROKER_COUNT` (`PlaintextConsumerFetchTest.java:71`).
+/// Java `PlaintextConsumerFetchTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;
 
 /// Translates `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`,
-/// as the suite's `@BeforeEach` does for `topic`
-/// (`PlaintextConsumerFetchTest.java:81-84`).
+/// as the suite's `@BeforeEach` (`PlaintextConsumerFetchTest#setup`) does for `topic`.
 ///
 /// Creates the topic through the admin client and then waits until every
 /// partition leader accepts leader-only requests, before the test produces or

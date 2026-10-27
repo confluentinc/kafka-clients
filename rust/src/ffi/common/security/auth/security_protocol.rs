@@ -32,7 +32,7 @@ pub struct kafka_common_security_auth_SecurityProtocol_t {
     _private: [u8; 0],
 }
 
-/// The value behind a [`kafka_common_security_auth_SecurityProtocol_t`], for a
+/// The value behind a `kafka_common_security_auth_SecurityProtocol_t`, for a
 /// `switch`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -95,7 +95,11 @@ fn optional_singleton(value: Option<SecurityProtocol>) -> *const kafka_common_se
     value.map_or(ptr::null(), singleton)
 }
 
-/// `SecurityProtocol.PLAINTEXT`: un-authenticated, non-encrypted channel.
+/// Un-authenticated, non-encrypted channel.
+///
+/// # Returns
+///
+/// `SecurityProtocol.PLAINTEXT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_plaintext()
@@ -103,7 +107,11 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_plaintext()
     singleton(SecurityProtocol::Plaintext)
 }
 
-/// `SecurityProtocol.SSL`: SSL channel.
+/// SSL channel.
+///
+/// # Returns
+///
+/// `SecurityProtocol.SSL`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_ssl()
@@ -111,7 +119,11 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_ssl()
     singleton(SecurityProtocol::Ssl)
 }
 
-/// `SecurityProtocol.SASL_PLAINTEXT`: SASL authenticated, non-encrypted channel.
+/// SASL authenticated, non-encrypted channel.
+///
+/// # Returns
+///
+/// `SecurityProtocol.SASL_PLAINTEXT`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_sasl_plaintext()
@@ -119,7 +131,11 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_sasl_plaintext()
     singleton(SecurityProtocol::SaslPlaintext)
 }
 
-/// `SecurityProtocol.SASL_SSL`: SASL authenticated, SSL channel.
+/// SASL authenticated, SSL channel.
+///
+/// # Returns
+///
+/// `SecurityProtocol.SASL_SSL`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_sasl_ssl()
@@ -127,7 +143,7 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_sasl_ssl()
     singleton(SecurityProtocol::SaslSsl)
 }
 
-/// The C enumerator of the value behind `self_`.
+/// Returns the C enumerator of the value behind `self_`.
 ///
 /// A caught Rust panic returns `kafka_common_security_auth_SecurityProtocol_PLAINTEXT`, the first
 /// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
@@ -146,7 +162,12 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `id`: the permanent and immutable id of the protocol, used on the wire.
+/// The permanent and immutable id of a security protocol -- this can't change, and must match
+/// kafka.cluster.SecurityProtocol
+///
+/// # Returns
+///
+/// The protocol's id.
 ///
 /// # Safety
 ///
@@ -161,12 +182,15 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_id(
     unsafe { value_of(self_) }.id()
 }
 
-/// `name`: the enum constant's name, e.g. `SASL_SSL`; a static string, never
-/// freed.
+/// Name of the security protocol. This may be used by client configuration.
+///
+/// # Returns
+///
+/// The protocol's name.
 ///
 /// # Safety
 ///
-/// `self_` must be one of the singletons.
+/// `self_` must be one of the singletons. The returned string is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_name(
@@ -178,7 +202,15 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_name(
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `forId(short id)`: the singleton with that id, or null for an unknown id.
+/// Returns the protocol with the given id.
+///
+/// # Parameters
+///
+/// - `id` - the protocol's id
+///
+/// # Returns
+///
+/// A static singleton never freed, or `NULL` for an unknown id.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_for_id(
@@ -187,12 +219,19 @@ pub extern "C" fn kafka_common_security_auth_SecurityProtocol_for_id(
     optional_singleton(SecurityProtocol::for_id(id))
 }
 
-/// `forName(String name)`: the singleton with that name, compared
-/// case-insensitively, or null for an unknown name.
+/// Case insensitive lookup by protocol name
+///
+/// # Parameters
+///
+/// - `name` - the protocol name
+///
+/// # Returns
+///
+/// The protocol, or `NULL` for an unknown name.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string.
+/// `name` must be a valid NUL-terminated string. The returned singleton is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_for_name(
@@ -204,20 +243,23 @@ pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_for_name(
     optional_singleton(SecurityProtocol::for_name(&unsafe { c_str_to_string(name) }))
 }
 
-/// `names()`: an owned list of owned NUL-terminated names, in id order.
-/// Freed with `kafka_List_destroy`, which also frees the strings.
+/// Returns the names of all security protocols, in id order.
+///
+/// # Safety
+///
+/// The returned list is owned, freed with `kafka_List_destroy`, which also frees the strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_SecurityProtocol_names() -> *mut kafka_List_t {
     box_string_list(SecurityProtocol::names())
 }
 
-/// `toString()`, the same text as `name`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the same text as `kafka_common_security_auth_SecurityProtocol_name`.
 ///
 /// # Safety
 ///
-/// `self_` must be one of the singletons.
+/// `self_` must be one of the singletons. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_SecurityProtocol_to_string(

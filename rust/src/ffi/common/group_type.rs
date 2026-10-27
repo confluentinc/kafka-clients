@@ -42,7 +42,7 @@ pub enum kafka_common_GroupType_e {
     kafka_common_GroupType_STREAMS,
 }
 
-/// One static instance per value, indexed by [`kafka_common_GroupType_e`].
+/// One static instance per value, indexed by `kafka_common_GroupType_e`.
 static VARIANTS: [GroupType; 5] = [
     GroupType::Unknown,
     GroupType::Consumer,
@@ -83,42 +83,42 @@ pub(crate) unsafe fn value_of(group_type: *const kafka_common_GroupType_t) -> Gr
     unsafe { *(group_type as *const GroupType) }
 }
 
-/// `GroupType.UNKNOWN`.
+/// Returns `GroupType.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_unknown() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Unknown)
 }
 
-/// `GroupType.CONSUMER`.
+/// Returns `GroupType.CONSUMER`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_consumer() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Consumer)
 }
 
-/// `GroupType.CLASSIC`.
+/// Returns `GroupType.CLASSIC`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_classic() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Classic)
 }
 
-/// `GroupType.SHARE`.
+/// Returns `GroupType.SHARE`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_share() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Share)
 }
 
-/// `GroupType.STREAMS`.
+/// Returns `GroupType.STREAMS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupType_streams() -> *const kafka_common_GroupType_t {
     singleton(GroupType::Streams)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_GroupType_UNKNOWN`.
 ///
@@ -135,11 +135,12 @@ pub unsafe extern "C" fn kafka_common_GroupType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `name()`: a static string, never freed.
+/// Returns the type's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_GroupType_t) -> *const c_char {
@@ -149,12 +150,19 @@ pub unsafe extern "C" fn kafka_common_GroupType_name(self_: *const kafka_common_
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `GroupType.parse(String name)`: case-insensitive, `UNKNOWN` for an
-/// unrecognised name, as in Java.
+/// Parse a string into a consumer group type, in a case-insensitive manner.
+///
+/// # Parameters
+///
+/// - `name` - the type's name
+///
+/// # Returns
+///
+/// The type, or `UNKNOWN` for an unrecognised name.
 ///
 /// # Safety
 ///
-/// `name` must be a valid NUL-terminated string.
+/// `name` must be a valid NUL-terminated string. The returned singleton is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *const kafka_common_GroupType_t {
@@ -164,11 +172,12 @@ pub unsafe extern "C" fn kafka_common_GroupType_parse(name: *const c_char) -> *c
     singleton(GroupType::parse(&unsafe { c_str_to_string(name) }))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the type's name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupType_to_string(self_: *const kafka_common_GroupType_t) -> *mut c_char {

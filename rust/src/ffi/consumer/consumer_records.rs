@@ -119,25 +119,44 @@ unsafe fn inner_ref<'a>(records: *const kafka_consumer_ConsumerRecords_t) -> &'a
     unsafe { &*(records as *const ConsumerRecordsInner) }
 }
 
-/// `ConsumerRecords.empty()`: an owned handle with no records.
+/// `ConsumerRecords.empty()`: a handle with no records.
+///
+/// # Returns
+///
+/// An empty ConsumerRecords
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_consumer_ConsumerRecords_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRecords_empty() -> *mut kafka_consumer_ConsumerRecords_t {
     box_consumer_records(ConsumerRecords::empty(), false, false)
 }
 
-/// `new ConsumerRecords(Map<TopicPartition, List<ConsumerRecord<K, V>>> records,
-/// Map<TopicPartition, OffsetAndMetadata> nextOffsets)`: `records` maps
-/// `kafka_common_TopicPartition_t *` to `kafka_List_t *` of
-/// `kafka_consumer_ConsumerRecord_t *`; both maps and everything in them are
-/// copied during the call and stay the caller's. The copied records never
-/// own their keys or values (see the module docs).
+/// Constructs a new ConsumerRecords with the given records and next offsets.
+///
+/// # Parameters
+///
+/// - `records` - The records for each partition: `kafka_common_TopicPartition_t *` to
+///   `kafka_List_t *` of `kafka_consumer_ConsumerRecord_t *`
+/// - `next_offsets` - The next offset and metadata for each partition whose position was advanced
+///   during the poll call. These represent the offsets that the consumer will start reading from on
+///   the next poll: `const kafka_common_TopicPartition_t *` to
+///   `const kafka_consumer_OffsetAndMetadata_t *`
+///
+/// # Returns
+///
+/// The new records handle.
 ///
 /// # Safety
 ///
-/// `records` and `next_offsets` must be null or valid maps of the documented
-/// element types, which no other call mutates during this one, nor the
-/// lists in `records`.
+/// `records` and `next_offsets` must be `NULL` (read as empty) or valid maps of
+/// the documented element types, which no other call mutates during this one,
+/// nor the lists in `records`. Both maps and everything in them are copied
+/// during the call and stay the caller's; the copied records never own their
+/// keys or values, which stay the C side's. The returned handle is owned by the
+/// caller, freed with `kafka_consumer_ConsumerRecords_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
@@ -170,12 +189,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_with_next_offsets(
     box_consumer_records(ConsumerRecords::with_next_offsets(by_partition, next_offsets), false, false)
 }
 
-/// `nextOffsets()`: an owned map of owned `kafka_common_TopicPartition_t *`
-/// to owned `kafka_consumer_OffsetAndMetadata_t *`.
+/// `nextOffsets()`: a map of `kafka_common_TopicPartition_t *` to
+/// `kafka_consumer_OffsetAndMetadata_t *`.
+///
+/// # Returns
+///
+/// The next offsets that the consumer will consume
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which also frees its
+/// keys and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
@@ -187,12 +213,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_next_offsets(
     offset_and_metadata_map(&unsafe { inner_ref(self_) }.next_offsets)
 }
 
-/// `partitions()`: an owned list of owned `kafka_common_TopicPartition_t *`,
+/// `partitions()`: a list of `kafka_common_TopicPartition_t *`,
 /// in the order the records were fetched.
+///
+/// # Returns
+///
+/// The set of partitions with data in this record set (may be empty if no data was returned)
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_partitions(
@@ -204,14 +237,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_partitions(
     topic_partition_list(unsafe { inner_ref(self_) }.partitions.iter().map(|(tp, _)| tp.clone()))
 }
 
-/// `records(TopicPartition partition)`: an owned list of borrowed
-/// `const kafka_consumer_ConsumerRecord_t *`, valid until this handle is
-/// destroyed (see the module docs); empty for an unknown partition.
+/// Get just the records for the given partition
+///
+/// # Parameters
+///
+/// - `partition` - The partition to get records for
+///
+/// # Returns
+///
+/// A list of `const kafka_consumer_ConsumerRecord_t *`; empty for an unknown partition.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle and `partition` a valid topic-partition
-/// handle.
+/// handle. The list is owned by the caller, freed with `kafka_List_destroy`;
+/// its records are borrowed from this handle, valid until it is destroyed, and
+/// never passed to `kafka_consumer_ConsumerRecord_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
@@ -234,13 +275,23 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_partition(
     )
 }
 
-/// `records(String topic)`: an owned list of borrowed
-/// `const kafka_consumer_ConsumerRecord_t *` across the topic's partitions,
-/// valid until this handle is destroyed.
+/// Get just the records for the given topic
+///
+/// # Parameters
+///
+/// - `topic` - The topic to get records for
+///
+/// # Returns
+///
+/// A list of `const kafka_consumer_ConsumerRecord_t *` across the topic's partitions.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle and `topic` a valid NUL-terminated string.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`. Its records are
+/// borrowed from this handle: they stay valid until it is destroyed and are never passed to
+/// `kafka_consumer_ConsumerRecord_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
@@ -265,6 +316,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_records_with_topic(
 
 /// `isEmpty()`.
 ///
+/// # Returns
+///
+/// True if there are no records, false otherwise
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
@@ -276,7 +331,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecords_is_empty(self_: *const k
     i8::from(unsafe { inner_ref(self_) }.count() == 0)
 }
 
-/// `count()`: the number of records across all partitions.
+/// The number of records for all topics
+///
+/// # Returns
+///
+/// The number of records across all partitions.
 ///
 /// # Safety
 ///

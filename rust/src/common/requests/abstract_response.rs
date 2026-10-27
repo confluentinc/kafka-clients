@@ -880,9 +880,10 @@ impl ConcreteResponse {
 
         if request_header.correlation_id() != response_header.correlation_id() {
             // Java throws `CorrelationIdMismatchException`
-            // (`AbstractResponse.java:105`), which `NetworkClient.parseResponse`
+            // (`org.apache.kafka.common.requests.AbstractResponse#parseResponse(ByteBuffer,RequestHeader)`),
+            // which `org.apache.kafka.clients.NetworkClient#parseResponse`
             // catches **by type** and either converts to a `SchemaException` or
-            // rethrows (`NetworkClient.java:922-931`). An untyped
+            // rethrows. An untyped
             // `ErrorKind::InvalidData` made that dispatch unexpressible, so the
             // typed value travels in the `io::Error` payload — the crate's
             // documented mechanism for a Java exception class crossing an
@@ -1363,7 +1364,7 @@ mod tests {
 
     /// Java's `parseResponse` default arm throws an `AssertionError` whose text
     /// interpolates the `ApiKeys` value — the enum constant — and ends with the
-    /// "code should be updated" clause (`AbstractResponse.java:295-296`). The
+    /// "code should be updated" clause (`AbstractResponse#parseResponse(ApiKeys,Readable,short)`). The
     /// method name is snake_cased per CLAUDE.md §2; the rest is verbatim.
     #[test]
     fn test_parse_response_unhandled_api_key_message() {

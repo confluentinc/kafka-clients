@@ -25,54 +25,73 @@ use crate::common::Error;
 /// (in the form of a string) when an offset is committed. This can be useful
 /// (for example) to store information about which node made the commit, what
 /// time the commit was made, etc.
-///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.OffsetAndMetadata`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata")]
 pub struct OffsetAndMetadata {
     offset: i64,
-    /// Internal leader epoch (raw); the public getter normalizes negative
-    /// values to `None` to match Java's `leaderEpoch()`.
+    // Internal leader epoch (raw); the public getter normalizes negative
+    // values to `None` to match Java's `leaderEpoch()`.
     leader_epoch: Option<i32>,
     metadata: String,
 }
 
 impl OffsetAndMetadata {
-    /// Construct a new `OffsetAndMetadata` with the given offset.
-    /// The metadata is set to the empty string and no leader epoch is set.
+    /// Construct a new OffsetAndMetadata object for committing through
+    /// [`KafkaConsumer`](crate::consumer::KafkaConsumer). The metadata
+    /// associated with the commit will be empty.
     ///
-    /// Corresponds to Java's `new OffsetAndMetadata(long offset)`.
+    /// # Arguments
+    ///
+    /// - `offset` - The offset to be committed
+    ///
+    /// # Returns
+    ///
+    /// The new `OffsetAndMetadata`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative
-    /// (matching Java's `IllegalArgumentException`).
+    /// - `Error::is_local_illegal_argument_error` if `offset` is negative.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn new(offset: i64) -> Result<Self, Error> {
         Self::with_leader_epoch_metadata(offset, None, String::new())
     }
 
-    /// Construct a new `OffsetAndMetadata` with the given offset and metadata.
+    /// Construct a new OffsetAndMetadata object for committing through
+    /// [`KafkaConsumer`](crate::consumer::KafkaConsumer).
     ///
-    /// Corresponds to Java's `new OffsetAndMetadata(long offset, String metadata)`.
+    /// # Arguments
+    ///
+    /// - `offset` - The offset to be committed
+    /// - `metadata` - Non-null metadata
+    ///
+    /// # Returns
+    ///
+    /// The new `OffsetAndMetadata`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
+    /// - `Error::is_local_illegal_argument_error` if `offset` is negative.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn with_metadata(offset: i64, metadata: impl Into<String>) -> Result<Self, Error> {
         Self::with_leader_epoch_metadata(offset, None, metadata)
     }
 
-    /// Construct a new `OffsetAndMetadata` with offset, optional leader epoch,
-    /// and metadata.
+    /// Construct a new OffsetAndMetadata object for committing through
+    /// [`KafkaConsumer`](crate::consumer::KafkaConsumer).
     ///
-    /// Corresponds to Java's
-    /// `new OffsetAndMetadata(long, Optional<Integer>, String)`.
+    /// # Arguments
+    ///
+    /// - `offset` - The offset to be committed
+    /// - `leader_epoch` - Optional leader epoch of the last consumed record
+    /// - `metadata` - Non-null metadata
+    ///
+    /// # Returns
+    ///
+    /// The new `OffsetAndMetadata`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `offset` is negative.
+    /// - `Error::is_local_illegal_argument_error` if `offset` is negative.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata")]
     pub fn with_leader_epoch_metadata(
         offset: i64,
@@ -88,22 +107,30 @@ impl OffsetAndMetadata {
         Ok(Self { offset, leader_epoch, metadata: metadata.into() })
     }
 
-    /// The committed offset.
+    /// Returns the committed offset.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
-    /// Returns the metadata associated with the commit, or an empty string
-    /// if no metadata was provided.
+    /// Get the metadata of the previously consumed record.
+    ///
+    /// # Returns
+    ///
+    /// The metadata or empty string if no metadata
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#metadata")]
     pub fn metadata(&self) -> &str {
         &self.metadata
     }
 
     /// Get the leader epoch of the previously consumed record (if one is
-    /// known). Negative epochs are filtered to `None` to match Java's
-    /// `leaderEpoch()`.
+    /// known). Log truncation is detected if there exists a leader epoch which
+    /// is larger than this epoch and begins at an offset earlier than the
+    /// committed offset.
+    ///
+    /// # Returns
+    ///
+    /// The leader epoch or empty if not known
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndMetadata#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         match self.leader_epoch {
@@ -132,9 +159,9 @@ impl Hash for OffsetAndMetadata {
 }
 
 impl fmt::Display for OffsetAndMetadata {
-    /// Matches Java's `toString()`:
-    /// `OffsetAndMetadata{offset=N, leaderEpoch=X, metadata='Y'}`
-    /// where `X` is `null` if no leader epoch is present.
+    // Matches Java's `toString()`:
+    // `OffsetAndMetadata{offset=N, leaderEpoch=X, metadata='Y'}`
+    // where `X` is `null` if no leader epoch is present.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let leader_epoch_str = match self.leader_epoch() {
             Some(e) => e.to_string(),

@@ -188,7 +188,7 @@ impl SslFactory {
 
 /// The error for an encrypted PEM private key, a Rust-only message: Java
 /// decrypts an encrypted PKCS#8 key (an `EncryptedPrivateKeyInfo`) with
-/// `ssl.key.password` (`DefaultSslEngineFactory.java:505-520`), which this
+/// `ssl.key.password` (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore#privateKey`), which this
 /// client does not implement, so the key password is not defined
 /// (`SslConfigs` module docs) and an encrypted key is reported as such rather
 /// than as a missing or unparseable key.
@@ -197,7 +197,7 @@ const ENCRYPTED_PEM_KEY_MESSAGE: &str =
 
 /// Whether `pem` holds an encrypted private key: a PKCS#8
 /// `ENCRYPTED PRIVATE KEY` section (what Java decrypts at
-/// `DefaultSslEngineFactory.java:517`), or a legacy OpenSSL block whose
+/// `org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore#privateKey`), or a legacy OpenSSL block whose
 /// `Proc-Type: 4,ENCRYPTED` header marks it encrypted (with its `DEK-Info`,
 /// e.g. in an `RSA PRIVATE KEY` section). A text check only: nothing is
 /// decrypted.
@@ -420,9 +420,9 @@ fn load_client_identity(
 /// The protocols the `SSLContext` of `ssl.protocol` enables by default.
 ///
 /// `protocol` is the name Kafka passes to `SSLContext.getInstance(protocol)`
-/// (`DefaultSslEngineFactory.java:243-245`), matched ignoring case as JCA
+/// (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createSSLContext`), matched ignoring case as JCA
 /// algorithm names are. The names are the client `SSLContext`s of the JDK's
-/// SunJSSE provider (`SunJSSE.java:71-82`), aliases included, and each
+/// SunJSSE provider (`sun.security.ssl.SunJSSE`), aliases included, and each
 /// context's default client protocols (`SSLContextImpl.java`):
 ///
 /// | `ssl.protocol` | JSSE context | default protocols | here |
@@ -468,16 +468,16 @@ fn context_default_versions(protocol: &str) -> io::Result<&'static [&'static rus
 /// `ssl.protocol` is not a ceiling of its own. It selects the `SSLContext`
 /// (see [`context_default_versions`]), which supplies only the *default* lists:
 /// its default protocols, and its default cipher suites, the suites usable
-/// with one of those protocols (`SSLContextImpl.java:655-670`). Kafka replaces
+/// with one of those protocols (`sun.security.ssl.SSLContextImpl`). Kafka replaces
 /// the suites when `ssl.cipher.suites` is not empty and the protocols when
-/// `ssl.enabled.protocols` is not empty (`DefaultSslEngineFactory.java:139-151`,
-/// `:191-192`); an empty list leaves the context's default. A protocol is then
+/// `ssl.enabled.protocols` is not empty (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#configure`,
+/// `org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createSslEngine`); an empty list leaves the context's default. A protocol is then
 /// used only when an enabled suite can be used with it
-/// (`HandshakeContext.java:258`, `getActiveProtocols`). So `TLSv1.2` keeps TLS
+/// (`sun.security.ssl.HandshakeContext#getActiveProtocols`). So `TLSv1.2` keeps TLS
 /// 1.3 out only while its default suites are in use: with the default
 /// `ssl.enabled.protocols` (`TLSv1.2,TLSv1.3`) and a TLS 1.3 suite in
 /// `ssl.cipher.suites`, Java negotiates TLS 1.3, and so does this client. The
-/// documented ceiling of `SslConfigs.java:35-40` is the default-suites case.
+/// documented ceiling of `org.apache.kafka.common.config.SslConfigs#SSL_PROTOCOL_DOC` is the default-suites case.
 ///
 /// `default_suites` are the TLS provider's suites, rustls's counterpart of the
 /// JSSE provider's default-enabled ones. An empty `ssl.enabled.protocols`
@@ -571,7 +571,7 @@ fn resolve_enabled_protocols(
 
 /// Resolves `ssl.cipher.suites` to the TLS provider's cipher suites, in the
 /// configured order (Java's `SSLEngine.setEnabledCipherSuites` order is the
-/// preference order, `DefaultSslEngineFactory.java:191`).
+/// preference order, `org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createSslEngine`).
 ///
 /// A name is the Java / IANA one. Every suite of the aws-lc-rs provider
 /// ([`rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES`]) is accepted, as Java's
@@ -948,7 +948,7 @@ B2V9lhUZNk+pRjtJw9unpXsM
     /// The cases of a JDK 25 (Corretto) probe that builds the client context
     /// with `SSLContext.getInstance(ssl.protocol)`, sets the cipher suites and
     /// then the protocols as `DefaultSslEngineFactory.createSslEngine` does
-    /// (`:191-192`), and handshakes with a JSSE server offering TLS 1.2 and TLS
+    /// (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createSslEngine`), and handshakes with a JSSE server offering TLS 1.2 and TLS
     /// 1.3 with an RSA certificate. Each comment gives the protocol Java
     /// negotiated; the versions asserted are the ones this client may use, of
     /// which rustls negotiates the highest. `T13` is `TLS_AES_128_GCM_SHA256`,
@@ -1381,7 +1381,7 @@ uviKbp188irqAMaMg47Y9WVEjN8mjQM5ag==
 
     /// Encrypted PKCS#8 private key (`openssl pkcs8 -topk8 -v2 aes-256-cbc`
     /// over a throwaway P-256 key, test-only), the form Java decrypts with
-    /// `ssl.key.password` (`DefaultSslEngineFactory.java:517`).
+    /// `ssl.key.password` (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore#privateKey`).
     const TEST_ENCRYPTED_PKCS8_KEY: &str = "\
 -----BEGIN ENCRYPTED PRIVATE KEY-----
 MIH0MF8GCSqGSIb3DQEFDTBSMDEGCSqGSIb3DQEFDDAkBBChEvfxzqdTnTzntfu+

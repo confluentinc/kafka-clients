@@ -13,14 +13,10 @@
 // limitations under the License.
 
 //! A configuration entry containing name, value and additional metadata.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ConfigEntry`.
 
 use crate::common::Error;
 
 /// Data type of configuration entry.
-///
-/// Corresponds to `ConfigEntry.ConfigType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigType")]
@@ -56,7 +52,7 @@ impl ConfigType {
     /// and `.type()`. Unlike Java's `forId`, which throws
     /// `IllegalArgumentException` for a negative id, this returns
     /// [`ConfigType::Unknown`] for any unrecognized id so response parsing never
-    /// panics on a recoverable path (CLAUDE.md §12).
+    /// panics on a recoverable path.
     pub(crate) fn for_id(id: i8) -> ConfigType {
         match id {
             1 => ConfigType::Boolean,
@@ -72,8 +68,8 @@ impl ConfigType {
         }
     }
 
-    /// The name of this constant in Java's `ConfigEntry.ConfigType`
-    /// (`ConfigEntry.java:199-210`). The Java enum does not override
+    /// The name of this constant in Java's
+    /// `org.apache.kafka.clients.admin.ConfigEntry$ConfigType`. The Java enum does not override
     /// `toString()`, so `Enum.toString()` returns this name.
     fn name(&self) -> &'static str {
         match self {
@@ -100,8 +96,6 @@ impl std::fmt::Display for ConfigType {
 }
 
 /// Source of configuration entries.
-///
-/// Corresponds to `ConfigEntry.ConfigSource`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSource")]
@@ -138,7 +132,7 @@ impl ConfigSource {
     /// and `KafkaAdminClient.configSource`. Unlike Java's `configSource`, which
     /// throws `IllegalArgumentException` for the `UNKNOWN` / client-metrics /
     /// group ids, this returns [`ConfigSource::Unknown`] for unrecognized ids so
-    /// response parsing never panics on a recoverable path (CLAUDE.md §12).
+    /// response parsing never panics on a recoverable path.
     pub(crate) fn for_id(id: i8) -> ConfigSource {
         match id {
             1 => ConfigSource::DynamicTopicConfig,
@@ -153,8 +147,8 @@ impl ConfigSource {
         }
     }
 
-    /// The name of this constant in Java's `ConfigEntry.ConfigSource`
-    /// (`ConfigEntry.java:215-225`). The Java enum does not override
+    /// The name of this constant in Java's
+    /// `org.apache.kafka.clients.admin.ConfigEntry$ConfigSource`. The Java enum does not override
     /// `toString()`, so `Enum.toString()` returns this name.
     fn name(&self) -> &'static str {
         match self {
@@ -179,9 +173,7 @@ impl std::fmt::Display for ConfigSource {
     }
 }
 
-/// A configuration synonym of a [`ConfigEntry`].
-///
-/// Corresponds to `ConfigEntry.ConfigSynonym`.
+/// Class representing a configuration synonym of a [`ConfigEntry`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym")]
 pub struct ConfigSynonym {
@@ -199,8 +191,7 @@ impl ConfigSynonym {
         Self { name, value, source }
     }
 
-    /// Returns the name of this configuration (this may be different from the
-    /// name of the associated [`ConfigEntry`]).
+    /// Returns the name of this configuration.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry$ConfigSynonym#name")]
     pub fn name(&self) -> &str {
         &self.name
@@ -220,7 +211,7 @@ impl ConfigSynonym {
     }
 }
 
-/// Mirrors Java's `ConfigSynonym.toString()` (`ConfigEntry.java:285-291`): the
+/// Java's `ConfigSynonym.toString()`: the
 /// source renders as its Java constant name and a missing value as `null`.
 impl std::fmt::Display for ConfigSynonym {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -234,16 +225,15 @@ impl std::fmt::Display for ConfigSynonym {
     }
 }
 
-/// What Java's `ConfigEntry.toString()` prints in place of a sensitive value
-/// (`ConfigEntry.java:186`).
+/// What Java's `ConfigEntry.toString()` prints in place of a sensitive value.
 const REDACTED: &str = "Redacted";
 
-/// A configuration entry containing name, value and additional metadata.
+/// A class representing a configuration entry containing name, value and
+/// additional metadata.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.ConfigEntry`.
+/// # Translation notes
 ///
-/// `Debug` renders what `Display` renders: the value of a sensitive entry is
-/// shown as `Redacted`, as Java's `toString()` shows it.
+/// `Debug` renders what `Display` renders.
 #[derive(Clone, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry")]
 pub struct ConfigEntry {
@@ -258,26 +248,18 @@ pub struct ConfigEntry {
 }
 
 /// The parameters of Java's widest `ConfigEntry` constructor
-/// (`ConfigEntry(String, String, ConfigSource, boolean, boolean, List, ConfigType, String)`,
-/// `ConfigEntry.java:59`).
+/// (`ConfigEntry(String, String, ConfigSource, boolean, boolean, List, ConfigType, String)`),
+/// taken by [`ConfigEntry::with_options`].
 ///
-/// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
-/// CLAUDE.md §2's cap on derived overload names: that constructor differs from
-/// the group's intersection `{name, value}` by six parameters, so the cap fires
-/// and this struct becomes the method's *only* parameter, carrying every Java
-/// parameter including the intersection's own.
-///
-/// It deliberately has **no** `Default`. `name` and `value` are what even Java's
-/// narrow constructor (`:44`) takes from its caller, so neither has a
-/// Java-derived default, and a synthesised empty name would produce an entry
-/// naming no config at all. Construct it with [`ConfigEntryOptionsBuilder::new`]
-/// and set them: [`ConfigEntryOptionsBuilder::build`] returns an error if any of `name`, `value` was not set.
+/// It has no `Default`: `name` and `value` are mandatory. Build it with
+/// [`ConfigEntryOptionsBuilder`], whose [`build`](ConfigEntryOptionsBuilder::build)
+/// returns an error if either was not set.
 ///
 /// `Debug` renders a sensitive `value` as `"Redacted"`, as the [`ConfigEntry`]
 /// built from it renders it.
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq)]
-// the options of ConfigEntry's constructor overloads (CLAUDE.md §2)
+// the options of ConfigEntry's constructor overloads
 #[doc(alias = "rust-only")]
 pub struct ConfigEntryOptions {
     /// The non-null config name. Java's `name`.
@@ -285,29 +267,25 @@ pub struct ConfigEntryOptions {
     /// The config value or `None`. Java's `value`.
     pub(crate) value: Option<String>,
     /// The source of this config entry. Java's `source`; starts as
-    /// [`ConfigSource::Unknown`], as in `:44`.
+    /// [`ConfigSource::Unknown`], as in the two-argument constructor.
     pub(crate) source: ConfigSource,
     /// Whether the config value is sensitive; the broker never returns the
-    /// value if it is sensitive. Java's `isSensitive`; starts as `false`, as in
-    /// `:44`.
+    /// value if it is sensitive. Java's `isSensitive`; starts as `false`.
     pub(crate) is_sensitive: bool,
     /// Whether the config is read-only and cannot be updated. Java's
-    /// `isReadOnly`; starts as `false`, as in `:44`.
+    /// `isReadOnly`; starts as `false`.
     pub(crate) is_read_only: bool,
-    /// Synonym configs in order of precedence. Java's `synonyms`; starts empty,
-    /// as in `:44` (`Collections.emptyList()`).
+    /// Synonym configs in order of precedence. Java's `synonyms`; starts empty.
     pub(crate) synonyms: Vec<ConfigSynonym>,
-    /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`],
-    /// as in `:44`.
+    /// The config data type. Java's `type`; starts as [`ConfigType::Unknown`].
     pub(crate) config_type: ConfigType,
-    /// The config documentation. Java's `documentation`; starts as `None`, as in
-    /// `:44`.
+    /// The config documentation. Java's `documentation`; starts as `None`.
     pub(crate) documentation: Option<String>,
 }
 
 /// Renders every field as the derive it replaces did, except that the value of
 /// a sensitive entry renders as `"Redacted"`, the word Java's
-/// `ConfigEntry.toString()` prints for it (`ConfigEntry.java:186`).
+/// `ConfigEntry.toString()` prints for it.
 ///
 /// This struct has no Java counterpart, so it has no Java rendering of its
 /// own. It carries the values of the [`ConfigEntry`] it builds, which never
@@ -347,12 +325,11 @@ impl std::fmt::Debug for ConfigEntryOptions {
 
 /// Fluent builder for [`ConfigEntryOptions`].
 ///
-/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
-/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
-/// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConfigEntryOptions`] it has no Java counterpart and
-/// exists solely to satisfy that naming rule (DoD #7).
+/// [`Self::new`] takes no parameters, every parameter has a fluent setter, and
+/// [`Self::build`] returns an error if a mandatory one (`name`, `value`) was not
+/// set.
 #[derive(Debug)]
-// builds ConfigEntryOptions (CLAUDE.md §2)
+// builds ConfigEntryOptions
 #[doc(alias = "rust-only")]
 pub struct ConfigEntryOptionsBuilder {
     name: Option<String>,
@@ -387,44 +364,110 @@ impl ConfigEntryOptionsBuilder {
         }
     }
 
-    /// Sets `ConfigEntryOptions::name`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// Sets `name`, a mandatory parameter: [`Self::build`] returns an error if it
+    /// was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the non-None config name
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_name(mut self, name: String) -> Self {
         self.name = Some(name);
         self
     }
-    /// Sets `ConfigEntryOptions::value`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// Sets `value`, a mandatory parameter: [`Self::build`] returns an error if it
+    /// was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` - the config value or `None`
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_value(mut self, value: Option<String>) -> Self {
         self.value = Some(value);
         self
     }
-    /// Sets `ConfigEntryOptions::source`.
+    /// Sets `source`.
+    ///
+    /// # Arguments
+    ///
+    /// - `source` - the source of this config entry
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_source(mut self, source: ConfigSource) -> Self {
         self.source = source;
         self
     }
-    /// Sets `ConfigEntryOptions::is_sensitive`.
+    /// Sets `is_sensitive`.
+    ///
+    /// # Arguments
+    ///
+    /// - `is_sensitive` - whether the config value is sensitive, the broker never returns the value
+    ///   if
+    ///   it is sensitive
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_is_sensitive(mut self, is_sensitive: bool) -> Self {
         self.is_sensitive = is_sensitive;
         self
     }
-    /// Sets `ConfigEntryOptions::is_read_only`.
+    /// Sets `is_read_only`.
+    ///
+    /// # Arguments
+    ///
+    /// - `is_read_only` - whether the config is read-only and cannot be updated
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_is_read_only(mut self, is_read_only: bool) -> Self {
         self.is_read_only = is_read_only;
         self
     }
-    /// Sets `ConfigEntryOptions::synonyms`.
+    /// Sets `synonyms`.
+    ///
+    /// # Arguments
+    ///
+    /// - `synonyms` - synonym configs in order of precedence
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_synonyms(mut self, synonyms: Vec<ConfigSynonym>) -> Self {
         self.synonyms = synonyms;
         self
     }
-    /// Sets `ConfigEntryOptions::config_type`.
+    /// Sets `config_type`.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_type` - the config data type
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_config_type(mut self, config_type: ConfigType) -> Self {
         self.config_type = config_type;
         self
     }
-    /// Sets `ConfigEntryOptions::documentation`.
+    /// Sets `documentation`.
+    ///
+    /// # Arguments
+    ///
+    /// - `documentation` - the config documentation
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_documentation(mut self, documentation: Option<String>) -> Self {
         self.documentation = documentation;
         self
@@ -432,17 +475,13 @@ impl ConfigEntryOptionsBuilder {
 
     /// Returns the built options.
     ///
-    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
-    /// being named in the constructor, so a later Java version that makes one of
-    /// them optional changes the set this accepts instead of adding a second
-    /// constructor. Today there is one mandatory set: `name`, `value`.
+    /// Only the presence of the mandatory parameters is checked here; semantic
+    /// validation belongs to [`ConfigEntry::with_options`].
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
-    /// set which was not given a setter call. Only presence is checked here;
-    /// semantic validation belongs to the method the options are passed to
-    /// (CLAUDE.md §2).
+    /// - `Error::is_local_illegal_argument_error` if `name` or `value` was not set,
+    ///   naming the first one missing.
     pub fn build(self) -> Result<ConfigEntryOptions, Error> {
         Ok(ConfigEntryOptions {
             name: self.name.ok_or_else(|| Self::missing("name"))?,
@@ -466,15 +505,12 @@ impl ConfigEntryOptionsBuilder {
 }
 
 impl ConfigEntry {
-    /// Create a configuration entry with the provided name and value.
+    /// Create a configuration entry with the provided values.
     ///
-    /// Corresponds to Java's `ConfigEntry(String, String)`
-    /// (`ConfigEntry.java:44`), whose parameters `{name, value}` are the
-    /// intersection across both constructors — so it owns the plain name
-    /// (CLAUDE.md §2).
+    /// # Arguments
     ///
-    /// * `name` - the non-null config name
-    /// * `value` - the config value or `None`
+    /// - `name` - the non-None config name
+    /// - `value` - the config value or `None`
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry")]
     pub fn new(name: String, value: Option<String>) -> Self {
         Self::with_options(
@@ -486,14 +522,13 @@ impl ConfigEntry {
         )
     }
 
-    /// Create a configuration entry with all values.
+    /// Create a configuration with the provided values.
     ///
-    /// Corresponds to Java's widest constructor (`ConfigEntry.java:59`). Its
-    /// eight parameters exceed CLAUDE.md §2's three-parameter cap on derived
-    /// overload names, so [`ConfigEntryOptions`] is this method's only
-    /// parameter and carries all of them.
+    /// # Arguments
     ///
-    /// * `options` - every parameter of Java's widest constructor
+    /// - `options` - the parameters of Java's widest constructor: `name`, `value`,
+    ///   `source`, `is_sensitive`, `is_read_only`, `synonyms`, `config_type` and
+    ///   `documentation`
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#ConfigEntry")]
     pub fn with_options(options: ConfigEntryOptions) -> Self {
         let ConfigEntryOptions {
@@ -518,40 +553,40 @@ impl ConfigEntry {
         }
     }
 
-    /// Return the config name.
+    /// Returns the config name.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Return the value or `None`. `None` is returned if the config is unset or
+    /// Returns the value or `None`. `None` is returned if the config is unset or
     /// if `is_sensitive` is true.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#value")]
     pub fn value(&self) -> Option<&str> {
         self.value.as_deref()
     }
 
-    /// Return the source of this configuration entry.
+    /// Returns the source of this configuration entry.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#source")]
     pub fn source(&self) -> ConfigSource {
         self.source
     }
 
-    /// Return whether the config value is the default or if it's been
+    /// Returns whether the config value is the default or if it's been
     /// explicitly set.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isDefault")]
     pub fn is_default(&self) -> bool {
         self.source == ConfigSource::DefaultConfig
     }
 
-    /// Return whether the config value is sensitive. The value is always set to
+    /// Returns whether the config value is sensitive. The value is always set to
     /// `None` by the broker if the config value is sensitive.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isSensitive")]
     pub fn is_sensitive(&self) -> bool {
         self.is_sensitive
     }
 
-    /// Return whether the config is read-only and cannot be updated.
+    /// Returns whether the config is read-only and cannot be updated.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#isReadOnly")]
     pub fn is_read_only(&self) -> bool {
         self.is_read_only
@@ -566,13 +601,13 @@ impl ConfigEntry {
         &self.synonyms
     }
 
-    /// Return the config data type.
+    /// Returns the config data type.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#type")]
     pub fn r#type(&self) -> ConfigType {
         self.config_type
     }
 
-    /// Return the config documentation.
+    /// Returns the config documentation.
     #[doc(alias = "org.apache.kafka.clients.admin.ConfigEntry#documentation")]
     pub fn documentation(&self) -> Option<&str> {
         self.documentation.as_deref()
@@ -582,7 +617,7 @@ impl ConfigEntry {
 impl std::fmt::Display for ConfigEntry {
     /// Redacts sensitive value.
     ///
-    /// Mirrors Java's `toString()` (`ConfigEntry.java:183-193`): the source and
+    /// Java's `toString()`: the source and
     /// type render as their Java constant names, and the synonyms as Java's
     /// `AbstractCollection.toString()` renders the list (`[a, b]`, `[]` when
     /// empty), each synonym through its own `Display`.
@@ -614,7 +649,7 @@ impl std::fmt::Display for ConfigEntry {
 
 /// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
 ///
-/// Java has a single `toString()` (`ConfigEntry.java:183-193`), which prints
+/// Java has a single `toString()`, which prints
 /// `Redacted` for the value of a sensitive entry; a derived `Debug` would be a
 /// second, unredacted rendering. [`Config`](crate::admin::Config) and
 /// [`AlterConfigOp`](crate::admin::AlterConfigOp) embed entries, so their
@@ -675,7 +710,7 @@ mod tests {
 
     /// New test, no Java original (Java has no `ConfigEntryTest`): every
     /// `ConfigType` renders its Java constant name, as Java's `Enum.toString()`
-    /// does (`ConfigEntry.java:199-210`).
+    /// does (`org.apache.kafka.clients.admin.ConfigEntry$ConfigType`).
     #[test]
     fn config_type_display_matches_java_constant_names() {
         for (config_type, java) in [
@@ -696,7 +731,7 @@ mod tests {
 
     /// New test, no Java original: every `ConfigSource` renders its Java
     /// constant name, as Java's `Enum.toString()` does
-    /// (`ConfigEntry.java:215-225`).
+    /// (`org.apache.kafka.clients.admin.ConfigEntry$ConfigSource`).
     #[test]
     fn config_source_display_matches_java_constant_names() {
         for (source, java) in [
@@ -715,7 +750,7 @@ mod tests {
     }
 
     /// New test, no Java original: `ConfigSynonym`'s `Display` is the string
-    /// Java's `ConfigSynonym.toString()` builds (`ConfigEntry.java:285-291`),
+    /// Java's `ConfigSynonym.toString()` builds,
     /// with a missing value rendered as `null`.
     #[test]
     fn config_synonym_display_matches_java_to_string() {
@@ -736,7 +771,7 @@ mod tests {
     }
 
     /// New test, no Java original: `Display` is the string Java's
-    /// `ConfigEntry.toString()` builds (`ConfigEntry.java:183-193`) for an entry
+    /// `ConfigEntry.toString()` builds for an entry
     /// with two synonyms and a non-default source, type and documentation. The
     /// synonyms render as Java's list of `ConfigSynonym.toString()`s.
     #[test]
@@ -775,7 +810,7 @@ mod tests {
     }
 
     /// New test, no Java original: the entry Java's two-argument constructor
-    /// builds (`ConfigEntry.java:44-47`) renders an empty synonym list as `[]`,
+    /// builds renders an empty synonym list as `[]`,
     /// the `UNKNOWN` source and type, and `null` for a missing value and
     /// documentation; a sensitive entry renders `Redacted` with the same shape.
     #[test]
@@ -877,7 +912,7 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    /// CLAUDE.md §2: the mandatory parameters are validated in
+    /// The mandatory parameters are validated in
     /// [`ConfigEntryOptionsBuilder::build`], not named in the constructor, so a
     /// builder left untouched panics naming the first one it finds unset.
     #[test]

@@ -226,17 +226,17 @@ pub struct Builder {
 }
 
 /// The parameters of Java's six-argument
-/// `ListOffsetsRequest.Builder.forConsumer(...)` (`ListOffsetsRequest.java:66`).
+/// `ListOffsetsRequest.Builder#forConsumer`.
 ///
-/// The two `forConsumer` forms (`:61`, `:66`) intersect on
-/// `{requireTimestamp, isolationLevel}`, leaving four flags to reach `:66`'s
+/// The two `forConsumer` forms intersect on
+/// `{requireTimestamp, isolationLevel}`, leaving four flags to reach the six-argument form's
 /// derived name. CLAUDE.md §2 caps that at three parameters and makes this
 /// struct the method's *only* parameter, so every Java parameter lives here —
 /// the intersection members included. This struct has no Java counterpart: it
 /// exists solely to satisfy that naming rule (DoD #7).
 ///
 /// It deliberately has **no** `Default`. Java's two-argument `forConsumer`
-/// (`:61`) does supply the four flags (`false, false, false, false`) but takes
+/// does supply the four flags (`false, false, false, false`) but takes
 /// `requireTimestamp` and `isolationLevel` from its caller, so those two have
 /// no Java-derived default — and a synthesised `isolationLevel` would silently
 /// pick a read isolation the caller never asked for. Build it from
@@ -249,14 +249,14 @@ pub struct ListOffsetsRequestBuilderOptions {
     pub(crate) require_timestamp: bool,
     /// Java's `isolationLevel`.
     pub(crate) isolation_level: IsolationLevel,
-    /// Java's `requireMaxTimestamp`. Starts as `false`, as in `:61`.
+    /// Java's `requireMaxTimestamp`. Starts as `false`, as in the two-argument `forConsumer`.
     pub(crate) require_max_timestamp: bool,
-    /// Java's `requireEarliestLocalTimestamp`. Starts as `false`, as in `:61`.
+    /// Java's `requireEarliestLocalTimestamp`. Starts as `false`, as in the two-argument `forConsumer`.
     pub(crate) require_earliest_local_timestamp: bool,
-    /// Java's `requireTieredStorageTimestamp`. Starts as `false`, as in `:61`.
+    /// Java's `requireTieredStorageTimestamp`. Starts as `false`, as in the two-argument `forConsumer`.
     pub(crate) require_tiered_storage_timestamp: bool,
     /// Java's `requireEarliestPendingUploadTimestamp`. Starts as `false`, as in
-    /// `:61`.
+    /// the two-argument `forConsumer`.
     pub(crate) require_earliest_pending_upload_timestamp: bool,
 }
 
@@ -368,8 +368,7 @@ impl Builder {
     /// Constructs a consumer-side builder.
     ///
     /// Corresponds to Java's
-    /// `ListOffsetsRequest.Builder.forConsumer(boolean, IsolationLevel)`
-    /// (`ListOffsetsRequest.java:61`).
+    /// `ListOffsetsRequest.Builder.forConsumer(boolean, IsolationLevel)`.
     #[doc(alias = "org.apache.kafka.common.requests.ListOffsetsRequest$Builder#forConsumer")]
     pub fn for_consumer(require_timestamp: bool, isolation_level: IsolationLevel) -> Self {
         Self::for_consumer_options(
@@ -384,8 +383,7 @@ impl Builder {
     /// Constructs a consumer-side builder, picking the minimum API version
     /// required to satisfy the requested feature flags.
     ///
-    /// Corresponds to Java's six-argument `Builder.forConsumer(...)`
-    /// (`ListOffsetsRequest.java:66`).
+    /// Corresponds to Java's six-argument `ListOffsetsRequest.Builder#forConsumer`.
     pub fn for_consumer_options(options: ListOffsetsRequestBuilderOptions) -> Self {
         let ListOffsetsRequestBuilderOptions {
             require_timestamp,

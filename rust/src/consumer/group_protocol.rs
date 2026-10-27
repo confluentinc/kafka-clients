@@ -21,18 +21,16 @@ use std::str::FromStr;
 
 use crate::common::Error;
 
-/// The supported consumer group protocols:
+/// Enum representing the supported consumer group protocols.
 ///
-/// * [`Classic`](Self::Classic) - The Classic consumer group protocol (pre
+/// - [`Classic`](Self::Classic) - The Classic consumer group protocol (pre
 ///   KIP-848)
-/// * [`Consumer`](Self::Consumer) - The Consumer rebalance protocol (KIP-848)
+/// - [`Consumer`](Self::Consumer) - The Consumer rebalance protocol (KIP-848)
 ///
-/// This client implements only [`Consumer`](Self::Consumer). `Classic` is
-/// the default value of `group.protocol`, as in Java, but
-/// [`KafkaConsumer::new`](crate::consumer::KafkaConsumer::new) returns an
-/// `UnsupportedVersion` error for it.
+/// # Translation notes
 ///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.GroupProtocol`.
+/// [`KafkaConsumer::new`](crate::consumer::KafkaConsumer::new) supports only
+/// [`Consumer`](Self::Consumer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol")]
@@ -44,9 +42,11 @@ pub enum GroupProtocol {
 }
 
 impl GroupProtocol {
-    /// The upper-case Java enum name (e.g. `"CLASSIC"`).
+    /// String representation of the group protocol.
     ///
-    /// Corresponds to Java `GroupProtocol.name`.
+    /// # Returns
+    ///
+    /// The upper-case name (e.g. `"CLASSIC"`).
     #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol#name")]
     pub fn name(self) -> &'static str {
         match self {
@@ -55,15 +55,20 @@ impl GroupProtocol {
         }
     }
 
-    /// Case-insensitive lookup by string name.
+    /// Case-insensitive group protocol lookup by string name.
     ///
-    /// Corresponds to Java `GroupProtocol.of(String)`.
+    /// # Arguments
+    ///
+    /// - `name` - The name of the group protocol
+    ///
+    /// # Returns
+    ///
+    /// The corresponding GroupProtocol
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `name` is not a recognized
-    /// group protocol (matching Java's `IllegalArgumentException` from
-    /// `Enum.valueOf`).
+    /// - `Error::is_local_illegal_argument_error` If the name does not match any
+    ///   protocol
     #[doc(alias = "org.apache.kafka.clients.consumer.GroupProtocol#of")]
     pub fn of(name: &str) -> Result<Self, Error> {
         match name.to_ascii_uppercase().as_str() {
@@ -77,9 +82,9 @@ impl GroupProtocol {
 }
 
 impl fmt::Display for GroupProtocol {
-    /// Lower-case representation matching Java's
-    /// `toString().toLowerCase(Locale.ROOT)` pattern used in
-    /// `ConsumerConfig.DEFAULT_GROUP_PROTOCOL`.
+    // Lower-case representation matching Java's
+    // `toString().toLowerCase(Locale.ROOT)` pattern used in
+    // `ConsumerConfig.DEFAULT_GROUP_PROTOCOL`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Classic => "classic",

@@ -64,13 +64,18 @@ unsafe fn destroy_node_element(element: *mut c_void) {
     unsafe { kafka_common_Node_destroy(element as *mut kafka_common_Node_t) }
 }
 
-/// `DescribeClusterResult.nodes()`: an owned future whose `get` delivers a
-/// `kafka_List_t *` owned by the future, of `kafka_common_Node_t *` (the
-/// brokers, in response order). Freed with `kafka_common_KafkaFuture_destroy`.
+/// Returns a future which yields a collection of nodes.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_List_t *` owned by the future, of `kafka_common_Node_t *`
+/// (the brokers, in response order).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
@@ -91,14 +96,22 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_nodes(
     }
 }
 
-/// `DescribeClusterResult.controller()`: an owned future whose `get`
-/// delivers a `kafka_common_Node_t *` owned by the future, or `NULL` when
-/// the controller is unknown (Java's `null`). Freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Returns a future which yields the current controller node.
+///
+/// When using `bootstrap.servers`, the controller refer to a random
+/// broker. When using `bootstrap.controllers`, it refers to the current
+/// voter leader.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_common_Node_t *` owned by the future, or `NULL` when the
+/// controller is unknown (Java's `null`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
@@ -119,13 +132,17 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     }
 }
 
-/// `DescribeClusterResult.clusterId()`: an owned future whose `get`
-/// delivers a `char *` owned by the future. Freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Returns a future which yields the current cluster id.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `char *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
@@ -137,16 +154,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_cluster_id(
     h.ctx.string_future(&h.result.cluster_id())
 }
 
-/// `DescribeClusterResult.authorizedOperations()`: an owned future whose
-/// `get` delivers a `kafka_List_t *` owned by the future, of the borrowed
-/// `kafka_common_acl_AclOperation_t` singletons (in declaration order,
-/// never freed), or `NULL` when the operations were not requested
-/// (`DescribeClusterOptions.includeAuthorizedOperations(false)`, Java's
-/// `null`). Freed with `kafka_common_KafkaFuture_destroy`.
+/// Returns a future which yields authorized operations. The future value will be non-`NULL` if the
+/// broker supplied this information, and `NULL` otherwise.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_List_t *` owned by the future, of the borrowed
+/// `kafka_common_acl_AclOperation_t` singletons (in declaration order, never freed), or `NULL` when
+/// the operations were not requested (`DescribeClusterOptions.includeAuthorizedOperations(false)`,
+/// Java's `null`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations(
@@ -176,12 +198,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operations
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures taken from the result
+/// Frees a result handle; `NULL` is a no-op. Futures taken from the result
 /// stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

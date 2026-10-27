@@ -23,11 +23,10 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 /// This is a special kind of [`CumulativeSum`] that always records `1` instead
 /// of the provided value. In other words, it counts the number of `record`
 /// invocations, instead of summing the recorded values.
-///
-/// Java implements this by extending `CumulativeSum` and overriding `record` to
-/// pass `1`; Rust composes a `CumulativeSum` and forwards `1.0` on each record.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeCount")]
+// Java extends `CumulativeSum` and overrides `record` to pass `1`; Rust
+// composes a `CumulativeSum` and forwards `1.0` on each record.
 pub struct CumulativeCount {
     inner: CumulativeSum,
 }

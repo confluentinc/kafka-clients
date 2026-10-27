@@ -95,9 +95,10 @@ impl AlterClientQuotasResponse {
                 Ok(())
             } else {
                 // Java: `error.exception(entryData.errorMessage())`
-                // (`AlterClientQuotasResponse.java:60`). `Errors.exception(String)`
+                // (`org.apache.kafka.common.requests.AlterClientQuotasResponse#complete`).
+                // `org.apache.kafka.common.protocol.Errors#exception(String)`
                 // falls back to the code's default text only when the message is
-                // **null** (`Errors.java:462-469`); a non-null empty string is passed
+                // **null**; a non-null empty string is passed
                 // through. Treating `Some("")` as absent would substitute the default
                 // where the broker deliberately sent none.
                 Err(match &entry_data.error_message {

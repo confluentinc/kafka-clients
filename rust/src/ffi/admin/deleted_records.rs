@@ -58,16 +58,22 @@ pub(crate) unsafe fn destroy_deleted_records_element(element: *mut c_void) {
     unsafe { kafka_admin_DeletedRecords_destroy(element as *mut kafka_admin_DeletedRecords_t) }
 }
 
-/// `new DeletedRecords(long lowWatermark)`. Owned, freed with
-/// [`kafka_admin_DeletedRecords_destroy`].
+/// `new DeletedRecords(long lowWatermark)`.
+///
+/// # Parameters
+///
+/// - `low_watermark` - "low watermark" for the topic partition on which the deletion was executed
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_DeletedRecords_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DeletedRecords_new(low_watermark: i64) -> *mut kafka_admin_DeletedRecords_t {
     box_deleted_records(DeletedRecords::new(low_watermark))
 }
 
-/// `lowWatermark()`: the "low watermark" for the topic partition on which the
-/// deletion was executed.
+/// Returns the "low watermark" for the topic partition on which the deletion was executed.
 ///
 /// # Safety
 ///
@@ -80,11 +86,11 @@ pub unsafe extern "C" fn kafka_admin_DeletedRecords_low_watermark(self_: *const 
     unsafe { deleted_records_ref(self_) }.low_watermark()
 }
 
-/// Frees an owned deleted-records handle; null is a no-op.
+/// Frees an owned deleted-records handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

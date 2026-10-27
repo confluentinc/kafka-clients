@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! Options for `Admin::list_transactions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
 
 use std::collections::HashSet;
 
 use crate::admin::TransactionState;
 
 /// Options for `Admin::list_transactions`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListTransactionsOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions")]
 pub struct ListTransactionsOptions {
@@ -34,8 +30,8 @@ pub struct ListTransactionsOptions {
 }
 
 impl PartialEq for ListTransactionsOptions {
-    /// Java's `ListTransactionsOptions.equals()` compares the four filters
-    /// only: `timeoutMs` is left out.
+    // Java's `ListTransactionsOptions.equals()` compares the four filters
+    // only: `timeoutMs` is left out.
     fn eq(&self, other: &Self) -> bool {
         self.filtered_states == other.filtered_states
             && self.filtered_producer_ids == other.filtered_producer_ids
@@ -47,9 +43,9 @@ impl PartialEq for ListTransactionsOptions {
 impl Eq for ListTransactionsOptions {}
 
 impl std::hash::Hash for ListTransactionsOptions {
-    /// Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of the
-    /// four filters, without `timeoutMs`, as `equals()`; the two filter sets
-    /// hash independently of their order.
+    // Java's `ListTransactionsOptions.hashCode()` is `Objects.hash` of the
+    // four filters, without `timeoutMs`, as `equals()`; the two filter sets
+    // hash independently of their order.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         crate::common::utils::Utils::hash_unordered(&self.filtered_states, state);
         crate::common::utils::Utils::hash_unordered(&self.filtered_producer_ids, state);
@@ -59,8 +55,9 @@ impl std::hash::Hash for ListTransactionsOptions {
 }
 
 /// Java's `new ListTransactionsOptions()`; a derived `Default` would set
-/// `filtered_duration_ms` to `0` instead of Java's `-1L`
-/// (`ListTransactionsOptions.java:36`), and `Admin::list_transactions()` uses it.
+/// `filtered_duration_ms` to `0` instead of Java's `-1L` (the initializer of
+/// `ListTransactionsOptions#filteredDuration`), and `Admin::list_transactions()`
+/// uses it.
 impl Default for ListTransactionsOptions {
     fn default() -> Self {
         Self::new()
@@ -81,8 +78,16 @@ impl ListTransactionsOptions {
         }
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `ListTransactionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -90,16 +95,24 @@ impl ListTransactionsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Filter only the transactions that are in a specific set of states.
+    /// Filter only the transactions that are in a specific set of states. If no filter is
+    /// specified or if the passed set of states is empty, then transactions in all states will
+    /// be returned.
     ///
-    /// Mirrors `filterStates`.
+    /// # Arguments
+    ///
+    /// - `states` - the set of states to filter by
+    ///
+    /// # Returns
+    ///
+    /// This `ListTransactionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterStates")]
     pub fn filter_states(mut self, states: impl IntoIterator<Item = TransactionState>) -> Self {
@@ -107,10 +120,17 @@ impl ListTransactionsOptions {
         self
     }
 
-    /// Filter only the transactions from producers in a specific set of
-    /// producer ids.
+    /// Filter only the transactions from producers in a specific set of producer ids. If no
+    /// filter is specified or if the passed collection of producer ids is empty, then the
+    /// transactions of all producer ids will be returned.
     ///
-    /// Mirrors `filterProducerIds`.
+    /// # Arguments
+    ///
+    /// - `producer_ids` - the set of producer ids to filter by
+    ///
+    /// # Returns
+    ///
+    /// This `ListTransactionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterProducerIds")]
     pub fn filter_producer_ids(mut self, producer_ids: impl IntoIterator<Item = i64>) -> Self {
@@ -118,9 +138,17 @@ impl ListTransactionsOptions {
         self
     }
 
-    /// Filter only the transactions running longer than the specified duration.
+    /// Filter only the transactions that are running longer than the specified duration. If no
+    /// filter is specified or if the passed duration ms is less than 0, then the all
+    /// transactions will be returned.
     ///
-    /// Mirrors `filterOnDuration`.
+    /// # Arguments
+    ///
+    /// - `duration_ms` - the duration in milliseconds to filter by
+    ///
+    /// # Returns
+    ///
+    /// This `ListTransactionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnDuration")]
     pub fn filter_on_duration(mut self, duration_ms: i64) -> Self {
@@ -128,9 +156,17 @@ impl ListTransactionsOptions {
         self
     }
 
-    /// Filter only the transactions matching the given transactional id pattern.
+    /// Filter only the transactions that match with the given transactional ID pattern. If the
+    /// filter is `None` or if the passed string is empty, then all the transactions will be
+    /// returned.
     ///
-    /// Mirrors `filterOnTransactionalIdPattern`.
+    /// # Arguments
+    ///
+    /// - `pattern` - the transactional ID regular expression pattern to filter by
+    ///
+    /// # Returns
+    ///
+    /// This `ListTransactionsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filterOnTransactionalIdPattern")]
     pub fn filter_on_transactional_id_pattern(mut self, pattern: Option<String>) -> Self {
@@ -138,33 +174,46 @@ impl ListTransactionsOptions {
         self
     }
 
-    /// The set of states being filtered (empty means no state filter).
+    /// Returns the set of states to be filtered or empty if no states have been specified.
     ///
-    /// Mirrors `filteredStates`.
+    /// # Returns
+    ///
+    /// the current set of filtered states (empty means that no states are filtered and all
+    /// transactions will be returned)
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredStates")]
     pub fn filtered_states(&self) -> &HashSet<TransactionState> {
         &self.filtered_states
     }
 
-    /// The set of producer ids being filtered (empty means no producer id filter).
+    /// Returns the set of producer ids that are being filtered or empty if none have been
+    /// specified.
     ///
-    /// Mirrors `filteredProducerIds`.
+    /// # Returns
+    ///
+    /// the current set of filtered producer ids (empty means that no producer ids are filtered
+    /// and all transactions will be returned)
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredProducerIds")]
     pub fn filtered_producer_ids(&self) -> &HashSet<i64> {
         &self.filtered_producer_ids
     }
 
-    /// The duration filter in milliseconds (negative means no duration filter).
+    /// Returns the duration ms value being filtered.
     ///
-    /// Mirrors `filteredDuration`.
+    /// # Returns
+    ///
+    /// the current duration filter value in ms (negative value means transactions are not
+    /// filtered by duration)
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredDuration")]
     pub fn filtered_duration(&self) -> i64 {
         self.filtered_duration_ms
     }
 
-    /// The transactional id pattern being filtered, if any.
+    /// Returns transactional ID being filtered.
     ///
-    /// Mirrors `filteredTransactionalIdPattern`.
+    /// # Returns
+    ///
+    /// the current transactional ID pattern filter (empty means no transactional IDs are
+    /// filtered and all transactions will be returned)
     #[doc(alias = "org.apache.kafka.clients.admin.ListTransactionsOptions#filteredTransactionalIdPattern")]
     pub fn filtered_transactional_id_pattern(&self) -> Option<&str> {
         self.filtered_transactional_id_pattern.as_deref()
@@ -233,7 +282,7 @@ mod tests {
     }
 
     /// `Default` gives Java's `new ListTransactionsOptions()`, including
-    /// `filteredDuration = -1L` (`ListTransactionsOptions.java:36`).
+    /// `filteredDuration = -1L` (`ListTransactionsOptions#filteredDuration`).
     #[test]
     fn default_is_new() {
         assert_eq!(ListTransactionsOptions::default(), ListTransactionsOptions::new());

@@ -21,11 +21,9 @@ kafka_error_type! {
     /// The producer attempted to update a transaction while another concurrent
     /// operation on the same transaction was ongoing.
     ///
-    /// Corresponds to Java's `ConcurrentTransactionsException`, error code `Errors::ConcurrentTransactions`.
-    ///
-    /// Java `extends` chain:
-    ///    `ConcurrentTransactionsException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::ConcurrentTransactions`. Java `extends` chain:
+    /// `ConcurrentTransactionsException` -> `RetriableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ConcurrentTransactionsException")]
     ConcurrentTransactionsError,
     code: Errors::ConcurrentTransactions,

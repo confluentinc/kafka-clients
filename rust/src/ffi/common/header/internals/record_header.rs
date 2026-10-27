@@ -37,7 +37,7 @@ pub struct kafka_common_header_internals_RecordHeader_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_header_internals_RecordHeader_t`] points at: the
+/// What a `kafka_common_header_internals_RecordHeader_t` points at: the
 /// header plus the lazily built `Header` view.
 pub(crate) struct RecordHeaderInner {
     header: HeaderStorage,
@@ -117,7 +117,7 @@ impl RecordHeaderInner {
 }
 
 /// Hands `header` to C as an owned handle, freed with
-/// [`kafka_common_header_internals_RecordHeader_destroy`].
+/// `kafka_common_header_internals_RecordHeader_destroy`.
 pub(crate) fn box_record_header(header: RecordHeader) -> *mut kafka_common_header_internals_RecordHeader_t {
     Box::into_raw(RecordHeaderInner::boxed(header)) as *mut kafka_common_header_internals_RecordHeader_t
 }
@@ -160,14 +160,18 @@ pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<Recor
         .collect()
 }
 
-/// `new RecordHeader(String key, byte[] value)`: `value.data == NULL` is
-/// Java's null value; both are copied. Owned, freed with
-/// [`kafka_common_header_internals_RecordHeader_destroy`].
+/// `new RecordHeader(String key, byte[] value)`.
+///
+/// # Parameters
+///
+/// - `key` - the header's key, copied
+/// - `value` - the header's value, copied; `value.data == NULL` is a `NULL` value
 ///
 /// # Safety
 ///
 /// `key` must be a valid NUL-terminated string and `value` null or a valid
-/// buffer.
+/// buffer. The header is owned, freed with
+/// `kafka_common_header_internals_RecordHeader_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
@@ -187,11 +191,13 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
     ))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-header handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
@@ -203,12 +209,14 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
     into_c_string(&unsafe { record_header_ref(self_) }.to_string())
 }
 
-/// The handle as the `Header` interface it implements: a borrowed view valid
-/// until the handle is destroyed, never passed to a `_destroy`.
+/// Returns the handle as the `Header` interface it implements.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid record-header handle.
+///
+/// The returned view is borrowed, valid until `self_` is destroyed, and is never passed to a
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(

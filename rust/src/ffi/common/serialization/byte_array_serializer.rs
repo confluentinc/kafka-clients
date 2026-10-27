@@ -96,12 +96,12 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
         let data: Option<&'a [u8]> = unsafe { bytes(data) };
         Serializer::<[u8]>::serialize_with_headers(&self.0, topic, headers, data).await
     }
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Serializer::<[u8]>::configure(&mut self.0, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Serializer::<[u8]>::configure(&mut self.0, configs, is_key).await
     }
 
-    async fn close(&self) {
-        Serializer::<[u8]>::close(&self.0).await;
+    async fn close(&self) -> Result<(), Error> {
+        Serializer::<[u8]>::close(&self.0).await
     }
 }
 
@@ -118,8 +118,12 @@ unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArraySerialize
     unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
 }
 
-/// `new ByteArraySerializer()`. Owned, freed with
-/// [`kafka_common_serialization_ByteArraySerializer_destroy`].
+/// `new ByteArraySerializer()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_ByteArraySerializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
@@ -128,13 +132,15 @@ pub extern "C" fn kafka_common_serialization_ByteArraySerializer_new()
         as *mut kafka_common_serialization_ByteArraySerializer_t
 }
 
-/// The serializer as a `Serializer`: a borrowed view valid as long as the
-/// handle, never passed to `Serializer_destroy`. Its `data` is a
+/// Returns the serializer as a `Serializer`. Its `data` is a
 /// `const kafka_Bytes_t *`, copied during the call.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to
+/// `kafka_common_serialization_Serializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Serializer(

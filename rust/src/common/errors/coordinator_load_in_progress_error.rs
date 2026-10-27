@@ -18,13 +18,19 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The coordinator is loading and hence can't process requests.
+    /// In the context of the group coordinator, the broker returns this error code for any
+    /// coordinator request if it is still loading the group metadata (e.g. after a leader change
+    /// for that group metadata topic partition).
     ///
-    /// Corresponds to Java's `CoordinatorLoadInProgressException`, error code `Errors::CoordinatorLoadInProgress`.
+    /// In the context of the transactional coordinator, this error will be returned if there is a
+    /// pending transactional request with the same transactional id, or if the transaction cache is
+    /// currently being populated from the transaction log.
     ///
-    /// Java `extends` chain:
-    ///    `CoordinatorLoadInProgressException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// # Translation notes
+    ///
+    /// Error code `Errors::CoordinatorLoadInProgress`. Java `extends` chain:
+    /// `CoordinatorLoadInProgressException` -> `RetriableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.CoordinatorLoadInProgressException")]
     CoordinatorLoadInProgressError,
     code: Errors::CoordinatorLoadInProgress,

@@ -168,7 +168,9 @@ impl KafkaConsumerMetrics {
             0
         };
         self.time_since_last_poll_ms.store(time_since_last_poll_ms, Ordering::SeqCst);
-        self.time_between_poll_sensor.record_with_value(time_since_last_poll_ms as f64);
+        // The client's sensors are built from a `MetricConfig` without a quota, so
+        // `record` cannot fail and its result is discarded.
+        let _ = self.time_between_poll_sensor.record_with_value(time_since_last_poll_ms as f64);
         self.last_poll_ms.store(poll_start_ms, Ordering::SeqCst);
     }
 
@@ -185,17 +187,17 @@ impl KafkaConsumerMetrics {
         } else {
             poll_time_ms as f64 * 1.0 / poll_cycle_time_ms as f64
         };
-        self.poll_idle_sensor.record_with_value(poll_idle_ratio);
+        let _ = self.poll_idle_sensor.record_with_value(poll_idle_ratio);
     }
 
     /// Java: `recordCommitSync(long duration)`.
     pub(crate) fn record_commit_sync(&self, duration: i64) {
-        self.commit_sync_sensor.record_with_value(duration as f64);
+        let _ = self.commit_sync_sensor.record_with_value(duration as f64);
     }
 
     /// Java: `recordCommitted(long duration)`.
     pub(crate) fn record_committed(&self, duration: i64) {
-        self.committed_sensor.record_with_value(duration as f64);
+        let _ = self.committed_sensor.record_with_value(duration as f64);
     }
 
     /// Removes every sensor and metric this manager registered. Since
@@ -280,7 +282,7 @@ mod tests {
             .expect("double-valued metric")
     }
 
-    /// Java `KafkaConsumerTest.testPollTimeMetrics` (line 3708), translated at
+    /// Java `org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollTimeMetrics`, translated at
     /// the `KafkaConsumerMetrics` level (the recording site). The Java test
     /// drives the values through `consumer.poll(Duration.ZERO)` + a mock
     /// clock; the value math is identical when driven via
@@ -341,7 +343,7 @@ mod tests {
         assert_eq!(read_metric(&metrics, "time-between-poll-max"), 10.0 * 1000.0);
     }
 
-    /// Java `KafkaConsumerTest.testPollIdleRatio` (line 3754), translated at
+    /// Java `org.apache.kafka.clients.consumer.KafkaConsumerTest#testPollIdleRatio`, translated at
     /// the `KafkaConsumerMetrics` level. Drives `record_poll_start` /
     /// `record_poll_end` with the same timing the Java test produces via the
     /// mock clock + `consumer.poll()`, then reads `poll-idle-ratio-avg`.

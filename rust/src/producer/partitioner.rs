@@ -21,78 +21,76 @@ use std::collections::HashMap;
 
 use crate::common::Cluster;
 
-/// Partitioner interface: compute the partition for a record.
+/// Partitioner Interface
 ///
-/// A `Partitioner` maps each produced record to a partition of its topic. The
-/// producer holds a single shared instance and consults it on the send path
-/// (see [`KafkaProducer`](crate::producer::KafkaProducer)); the built-in
-/// key-hash / sticky logic is used only when no partitioner is configured.
+/// # Translation notes
 ///
-/// # Translation notes (Definition-of-Done §7 — justified deviations)
+/// WARNING: `Monitorable` is not translated, so a partitioner cannot register
+/// metrics.
 ///
-/// Java's interface `extends Configurable, Closeable` and takes `Object key` /
-/// `Object value`. Rust has neither `Configurable` nor `Closeable`, and the
-/// producer is generic rather than erased, so the shape differs deliberately:
-///
-/// - **`K, V` generics** translate Java's `Object key` / `Object value`. In the
-///   generic Rust producer the key and value have concrete types, so the
-///   partitioner receives typed borrows instead of `Object` — no downcasts.
-/// - **`Send + Sync` supertraits**: the producer is shared across tasks, so the
-///   boxed partitioner it owns must be shareable. Because these are supertrait
-///   bounds, `Box<dyn Partitioner<K, V>>` is itself `Send + Sync`.
-/// - **`partition(&self)`**, not `&mut self`: Java's `KafkaProducer` is
-///   thread-safe and calls the *one* shared partitioner instance concurrently,
-///   so Java implementations must already be internally synchronized
-///   (`RoundRobinPartitioner` uses a `ConcurrentMap` + `AtomicInteger`). `&self`
-///   is the faithful translation and keeps the send path lock-free (DoD §10):
-///   any per-record state is the implementer's job via interior mutability
-///   (atomics / a concurrent map), exactly as in Java.
-/// - **`close(&self)`**, not `&mut self`: [`Producer::close`](crate::producer::Producer::close)
-///   takes `&self`, so the partitioner must be closable through a shared
-///   reference. Wrapping it in a `Mutex` to obtain `&mut` would add a lock to
-///   every send for no behavioral gain.
-/// - **`configure(&mut self)`** with a default no-op mirrors the consumer
-///   interceptor precedent (`ConsumerInterceptor::configure`) and is called
-///   exactly once, before the instance is boxed and shared with the producer,
-///   so `&mut self` is available then.
-/// - Java's `Plugin<Partitioner>` / `Monitorable` metrics wrapper (the javadoc's
-///   "implement `Monitorable` to register metrics") has **no Rust counterpart**
-///   and is not translated.
+/// `partition` and `close` take `&self`: the producer shares one instance
+/// across tasks, as Java's shares it across threads.
+//
+// Java's interface `extends Configurable, Closeable` and takes `Object key` /
+// `Object value`. Rust has neither `Configurable` nor `Closeable`, and the
+// producer is generic rather than erased, so the shape differs deliberately
+// (justified deviations, Definition of Done §7):
+//
+// - `K, V` generics translate Java's `Object key` / `Object value`: the
+//   partitioner receives typed borrows instead of `Object`, no downcasts.
+// - `Send + Sync` supertraits: the producer is shared across tasks, so the
+//   boxed partitioner it owns must be shareable.
+// - `partition(&self)`, not `&mut self`: Java's `KafkaProducer` calls the one
+//   shared partitioner concurrently, so Java implementations are already
+//   internally synchronized (`RoundRobinPartitioner` uses a `ConcurrentMap` +
+//   `AtomicInteger`). `&self` keeps the send path lock-free; per-record state
+//   is the implementer's job via interior mutability, as in Java.
+// - `close(&self)`, not `&mut self`: `Producer::close` takes `&self`, and a
+//   `Mutex` to obtain `&mut` would add a lock to every send.
+// - `configure(&mut self)` with a default no-op mirrors
+//   `ConsumerInterceptor::configure` and is called exactly once, before the
+//   instance is boxed and shared with the producer.
+// - Java's `Plugin<Partitioner>` / `Monitorable` metrics wrapper has no Rust
+//   counterpart.
 #[doc(alias = "org.apache.kafka.clients.producer.Partitioner")]
 pub trait Partitioner<K, V>: Send + Sync {
-    /// Configure this partitioner.
+    /// Configure this class with the given key-value pairs
     ///
-    /// Corresponds to Java's `Configurable.configure(Map<String, ?> configs)`.
-    /// Called once, before the instance is shared with the producer, with the
-    /// producer's original configuration plus the (possibly generated)
-    /// `client.id`. The default implementation is a no-op.
+    /// # Arguments
+    ///
+    /// - `_configs` - the pairs
+    // Java's `Configurable.configure(Map<String, ?> configs)`. Called once,
+    // before the instance is shared with the producer, with the producer's
+    // original configuration plus the (possibly generated) `client.id`. The
+    // default implementation is a no-op.
     #[doc(alias = "org.apache.kafka.common.Configurable#configure")]
     fn configure(&mut self, _configs: &HashMap<String, String>) {}
 
     /// Compute the partition for the given record.
     ///
-    /// Corresponds to Java's `int partition(String topic, Object key,
-    /// byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster)`.
+    /// # Arguments
     ///
-    /// - `topic` — the topic name.
-    /// - `key` — the typed key to partition on, or `None` if there is no key.
-    /// - `key_bytes` — the serialized key to partition on, or `None` if there is
-    ///   no key.
-    /// - `value` — the typed value to partition on, or `None`.
-    /// - `value_bytes` — the serialized value to partition on, or `None`.
-    /// - `cluster` — the current cluster metadata.
+    /// - `topic` - The topic name
+    /// - `key` - The key to partition on (or None if no key)
+    /// - `key_bytes` - The serialized key to partition on( or None if no key)
+    /// - `value` - The value to partition on or None
+    /// - `value_bytes` - The serialized value to partition on or None
+    /// - `cluster` - The current cluster metadata
     ///
-    /// The returned partition must be non-negative; the producer rejects a
-    /// negative result with an `IllegalArgumentError`.
+    /// # Returns
     ///
-    /// Note: on the borrowed zero-copy send path
-    /// (`KafkaProducer<Vec<u8>, Vec<u8>>::send(ProducerRecord<&[u8], &[u8]>)`)
-    /// the typed `key` / `value` are `None` even when `key_bytes` / `value_bytes`
-    /// are present, because on that path Java's `record.key()` *is* the same
-    /// `byte[]` as `keyBytes`; materializing a typed `&Vec<u8>` from the borrowed
-    /// bytes would allocate, violating the zero-copy contract. Partitioners that
-    /// need the key/value should read the `*_bytes` parameters, which are always
-    /// supplied when a key/value exists.
+    /// The partition, non-negative: the send fails on a negative one.
+    ///
+    /// # Translation notes
+    ///
+    /// WARNING: `key` and `value` are `None` on the borrowed send path of
+    /// `KafkaProducer<Vec<u8>, Vec<u8>>`.
+    // On the borrowed zero-copy send path
+    // (`KafkaProducer<Vec<u8>, Vec<u8>>::send(ProducerRecord<&[u8], &[u8]>)`)
+    // Java's `record.key()` is the same `byte[]` as `keyBytes`; materializing a
+    // typed `&Vec<u8>` from the borrowed bytes would allocate, violating the
+    // zero-copy contract. Partitioners that need the key/value read the
+    // `*_bytes` parameters, which are always supplied when a key/value exists.
     #[doc(alias = "org.apache.kafka.clients.producer.Partitioner#partition")]
     fn partition(
         &self,
@@ -104,10 +102,8 @@ pub trait Partitioner<K, V>: Send + Sync {
         cluster: &Cluster,
     ) -> i32;
 
-    /// Close this partitioner.
-    ///
-    /// Corresponds to Java's `Closeable.close()` — "This is called when
-    /// partitioner is closed." The default implementation is a no-op.
+    /// This is called when partitioner is closed.
+    // Java's `Closeable.close()`. The default implementation is a no-op.
     #[doc(alias = "org.apache.kafka.clients.producer.Partitioner#close")]
     fn close(&self) {}
 }

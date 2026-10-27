@@ -30,7 +30,7 @@ pub struct kafka_common_resource_Resource_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_resource_Resource_t`] points at: the resource plus
+/// What a `kafka_common_resource_Resource_t` points at: the resource plus
 /// the NUL-terminated name its getter borrows out.
 pub(crate) struct ResourceInner {
     resource: Resource,
@@ -69,18 +69,23 @@ pub(crate) unsafe fn resource_ref<'a>(resource: *const kafka_common_resource_Res
 }
 
 /// Hands `resource` to C as an owned handle, freed with
-/// [`kafka_common_resource_Resource_destroy`].
+/// `kafka_common_resource_Resource_destroy`.
 pub(crate) fn box_resource(resource: Resource) -> *mut kafka_common_resource_Resource_t {
     Box::into_raw(Box::new(ResourceInner::new(resource))) as *mut kafka_common_resource_Resource_t
 }
 
-/// `new Resource(ResourceType resourceType, String name)`: the name is
-/// copied. Owned, freed with [`kafka_common_resource_Resource_destroy`].
+/// Create an instance of this class with the provided parameters.
+///
+/// # Parameters
+///
+/// - `resource_type` - non-`NULL` resource type
+/// - `name` - non-`NULL` resource name
 ///
 /// # Safety
 ///
 /// `resource_type` must be a resource-type singleton and `name` a valid
-/// NUL-terminated string.
+/// NUL-terminated string, copied. The returned resource is owned, freed with
+/// `kafka_common_resource_Resource_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_new(
@@ -96,19 +101,27 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
     }))
 }
 
-/// `Resource.CLUSTER`: the single cluster resource. Owned, as every handle
-/// of this type.
+/// A resource representing the whole cluster.
+///
+/// # Returns
+///
+/// The resource.
+///
+/// # Safety
+///
+/// The returned resource is owned, freed with `kafka_common_resource_Resource_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_resource_Resource_cluster() -> *mut kafka_common_resource_Resource_t {
     box_resource(Resource::cluster())
 }
 
-/// `resourceType()`: the borrowed `ResourceType` singleton.
+/// Returns the resource type.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
@@ -120,11 +133,12 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
     resource_type_singleton(unsafe { resource_ref(self_) }.resource_type())
 }
 
-/// `name()`: borrowed from the handle.
+/// Returns the resource name.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_name(
@@ -136,7 +150,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_name(
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `isUnknown()`: whether the resource type is `UNKNOWN`.
+/// Returns 1 if this Resource has any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -151,11 +165,12 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
     i8::from(unsafe { resource_ref(self_) }.is_unknown())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the resource.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid resource handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(

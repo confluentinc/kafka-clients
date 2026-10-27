@@ -22,7 +22,7 @@ use crate::common::error::message_only_error;
 message_only_error! {
     /// Unsupported operation error — the requested operation is not supported.
     ///
-    /// Corresponds to Java's `java.lang.UnsupportedOperationException`; like
+    /// Java's `java.lang.UnsupportedOperationException`; like
     /// [`LocalIllegalArgumentError`](crate::common::LocalIllegalArgumentError),
     /// outside the `KafkaException` hierarchy. Not to be confused with
     /// `UnsupportedVersionError`, Java's wire-level `UnsupportedVersionException`

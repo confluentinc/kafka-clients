@@ -20,12 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The log's topic ID did not match the topic ID in the request.
     ///
-    /// Corresponds to Java's `InconsistentTopicIdException`, error code `Errors::InconsistentTopicId`.
-    ///
-    /// Java `extends` chain:
-    ///    `InconsistentTopicIdException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::InconsistentTopicId`. Java `extends` chain:
+    /// `InconsistentTopicIdException` -> `InvalidMetadataException` -> `RefreshRetriableException`
+    /// -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InconsistentTopicIdException")]
     InconsistentTopicIdError,
     code: Errors::InconsistentTopicId,

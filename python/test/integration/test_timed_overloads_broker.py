@@ -18,12 +18,15 @@ timeout)``, ``committed(partitions, timeout)``, ``beginning_offsets`` /
 ``end_offsets(partitions, timeout)`` and ``offsets_for_times(timestamps,
 timeout)``, ``partitions_for`` / ``list_topics(timeout)`` and ``commit(timeout)``
 without offsets return the broker's values; a zero timeout on a fresh consumer
-answers as ``AsyncKafkaConsumer`` does: ``TimeoutError`` with Java's message
-from ``position`` (``AsyncKafkaConsumer.java:1251``), ``committed`` (:1281),
-``partitions_for`` (:1320) and ``list_topics`` (:1348), the partitions mapped
-to ``None`` from ``offsets_for_times`` (:1429) and an empty map from
-``beginning_offsets`` / ``end_offsets`` (:1490). Skips without Docker
-(``kafka_broker``)."""
+answers as ``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer``
+does: ``TimeoutError`` with Java's message from ``position``
+(``#position(TopicPartition,Duration)``), ``committed``
+(``#committed(Set,Duration)``), ``partitions_for``
+(``#partitionsFor(String,Duration)``) and ``list_topics``
+(``#listTopics(Duration)``), the partitions mapped to ``None`` from
+``offsets_for_times`` (``#offsetsForTimes(Map,Duration)``) and an empty map
+from ``beginning_offsets`` / ``end_offsets`` (``#beginningOrEndOffset``). Skips
+without Docker (``kafka_broker``)."""
 
 from __future__ import annotations
 
@@ -153,7 +156,7 @@ def test_zero_timeouts_on_a_fresh_consumer(kafka_broker: Any, mode: str) -> None
     "recorded core deviation, for the owner to decide: list_topics(timeout=0) raises "
     "TimeoutError(\"Timeout of 0ms expired before all topics' metadata could be "
     "listed\"), where Java's AsyncKafkaConsumer.listTopics throws new TimeoutException() "
-    "without a message (AsyncKafkaConsumer.java:1347-1348), which the Errors rule renders "
+    "without a message, which the Errors rule renders "
     "as str(e) == ''; the core adds the text on purpose, citing the RECORDED DEVIATION of "
     "rust/src/consumer/internals/async_kafka_consumer.rs:6241-6255 (repeated at "
     ":6289-6297), on the ground that Error cannot carry Java's null message -- but "
@@ -161,7 +164,8 @@ def test_zero_timeouts_on_a_fresh_consumer(kafka_broker: Any, mode: str) -> None
     "could here"))
 @MODE
 def test_zero_timeout_list_topics(kafka_broker: Any, mode: str) -> None:
-    # AsyncKafkaConsumer.java:1347-1348: TimeoutException() without a message.
+    # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#listTopics(Duration):
+    # TimeoutException() without a message.
     async def body() -> None:
         consumer = make_consumer(mode, consumer_configs(kafka_broker))
         try:
@@ -178,7 +182,7 @@ def test_zero_timeout_list_topics(kafka_broker: Any, mode: str) -> None:
     "recorded core deviation, for the owner to decide: partitions_for(timeout=0) of an "
     "uncached topic raises TimeoutError('Timeout of 0ms expired before partitions for "
     "topic <t> could be determined'), where Java's AsyncKafkaConsumer.partitionsFor throws "
-    "new TimeoutException() without a message (AsyncKafkaConsumer.java:1319-1320); the "
+    "new TimeoutException() without a message; the "
     "core adds the text on purpose, its RECORDED DEVIATION at "
     "rust/src/consumer/internals/async_kafka_consumer.rs:6241-6255, on the ground that "
     "Error cannot carry Java's null message -- but 84e3a6e2 gives the message-less "
@@ -201,7 +205,8 @@ def test_zero_timeout_partitions_for(kafka_broker: Any, mode: str) -> None:
 
 def test_offset_lookups_answer_within_a_round_trip(kafka_broker: Any) -> None:
     """A ListOffsets-backed lookup answers within a round trip, as Java's, which
-    completes it inside client.poll (OffsetsRequestManager.java:686): the core
+    completes it inside client.poll
+    (org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#buildListOffsetRequestToNode): the core
     wakes its background loop when the response is queued (#264), so a 2 s
     timeout is ample after the first lookup. One mode only: the sync and asyncio
     consumers reach the same core path."""

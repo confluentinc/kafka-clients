@@ -20,15 +20,12 @@
 
 use crate::common::Uuid;
 
-/// A collection of topics. This collection may define topics by name or ID.
+/// A class used to represent a collection of topics. This collection may
+/// define topics by name or ID.
 ///
-/// Corresponds to `org.apache.kafka.common.TopicCollection`. Java models this
-/// as an abstract class with `TopicIdCollection` / `TopicNameCollection`
-/// subclasses; in Rust the closed set of subclasses is an enum whose variants
-/// wrap the subclasses, so callers `match` on the variant instead of using
-/// `instanceof` and read the topics through the subclass's getter. Keeping the
-/// subclass behind the variant, rather than its `Vec`, lets a field Java adds
-/// to the subclass arrive without changing the variant's shape.
+/// # Translation notes
+///
+/// An enum whose variants wrap Java's two subclasses.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.TopicCollection")]
@@ -44,7 +41,9 @@ pub enum TopicCollection {
 impl TopicCollection {
     /// Returns a collection of topics defined by topic ID.
     ///
-    /// Translated from `TopicCollection.ofTopicIds`.
+    /// # Arguments
+    ///
+    /// - `topics` - the topic IDs
     #[doc(alias = "org.apache.kafka.common.TopicCollection#ofTopicIds")]
     pub fn of_topic_ids(topics: Vec<Uuid>) -> TopicCollection {
         TopicCollection::TopicIds(TopicIdCollection::new(topics))
@@ -52,7 +51,9 @@ impl TopicCollection {
 
     /// Returns a collection of topics defined by topic name.
     ///
-    /// Translated from `TopicCollection.ofTopicNames`.
+    /// # Arguments
+    ///
+    /// - `topics` - the topic names
     #[doc(alias = "org.apache.kafka.common.TopicCollection#ofTopicNames")]
     pub fn of_topic_names(topics: Vec<String>) -> TopicCollection {
         TopicCollection::TopicNames(TopicNameCollection::new(topics))
@@ -62,9 +63,9 @@ impl TopicCollection {
 /// A class used to represent a collection of topics defined by their topic ID.
 /// Subclassing this class beyond the classes within this file is not supported.
 ///
-/// Corresponds to `org.apache.kafka.common.TopicCollection.TopicIdCollection`.
-/// Built only by [`TopicCollection::of_topic_ids`], as Java's constructor is
-/// private.
+/// # Translation notes
+///
+/// Built only by [`TopicCollection::of_topic_ids`].
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicIdCollection")]
 pub struct TopicIdCollection {
@@ -78,10 +79,7 @@ impl TopicIdCollection {
         Self { topic_ids }
     }
 
-    /// Returns the topic IDs of the collection, in the order they were given.
-    ///
-    /// Translated from `TopicIdCollection.topicIds()`, which returns an
-    /// unmodifiable view; here a shared slice.
+    /// Returns a collection of topic IDs.
     #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicIdCollection#topicIds")]
     pub fn topic_ids(&self) -> &[Uuid] {
         &self.topic_ids
@@ -91,9 +89,9 @@ impl TopicIdCollection {
 /// A class used to represent a collection of topics defined by their topic name.
 /// Subclassing this class beyond the classes within this file is not supported.
 ///
-/// Corresponds to `org.apache.kafka.common.TopicCollection.TopicNameCollection`.
-/// Built only by [`TopicCollection::of_topic_names`], as Java's constructor is
-/// private.
+/// # Translation notes
+///
+/// Built only by [`TopicCollection::of_topic_names`].
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicNameCollection")]
 pub struct TopicNameCollection {
@@ -107,10 +105,7 @@ impl TopicNameCollection {
         Self { topic_names }
     }
 
-    /// Returns the topic names of the collection, in the order they were given.
-    ///
-    /// Translated from `TopicNameCollection.topicNames()`, which returns an
-    /// unmodifiable view; here a shared slice.
+    /// Returns a collection of topic names.
     #[doc(alias = "org.apache.kafka.common.TopicCollection$TopicNameCollection#topicNames")]
     pub fn topic_names(&self) -> &[String] {
         &self.topic_names
@@ -141,8 +136,7 @@ mod tests {
         assert_eq!(by_name.topic_names(), names.as_slice());
     }
 
-    /// Translated from `TopicCollectionTest.testTopicCollection`
-    /// (`clients/admin/TopicCollectionTest.java`): the collections hand back
+    /// Translated from `TopicCollectionTest.testTopicCollection`: the collections hand back
     /// the topics they were built from.
     #[test]
     fn test_topic_collection() {

@@ -21,21 +21,13 @@ use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// No offset is defined for one or more partitions and no reset policy is set.
-///
-/// Corresponds to Java's `NoOffsetForPartitionException`. It has no entry in
-/// `Errors`, so it carries no protocol code.
-///
-/// Java `extends` chain:
-///    `NoOffsetForPartitionException` -> `InvalidOffsetException` ->
-///   `KafkaException`
-///
-/// The `InvalidOffsetException` here is the **consumer package's** abstract
-/// class, which extends `KafkaException` — not the concrete
-/// [`InvalidOffsetError`](crate::common::errors::InvalidOffsetError) of
-/// `common.errors`, which extends `ApiException`. Hence
-/// `is_consumer_invalid_offset_error`
-/// rather than `is_invalid_offset_error`.
+/// Indicates that there is no stored offset for a partition and no defined
+/// offset reset policy.
+// Java `extends` chain: `NoOffsetForPartitionException` ->
+// `InvalidOffsetException` -> `KafkaException`, the consumer package's abstract
+// class, not `common.errors`' (an `ApiException`); hence
+// `is_consumer_invalid_offset_error`, not `is_invalid_offset_error`. It has no
+// entry in `Errors`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException")]
 pub struct ConsumerNoOffsetForPartitionError {
@@ -45,21 +37,25 @@ pub struct ConsumerNoOffsetForPartitionError {
 }
 
 impl ConsumerNoOffsetForPartitionError {
-    /// Create the error for a single partition, mirroring Java's
-    /// `NoOffsetForPartitionException(TopicPartition)`.
+    /// Constructs a new `ConsumerNoOffsetForPartitionError` for a single
+    /// partition.
     ///
-    /// Java's single-partition constructor renders the **singular** "partition:"
-    /// while the collection constructor renders "partitions:"; both forms are
-    /// asserted by tests, so they are built separately rather than routed
-    /// through one another.
+    /// # Arguments
+    ///
+    /// - `partition` - The partition for which no offset is defined
     #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException")]
     pub fn new(partition: TopicPartition) -> Self {
+        // The singular "partition:", where `with_partitions` writes "partitions:".
         let message = format!("Undefined offset with no reset policy for partition: {partition}");
         Self { message, partitions: HashSet::from([partition]) }
     }
 
-    /// Create the error for a set of partitions, mirroring Java's
-    /// `NoOffsetForPartitionException(Collection<TopicPartition>)`.
+    /// Constructs a new `ConsumerNoOffsetForPartitionError` for multiple
+    /// partitions.
+    ///
+    /// # Arguments
+    ///
+    /// - `partitions` - The partitions for which no offset is defined
     #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException")]
     pub fn with_partitions(partitions: impl IntoIterator<Item = TopicPartition>) -> Self {
         let partitions: HashSet<TopicPartition> = partitions.into_iter().collect();
@@ -69,13 +65,17 @@ impl ConsumerNoOffsetForPartitionError {
         Self { message, partitions }
     }
 
-    /// The partitions with no defined offset.
+    /// Returns all partitions for which no offsets are defined.
+    ///
+    /// # Returns
+    ///
+    /// All partitions without offsets
     #[doc(alias = "org.apache.kafka.clients.consumer.NoOffsetForPartitionException#partitions")]
     pub fn partitions(&self) -> &HashSet<TopicPartition> {
         &self.partitions
     }
 
-    /// The error message.
+    /// Returns the error message.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
@@ -115,10 +115,10 @@ impl ErrorSource for ConsumerNoOffsetForPartitionError {
 }
 
 impl ConsumerNoOffsetForPartitionError {
-    /// Always `None`: `NoOffsetForPartitionException` exposes no `Throwable cause` constructor, so its
-    /// cause is null in Java too. Present as an inherent method so it shadows
-    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
-    /// `x.source()` unambiguous and typed.
+    /// Returns the cause of this error: always `None`, as no constructor takes
+    /// one.
+    // An inherent method, so it shadows both `ErrorSource::source` and
+    // `std::error::Error::source`, keeping `x.source()` unambiguous and typed.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
@@ -141,7 +141,7 @@ mod tests {
     /// that file was split into one file per error class.
     ///
     /// Java: `NoOffsetForPartitionException(TopicPartition)` renders the
-    /// SINGULAR "partition:" (`NoOffsetForPartitionException.java:43-46`).
+    /// SINGULAR "partition:" (`org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException(TopicPartition)`).
     #[test]
     fn test_no_offset_for_partition_singular_message() {
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -154,7 +154,7 @@ mod tests {
     ///
     /// Java: `NoOffsetForPartitionException(Collection<TopicPartition>)` renders
     /// the PLURAL "partitions:" followed by the collection
-    /// (`NoOffsetForPartitionException.java:53-56`), and Java's
+    /// (`org.apache.kafka.clients.consumer.NoOffsetForPartitionException#NoOffsetForPartitionException(Collection)`), and Java's
     /// `Collection.toString()` brackets the items — hence `[t-0, t-1]`. The
     /// exact encoding is asserted here because the split changed it (the old
     /// Rust form emitted the items bare) and no test noticed.
@@ -171,7 +171,7 @@ mod tests {
     /// (`test_no_offset_for_partition_partitions_accessor`).
     ///
     /// Java: `partitions()` — the one member `InvalidOffsetException` declares
-    /// abstract (`InvalidOffsetException.java:49`).
+    /// abstract (`org.apache.kafka.clients.consumer.InvalidOffsetException#partitions`).
     #[test]
     fn test_no_offset_for_partition_partitions_accessor() {
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -182,7 +182,7 @@ mod tests {
     }
 
     /// `NoOffsetForPartitionException extends InvalidOffsetException extends
-    /// KafkaException` (`NoOffsetForPartitionException.java:32`), where
+    /// KafkaException` (`org.apache.kafka.clients.consumer.NoOffsetForPartitionException`), where
     /// `InvalidOffsetException` is the CONSUMER package's abstract class — not
     /// the `common.errors` class of the same name, which extends
     /// `ApiException`.

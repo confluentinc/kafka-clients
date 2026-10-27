@@ -31,7 +31,7 @@ pub struct kafka_common_MetricName_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_MetricName_t`] points at: the value plus the
+/// What a `kafka_common_MetricName_t` points at: the value plus the
 /// NUL-terminated strings its getters borrow out.
 pub(crate) struct MetricNameInner {
     name: MetricName,
@@ -59,7 +59,7 @@ impl MetricNameInner {
 }
 
 /// Hands `name` to C as an owned handle, freed with
-/// [`kafka_common_MetricName_destroy`].
+/// `kafka_common_MetricName_destroy`.
 pub(crate) fn box_metric_name(name: MetricName) -> *mut kafka_common_MetricName_t {
     Box::into_raw(Box::new(MetricNameInner::new(name))) as *mut kafka_common_MetricName_t
 }
@@ -92,15 +92,22 @@ unsafe fn inner<'a>(self_: *const kafka_common_MetricName_t) -> &'a MetricNameIn
     unsafe { &*(self_ as *const MetricNameInner) }
 }
 
-/// `new MetricName(String name, String group, String description,
-/// Map<String, String> tags)`: `tags` maps `const char *` to `const char *`;
-/// everything is copied. Owned, freed with
-/// [`kafka_common_MetricName_destroy`].
+/// `new MetricName(String name, String group, String description, Map<String, String> tags)`:
+/// `tags` maps `const char *` to `const char *`; everything is copied.
+///
+/// # Parameters
+///
+/// - `name` - The name of the metric
+/// - `group` - logical group name of the metrics to which this metric belongs
+/// - `description` - A human-readable description to include in the metric
+/// - `tags` - additional key/value attributes of the metric
 ///
 /// # Safety
 ///
 /// The strings must be valid NUL-terminated strings and `tags` null or a
 /// valid map of NUL-terminated strings.
+///
+/// The returned handle is owned by the caller, freed with `kafka_common_MetricName_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_new(
@@ -130,11 +137,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_new(
     ))
 }
 
-/// `name()`: borrowed from the handle, valid as long as it is.
+/// Returns the name of the metric.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name handle.
+/// `self_` must be a valid metric-name handle. The returned string is borrowed, valid as long as
+/// the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_name(self_: *const kafka_common_MetricName_t) -> *const c_char {
@@ -144,11 +152,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_name(self_: *const kafka_common
     unsafe { inner(self_) }.name_c.as_ptr()
 }
 
-/// `group()`: borrowed from the handle, valid as long as it is.
+/// Returns the logical group name of the metric.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name handle.
+/// `self_` must be a valid metric-name handle. The returned string is borrowed, valid as long as
+/// the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_group(self_: *const kafka_common_MetricName_t) -> *const c_char {
@@ -158,11 +167,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_group(self_: *const kafka_commo
     unsafe { inner(self_) }.group_c.as_ptr()
 }
 
-/// `description()`: borrowed from the handle, valid as long as it is.
+/// Returns the human-readable description of the metric.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name handle.
+/// `self_` must be a valid metric-name handle. The returned string is borrowed, valid as long as
+/// the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_description(self_: *const kafka_common_MetricName_t) -> *const c_char {
@@ -172,12 +182,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_description(self_: *const kafka
     unsafe { inner(self_) }.description_c.as_ptr()
 }
 
-/// `tags()`: an owned map of `char *` to `char *` sorted by key, freed with
-/// `kafka_Map_destroy`.
+/// Returns the tags of the metric, a map of `char *` to `char *` sorted by key.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name handle.
+/// `self_` must be a valid metric-name handle. The returned map is owned, freed with
+/// `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_tags(self_: *const kafka_common_MetricName_t) -> *mut kafka_Map_t {
@@ -187,11 +197,12 @@ pub unsafe extern "C" fn kafka_common_MetricName_tags(self_: *const kafka_common
     box_string_map(unsafe { metric_name_ref(self_) }.tags())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the metric name.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-name handle.
+/// `self_` must be a valid metric-name handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricName_to_string(self_: *const kafka_common_MetricName_t) -> *mut c_char {
@@ -228,18 +239,6 @@ pub(crate) unsafe fn destroy_metric_name_element(element: *mut c_void) {
     // SAFETY: Per this function's `# Safety`, `element` is an owned metric-name handle not yet
     // destroyed, which is what `kafka_common_MetricName_destroy` requires of a non-null handle.
     unsafe { kafka_common_MetricName_destroy(element as *mut kafka_common_MetricName_t) }
-}
-
-/// Key equality for `kafka_Map_t`s keyed by `kafka_common_MetricName_t`
-/// (the `metrics()` maps, see `ffi::common::metrics::box_metrics_map`).
-///
-/// # Safety
-///
-/// `a` and `b` must be valid metric-name handles.
-pub(crate) unsafe fn metric_name_eq(a: *mut c_void, b: *mut c_void) -> bool {
-    // SAFETY: Per this function's `# Safety`, `a` and `b` are valid metric-name handles, as
-    // `metric_name_ref` requires; both references are used only for the comparison.
-    unsafe { metric_name_ref(a as *const _) == metric_name_ref(b as *const _) }
 }
 
 #[cfg(test)]

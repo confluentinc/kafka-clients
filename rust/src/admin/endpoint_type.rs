@@ -14,13 +14,12 @@
 
 //! The endpoint type of KIP-919.
 //!
-//! Corresponds to `org.apache.kafka.clients.admin.EndpointType`.
+//! Corresponds to `org.apache.kafka.clients.admin.EndpointType`. A
+//! `DescribeCluster` request names the endpoint type it describes, and its
+//! response states the endpoint type that answered: the brokers, or the
+//! controllers a client reaches through `bootstrap.controllers`.
 
 /// Identifies the endpoint type, as specified by KIP-919.
-///
-/// A `DescribeCluster` request names the endpoint type it describes, and its
-/// response states the endpoint type that answered: the brokers, or the
-/// controllers a client reaches through `bootstrap.controllers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.EndpointType")]
@@ -46,9 +45,7 @@ impl std::fmt::Display for EndpointType {
 }
 
 impl EndpointType {
-    /// The id of this endpoint type on the wire.
-    ///
-    /// Mirrors `EndpointType.id()`.
+    /// Returns the id of this endpoint type on the wire.
     #[doc(alias = "org.apache.kafka.clients.admin.EndpointType#id")]
     pub fn id(self) -> i8 {
         match self {
@@ -58,11 +55,13 @@ impl EndpointType {
         }
     }
 
-    /// The endpoint type with the given id: [`EndpointType::Broker`] for `1`,
-    /// [`EndpointType::Controller`] for `2`, and [`EndpointType::Unknown`] for
-    /// any other id.
+    /// Returns the endpoint type with the given id: [`EndpointType::Broker`]
+    /// for `1`, [`EndpointType::Controller`] for `2`, and
+    /// [`EndpointType::Unknown`] for any other id.
     ///
-    /// Mirrors `EndpointType.fromId(byte)`.
+    /// # Arguments
+    ///
+    /// - `id` - The id on the wire, Java's `byte`.
     #[doc(alias = "org.apache.kafka.clients.admin.EndpointType#fromId")]
     pub fn from_id(id: i8) -> EndpointType {
         if id == EndpointType::Broker.id() {
@@ -109,7 +108,7 @@ mod tests {
 
     /// New test, no Java original: the wire ids, which `DescribeCluster`
     /// carries, and every other id (negative ones included) is unknown, as
-    /// `EndpointType.java:25-50` maps them.
+    /// `EndpointType#fromId` maps them.
     #[test]
     fn ids_match_the_wire_protocol() {
         assert_eq!(EndpointType::Unknown.id(), 0);

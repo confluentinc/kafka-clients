@@ -2003,7 +2003,7 @@ impl AdminBackend for MultilanguageAdmin {
             admin_id: self.admin_id,
             group_id: group_id.to_string(),
             // `removeAll()` is Java's own `members.isEmpty()`
-            // (`RemoveMembersFromConsumerGroupOptions.java:57-59`), and it must
+            // (`org.apache.kafka.clients.admin.RemoveMembersFromConsumerGroupOptions#removeAll`), and it must
             // cross as the absent wrapper rather than as a present-but-empty list:
             // present-and-empty is the collection constructor, which Java rejects
             // with `IllegalArgumentException("Invalid empty members has been

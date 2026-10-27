@@ -20,12 +20,6 @@ use crate::common::Node;
 
 /// A class containing leadership, replicas and ISR information for a topic
 /// partition.
-///
-/// Corresponds to `org.apache.kafka.common.TopicPartitionInfo`.
-///
-/// `leader` is `None` when there is no leader (Java `null`); `elr` and
-/// `last_known_elr` are `None` when the information is unavailable (the Java
-/// short constructor leaves them `null`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo")]
 pub struct TopicPartitionInfo {
@@ -40,13 +34,15 @@ pub struct TopicPartitionInfo {
 impl TopicPartitionInfo {
     /// Create an instance with the provided parameters.
     ///
-    /// * `partition` - the partition id
-    /// * `leader` - the leader of the partition or `None` if there is none
-    /// * `replicas` - the replicas of the partition in the same order as the
+    /// # Arguments
+    ///
+    /// - `partition` - the partition id
+    /// - `leader` - the leader of the partition or `None` if there is none.
+    /// - `replicas` - the replicas of the partition in the same order as the
     ///   replica assignment (the preferred replica is the head of the list)
-    /// * `isr` - the in-sync replicas
-    /// * `elr` - the eligible leader replicas
-    /// * `last_known_elr` - the last known eligible leader replicas
+    /// - `isr` - the in-sync replicas
+    /// - `elr` - the eligible leader replicas
+    /// - `last_known_elr` - the last known eligible leader replicas.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#TopicPartitionInfo")]
     pub fn with_elr_last_known_elr(
         partition: i32,
@@ -78,47 +74,58 @@ impl TopicPartitionInfo {
         Self { partition, leader, replicas, isr, elr, last_known_elr }
     }
 
-    /// Create an instance without eligible-leader-replica information (the Java
-    /// four-argument constructor, which leaves `elr`/`last_known_elr` `null`).
+    /// Create an instance with the provided parameters, without eligible
+    /// leader replica information.
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - the partition id
+    /// - `leader` - the leader of the partition or `None` if there is none.
+    /// - `replicas` - the replicas of the partition in the same order as the
+    ///   replica assignment (the preferred replica is the head of the list)
+    /// - `isr` - the in-sync replicas
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#TopicPartitionInfo")]
     pub fn new(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> Self {
         Self { partition, leader, replicas, isr, elr: None, last_known_elr: None }
     }
 
-    /// Return the partition id.
+    /// Returns the partition id.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
-    /// Return the leader of the partition or `None` if there is none.
+    /// Returns the leader of the partition or `None` if there is none.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#leader")]
     pub fn leader(&self) -> Option<&Node> {
         self.leader.as_ref()
     }
 
-    /// Return the replicas of the partition in the same order as the replica
+    /// Returns the replicas of the partition in the same order as the replica
     /// assignment. The preferred replica is the head of the list.
+    ///
+    /// Brokers with version lower than 0.11.0.0 return the replicas in
+    /// unspecified order due to a bug.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#replicas")]
     pub fn replicas(&self) -> &[Node] {
         &self.replicas
     }
 
-    /// Return the in-sync replicas of the partition. The ordering is
+    /// Returns the in-sync replicas of the partition. The ordering is
     /// unspecified.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#isr")]
     pub fn isr(&self) -> &[Node] {
         &self.isr
     }
 
-    /// Return the eligible leader replicas of the partition, or `None` if
+    /// Returns the eligible leader replicas of the partition, or `None` if
     /// unavailable. The ordering is unspecified.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#elr")]
     pub fn elr(&self) -> Option<&[Node]> {
         self.elr.as_deref()
     }
 
-    /// Return the last known eligible leader replicas of the partition, or
+    /// Returns the last known eligible leader replicas of the partition, or
     /// `None` if unavailable. The ordering is unspecified.
     #[doc(alias = "org.apache.kafka.common.TopicPartitionInfo#lastKnownElr")]
     pub fn last_known_elr(&self) -> Option<&[Node]> {

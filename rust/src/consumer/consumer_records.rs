@@ -23,51 +23,49 @@ use crate::common::TopicPartition;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::OffsetAndMetadata;
 
-/// A container that holds the list of [`ConsumerRecord`] per partition for a
-/// particular topic.
-///
-/// There is one [`ConsumerRecord`] list for every topic-partition returned by
-/// a `Consumer::poll(...)` operation.
-///
-/// Corresponds to Java's
-/// `org.apache.kafka.clients.consumer.ConsumerRecords<K, V>`.
-///
-/// Uses an [`IndexMap`] internally so iteration order matches insertion order
-/// (Java's `ConsumerRecords` is documented as iterating per the underlying
-/// map's iteration order; the test suite assumes ordering matches insertion
-/// when a `LinkedHashMap` is supplied).
+/// A container that holds the list [`ConsumerRecord`] per partition for a
+/// particular topic. There is one [`ConsumerRecord`] list for every topic
+/// partition returned by a [`Consumer::poll`](crate::consumer::Consumer::poll)
+/// operation.
+// Uses an `IndexMap` internally so iteration order matches insertion order:
+// Java iterates in the underlying map's order, and its tests assume insertion
+// order when a `LinkedHashMap` is supplied.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords")]
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-    /// Whether the consumed position advanced for at least one partition
-    /// during the `collect_fetch` that produced this batch, even if no
-    /// records were returned (e.g. all records in a batch were aborted under
-    /// READ_COMMITTED).
-    ///
-    /// This field carries Java's internal `Fetch.positionAdvanced` flag —
-    /// the Rust port collapses Java's internal `Fetch<K, V>` into
-    /// `ConsumerRecords<K, V>` (no separate `Fetch` type). The public
-    /// [`Self::is_empty`] still mirrors Java's *public*
-    /// `ConsumerRecords.isEmpty()` (`records.isEmpty()`), but the poll loop
-    /// needs Java's internal `Fetch.isEmpty()` (`numRecords == 0 &&
-    /// !positionAdvanced`) so it returns promptly when only the position
-    /// advanced — see [`Self::is_fetch_empty`].
+    // Whether the consumed position advanced for at least one partition
+    // during the `collect_fetch` that produced this batch, even if no
+    // records were returned (e.g. all records in a batch were aborted under
+    // READ_COMMITTED).
+    //
+    // This field carries Java's internal `Fetch.positionAdvanced` flag —
+    // the Rust port collapses Java's internal `Fetch<K, V>` into
+    // `ConsumerRecords<K, V>` (no separate `Fetch` type). The public
+    // [`Self::is_empty`] still mirrors Java's *public*
+    // `ConsumerRecords.isEmpty()` (`records.isEmpty()`), but the poll loop
+    // needs Java's internal `Fetch.isEmpty()` (`numRecords == 0 &&
+    // !positionAdvanced`) so it returns promptly when only the position
+    // advanced — see [`Self::is_fetch_empty`].
     position_advanced: bool,
 }
 
 impl<K, V> ConsumerRecords<K, V> {
-    /// Create a new `ConsumerRecords` with the given records and next offsets.
+    /// Constructs a new `ConsumerRecords` with the given records and next offsets.
     ///
-    /// * `records` - The records for each partition
-    /// * `next_offsets` - The next offset and metadata for each partition whose
-    ///   position was advanced during the poll call. These represent the
-    ///   offsets that the consumer will start reading from on the next poll.
+    /// # Arguments
     ///
-    /// Corresponds to Java's `ConsumerRecords(Map, Map)`
-    /// (`ConsumerRecords.java:72`). Java's deprecated `ConsumerRecords(Map)`,
-    /// which supplies no next offsets, is not translated (CLAUDE.md §3).
+    /// - `records` - The records for each partition
+    /// - `next_offsets` - The next offset and metadata for each partition whose position was
+    ///   advanced during the poll call. These represent the offsets that the consumer will start
+    ///   reading from on the next poll.
+    ///
+    /// # Returns
+    ///
+    /// The new `ConsumerRecords`.
+    // Java's deprecated `ConsumerRecords(Map)`, which supplies no next offsets,
+    // is not translated (CLAUDE.md §3).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map)")]
     pub fn with_next_offsets(
         records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
@@ -89,10 +87,12 @@ impl<K, V> ConsumerRecords<K, V> {
         Self { records, next_offsets, position_advanced }
     }
 
-    /// Returns an empty `ConsumerRecords`.
+    /// Returns an empty `ConsumerRecords` instance.
     ///
-    /// Corresponds to Java's static `ConsumerRecords.empty()` /
-    /// `ConsumerRecords.EMPTY`.
+    /// # Returns
+    ///
+    /// An empty `ConsumerRecords`.
+    // Java's static `ConsumerRecords.empty()` / `ConsumerRecords.EMPTY`.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#empty")]
     pub fn empty() -> Self {
         Self { records: IndexMap::new(), next_offsets: HashMap::new(), position_advanced: false }
@@ -107,7 +107,7 @@ impl<K, V> ConsumerRecords<K, V> {
         Self::fetch_is_empty(&self.records, self.position_advanced)
     }
 
-    /// Java's internal `Fetch.isEmpty()` (`Fetch.java:116-118`) evaluated over
+    /// Java's internal `Fetch.isEmpty()` (`org.apache.kafka.clients.consumer.internals.Fetch#isEmpty`) evaluated over
     /// the two accumulators that build a `Fetch`, for callers that do not have
     /// a `ConsumerRecords` yet.
     ///
@@ -132,23 +132,29 @@ impl<K, V> ConsumerRecords<K, V> {
         records.is_empty() && !position_advanced
     }
 
-    /// Get the records for the given partition.
+    /// Get just the records for the given partition.
     ///
-    /// Returns an empty slice if no records are present for that partition.
+    /// # Arguments
     ///
-    /// Corresponds to Java's `ConsumerRecords.records(TopicPartition)`.
+    /// - `partition` - The partition to get records for
+    ///
+    /// # Returns
+    ///
+    /// The records, an empty slice if there are none.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#records")]
     pub fn records_with_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>] {
         self.records.get(partition).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Get the records for the given topic, across all partitions in this
-    /// record set.
+    /// Get just the records for the given topic.
     ///
-    /// Returns an iterator that yields references to records in
-    /// partition-insertion order.
+    /// # Arguments
     ///
-    /// Corresponds to Java's `ConsumerRecords.records(String)`.
+    /// - `topic` - The topic to get records for
+    ///
+    /// # Returns
+    ///
+    /// An iterator over the records, in partition-insertion order.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#records")]
     pub fn records_with_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a {
         self.records
@@ -159,34 +165,38 @@ impl<K, V> ConsumerRecords<K, V> {
 
     /// Get the partitions which have records contained in this record set.
     ///
-    /// Returns an iterator over partition references in insertion order. The
-    /// set may be empty if no data was returned.
+    /// # Returns
     ///
-    /// Corresponds to Java's `ConsumerRecords.partitions()`.
+    /// The set of partitions with data in this record set (may be empty if no data was returned),
+    /// as an iterator in insertion order.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.records.keys()
     }
 
-    /// The number of records across all topics and partitions in this set.
+    /// Returns the number of records for all topics.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#count")]
     pub fn count(&self) -> usize {
         self.records.values().map(Vec::len).sum()
     }
 
-    /// `true` if this record set has no partitions.
+    /// Returns whether this container has any records.
     ///
-    /// Matches Java's `ConsumerRecords.isEmpty()` exactly (Java returns
-    /// `records.isEmpty()`, not `count() == 0`).
+    /// # Returns
+    ///
+    /// True if there are no records, false otherwise
+    // Java returns `records.isEmpty()`, not `count() == 0`.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#isEmpty")]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
-    /// Get the next offsets and metadata for all topic-partitions for which
-    /// the position has been advanced in this poll call.
+    /// Get the next offsets and metadata corresponding to all topic partitions
+    /// for which the position have been advanced in this poll call.
     ///
-    /// Corresponds to Java's `ConsumerRecords.nextOffsets()`.
+    /// # Returns
+    ///
+    /// The next offsets that the consumer will consume
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecords#nextOffsets")]
     pub fn next_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
         &self.next_offsets

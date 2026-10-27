@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! The state of a transaction, as reported by `DescribeTransactions`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.TransactionState`.
 
 /// The state of a transaction.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.TransactionState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.TransactionState")]
@@ -60,7 +56,9 @@ impl TransactionState {
     /// Parses a state name, returning [`TransactionState::Unknown`] for any
     /// unrecognized value.
     ///
-    /// Mirrors `TransactionState.parse`.
+    /// # Arguments
+    ///
+    /// - `name` - the state name.
     #[doc(alias = "org.apache.kafka.clients.admin.TransactionState#parse")]
     pub fn parse(name: &str) -> TransactionState {
         match name {

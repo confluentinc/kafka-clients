@@ -90,15 +90,20 @@ pub(crate) unsafe fn destroy_transaction_listing_element(element: *mut c_void) {
     unsafe { kafka_admin_TransactionListing_destroy(element as *mut kafka_admin_TransactionListing_t) }
 }
 
-/// `new TransactionListing(String transactionalId, long producerId,
-/// TransactionState transactionState)`; `transaction_state` is a
-/// `kafka_admin_TransactionState_t` singleton. Owned, freed with
-/// [`kafka_admin_TransactionListing_destroy`].
+/// Creates the listing of a transaction.
+///
+/// # Parameters
+///
+/// - `transactional_id` - the transactional id.
+/// - `producer_id` - the producer id of the transaction.
+/// - `transaction_state` - the state of the transaction, a `kafka_admin_TransactionState_t`
+///   singleton.
 ///
 /// # Safety
 ///
 /// `transactional_id` must be a valid NUL-terminated string and
-/// `transaction_state` a transaction-state singleton.
+/// `transaction_state` a transaction-state singleton. The returned handle is owned, freed with
+/// [`kafka_admin_TransactionListing_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
@@ -118,11 +123,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_new(
     ))
 }
 
-/// `transactionalId()`: borrowed from the handle.
+/// Returns the transactional id.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-listing handle.
+/// `self_` must be a valid transaction-listing handle. The returned string is borrowed, valid as
+/// long as the listing.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_transactional_id(
@@ -134,7 +140,7 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_transactional_id(
     unsafe { inner_ref(self_) }.transactional_id_c.as_ptr()
 }
 
-/// `producerId()`.
+/// Returns the producer id of the transaction.
 ///
 /// # Safety
 ///
@@ -149,11 +155,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_producer_id(
     unsafe { transaction_listing_ref(self_) }.producer_id()
 }
 
-/// `state()`: the `kafka_admin_TransactionState_t` singleton, never freed.
+/// Returns the state of the transaction.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-listing handle.
+/// `self_` must be a valid transaction-listing handle. The returned
+/// `kafka_admin_TransactionState_t` singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_state(
@@ -164,11 +171,12 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_state(
     transaction_state_singleton(unsafe { transaction_listing_ref(self_) }.state())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the listing.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid transaction-listing handle.
+/// `self_` must be a valid transaction-listing handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TransactionListing_to_string(
@@ -179,11 +187,11 @@ pub unsafe extern "C" fn kafka_admin_TransactionListing_to_string(
     into_c_string(&unsafe { transaction_listing_ref(self_) }.to_string())
 }
 
-/// Frees an owned transaction-listing handle; null is a no-op.
+/// Frees an owned transaction-listing handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

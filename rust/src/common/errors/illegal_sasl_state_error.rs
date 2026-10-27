@@ -18,13 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Request is not valid given the current SASL state.
+    /// This error indicates unexpected requests prior to SASL authentication. This could be due to
+    /// misconfigured security, e.g. if PLAINTEXT protocol is used to connect to a SASL endpoint.
     ///
-    /// Corresponds to Java's `IllegalSaslStateException`, error code `Errors::IllegalSaslState`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `IllegalSaslStateException` -> `AuthenticationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::IllegalSaslState`. Java `extends` chain: `IllegalSaslStateException` ->
+    /// `AuthenticationException` -> `InvalidConfigurationException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.IllegalSaslStateException")]
     IllegalSaslStateError,
     code: Errors::IllegalSaslState,

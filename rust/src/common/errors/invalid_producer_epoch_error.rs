@@ -18,13 +18,16 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Producer attempted to produce with an old epoch.
+    /// This error indicates that the produce request sent to the partition leader contains a
+    /// non-matching producer epoch. When encountering this error, user should abort the ongoing
+    /// transaction by calling `KafkaProducer::abort_transaction` which would try to send
+    /// initPidRequest and reinitialize the producer under the hood.
     ///
-    /// Corresponds to Java's `InvalidProducerEpochException`, error code `Errors::InvalidProducerEpoch`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidProducerEpochException` -> `ApplicationRecoverableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidProducerEpoch`. Java `extends` chain:
+    /// `InvalidProducerEpochException` -> `ApplicationRecoverableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidProducerEpochException")]
     InvalidProducerEpochError,
     code: Errors::InvalidProducerEpoch,

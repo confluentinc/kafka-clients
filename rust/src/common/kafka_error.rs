@@ -25,8 +25,8 @@
 //! the rest are Kafka errors too — see [`Error::is_kafka_error`] for that test.
 //!
 //! The file keeps its `kafka_error` name because it translates
-//! `KafkaException.java`, as does the C FFI type `kafka_common_Error_t`
-//! (CLAUDE.md §4).
+//! `org.apache.kafka.common.KafkaException`, as does the C FFI type
+//! `kafka_common_Error_t`.
 
 use std::fmt;
 
@@ -39,41 +39,23 @@ use super::Error;
 use super::error::ambassador_impl_ErrorMessage;
 use super::protocol::Errors;
 
-/// Base Kafka error with common fields shared by all error types.
+/// The base class of all other Kafka errors
 ///
-/// Corresponds to Java's `KafkaException` / `ApiException` base class.
-/// Contains the protocol error code and an optional custom message —
-/// exactly the state Java's `KafkaException` carries. Fatality is NOT state
-/// here: like Java, it is derived from the error's identity, see
-/// `request_utils::RequestUtils::is_fatal_error`.
+/// # Translation notes
 ///
-/// Specific error types (e.g., [`TopicAuthorizationError`](crate::common::errors::TopicAuthorizationError)) embed this
-/// struct and add their own fields, mirroring Java's error subclasses.
-///
-/// Do not confuse this with [`Error`], the flat enum that wraps it — or with
-/// that enum's [`KafkaError`](Error::KafkaError) variant, which holds exactly
-/// one of these and nothing else.
-///
-/// # Examples
-///
-/// ```
-/// use confluent_kafka::common::Error;
-///
-/// let err = Error::kafka_message_source("send failed", Error::timeout("expired"));
-/// let base = err.kafka_error().expect("a bare Kafka error embeds a KafkaError");
-/// assert_eq!(base.message(), "send failed");
-/// assert_eq!(base.source().map(Error::message), Some("expired"));
-/// ```
-///
-/// Classification lives on [`Error`], which wraps this type — Java's
-/// `KafkaException` has no `isRetriable()` either:
-///
-/// ```
-/// use confluent_kafka::common::Error;
-///
-/// assert!(Error::timeout("expired").is_retriable_error());
-/// assert!(!Error::kafka().is_retriable_error());
-/// ```
+/// Embedded by each error.
+// Contains the protocol error code and an optional custom message, exactly the
+// state Java's `KafkaException` carries. Fatality is NOT state here: like Java,
+// it is derived from the error's identity, see
+// `request_utils::RequestUtils::is_fatal_error`.
+//
+// Specific error types (e.g. `TopicAuthorizationError`) embed this struct and
+// add their own fields, mirroring Java's error subclasses.
+//
+// Do not confuse this with `Error`, the flat enum that wraps it, or with that
+// enum's `KafkaError` variant, which holds exactly one of these and nothing
+// else. Classification lives on `Error`: Java's `KafkaException` has no
+// `isRetriable()` either. The tests below show both.
 #[derive(Clone, Debug, Delegate)]
 // `target = "self"`: the trait impl is generated from the inherent `message()`
 // below. If that method ever disappeared, this would recurse — and rustc's
@@ -92,9 +74,9 @@ pub struct KafkaError {
 
 impl KafkaError {
     // The four constructors below map one-for-one onto Java's four
-    // `KafkaException` constructors — `()` (`KafkaException.java:38`),
-    // `(String message)` (`:30`), `(Throwable cause)` (`:34`) and
-    // `(String message, Throwable cause)` (`:26`) — with a leading `error: Errors`
+    // `KafkaException` constructors — `KafkaException()`,
+    // `KafkaException(String)`, `KafkaException(Throwable)` and
+    // `KafkaException(String, Throwable)` — with a leading `error: Errors`
     // that has no Java counterpart: it carries what Java's subclass identity
     // carried, since this struct stands in for the whole base class (CLAUDE.md
     // §12.3). `error` is therefore in every signature, so the parameter-name
@@ -130,8 +112,7 @@ impl KafkaError {
         Self { error, custom_message: None, source: Some(Box::new(source)) }
     }
 
-    /// The underlying cause, if any. Mirrors Java's `getCause()`.
-    // Java's Throwable.getCause, a JDK method
+    /// Returns the underlying cause, if any: Java's `getCause()`.
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
@@ -143,9 +124,8 @@ impl KafkaError {
         self.error
     }
 
-    /// The error message. Returns the custom message if set, otherwise the
-    /// default message from the error code.
-    // Java's Throwable.getMessage, a JDK method
+    /// Returns the error message: the custom message if set, otherwise the default message of
+    /// the error code. Java's `getMessage()`.
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         match &self.custom_message {
@@ -168,9 +148,9 @@ impl fmt::Display for KafkaError {
 }
 
 impl std::error::Error for KafkaError {
-    /// Wired to the stored source. This impl used to be empty, so `source()`
-    /// answered `None` even when a cause was present — Java's
-    /// `KafkaException(String, Throwable)` keeps it.
+    // Wired to the stored source. This impl used to be empty, so `source()`
+    // answered `None` even when a cause was present; Java's
+    // `KafkaException(String, Throwable)` keeps it.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
     }
@@ -200,5 +180,24 @@ impl ErrorName for KafkaError {
 impl ErrorHierarchy for KafkaError {
     fn is_kafka_error(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::common::Error;
+
+    #[test]
+    fn test_base_carries_message_and_source() {
+        let err = Error::kafka_message_source("send failed", Error::timeout("expired"));
+        let base = err.kafka_error().expect("a bare Kafka error embeds a KafkaError");
+        assert_eq!(base.message(), "send failed");
+        assert_eq!(base.source().map(Error::message), Some("expired"));
+    }
+
+    #[test]
+    fn test_classification_lives_on_error() {
+        assert!(Error::timeout("expired").is_retriable_error());
+        assert!(!Error::kafka().is_retriable_error());
     }
 }

@@ -649,7 +649,8 @@ impl Metadata {
     ) -> Result<bool, Error> {
         if leader_epoch < 0 {
             // Java: `throw new IllegalArgumentException("Invalid leader epoch " +
-            // leaderEpoch + " (must be non-negative)")` (`Metadata.java:234`).
+            // leaderEpoch + " (must be non-negative)")`
+            // (`org.apache.kafka.clients.Metadata#updateLastSeenEpochIfNewer`).
             // Was previously built as a fatal UnknownServerError, which was
             // wrong twice over: Java's IllegalArgumentException is not a
             // KafkaException at all, and it is not in the fatal family.
@@ -1139,7 +1140,7 @@ impl Metadata {
     /// and other call sites that lack a topic id; `retain_topic_with_id` is the
     /// topic-id-aware retain matching Java's
     /// `retainTopic(topicName, topicId, isInternal, nowMs)` invoked on every
-    /// topic in the response (mirrors `Metadata.java:511`).
+    /// topic in the response.
     #[doc(alias = "org.apache.kafka.clients.Metadata#handleMetadataResponse")]
     fn handle_metadata_response(
         inner: &mut MetadataInner,
@@ -1512,18 +1513,18 @@ impl Metadata {
             // missing a notification between the check and the await.
             let notified = self.update_notify.notified();
 
-            // Java's wait predicate calls `maybeThrowFatalException()` first
-            // (`ProducerMetadata.java:125`), so a fatal error — an authentication
+            // Java's wait predicate in
+            // `org.apache.kafka.clients.producer.internals.ProducerMetadata#awaitUpdate` calls
+            // `maybeThrowFatalException()` first, so a fatal error — an authentication
             // failure, say — fails the wait immediately instead of being reported
             // as a retriable timeout once the deadline expires.
             self.maybe_return_fatal_error()?;
 
             {
                 let inner = self.inner.lock().unwrap();
-                // `updateVersion() > lastVersion || isClosed()`
-                // (`ProducerMetadata.java:126`): a `close()` racing the waiter ends
-                // the wait, and the post-wait check turns it into the
-                // distinguishable error Java throws at `:129-130` instead of
+                // `updateVersion() > lastVersion || isClosed()` (`ProducerMetadata#awaitUpdate`):
+                // a `close()` racing the waiter ends the wait, and the post-wait check turns
+                // it into the distinguishable error Java throws after the wait instead of
                 // stalling for the whole deadline and then reporting a retriable
                 // timeout that says nothing about the close.
                 if inner.update_version > last_version || inner.is_closed {
@@ -1549,13 +1550,12 @@ impl Metadata {
         }
     }
 
-    /// The tail of Java's `ProducerMetadata.awaitUpdate`
-    /// (`ProducerMetadata.java:129-130`): once the wait predicate is satisfied, a
+    /// The tail of Java's `ProducerMetadata#awaitUpdate`: once the wait predicate is satisfied, a
     /// closed instance fails instead of reporting a successful update.
     ///
     /// A bare `KafkaException`, so `is_kafka_error()` is `true` while
-    /// `is_api_error()` is `false` — which is what makes `KafkaProducer.doSend`'s
-    /// `catch (KafkaException e)` (`KafkaProducer.java:1070`) pick it up and
+    /// `is_api_error()` is `false` — which is what makes `KafkaProducer#doSend`'s
+    /// `catch (KafkaException e)` pick it up and
     /// relabel it as `"Producer closed while send in progress"`.
     fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
         if inner.is_closed {
@@ -1695,8 +1695,8 @@ mod tests {
     /// A fatal metadata error must fail `await_update` immediately, not be
     /// reported as a retriable timeout after the full wait.
     ///
-    /// Java's wait predicate calls `maybeThrowFatalException()`
-    /// (`ProducerMetadata.java:125`), so the fatal error surfaces on the first
+    /// Java's wait predicate in `ProducerMetadata#awaitUpdate` calls
+    /// `maybeThrowFatalException()`, so the fatal error surfaces on the first
     /// evaluation. Three defects used to stack here: the reader had no callers,
     /// `fatal_error` never notified the waiters, and the producer's caller
     /// discarded whatever came back and rebuilt a `Timeout`. The result was that a
@@ -1770,8 +1770,7 @@ mod tests {
         }
     }
 
-    /// `ProducerMetadata.awaitUpdate`'s close exit
-    /// (`ProducerMetadata.java:126,129-130`): `isClosed()` ends the wait and the
+    /// `ProducerMetadata#awaitUpdate`'s close exit: `isClosed()` ends the wait and the
     /// post-wait check throws a bare `KafkaException`.
     ///
     /// Java asserts this exact string in two `ProducerMetadataTest` tests (the

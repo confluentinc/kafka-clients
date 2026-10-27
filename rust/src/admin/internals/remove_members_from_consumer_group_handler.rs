@@ -166,8 +166,9 @@ impl AdminApiHandler<CoordinatorKey, MemberErrors> for RemoveMembersFromConsumer
         self.validate_keys(group_ids);
 
         let ConcreteResponse::LeaveGroup(response) = response else {
-            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
-            // mismatch; see `ApiResult::failed_all`.
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // fails this one call on a response-type mismatch; see
+            // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 group_ids,
                 Error::local_illegal_state(

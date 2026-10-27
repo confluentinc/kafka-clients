@@ -80,16 +80,20 @@ unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
 }
 
-/// `DeleteTopicsResult.topicIdValues()`: an owned map, sorted by topic id,
-/// of owned `kafka_common_Uuid_t *` keys (compared by value in
-/// `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
-/// (`KafkaFuture<Void>`: `get` delivers `NULL`), freed with
-/// `kafka_Map_destroy` (which frees the keys and the futures); or `NULL`
-/// when the result is keyed by topic name (Java's `null`).
+/// Use when `kafka_admin_Admin_delete_topics` used a TopicIdCollection
+///
+/// # Returns
+///
+/// A map from topic IDs to futures which can be used to check the status of individual deletions if
+/// the deleteTopics request used topic IDs. Otherwise return `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle. The returned map is owned, sorted by
+/// topic id, of owned `kafka_common_Uuid_t *` keys (compared by value in
+/// `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`), and freed with
+/// `kafka_Map_destroy`, which frees the keys and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_id_values(
@@ -114,15 +118,19 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_id_values(
     }
 }
 
-/// `DeleteTopicsResult.topicNameValues()`: an owned map, sorted by topic
-/// name, of owned `char *` keys to owned `kafka_common_KafkaFuture_t *`
-/// (`KafkaFuture<Void>`: `get` delivers `NULL`), freed with
-/// `kafka_Map_destroy` (which frees the keys and the futures); or `NULL`
-/// when the result is keyed by topic id (Java's `null`).
+/// Use when `kafka_admin_Admin_delete_topics` used a TopicNameCollection
+///
+/// # Returns
+///
+/// A map from topic names to futures which can be used to check the status of individual deletions
+/// if the deleteTopics request used topic names. Otherwise return `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle. The returned map is owned, sorted by
+/// topic name, of owned `char *` keys to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`), and freed with
+/// `kafka_Map_destroy`, which frees the keys and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_name_values(
@@ -137,13 +145,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_topic_name_values(
     }
 }
 
-/// `DeleteTopicsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every topic was deleted, freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// # Returns
+///
+/// A future which succeeds only if all the topic deletions succeed.
 ///
 /// # Safety
 ///
-/// `self_` must be a live result handle.
+/// `self_` must be a live result handle. The returned `KafkaFuture<Void>` (its
+/// `get` delivers `NULL`) is owned and freed with
+/// `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all(
@@ -155,12 +165,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

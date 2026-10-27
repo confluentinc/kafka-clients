@@ -480,7 +480,8 @@ impl ApplicationEventProcessor {
         };
         if !has_membership {
             // Java: `new KafkaException("MembershipManager is not available
-            // when processing a subscribe event")` (`:386`) — a *bare*
+            // when processing a subscribe event")` (in
+            // `ApplicationEventProcessor#process(TopicRe2JPatternSubscriptionChangeEvent)`) — a *bare*
             // `KafkaException`, so `is_kafka_error()` must answer true.
             handle.complete_with_error(Error::kafka_message(
                 "MembershipManager is not available when processing a subscribe event",
@@ -716,7 +717,8 @@ impl ApplicationEventProcessor {
                 }
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to async commit offset
-                // because ...")` (`:246`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(AsyncCommitEvent)`) — a bare `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -786,7 +788,8 @@ impl ApplicationEventProcessor {
                 }
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to sync commit offset
-                // because ...")` (`:264`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(SyncCommitEvent)`) — a bare `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -820,7 +823,7 @@ impl ApplicationEventProcessor {
     /// Java: `process(FetchCommittedOffsetsEvent)`.
     fn process_fetch_committed_offsets(
         &mut self,
-        handle: super::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        handle: super::CompletableEventHandle<HashMap<TopicPartition, Option<OffsetAndMetadata>>>,
         partitions: HashSet<TopicPartition>,
     ) {
         let deadline_ms = handle.deadline_ms();
@@ -830,7 +833,9 @@ impl ApplicationEventProcessor {
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
                 // Java: `new KafkaException("Unable to fetch committed offset
-                // because ...")` (`:282`) — a bare `KafkaException`.
+                // because ...")` (in
+                // `ApplicationEventProcessor#process(FetchCommittedOffsetsEvent)`) — a bare
+                // `KafkaException`.
                 handle.complete_with_error(Error::kafka_message(
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -847,19 +852,7 @@ impl ApplicationEventProcessor {
                     // had retriable errors (UNKNOWN_TOPIC_ID /
                     // UNKNOWN_TOPIC_OR_PARTITION), returning partial results
                     // rather than failing the whole `committed()` call.
-                    //
-                    // The FetchCommittedOffsetsEvent handle type is
-                    // `HashMap<TopicPartition, OffsetAndMetadata>` (no `Option`),
-                    // so "no offset for this partition" is represented by
-                    // absence: entries whose value is `None` (uncommitted or
-                    // errored) are stripped, matching the observable behaviour
-                    // of the public API.
-                    let stripped: HashMap<TopicPartition, OffsetAndMetadata> = result
-                        .to_offset_map_with_nulls()
-                        .into_iter()
-                        .filter_map(|(k, v)| v.map(|om| (k, om)))
-                        .collect();
-                    handle.complete(stripped);
+                    handle.complete(result.to_offset_map_with_nulls());
                 },
                 Ok(Err(err)) => {
                     handle.complete_with_error(err);
@@ -1378,7 +1371,7 @@ impl ApplicationEventProcessor {
                         // `pollTimer.isExpired()` BEFORE the reset and
                         // calls `membershipManager().maybeRejoinStaleMember()`
                         // when expired
-                        // (`AbstractHeartbeatRequestManager.java:265-274`).
+                        // (`AbstractHeartbeatRequestManager#resetPollTimer`).
                         // Required for fence-rejoin recovery: when the
                         // poll timer expires the heartbeat manager
                         // transitions the member to STALE via leave
@@ -2451,9 +2444,10 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:251`), so
-        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
-        // false and flip every §10.4 gate the app side consults.
+        // `KafkaException` here
+        // (`org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(AsyncCommitEvent)`),
+        // so `is_kafka_error()` must be true — `Error::local_illegal_state` would answer false and flip every §10.4
+        // gate the app side consults.
         assert_eq!(
             err.message(),
             "Unable to async commit offset because the CommitRequestManager is not available. \
@@ -2573,9 +2567,10 @@ mod tests {
 
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:269`), so
-        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
-        // false and flip every §10.4 gate the app side consults.
+        // `KafkaException` here
+        // (`org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(SyncCommitEvent)`), so
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer false and flip every §10.4 gate
+        // the app side consults.
         assert_eq!(
             err.message(),
             "Unable to sync commit offset because the CommitRequestManager is not available. \
@@ -2644,12 +2639,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_committed_offsets_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false);
-        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>::new(60_000);
         fx.processor
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
-        // `KafkaException` here (`ApplicationEventProcessor.java:287`), so
+        // `KafkaException` here
+        // (`ApplicationEventProcessor#process(FetchCommittedOffsetsEvent)`), so
         // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
@@ -2674,7 +2670,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_committed_offsets_empty_partitions_resolves_immediately() {
         let mut fx = setup_processor(true);
-        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>::new(60_000);
         fx.processor
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
@@ -2909,8 +2905,7 @@ mod tests {
     // C2-01: the Unsubscribe / LeaveGroupOnClose event future follows the
     // membership manager's leave-in-progress future. Java
     // `process(UnsubscribeEvent)` / `process(LeaveGroupOnCloseEvent)` chain
-    // the event future onto `leaveGroup()` / `leaveGroupOnClose(...)`
-    // (`ApplicationEventProcessor.java:427-430,491-495`), which completes
+    // the event future onto `leaveGroup()` / `leaveGroupOnClose(...)`, which completes
     // only when the leave heartbeat's response (or failure / skip / fence /
     // fatal) is observed; and they start the leave synchronously, inside
     // `process(...)` on the network thread.
@@ -3117,7 +3112,7 @@ mod tests {
     }
 
     /// A second Unsubscribe while the first leave is in progress gets the
-    /// SAME leave future (`AbstractMembershipManager.java:637-643`): neither
+    /// SAME leave future (`AbstractMembershipManager#leaveGroup(boolean)`): neither
     /// event completes before the leave response, and both complete with it.
     /// A LeaveGroupOnClose arriving during an unsubscribe joins the same
     /// leave.
@@ -3409,7 +3404,7 @@ mod tests {
 
         let mut processor = fx.processor;
         let request_managers = Arc::clone(&fx.request_managers);
-        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(20_000);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>::new(20_000);
         processor.process(ApplicationEvent::FetchCommittedOffsets { handle, partitions });
 
         // Stub the manager's response — Java does this via Mockito on
@@ -3446,9 +3441,79 @@ mod tests {
             .expect("sender alive")
             .expect("ok");
         assert_eq!(result.len(), 3);
-        assert_eq!(result.get(&tp0).map(|o| o.offset()), Some(10));
-        assert_eq!(result.get(&tp1).map(|o| o.offset()), Some(15));
-        assert_eq!(result.get(&tp2).map(|o| o.offset()), Some(20));
+        assert_eq!(
+            result.get(&tp0).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
+            Some(10)
+        );
+        assert_eq!(
+            result.get(&tp1).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
+            Some(15)
+        );
+        assert_eq!(
+            result.get(&tp2).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
+            Some(20)
+        );
+    }
+
+    /// A partition the coordinator reports without a committed offset stays in
+    /// the event's result with a `None` value.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_committed_offsets_event_keeps_partitions_without_an_offset() {
+        let fx = setup_processor(true);
+        let tp0 = tp("topic", 0);
+        let tp1 = tp("topic", 1);
+        let tp2 = tp("topic", 2);
+        let mut partitions = HashSet::new();
+        partitions.insert(tp0.clone());
+        partitions.insert(tp1.clone());
+        partitions.insert(tp2.clone());
+
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, Option<OffsetAndMetadata>>>::new(20_000);
+        processor.process(ApplicationEvent::FetchCommittedOffsets { handle, partitions });
+
+        // Stub the manager's response — Java does this via Mockito on
+        // `commitRequestManager.fetchOffsets`.
+        let stub = {
+            let mut response = HashMap::new();
+            response.insert(tp0.clone(), Some(make_offset_and_metadata(10, Some(2))));
+            response.insert(tp1.clone(), None);
+            response.insert(tp2.clone(), Some(make_offset_and_metadata(20, Some(3))));
+            response
+        };
+        // Wait until the spawned AEP task has enqueued the unsent fetch,
+        // then complete it via the test helper.
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_fetch_for_test(stub.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetFetch via the commit manager");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        // Java completes the event with `toOffsetMapWithNulls()`: a partition
+        // without a committed offset stays in the map with a `null` value.
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get(&tp1), Some(&None));
+        assert_eq!(
+            result.get(&tp0).and_then(Option::as_ref).map(OffsetAndMetadata::offset),
+            Some(10)
+        );
     }
 
     // -------------------------------------------------------------------

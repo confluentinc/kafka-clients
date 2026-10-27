@@ -17,16 +17,17 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// No valid offset is available for the requested partition.
+    /// Thrown when the offset for a set of partitions is invalid (either undefined or out of
+    /// range), and no reset policy has been configured.
     ///
-    /// The concrete base of the invalid-offset family; its coded subclass is
-    /// `OffsetOutOfRangeException`.
+    /// # See also
     ///
-    /// Corresponds to Java's `InvalidOffsetException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
+    /// - `OffsetOutOfRangeError`
     ///
-    /// Java `extends` chain:
-    ///    `InvalidOffsetException` -> `ApiException` -> `KafkaException`
+    /// # Translation notes
+    ///
+    /// No protocol code. Java `extends` chain: `InvalidOffsetException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidOffsetException")]
     InvalidOffsetError,
     extends: [

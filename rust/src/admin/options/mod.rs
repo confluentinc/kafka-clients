@@ -14,10 +14,8 @@
 
 //! Options classes for admin operations.
 //!
-//! Corresponds to the `*Options` classes in `org.apache.kafka.clients.admin`.
-//! Each extends the Java `AbstractOptions` base (a `timeout_ms` field); in Rust
-//! each options struct simply carries its own optional timeout plus operation
-//! specific fields.
+//! Each options struct carries its own optional timeout plus operation specific
+//! fields.
 
 mod abort_transaction_options;
 mod alter_client_quotas_options;

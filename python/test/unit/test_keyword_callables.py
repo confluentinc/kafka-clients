@@ -119,8 +119,9 @@ def test_a_constructor_deserializer_without_kwargs_is_rejected(argument: str) ->
 
 
 def test_a_config_route_serializer_without_kwargs_is_rejected_and_closed() -> None:
-    # Checked before configure(), as Java's getConfiguredInstance checks the
-    # type before it configures (AbstractConfig.java:414-422), then closed.
+    # Checked before configure(), as Java's
+    # org.apache.kafka.common.config.AbstractConfig#getConfiguredInstance(Object,Class,Map)
+    # checks the type before it configures, then closed.
     NoKwargsSerializer.closed = NoKwargsSerializer.configured = 0
     configs = dict(PRODUCER)
     configs["value.serializer"] = f"{__name__}.NoKwargsSerializer"

@@ -62,8 +62,8 @@ _K = TypeVar("_K")
 
 
 class _ConsumerProtocol:
-    """Java's ``ConsumerProtocol``, for ``MockAdminClient.listGroups``: only its
-    ``PROTOCOL_TYPE`` (``ConsumerProtocol.java:45``)."""
+    """Java's ``org.apache.kafka.clients.consumer.internals.ConsumerProtocol``, for
+    ``MockAdminClient.listGroups``: only its ``PROTOCOL_TYPE``."""
 
     PROTOCOL_TYPE: ClassVar[str] = "consumer"
 

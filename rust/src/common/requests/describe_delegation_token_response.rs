@@ -40,10 +40,10 @@ pub struct DescribeDelegationTokenResponse {
 }
 
 /// The parameters of Java's four-argument `DescribeDelegationTokenResponse`
-/// constructor (`DescribeDelegationTokenResponse.java:38`).
+/// constructor.
 ///
-/// Java's three constructors (`:38`, `:69`, `:73`) share no parameter name, so
-/// all four of `:38`'s parameters reach its derived name. CLAUDE.md §2 caps that
+/// Java's three `DescribeDelegationTokenResponse#DescribeDelegationTokenResponse` constructors
+/// share no parameter name, so all four of this one's parameters reach its derived name. CLAUDE.md §2 caps that
 /// at three and makes this struct the method's *only* parameter, so every Java
 /// parameter lives here. This struct has no Java counterpart: it exists solely
 /// to satisfy that naming rule (DoD #7).
@@ -51,7 +51,7 @@ pub struct DescribeDelegationTokenResponse {
 /// It has **no** `Default`: `version`, `throttle_time_ms` and `error` come from
 /// the caller in every Java overload, so [`DescribeDelegationTokenResponseOptionsBuilder::build`] returns an error if any of `version`, `throttle_time_ms`, `error` was not set.
 /// Build it from [`DescribeDelegationTokenResponseOptionsBuilder::new`], whose `tokens` starts empty
-/// exactly as Java's `DescribeDelegationTokenResponse(int, int, Errors)` (`:69`)
+/// exactly as Java's `DescribeDelegationTokenResponse(int, int, Errors)`
 /// passes `new ArrayList<>()` on the caller's behalf.
 ///
 /// `Debug` renders no token's id and no token's hmac, as the response built
@@ -65,21 +65,20 @@ pub struct DescribeDelegationTokenResponseOptions<'a> {
     pub(crate) throttle_time_ms: i32,
     /// Java's `error`.
     pub(crate) error: Errors,
-    /// Java's `tokens`. Starts empty, as in `:69`.
+    /// Java's `tokens`. Starts empty, as in `DescribeDelegationTokenResponse(int, int, Errors)`.
     pub(crate) tokens: &'a [DelegationToken],
 }
 
 /// Renders `version`, `throttle_time_ms` and `error` as the derive it replaces
 /// did, and each token field by field, with its id and hmac rendered as Java's
-/// `DescribeDelegationTokenResponse.toString()` renders them
-/// (`DescribeDelegationTokenResponse.java:131-140`): the token id as
+/// `DescribeDelegationTokenResponse#toString` renders them: the token id as
 /// `"REDACTED"` and the hmac as empty.
 ///
 /// This struct has no Java counterpart, so it has no Java rendering of its
 /// own. It carries the tokens of the response it prepares, which never renders
 /// their ids or hmacs. The derive rendered each token through
 /// [`DelegationToken`]'s own `Debug`, which follows Java's
-/// `DelegationToken.toString()` (`DelegationToken.java:71-76`): that hides the
+/// `DelegationToken#toString`: that hides the
 /// hmac but prints the token id, so the derive printed what the response
 /// itself hides.
 impl std::fmt::Debug for DescribeDelegationTokenResponseOptions<'_> {
@@ -210,8 +209,7 @@ impl DescribeDelegationTokenResponse {
     /// Creates a new `DescribeDelegationTokenResponse` from the underlying data.
     ///
     /// Corresponds to Java's
-    /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`
-    /// (`DescribeDelegationTokenResponse.java:73`).
+    /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_data(data: DescribeDelegationTokenResponseData) -> Self {
         Self { data }
@@ -220,7 +218,7 @@ impl DescribeDelegationTokenResponse {
     /// Builds a response from a list of delegation tokens.
     ///
     /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
-    /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
+    /// List<DelegationToken>)`. The
     /// token requester is only encoded on v3+.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_options(options: DescribeDelegationTokenResponseOptions<'_>) -> Self {
@@ -264,8 +262,7 @@ impl DescribeDelegationTokenResponse {
 
     /// Builds an error response with no tokens.
     ///
-    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
-    /// (`DescribeDelegationTokenResponse.java:69`).
+    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`.
     #[doc(alias = "org.apache.kafka.common.requests.DescribeDelegationTokenResponse#DescribeDelegationTokenResponse")]
     pub fn with_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
         Self::with_options(
@@ -465,8 +462,7 @@ mod tests {
     }
 
     /// Translates the rendering assertions of
-    /// `RequestResponseTest.createDescribeTokenResponse`
-    /// (`RequestResponseTest.java:3241-3265`): with two tokens, the redacting
+    /// `RequestResponseTest#createDescribeTokenResponse`: with two tokens, the redacting
     /// `Display` masks both token ids and empties both hmacs. Java counts
     /// exactly two `tokenId='REDACTED'` and two `hmac=[]`; they read
     /// `token_id: "REDACTED"` and `hmac: []` in the Rust rendering.
@@ -491,8 +487,8 @@ mod tests {
         }
     }
 
-    /// The `Debug` counterpart of `RequestResponseTest.createDescribeTokenResponse`'s
-    /// rendering assertions (`RequestResponseTest.java:3241-3265`): `Debug`
+    /// The `Debug` counterpart of `RequestResponseTest#createDescribeTokenResponse`'s
+    /// rendering assertions: `Debug`
     /// renders exactly what `Display` does (Java has a single `toString()`), so
     /// with two tokens both ids are masked and both hmacs, which a derived
     /// `Debug` would print as their byte values, render empty.
@@ -521,8 +517,8 @@ mod tests {
     }
 
     /// New test, no Java original (Java has no such struct): `Debug` renders
-    /// each token's id and hmac as Java's `toString()` renders the response's
-    /// (`DescribeDelegationTokenResponse.java:131-140`), the other token fields
+    /// each token's id and hmac as Java's `DescribeDelegationTokenResponse#toString` renders the
+    /// response's, the other token fields
     /// as they are, and every other field as the derive did.
     #[test]
     fn options_debug_redacts_token_id_and_hmac() {

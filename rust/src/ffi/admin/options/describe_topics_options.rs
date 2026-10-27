@@ -64,15 +64,24 @@ fn boxed(options: DescribeTopicsOptions) -> *mut kafka_admin_DescribeTopicsOptio
 }
 
 /// `new DescribeTopicsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_DescribeTopicsOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_DescribeTopicsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_DescribeTopicsOptions_new() -> *mut kafka_admin_DescribeTopicsOptions_t {
     boxed(DescribeTopicsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -90,8 +99,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -107,7 +120,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_timeout_ms(
     unsafe { describe_topics_options_ref(self_) }.timeout_ms().unwrap_or(-1)
 }
 
-/// `DescribeTopicsOptions.includeAuthorizedOperations(boolean includeAuthorizedOperations)`: whether to include authorized operations in the description.
+/// `DescribeTopicsOptions.includeAuthorizedOperations(boolean includeAuthorizedOperations)`.
+///
+/// # Parameters
+///
+/// - `include_authorized_operations` - whether to include authorized operations in the description.
 ///
 /// # Safety
 ///
@@ -125,7 +142,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_include_authorize
     *options = std::mem::take(options).set_include_authorized_operations(include_authorized_operations != 0);
 }
 
-/// `DescribeTopicsOptions.includeAuthorizedOperations()`: whether authorized operations are included in the description.
+/// `DescribeTopicsOptions.includeAuthorizedOperations()`.
+///
+/// # Returns
+///
+/// Whether authorized operations are included in the description.
 ///
 /// # Safety
 ///
@@ -141,7 +162,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_include_authorized_op
     i8::from(unsafe { describe_topics_options_ref(self_) }.include_authorized_operations())
 }
 
-/// `DescribeTopicsOptions.partitionSizeLimitPerResponse(int partitionSizeLimitPerResponse)`: the maximum number of partitions per `DescribeTopicPartitions` response.
+/// `DescribeTopicsOptions.partitionSizeLimitPerResponse(int partitionSizeLimitPerResponse)`: the
+/// maximum number of partitions per `DescribeTopicPartitions` response.
+///
+/// # Parameters
+///
+/// - `partition_size_limit_per_response` - the maximum number of partitions per response
 ///
 /// # Safety
 ///
@@ -159,7 +185,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsOptions_set_partition_size_li
     *options = std::mem::take(options).set_partition_size_limit_per_response(partition_size_limit_per_response);
 }
 
-/// `DescribeTopicsOptions.partitionSizeLimitPerResponse()`: the maximum number of partitions per `DescribeTopicPartitions` response.
+/// `DescribeTopicsOptions.partitionSizeLimitPerResponse()`.
+///
+/// # Returns
+///
+/// The maximum number of partitions per `DescribeTopicPartitions` response.
 ///
 /// # Safety
 ///

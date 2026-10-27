@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::incremental_alter_configs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterConfigsOptions`.
 
 /// Options for `Admin::incremental_alter_configs`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterConfigsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsOptions")]
 pub struct AlterConfigsOptions {
@@ -33,8 +29,16 @@ impl AlterConfigsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `AlterConfigsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,14 +46,22 @@ impl AlterConfigsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set whether the request should be validated without altering the configs.
+    /// Set to true if the request should be validated without altering the configs.
+    ///
+    /// # Arguments
+    ///
+    /// - `validate_only` - `true` to only validate the request.
+    ///
+    /// # Returns
+    ///
+    /// This `AlterConfigsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
@@ -57,7 +69,7 @@ impl AlterConfigsOptions {
         self
     }
 
-    /// Whether the request should be validated without altering the configs.
+    /// Returns true if the request should be validated without altering the configs.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsOptions#shouldValidateOnly")]
     pub fn should_validate_only(&self) -> bool {
         self.validate_only

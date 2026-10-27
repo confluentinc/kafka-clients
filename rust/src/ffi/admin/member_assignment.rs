@@ -61,14 +61,17 @@ pub(crate) unsafe fn member_assignment_ref<'a>(
     unsafe { &*(assignment as *const MemberAssignment) }
 }
 
-/// `new MemberAssignment(Set<TopicPartition> topicPartitions)`: a borrowed
-/// list of `const kafka_common_TopicPartition_t *`, copied (null reads as
-/// empty). Owned, freed with [`kafka_admin_MemberAssignment_destroy`].
+/// Creates an instance with the specified parameters.
+///
+/// # Parameters
+///
+/// - `topic_partitions` - List of topic partitions
 ///
 /// # Safety
 ///
-/// `topic_partitions` must be null or a valid list of topic-partition
-/// handles.
+/// `topic_partitions` must be `NULL`, read as empty, or a valid borrowed list of
+/// `const kafka_common_TopicPartition_t *`, copied. The returned handle is owned, freed with
+/// [`kafka_admin_MemberAssignment_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
@@ -80,12 +83,16 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_new(
     box_member_assignment(MemberAssignment::new(partitions))
 }
 
-/// `topicPartitions()`: an owned list of owned `kafka_common_TopicPartition_t *`
-/// copies ordered by topic then partition, freed with `kafka_List_destroy`.
+/// The topic partitions assigned to a group member.
+///
+/// # Returns
+///
+/// The partitions, ordered by topic then partition.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-assignment handle.
+/// `self_` must be a valid member-assignment handle. The returned list of
+/// `kafka_common_TopicPartition_t *` copies is owned, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
@@ -96,11 +103,12 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_topic_partitions(
     sorted_topic_partition_list(unsafe { member_assignment_ref(self_) }.topic_partitions())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the assignment.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid member-assignment handle.
+/// `self_` must be a valid member-assignment handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
@@ -116,7 +124,7 @@ pub unsafe extern "C" fn kafka_admin_MemberAssignment_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

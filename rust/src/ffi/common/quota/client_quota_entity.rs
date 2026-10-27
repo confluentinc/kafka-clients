@@ -65,7 +65,7 @@ pub(crate) fn client_quota_entity_ptr(entity: &ClientQuotaEntity) -> *const kafk
 }
 
 /// Hands `entity` to C as an owned handle, freed with
-/// [`kafka_common_quota_ClientQuotaEntity_destroy`].
+/// `kafka_common_quota_ClientQuotaEntity_destroy`.
 pub(crate) fn box_client_quota_entity(entity: ClientQuotaEntity) -> *mut kafka_common_quota_ClientQuotaEntity_t {
     Box::into_raw(Box::new(entity)) as *mut kafka_common_quota_ClientQuotaEntity_t
 }
@@ -80,16 +80,21 @@ pub(crate) fn sorted_entries(entity: &ClientQuotaEntity) -> Vec<(&str, Option<&s
     entries
 }
 
-/// `new ClientQuotaEntity(Map<String, String> entries)`: `entries` maps
-/// entity-type strings to entity-name strings, a `NULL` value naming the
-/// built-in default entity for its type. The map and its strings are copied
-/// during the call. The owned entity is freed with
-/// [`kafka_common_quota_ClientQuotaEntity_destroy`].
+/// `new ClientQuotaEntity(Map<String, String> entries)`: `entries` maps entity-type strings to
+/// entity-name strings, a `NULL` value naming the built-in default entity for its type. The map and
+/// its strings are copied during the call.
+///
+/// # Parameters
+///
+/// - `entries` - maps entity type to its name
 ///
 /// # Safety
 ///
 /// `entries` must be a valid map of NUL-terminated keys and NUL-terminated or
 /// `NULL` values.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_quota_ClientQuotaEntity_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
@@ -113,8 +118,11 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
     box_client_quota_entity(ClientQuotaEntity::new(entries))
 }
 
-/// `isValidEntityType(String entityType)`: whether `entity_type` is one of
-/// `user`, `client-id` or `ip`.
+/// Returns 1 if `entity_type` is one of `user`, `client-id` or `ip`, else 0.
+///
+/// # Parameters
+///
+/// - `entity_type` - the entity type to check
 ///
 /// # Safety
 ///
@@ -130,14 +138,17 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_is_valid_entity_ty
     }))
 }
 
-/// `entries()`: an owned map from entity type to entity name, both
-/// NUL-terminated strings, a `NULL` value meaning the built-in default entity
-/// for its type. Entries are sorted by entity type. Freed with
-/// `kafka_Map_destroy`, which also frees the strings.
+/// `entries()`.
+///
+/// # Returns
+///
+/// map of entity type to its name
 ///
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-entity handle.
+/// The returned map is owned, its entries sorted by entity type, a `NULL` value meaning the
+/// built-in default entity; `kafka_Map_destroy` frees it and its strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
@@ -152,11 +163,14 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
     box_string_keyed_map(entries, Some(destroy_string_element))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// # Returns
+///
+/// the string form of this client-quota-entity.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-entity handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_to_string(

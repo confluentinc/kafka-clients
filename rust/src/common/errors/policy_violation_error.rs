@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Request parameters do not satisfy the configured policy.
+    /// Error thrown if a create topics request does not satisfy the configured policy for a topic.
     ///
-    /// Corresponds to Java's `PolicyViolationException`, error code `Errors::PolicyViolation`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `PolicyViolationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::PolicyViolation`.
     #[doc(alias = "org.apache.kafka.common.errors.PolicyViolationException")]
     PolicyViolationError,
     code: Errors::PolicyViolation,

@@ -17,8 +17,6 @@
 use std::fmt;
 
 /// The topic name, partition number and the brokerId of the replica.
-///
-/// Corresponds to `org.apache.kafka.common.TopicPartitionReplica`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica")]
 pub struct TopicPartitionReplica {
@@ -29,6 +27,12 @@ pub struct TopicPartitionReplica {
 
 impl TopicPartitionReplica {
     /// Creates a new `TopicPartitionReplica`.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - the topic name
+    /// - `partition` - the partition number
+    /// - `broker_id` - the id of the broker holding the replica
     #[doc(alias = "org.apache.kafka.common.TopicPartitionReplica#TopicPartitionReplica")]
     pub fn new(topic: impl Into<String>, partition: i32, broker_id: i32) -> Self {
         Self { broker_id, partition, topic: topic.into() }

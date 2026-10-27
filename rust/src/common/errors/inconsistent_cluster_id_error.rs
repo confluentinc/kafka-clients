@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The clusterId in the request does not match that found on the server.
     ///
-    /// Corresponds to Java's `InconsistentClusterIdException`, error code `Errors::InconsistentClusterId`.
-    ///
-    /// Java `extends` chain:
-    ///    `InconsistentClusterIdException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InconsistentClusterId`. Java `extends` chain:
+    /// `InconsistentClusterIdException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InconsistentClusterIdException")]
     InconsistentClusterIdError,
     code: Errors::InconsistentClusterId,
