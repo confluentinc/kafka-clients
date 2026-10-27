@@ -140,13 +140,17 @@ def reduce(self: BaseException) -> str | tuple[Any, ...]:
     """``__reduce__`` for every generated error: a singleton pickles by name;
     any other error rebuilds from its constructor arguments by keyword. The
     constructor rebuilds the error's own state; only attributes a caller added
-    (public names) and the cause travel as state. The cause travels because an
+    (public names), the notes (``add_note``) and the cause travel as state, as
+    Python's own exceptions keep their notes. The cause travels because an
     error from the core gets it (``kafka_common_Error_source``) after
     construction, so the constructor arguments do not carry it."""
     singleton_name = self.__dict__.get(_SINGLETON)
     if singleton_name is not None:
         return str(singleton_name)
     public = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+    notes = self.__dict__.get("__notes__")
+    if notes is not None:
+        public["__notes__"] = notes
     if self.__cause__ is not None:
         public["__cause__"] = self.__cause__
     state = public or None
