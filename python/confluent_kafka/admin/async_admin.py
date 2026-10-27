@@ -968,16 +968,24 @@ class AsyncAdmin(_AdminState):
         self, *,
         options: ListPartitionReassignmentsOptions,
     ) -> ListPartitionReassignmentsResult[Async]: ...
+    @overload
+    def list_partition_reassignments(
+        self, *,
+        partitions: Iterable[TopicPartition] | None,
+        options: ListPartitionReassignmentsOptions,
+    ) -> ListPartitionReassignmentsResult[Async]: ...
 
     def list_partition_reassignments(
-            self, *, partitions: Iterable[TopicPartition] = MISSING,
+            self, *, partitions: Iterable[TopicPartition] | None = MISSING,
             options: ListPartitionReassignmentsOptions = MISSING
             ) -> ListPartitionReassignmentsResult[Async]:
         """See :meth:`Admin.list_partition_reassignments`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
         targets: Iterable[TopicPartition] | None = None
-        if partitions is not MISSING:  # else Java's (options) form: Optional.empty()
+        # Left out (Java's (options) form), or None with options given (Java's
+        # (Optional<Set>, options) form with Optional.empty()): every partition.
+        if partitions is not MISSING and (partitions is not None or options is MISSING):
             _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
             targets = partitions
         args = _conversions.list_partition_reassignments_args(targets)
