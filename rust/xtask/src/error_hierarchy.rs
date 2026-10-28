@@ -1540,13 +1540,36 @@ impl Graph<'_> {
                     (["Collections", "singleton"], [x]) => {
                         PyVal { expr: format!("{{{}}}", x.expr), ty: Some("Set".into()), konst: None }
                     },
-                    (["Set", "copyOf"] | ["Collections", "unmodifiableSet"], [x]) => PyVal {
-                        expr: format!("_throwable.copy_set({})", x.expr),
+                    // Each copy dereferences its argument, so a `None` raises
+                    // Java's NullPointerException as `TypeError` naming the
+                    // parameter; `Set.copyOf` / `Map.copyOf` also reject a null
+                    // element, key or value (CLAUDE.md, Python Binding
+                    // Conventions, Types). A plain store keeps a `None`.
+                    (["Set", "copyOf"], [x]) => PyVal {
+                        expr: format!("_throwable.checked_set({}, {}, elements=True)", x.expr, py_str_literal(&x.expr)),
                         ty: Some("Set".into()),
                         konst: None,
                     },
-                    (["Collections", "unmodifiableMap"] | ["Map", "copyOf"], [x]) => PyVal {
-                        expr: format!("_throwable.copy_dict({})", x.expr),
+                    (["Collections", "unmodifiableSet"], [x]) => PyVal {
+                        expr: format!(
+                            "_throwable.checked_set({}, {}, elements=False)",
+                            x.expr,
+                            py_str_literal(&x.expr)
+                        ),
+                        ty: Some("Set".into()),
+                        konst: None,
+                    },
+                    (["Map", "copyOf"], [x]) => PyVal {
+                        expr: format!("_throwable.checked_dict({}, {}, entries=True)", x.expr, py_str_literal(&x.expr)),
+                        ty: Some("Map".into()),
+                        konst: None,
+                    },
+                    (["Collections", "unmodifiableMap"], [x]) => PyVal {
+                        expr: format!(
+                            "_throwable.checked_dict({}, {}, entries=False)",
+                            x.expr,
+                            py_str_literal(&x.expr)
+                        ),
                         ty: Some("Map".into()),
                         konst: None,
                     },
@@ -1757,6 +1780,12 @@ fn convert_for_field(ty: &str, v: PyVal) -> PyVal {
 fn stored_param(expr: &str) -> &str {
     for w in ["copy_set", "copy_dict", "view", "headers"] {
         if let Some(inner) = expr.strip_prefix(&format!("_throwable.{w}(")).and_then(|s| s.strip_suffix(')')) {
+            return inner;
+        }
+    }
+    // A checking copy names the parameter first: `checked_set(x, "x", ...)`.
+    for w in ["checked_set", "checked_dict"] {
+        if let Some((inner, _)) = expr.strip_prefix(&format!("_throwable.{w}(")).and_then(|s| s.split_once(", ")) {
             return inner;
         }
     }
@@ -2841,7 +2870,15 @@ fn render_class(g: &Graph, info: &ClassInfo) -> anyhow::Result<Rendered> {
                 }
                 format!("return self.{attr}")
             },
-            GetterBody::KeySet(f) => format!("return set(self.{}.keys())", attr_name(f)),
+            // `field.keySet()` dereferences the field: a stored `None` raises
+            // `TypeError` naming it, as Java's NullPointerException.
+            GetterBody::KeySet(f) => {
+                let attr = attr_name(f);
+                format!(
+                    "return set(_throwable.non_null(self.{attr}, {}).keys())",
+                    py_str_literal(attr.trim_start_matches('_'))
+                )
+            },
             GetterBody::Abstract => "raise NotImplementedError".to_string(),
         };
         body.push(String::new());
@@ -3730,6 +3767,40 @@ mod tests {
             assert!(err.contains("unsupported"), "{part}: {err}");
         }
         assert!(translate_to_string("x.E", "metric + \": x\"", &fields).is_err());
+    }
+
+    #[test]
+    fn test_a_copy_that_dereferences_its_argument_is_checked() {
+        let g = Graph { classes: &BTreeMap::new() };
+        let mut env = Env::new();
+        env.insert(
+            "partitions".into(),
+            PyVal { expr: "partitions".into(), ty: Some("Collection".into()), konst: None },
+        );
+        let call = |n: &[&str]| {
+            Expr::Call(
+                n.iter().map(|s| s.to_string()).collect(),
+                vec![Expr::Name(vec!["partitions".into()])],
+            )
+        };
+        let t = |n: &[&str]| g.translate(&call(n), &env).unwrap().expr;
+        assert_eq!(
+            t(&["Set", "copyOf"]),
+            "_throwable.checked_set(partitions, \"partitions\", elements=True)"
+        );
+        assert_eq!(
+            t(&["Collections", "unmodifiableSet"]),
+            "_throwable.checked_set(partitions, \"partitions\", elements=False)"
+        );
+        assert_eq!(
+            t(&["Map", "copyOf"]),
+            "_throwable.checked_dict(partitions, \"partitions\", entries=True)"
+        );
+        assert_eq!(
+            t(&["Collections", "unmodifiableMap"]),
+            "_throwable.checked_dict(partitions, \"partitions\", entries=False)"
+        );
+        assert_eq!(stored_param(&t(&["Set", "copyOf"])), "partitions");
     }
 
     fn repo_root() -> PathBuf {

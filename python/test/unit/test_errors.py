@@ -490,6 +490,39 @@ def test_offset_out_of_range_and_log_truncation_constructors() -> None:
     assert str(LogTruncationError(message="m", fetch_offsets={}, divergent_offsets={})) == "m"
 
 
+def test_a_none_the_java_constructor_copies_raises_type_error() -> None:
+    """``Set.copyOf(partitions)`` and ``Collections.unmodifiableMap(divergentOffsets)``
+    dereference their argument, and ``Set.copyOf`` a ``null`` element: Java's
+    NullPointerException is ``TypeError`` naming the parameter (Types)."""
+    with pytest.raises(TypeError) as e:
+        NoOffsetForPartitionError(partitions=None)
+    assert str(e.value) == "partitions must not be None"
+    with pytest.raises(TypeError) as e:
+        NoOffsetForPartitionError(partitions=[_TP, None])
+    assert str(e.value) == "partitions must not contain None"
+    for given in ({}, {"message": "m"}):
+        with pytest.raises(TypeError) as e:
+            LogTruncationError(**given, fetch_offsets={_TP: 1}, divergent_offsets=None)
+        assert str(e.value) == "divergent_offsets must not be None"
+    # unmodifiableMap keeps a null key or value, as Java's view does.
+    assert LogTruncationError(fetch_offsets={}, divergent_offsets={_TP: None}).divergent_offsets() \
+        == {_TP: None}
+
+
+def test_partitions_of_a_stored_none_raises_type_error() -> None:
+    """``partitions()`` is ``offsetOutOfRangePartitions.keySet()``: a stored null
+    map, which Java's constructor keeps, throws there."""
+    e = OffsetOutOfRangeError(message="m", offset_out_of_range_partitions=None)
+    assert e.offset_out_of_range_partitions() is None
+    with pytest.raises(TypeError) as raised:
+        e.partitions()
+    assert str(raised.value) == "offset_out_of_range_partitions must not be None"
+    truncation = LogTruncationError(fetch_offsets=None, divergent_offsets={})
+    with pytest.raises(TypeError) as raised:
+        truncation.partitions()
+    assert str(raised.value) == "offset_out_of_range_partitions must not be None"
+
+
 def test_payload_getters_return_javas_defaults() -> None:
     assert ThrottlingQuotaExceededError(message="x").throttle_time_ms() == 0
     assert ThrottlingQuotaExceededError(throttle_time_ms=5, message="x").throttle_time_ms() == 5

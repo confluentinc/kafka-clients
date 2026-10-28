@@ -218,6 +218,33 @@ def copy_dict(value: Mapping[Any, Any] | None) -> dict[Any, Any] | None:
     return None if value is None else dict(value)
 
 
+def checked_set(value: Iterable[Any] | None, name: str, *, elements: bool) -> set[Any]:
+    """A ``Set`` field from Java's ``Set.copyOf(x)`` (``elements``) or
+    ``Collections.unmodifiableSet(x)``: both dereference ``x``, so a ``None``
+    raises ``TypeError("<name> must not be None")``; ``Set.copyOf`` also
+    rejects a ``None`` element (``"<name> must not contain None"``), as Java's
+    NullPointerException (CLAUDE.md, Python Binding Conventions, Types)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    copied = set(value)
+    if elements and None in copied:
+        raise TypeError(f"{name} must not contain None")
+    return copied
+
+
+def checked_dict(value: Mapping[Any, Any] | None, name: str, *, entries: bool) -> dict[Any, Any]:
+    """A ``Map`` field from Java's ``Map.copyOf(x)`` (``entries``) or
+    ``Collections.unmodifiableMap(x)``: both dereference ``x``, so a ``None``
+    raises ``TypeError("<name> must not be None")``; ``Map.copyOf`` also
+    rejects a ``None`` key or value (``"<name> must not contain None"``)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    copied = dict(value)
+    if entries and any(k is None or v is None for k, v in copied.items()):
+        raise TypeError(f"{name} must not contain None")
+    return copied
+
+
 def view(value: bytes | bytearray | memoryview | None) -> memoryview | None:
     """A ``ByteBuffer`` field: a ``memoryview`` of the argument, never a copy."""
     return None if value is None else memoryview(value)
