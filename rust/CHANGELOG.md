@@ -9,8 +9,7 @@ breaking changes.
 
 ### General availability
 
-- First generally available (GA) release of the Rust client. The clients no
-  longer log a preview warning at startup.
+- First generally available (GA) release of the Rust client, version 1.0.0.
 
 ### Admin client
 

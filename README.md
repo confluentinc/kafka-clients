@@ -9,7 +9,7 @@ It also contains bindings for multiple languages, automatically generated follow
 
 ## Status
 
-**Rust Client: Generally Available**. This is the first GA release of the Rust client. We welcome your feedback, see [RFCs and feedback](#rfcs-and-feedback).
+**Rust Client: Generally Available**. This is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](#rfcs-and-feedback).
 
 **Python Client: Preview**. The Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
 
