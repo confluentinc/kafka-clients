@@ -21,11 +21,10 @@ use std::fmt;
 use crate::common::Error;
 
 /// A container class for offset and timestamp.
-// This value is non-nullable, so when it is the value type of an
-// `offsets_for_times` result map, an unresolved partition (queried but with no
-// offset at/after the target time) is omitted from the map (key absent) rather
-// than present with a `null` value as in Java (see
-// `Consumer::offsets_for_times`).
+// In an `offsets_for_times` result map the value is an
+// `Option<OffsetAndTimestamp>`: an unresolved partition (queried but with no
+// offset at/after the target time) is present with `None`, as Java maps it to
+// `null` (see `Consumer::offsets_for_times`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp")]
 pub struct OffsetAndTimestamp {
