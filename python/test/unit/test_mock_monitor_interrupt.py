@@ -12,25 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A Ctrl+C while ``AsyncMockConsumer`` hands its monitor to the awaiting task.
+"""A Ctrl+C while a mock consumer holds its monitor, or ``AsyncMockConsumer``
+hands it to the awaiting task.
 
 ``rebalance``, ``lose_partitions``, ``poll`` with an ``async def`` poll task and
 ``commit_nowait`` with an ``async def`` callback hold the mock's monitor for
 the task while they await (``_Monitor``). A ``KeyboardInterrupt`` landing right
-after the hand-over (here, as the monitor's ``__exit__`` returns) or at it
+after the hand-over (here, as the block that hands it over releases the lock) or at it
 (before the owner is set) must leave the monitor with no owner; otherwise every
 later call from another task raises ``ConcurrentModificationError`` for good."""
 
 from __future__ import annotations
 
 import asyncio
+import random
+import signal
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
 from confluent_kafka.common import TopicPartition
-from confluent_kafka.consumer import AsyncMockConsumer, ConsumerRebalanceListener
+from confluent_kafka.consumer import AsyncMockConsumer, ConsumerRebalanceListener, MockConsumer
 from confluent_kafka.consumer import _mock_core
 
 _TP = TopicPartition(topic="t", partition=0)
@@ -82,15 +87,26 @@ def test_an_interrupt_at_the_hand_over_leaves_the_monitor_free(
         call = await _ready(consumer, site)
         armed = [True]
         if at == "after":
-            real_exit = _mock_core._Monitor.__exit__
+            real_rlock = consumer._lock.rlock
 
-            def exit_then_interrupt(self: Any, *exc: object) -> None:
-                real_exit(self, *exc)
-                if armed[0] and self.owner is not None and self.owner is asyncio.current_task():
-                    armed[0] = False
-                    raise KeyboardInterrupt
+            class InterruptAfterHandOver:
+                """The monitor's lock, raising once right after it is released by
+                the block that handed the monitor over (the owner is then this
+                task), as a signal handler does at the next check point."""
 
-            monkeypatch.setattr(_mock_core._Monitor, "__exit__", exit_then_interrupt)
+                def __enter__(self) -> bool:
+                    return bool(real_rlock.__enter__())
+
+                def __exit__(self, *exc: object) -> None:
+                    real_rlock.__exit__(*exc)
+                    if armed[0] and consumer._lock.owner is asyncio.current_task():
+                        armed[0] = False
+                        raise KeyboardInterrupt
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(real_rlock, name)
+
+            consumer._lock.rlock = InterruptAfterHandOver()  # type: ignore[assignment]
         else:
             real_current = _mock_core._current_task
 
@@ -104,6 +120,8 @@ def test_an_interrupt_at_the_hand_over_leaves_the_monitor_free(
         with pytest.raises(KeyboardInterrupt):
             await call()
         monkeypatch.undo()
+        if at == "after":
+            consumer._lock.rlock = real_rlock
         assert not armed[0], "the interrupt was not injected"
         assert consumer._lock.owner is None
 
@@ -115,3 +133,151 @@ def test_an_interrupt_at_the_hand_over_leaves_the_monitor_free(
         await consumer.close()
 
     asyncio.run(main())
+
+
+# --------------------------------------------------------------------------- #
+# The sync MockConsumer: a Ctrl+C while a method holds the monitor's lock must
+# not leave the lock held; Java's monitor cannot stay held after the method.
+# --------------------------------------------------------------------------- #
+
+WAIT = 10.0
+
+
+def _lock_is_free(lock: Any) -> bool:
+    """Whether another thread can take ``lock`` (a held RLock blocks it)."""
+    taken: list[bool] = []
+
+    def take() -> None:
+        ok = lock.acquire(timeout=WAIT)
+        taken.append(ok)
+        if ok:
+            lock.release()
+
+    thread = threading.Thread(target=take, daemon=True)
+    thread.start()
+    thread.join(WAIT + 1)
+    return taken == [True]
+
+
+def _returns_from_another_thread(call: Callable[[], object]) -> bool:
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: (call(), done.set()), daemon=True)
+    thread.start()
+    return done.wait(WAIT)
+
+
+class _InterruptingRLock:
+    """The monitor's lock, raising ``KeyboardInterrupt`` once on the test's
+    thread: before its acquire (``acquire``) or after its release
+    (``release``)."""
+
+    def __init__(self, inner: Any, at: str) -> None:
+        self._inner = inner
+        self._at = at
+        self._thread = threading.get_ident()
+        self.fired = False
+
+    def _fire(self, at: str) -> None:
+        if self._at == at and not self.fired and threading.get_ident() == self._thread:
+            self.fired = True
+            raise KeyboardInterrupt
+
+    def __enter__(self) -> bool:
+        self._fire("acquire")
+        return bool(self._inner.__enter__())
+
+    def __exit__(self, *exc: object) -> None:
+        self._inner.__exit__(*exc)
+        self._fire("release")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _assigned_mock() -> MockConsumer[str, str]:
+    consumer: MockConsumer[str, str] = MockConsumer(offset_reset_strategy="earliest")
+    consumer.assign(partitions=[_TP])
+    return consumer
+
+
+@pytest.mark.parametrize("at", ["acquire", "check", "release"])
+@pytest.mark.parametrize("method", ["assignment", "paused"])
+def test_an_interrupt_in_a_sync_mock_call_leaves_the_monitor_free(
+        method: str, at: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    consumer = _assigned_mock()
+    real = consumer._lock.rlock
+    fired = [False]
+    if at == "check":
+        real_check = _mock_core._Monitor.check
+
+        def interrupt_once(self: Any) -> None:
+            if not fired[0]:
+                fired[0] = True
+                raise KeyboardInterrupt
+            real_check(self)
+
+        monkeypatch.setattr(_mock_core._Monitor, "check", interrupt_once)
+    else:
+        wrapper = _InterruptingRLock(real, at)
+        consumer._lock.rlock = wrapper  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            getattr(consumer, method)()
+    finally:
+        consumer._lock.rlock = real
+        monkeypatch.undo()
+    assert fired[0] or wrapper.fired
+    assert _lock_is_free(real)
+    assert _returns_from_another_thread(getattr(consumer, method))
+
+
+STRESS_S = 3.0
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="needs signal.pthread_kill")
+@pytest.mark.parametrize("method", ["assignment", "paused"])
+def test_real_sigint_leaves_the_sync_mock_monitor_free(method: str) -> None:
+    """Real ``SIGINT`` signals while a sync mock call loops: the handler raises
+    ``KeyboardInterrupt`` only while the call runs, at the interpreter's own
+    check points; the lock is free afterwards and another thread's call
+    returns."""
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals reach only the main thread")
+    consumer = _assigned_mock()
+    call = getattr(consumer, method)
+    in_call = [False]
+
+    def handler(signum: int, frame: object) -> None:
+        if in_call[0]:
+            raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGINT, handler)
+    stop = threading.Event()
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def send() -> None:
+        while not stop.is_set():
+            signal.pthread_kill(main, signal.SIGINT)
+            time.sleep(random.uniform(20e-6, 500e-6))
+
+    sender = threading.Thread(target=send, daemon=True)
+    interrupted = 0
+    try:
+        sender.start()
+        deadline = time.monotonic() + STRESS_S
+        while time.monotonic() < deadline:
+            try:
+                in_call[0] = True
+                call()
+            except KeyboardInterrupt:
+                interrupted += 1
+            finally:
+                in_call[0] = False
+    finally:
+        stop.set()
+        sender.join(WAIT)
+        signal.signal(signal.SIGINT, previous)
+    assert interrupted > 0, "no call was interrupted; the test did not run its case"
+    assert _lock_is_free(consumer._lock.rlock)
+    assert _returns_from_another_thread(call)
