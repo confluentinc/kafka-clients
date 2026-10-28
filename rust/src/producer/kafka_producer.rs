@@ -1496,7 +1496,6 @@ impl<K, V> KafkaProducer<K, V> {
             sender.run().await;
         });
 
-        crate::preview_warning::log_preview_warning(&log_context);
         kafka_debug!(log_context, "Kafka producer started");
 
         Self {

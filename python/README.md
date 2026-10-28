@@ -8,7 +8,7 @@ links the Rust library's C API (`../rust`, feature `ffi`).
 
 ## Status
 
-**In Development:** the API is subject to large changes and the stability is not guaranteed.
+**Preview:** the Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
 
 ## Import paths
 
