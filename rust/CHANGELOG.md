@@ -7,6 +7,10 @@ breaking changes.
 
 ## [Unreleased]
 
+### General availability
+
+- First generally available (GA) release of the Rust client, version 1.0.0.
+
 ### Admin client
 
 - **Behaviour change:** a retriable error during `close(timeout)` no longer

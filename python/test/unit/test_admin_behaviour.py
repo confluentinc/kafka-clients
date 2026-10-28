@@ -48,6 +48,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka._preview import PREVIEW_WARNING
 from confluent_kafka.admin import (
     Admin,
     AsyncAdmin,
@@ -389,8 +390,10 @@ class _Reports:
         gc.collect()
         reports = [str(w.message) for w in self._caught]
         reports += [str(u.exc_value) for u in self._unraisable]
+        # The preview warning a client logs when constructed is not a report.
         reports += [r.getMessage() for r in self._caplog.records
-                    if r.name == "asyncio" or r.name.startswith("confluent_kafka")]
+                    if (r.name == "asyncio" or r.name.startswith("confluent_kafka"))
+                    and r.getMessage() != PREVIEW_WARNING]
         assert reports == []
 
 

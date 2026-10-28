@@ -528,7 +528,6 @@ impl KafkaAdminClient {
             bootstrap,
         )?);
 
-        crate::preview_warning::log_preview_warning(&log_context);
         let (admin, runnable) = Self::build(client, metadata_manager, &config, client_id, time, log_context)?;
         // Java's constructor reads its settings through the config's getters,
         // then logs what it did not read (`KafkaAdminClient.java:702`).
