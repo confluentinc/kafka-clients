@@ -31,6 +31,35 @@ static int checked_len_to_int32(Py_ssize_t len, const char* what, int32_t* out) 
     return 0;
 }
 
+// Converts a Python int to a Java integer type of `bits` bits (8, 16 or 32),
+// as Java's `byte`, `short` and `int`: 0 with the value stored in *out, or -1
+// with OverflowError("<v> does not fit a <bits>-bit signed int") set when it
+// is outside the type's range (CLAUDE.md, Python Binding Conventions, Types: an
+// int wider than the Java type raises OverflowError where it reaches the FFI),
+// never a narrowing cast that would send another number.
+static int py_as_signed(PyObject* value, int bits, int32_t* out) {
+    long long v = PyLong_AsLongLong(value);
+    if (v == -1 && PyErr_Occurred()) return -1;
+    long long hi = bits == 8 ? INT8_MAX : bits == 16 ? INT16_MAX : INT32_MAX;
+    long long lo = -hi - 1;
+    if (v < lo || v > hi) {
+        PyErr_Format(PyExc_OverflowError, "%lld does not fit a %d-bit signed int", v, bits);
+        return -1;
+    }
+    *out = (int32_t)v;
+    return 0;
+}
+
+// The int a PyArg_ParseTuple "i" unit gave, as a Java `short` (see py_as_signed).
+static int int_as_i16(int value, int16_t* out) {
+    if (value < INT16_MIN || value > INT16_MAX) {
+        PyErr_Format(PyExc_OverflowError, "%d does not fit a 16-bit signed int", value);
+        return -1;
+    }
+    *out = (int16_t)value;
+    return 0;
+}
+
 // ---- calling the C API -----------------------------------------------------
 //
 // Only confluent_kafka_bindings.h is included. It declares every function that
@@ -3119,8 +3148,8 @@ static PyObject* py_MockProducer_set_commit_transaction_error(PyObject* self, Py
     Producer* p = producer_from_handle(ptr);
     kafka_common_Error_t* err = NULL;
     if (code_obj != Py_None) {
-        long code = PyLong_AsLong(code_obj);
-        if (code == -1 && PyErr_Occurred()) return NULL;
+        int32_t code;
+        if (py_as_signed(code_obj, 32, &code) < 0) return NULL;
         err = mock_error_from_code((int)code, message);
         if (err == NULL) return NULL;
     }
@@ -6675,8 +6704,8 @@ static PyObject* py_MockConsumer_update_partitions(PyObject* self, PyObject* arg
 static kafka_common_Error_t* mock_error_build(const char* message, PyObject* code) {
     kafka_common_Error_t *ffi_err = NULL;
     if (code == Py_None) return ffi_built(kafka_common_Error_kafka_message_err(message, &ffi_err), &ffi_err);
-    long c = PyLong_AsLong(code);
-    if (c == -1 && PyErr_Occurred()) return NULL;
+    int32_t c;
+    if (py_as_signed(code, 32, &c) < 0) return NULL;
     return mock_error_from_code((int)c, message);
 }
 
@@ -7377,9 +7406,9 @@ static int i32_list_build(PyObject* seq, i32_list_t* l, const char* what) {
     if (n > 0 && l->vals == NULL) { Py_DECREF(fast); i32_list_free(l); PyErr_NoMemory(); return -1; }
     l->n = n;
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { Py_DECREF(fast); i32_list_free(l); return -1; }
-        l->vals[i] = (int32_t)v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 32, &l->vals[i]) < 0) {
+            Py_DECREF(fast); i32_list_free(l); return -1;
+        }
         if (ffi_raise((kafka_List_add_err(l->list, &l->vals[i], &ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(fast); i32_list_free(l); return -1; }
     }
     Py_DECREF(fast);
@@ -8688,9 +8717,9 @@ static kafka_List_t* i32_list_boxed(PyObject* seq, const char* what) {
     obj_list_t l;
     if (obj_list_init(&l, n, pymem_free) < 0) { Py_DECREF(fast); return NULL; }
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
-        int32_t* b = box_i32((int32_t)v);
+        int32_t v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 32, &v) < 0) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
+        int32_t* b = box_i32(v);
         if (b == NULL || obj_list_add(&l, b) < 0) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
     }
     Py_DECREF(fast);
@@ -9201,9 +9230,13 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
             if (ok) ok = !ffi_raise((t = kafka_admin_NewTopic_with_replicas_assignments_err(name, m.map, &ffi_err), ffi_take(&ffi_err)));
             obj_map_free(&m);
             if (!ok) goto fail;
-        } else if (ffi_raise((t = kafka_admin_NewTopic_with_num_partitions_replication_factor_err(
-                       name, (int32_t)np, (int16_t)rf, &ffi_err), ffi_take(&ffi_err)))) {
-            goto fail;
+        } else {
+            int16_t replication_factor;
+            if (int_as_i16(rf, &replication_factor) < 0) goto fail;
+            if (ffi_raise((t = kafka_admin_NewTopic_with_num_partitions_replication_factor_err(
+                    name, (int32_t)np, replication_factor, &ffi_err), ffi_take(&ffi_err)))) {
+                goto fail;
+            }
         }
         if (obj_list_add(&topics, t) < 0) goto fail;
         if (configs != Py_None) {
@@ -9809,14 +9842,14 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
     kafka_List_t* list = NULL;   // borrowed Type singletons
     if (ffi_raise((list = kafka_List_new_err(&ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(fast); return NULL; }
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL; }
+        int32_t v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 8, &v) < 0) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL; }
         const kafka_common_config_ConfigResource_Type_t* rt = NULL;
         if (ffi_raise((rt = kafka_common_config_ConfigResource_Type_for_id_err((int8_t)v, &ffi_err), ffi_take(&ffi_err)))) {
             ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL;
         }
         if (rt == NULL) {
-            PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %ld", v);
+            PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %d", (int)v);
             ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL;
         }
         if (ffi_raise((kafka_List_add_err(list, (void*)rt, &ffi_err), ffi_take(&ffi_err)))) {

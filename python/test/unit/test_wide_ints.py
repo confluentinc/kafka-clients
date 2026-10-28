@@ -20,8 +20,12 @@ value."""
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+
 import pytest
 
+from confluent_kafka.admin import Admin, NewPartitionReassignment, NewPartitions, NewTopic
 from confluent_kafka.common import TopicPartition, Uuid
 from confluent_kafka.consumer import KafkaConsumer, MockConsumer, OffsetAndMetadata
 
@@ -60,3 +64,70 @@ def test_uuid_keeps_the_low_64_bits_of_each_half_as_a_signed_long() -> None:
     unsigned = Uuid(most_sig_bits=2**64 - 1, least_sig_bits=2**63)
     assert unsigned.most_significant_bits() == -1
     assert unsigned.least_significant_bits() == -(2**63)
+
+
+_INT_MIN, _INT_MAX = -(2**31), 2**31 - 1
+_SHORT_MIN, _SHORT_MAX = -(2**15), 2**15 - 1
+
+
+@contextlib.contextmanager
+def _admin() -> Iterator[Admin]:
+    admin = Admin.create(configs={"bootstrap.servers": "localhost:1"})
+    try:
+        yield admin
+    finally:
+        # The RPCs never reach a broker: do not wait for them.
+        admin.close(timeout=0)
+
+
+def _fits(value: int, bits: int) -> str:
+    return f"{value} does not fit a {bits}-bit signed int"
+
+
+@pytest.mark.parametrize("wide", [_INT_MAX + 1, _INT_MIN - 1, 2**32 + 1])
+def test_a_broker_id_wider_than_a_java_int_raises_overflow_error(wide: int) -> None:
+    """Java's ``Integer`` broker ids: no wrap to another broker (``2**32 + 1``
+    is not broker 1)."""
+    tp = TopicPartition(topic="t", partition=0)
+    with _admin() as admin:
+        calls = [
+            lambda b: admin.describe_log_dirs(brokers=[b]),
+            lambda b: admin.create_topics(new_topics=[NewTopic(
+                name="t", replicas_assignments={0: [b]})]),
+            lambda b: admin.create_partitions(new_partitions={"t": NewPartitions.increase_to(
+                total_count=2, new_assignments=[[b]])}),
+            lambda b: admin.alter_partition_reassignments(reassignments={
+                tp: NewPartitionReassignment(target_replicas=[b])}),
+        ]
+        for call in calls:
+            with pytest.raises(OverflowError) as e:
+                call(wide)
+            assert str(e.value) == _fits(wide, 32)
+            # The ends of Java's int range go through.
+            call(_INT_MAX)
+            call(_INT_MIN)
+
+
+@pytest.mark.parametrize("wide", [_SHORT_MAX + 1, _SHORT_MIN - 1, 65539])
+def test_a_replication_factor_wider_than_a_java_short_raises_overflow_error(wide: int) -> None:
+    """``NewTopic(String, int, short)``: no wrap (``65539`` is not 3, ``65535``
+    not -1)."""
+    with _admin() as admin:
+        with pytest.raises(OverflowError) as e:
+            admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                     replication_factor=wide)])
+        assert str(e.value) == _fits(wide, 16)
+        for end in (_SHORT_MAX, _SHORT_MIN):
+            admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=1,
+                                                     replication_factor=end)])
+
+
+@pytest.mark.parametrize("wide", [_INT_MAX + 1, _INT_MIN - 1])
+def test_a_partition_count_wider_than_a_java_int_raises_overflow_error(wide: int) -> None:
+    with _admin() as admin:
+        with pytest.raises(OverflowError):
+            admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=wide,
+                                                     replication_factor=1)])
+        for end in (_INT_MAX, _INT_MIN):
+            admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=end,
+                                                     replication_factor=1)])
