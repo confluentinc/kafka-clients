@@ -34,9 +34,10 @@
 //! returns at once and reports through
 //! [`kafka_common_serialization_Serializer__set_callback_result`], so a client
 //! awaits the report without holding any thread. A failure an implementation
-//! reports from `configure` or `close` is logged, as the Rust trait methods
-//! return nothing; a `NULL` `configure` or `close`, and the built-in classes,
-//! keep the Java defaults, which do nothing.
+//! reports from `configure` or `close` reaches the caller: the invoker's
+//! `out_err`, or its `_cb` twin's completion, the caller owning the error and
+//! freeing it with `kafka_common_Error_destroy`. A `NULL` `configure` or
+//! `close`, and the built-in classes, keep the Java defaults, which do nothing.
 //!
 //! The invokers park their calling thread until a C implementation reports;
 //! the `_cb` twins fire their completion on the thread that reports, or, for
