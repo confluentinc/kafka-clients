@@ -15,7 +15,7 @@ sources are the `kafka/` submodule at the repository root).
 
 ## Status
 
-**Preview:** the Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
+**Generally Available:** this is the first GA release of the Rust client, version 1.0.0. We welcome your feedback, see [RFCs and feedback](../README.md#rfcs-and-feedback).
 
 
 ## Directory Structure
