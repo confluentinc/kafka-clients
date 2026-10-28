@@ -35,8 +35,6 @@ pub enum IsolationLevel {
 
 impl IsolationLevel {
     /// Returns the wire-protocol id used to encode this isolation level.
-    ///
-    /// Translated from Java's `byte id()`.
     #[doc(alias = "org.apache.kafka.common.IsolationLevel#id")]
     pub fn id(&self) -> u8 {
         match self {
@@ -47,9 +45,13 @@ impl IsolationLevel {
 
     /// Returns the [`IsolationLevel`] for the given wire-protocol id.
     ///
-    /// Translated from Java's `forId(byte id)`. Returns
-    /// [`Error::LocalIllegalArgument`] for unknown ids; the Java implementation
-    /// throws `IllegalArgumentException`.
+    /// # Arguments
+    ///
+    /// - `id` - the wire-protocol id: 0 or 1
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::is_local_illegal_argument_error`] for an unknown id
     #[doc(alias = "org.apache.kafka.common.IsolationLevel#forId")]
     pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {

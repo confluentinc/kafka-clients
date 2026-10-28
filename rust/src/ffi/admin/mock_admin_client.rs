@@ -81,7 +81,7 @@ unsafe fn mock_ref<'a>(self_: *const kafka_admin_MockAdminClient_t) -> &'a MockA
 ///
 /// # Safety
 ///
-/// `map` must be null or a live map of C strings to `const int16_t *`
+/// `map` must be `NULL` or a live map of C strings to `const int16_t *`
 /// values, each pointing at an `int16_t`.
 unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
     if map.is_null() {
@@ -99,11 +99,16 @@ unsafe fn map_string_i16(map: *const kafka_Map_t) -> HashMap<String, i16> {
         .collect()
 }
 
-/// `MockAdminClient.create()`: a fresh [`kafka_admin_MockAdminClient_Builder_t`]
-/// with one broker, `Node(0, "localhost", 1000)`, as Java's static `create()`
-/// returns `new Builder()`. Owned by the caller, freed with
-/// [`kafka_admin_MockAdminClient_Builder_destroy`]; the same as
-/// [`kafka_admin_MockAdminClient_Builder_new`].
+/// `MockAdminClient.create()`: a fresh builder with one broker, `Node(0, "localhost", 1000)`, as
+/// Java's static `create()` returns `new Builder()`; the same as `kafka_admin_MockAdminClient_Builder_new`.
+///
+/// # Returns
+///
+/// The builder.
+///
+/// # Safety
+///
+/// The builder is owned by the caller, freed with `kafka_admin_MockAdminClient_Builder_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_create() -> *mut kafka_admin_MockAdminClient_Builder_t {
@@ -111,25 +116,38 @@ pub extern "C" fn kafka_admin_MockAdminClient_create() -> *mut kafka_admin_MockA
 }
 
 /// `new MockAdminClient()`: a mock with one broker, `Node.noNode()`, which is
-/// also the controller. Owned by the caller, freed with
-/// [`kafka_admin_MockAdminClient_destroy`].
+/// also the controller.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with [`kafka_admin_MockAdminClient_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new() -> *mut kafka_admin_MockAdminClient_t {
     box_mock(MockAdminClient::new())
 }
 
-/// `new MockAdminClient(List<Node> brokers, Node controller)`: `brokers` is a
-/// `kafka_List_t` of `const kafka_common_Node_t *` and `controller` a node
-/// handle, both borrowed and copied during the call. The mock is owned by the
-/// caller and freed with [`kafka_admin_MockAdminClient_destroy`]. Fails, with
-/// `NULL` returned, with Java's message "The controller node must be in the
-/// list of brokers" when `controller` is not one of `brokers`.
+/// `new MockAdminClient(List<Node> brokers, Node controller)`.
+///
+/// # Parameters
+///
+/// - `brokers` - a `kafka_List_t` of `const kafka_common_Node_t *`, copied during the call
+/// - `controller` - the controller node, copied during the call
+///
+/// # Returns
+///
+/// The mock, or `NULL` on error.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` ("The controller node must be in the list
+///   of brokers") if `controller` is not one of `brokers`
 ///
 /// # Safety
 ///
-/// `brokers` must be null or a valid list of valid node handles, `controller`
-/// a valid node handle, and `out_err` a valid slot pointing at null.
+/// `brokers` must be `NULL` or a valid list of valid node handles, `controller` a valid node handle,
+/// and `out_err` a valid slot pointing at `NULL`. The mock is owned by the caller, freed with
+/// `kafka_admin_MockAdminClient_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_with_brokers_controller(
@@ -153,12 +171,12 @@ fn box_mock(mock: MockAdminClient) -> *mut kafka_admin_MockAdminClient_t {
     Box::into_raw(AdminClassHandle::from_mock(mock)) as *mut kafka_admin_MockAdminClient_t
 }
 
-/// The `Admin` view of the mock (CLAUDE.md §4 rule 3): borrowed, valid until
-/// the class handle is destroyed, never passed to `kafka_admin_Admin_destroy`.
+/// Returns the `Admin` view of the mock.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The view is borrowed, valid until the class handle is destroyed,
+/// and never passed to `kafka_admin_Admin_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
@@ -170,14 +188,17 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient__as_Admin(
     unsafe { &*(self_ as *const AdminClassHandle) }.as_admin()
 }
 
-/// `MockAdminClient.updateBeginningOffsets(Map<TopicPartition, Long>)`:
-/// `new_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *`
-/// to `const int64_t *`, borrowed and copied during the call.
+/// `MockAdminClient.updateBeginningOffsets(Map<TopicPartition, Long>)`.
+///
+/// # Parameters
+///
+/// - `new_offsets` - a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` to
+///   `const int64_t *`, copied during the call
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map of
-/// the types above, each key and value live.
+/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
@@ -191,13 +212,16 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     unsafe { mock_ref(self_).update_beginning_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
-/// `MockAdminClient.updateEndOffsets(Map<TopicPartition, Long>)`; the map
-/// as in [`kafka_admin_MockAdminClient_update_beginning_offsets`].
+/// `MockAdminClient.updateEndOffsets(Map<TopicPartition, Long>)`.
+///
+/// # Parameters
+///
+/// - `new_offsets` - the map as in `kafka_admin_MockAdminClient_update_beginning_offsets`
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map of
-/// the types above, each key and value live.
+/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
@@ -211,13 +235,16 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     unsafe { mock_ref(self_).update_end_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
-/// `MockAdminClient.updateConsumerGroupOffsets(Map<TopicPartition, Long>)`;
-/// the map as in [`kafka_admin_MockAdminClient_update_beginning_offsets`].
+/// `MockAdminClient.updateConsumerGroupOffsets(Map<TopicPartition, Long>)`.
+///
+/// # Parameters
+///
+/// - `new_offsets` - the map as in `kafka_admin_MockAdminClient_update_beginning_offsets`
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `new_offsets` null or a live map of
-/// the types above, each key and value live.
+/// `self_` must be a live handle and `new_offsets` `NULL` or a live map of the types above, each key
+/// and value live.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offsets(
@@ -231,19 +258,29 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
     unsafe { mock_ref(self_).update_consumer_group_offsets(map_topic_partition_i64(new_offsets)) }
 }
 
-/// `MockAdminClient.addTopic(boolean internal, String name,
-/// List<TopicPartitionInfo> partitions, Map<String, String> configs)`:
-/// `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartitionInfo_t *`
-/// and `configs` a `kafka_Map_t` of `const char *` to `const char *`, `NULL`
-/// for Java's null; both borrowed and copied during the call. Fails with
-/// Java's message when the topic exists or a partition names an unknown
-/// broker.
+/// `MockAdminClient.addTopic(boolean internal, String name, List<TopicPartitionInfo> partitions,
+/// Map<String, String> configs)`.
+///
+/// # Parameters
+///
+/// - `internal` - whether the topic is internal (0 or 1)
+/// - `name` - the topic name
+/// - `partitions` - a `kafka_List_t` of `const kafka_common_TopicPartitionInfo_t *`, copied during
+///   the call, whose leaders, replicas and ISR must be brokers of the mock
+/// - `configs` - a `kafka_Map_t` of `const char *` to `const char *`, copied during the call, or
+///   `NULL` for none
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error`, with Java's message, if the topic was
+///   already added, or if any partition names a broker the mock does not have as its leader, in its
+///   replica list, or in its ISR
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `name` a C string, `partitions` null or a
-/// live list and `configs` null or a live map, of the element types above, each
-/// element live. `out_err` must be a valid slot pointing at null.
+/// `self_` must be a live handle, `name` a C string, `partitions` `NULL` or a live list and `configs`
+/// `NULL` or a live map, of the element types above, each element live. `out_err` must be a valid slot
+/// pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
@@ -287,13 +324,21 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_add_topic(
     unsafe { deliver_unit(result, out_err) }
 }
 
-/// `MockAdminClient.markTopicForDeletion(String name)`; fails with Java's
-/// message for an unknown topic.
+/// `MockAdminClient.markTopicForDeletion(String name)`.
+///
+/// # Parameters
+///
+/// - `name` - the topic name
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` ("Topic <name> did not exist.") for an
+///   unknown topic
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `name` a C string. `out_err` must be a
-/// valid slot pointing at null.
+/// `self_` must be a live handle and `name` a C string. `out_err` must be a valid slot pointing at
+/// `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
@@ -311,8 +356,12 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_mark_topic_for_deletion(
     unsafe { deliver_unit(result, out_err) }
 }
 
-/// `MockAdminClient.timeoutNextRequest(int numberOfRequests)`: the next
-/// `number_of_requests` RPCs fail their futures with a `TimeoutException`.
+/// `MockAdminClient.timeoutNextRequest(int numberOfRequests)`: the next RPCs fail their futures with
+/// a `kafka_common_Error_is_timeout_error` error.
+///
+/// # Parameters
+///
+/// - `number_of_requests` - how many RPCs time out
 ///
 /// # Safety
 ///
@@ -328,16 +377,22 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     unsafe { mock_ref(self_) }.timeout_next_request(number_of_requests)
 }
 
-/// `MockAdminClient.controller(Node controller)`: makes `controller` (a node
-/// handle, borrowed and copied during the call) the controller
-/// `describe_cluster` reports. Fails with Java's message "The controller node
-/// must be in the list of brokers" when it is not one of the mock's brokers,
-/// leaving the controller unchanged.
+/// `MockAdminClient.controller(Node controller)`: makes `controller` the controller
+/// `describe_cluster` reports.
+///
+/// # Parameters
+///
+/// - `controller` - the node, copied during the call
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` ("The controller node must be in the list
+///   of brokers") if it is not one of the mock's brokers, the controller then unchanged
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `controller` a valid node handle, and
-/// `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle, `controller` a valid node handle, and `out_err` a valid slot
+/// pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_controller(
@@ -356,15 +411,23 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_controller(
 }
 
 /// `MockAdminClient.setFetchesRemainingUntilVisible(String topicName, int
-/// fetchesRemainingUntilVisible)`: hides the topic from the next
-/// `fetches_remaining_until_visible` fetches (`list_topics`, `describe_topics`
-/// and topic `describe_configs`). Fails with Java's message
-/// `"No such topic as <name>"` for an unknown topic.
+/// fetchesRemainingUntilVisible)`: hides the topic from the next fetches (`list_topics`,
+/// `describe_topics` and topic `describe_configs`).
+///
+/// # Parameters
+///
+/// - `topic_name` - the topic name
+/// - `fetches_remaining_until_visible` - how many fetches the topic stays hidden from
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` ("No such topic as <name>") for an unknown
+///   topic
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `topic_name` a C string, and `out_err` a
-/// valid slot pointing at null.
+/// `self_` must be a live handle, `topic_name` a C string, and `out_err` a valid slot pointing at
+/// `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_fetches_remaining_until_visible(
@@ -384,13 +447,20 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_fetches_remaining_until
     unsafe { deliver_unit(result, out_err) }
 }
 
-/// Frees the mock (see the module docs of `crate::ffi::admin` for what
-/// `_destroy` does); null is a no-op. Views from
+/// Frees the mock; `NULL` is a no-op. Views from
 /// [`kafka_admin_MockAdminClient__as_Admin`] become invalid.
+///
+/// It waits for the tasks spawned by `_cb` calls, closes the client, runs the
+/// still-pending callbacks, each exactly once, drops the client and shuts its
+/// runtime down; the `kafka_common_KafkaFuture_get_cb` calls still waiting on
+/// its futures fire last, once each, failing with
+/// `kafka_common_Error_is_local_illegal_state_error` when the future never
+/// completed. Called inside a tokio runtime, where it cannot wait, it returns
+/// at once and does all of this on a new thread, the pending callbacks included.
 ///
 /// # Safety
 ///
-/// `self_` must be null or a handle not yet destroyed, that no other call
+/// `self_` must be `NULL` or a handle not yet destroyed, that no other call
 /// uses at the same time, directly or through a view; neither it nor its
 /// views are used afterwards, by the callbacks this call runs included.
 #[ffi_guard]
@@ -451,7 +521,7 @@ unsafe fn update(self_: *mut kafka_admin_MockAdminClient_Builder_t, set: impl Fn
 ///
 /// # Safety
 ///
-/// As [`builder_mut`], for this call; `out_err` a valid slot pointing at null.
+/// As [`builder_mut`], for this call; `out_err` a valid slot pointing at `NULL`.
 unsafe fn try_update(
     self_: *mut kafka_admin_MockAdminClient_Builder_t,
     out_err: *mut *mut kafka_common_Error_t,
@@ -468,19 +538,27 @@ unsafe fn try_update(
 
 /// `new MockAdminClient.Builder()`: a builder with one broker,
 /// `Node(0, "localhost", 1000)`, and [`MockAdminClient::DEFAULT_LOG_DIRS`].
-/// Owned by the caller, freed with [`kafka_admin_MockAdminClient_Builder_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// [`kafka_admin_MockAdminClient_Builder_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_Builder_new() -> *mut kafka_admin_MockAdminClient_Builder_t {
     box_builder(Builder::new())
 }
 
-/// `Builder.clusterId(String clusterId)`: `cluster_id` is copied.
+/// `Builder.clusterId(String clusterId)`.
+///
+/// # Parameters
+///
+/// - `cluster_id` - the cluster id, copied
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `cluster_id` a C string.
+/// `self_` must be a live builder handle that no other call uses at the same time, and `cluster_id`
+/// a C string.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_cluster_id(
@@ -495,20 +573,30 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_cluster_id(
     unsafe { update(self_, |b| b.set_cluster_id(&cluster_id)) }
 }
 
-/// `Builder.brokers(List<Node> brokers)`: `brokers` is a `kafka_List_t` of
-/// `const kafka_common_Node_t *`, copied during the call. As in Java, the
-/// broker count is first set with `numBrokers(brokers.size())`, which pads or
-/// truncates the log directories, and the list is then replaced. Returns
-/// `self_` (borrowed, still owned by the caller); on failure `NULL`, the
-/// builder unchanged: the one reachable failure is a log-dir list shorter
-/// than `brokers` after [`kafka_admin_MockAdminClient_Builder_set_broker_log_dirs`],
-/// with the JDK's message "toIndex = n" (Java's `subList`).
+/// `Builder.brokers(List<Node> brokers)`. As in Java, the broker count is first set with
+/// `numBrokers(brokers.size())`, which pads or truncates the log directories, and the list is then
+/// replaced.
+///
+/// # Parameters
+///
+/// - `brokers` - a `kafka_List_t` of `const kafka_common_Node_t *`, copied during the call
+///
+/// # Returns
+///
+/// `self_`, or `NULL` on error, the builder unchanged.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` (the JDK's `subList` message
+///   "toIndex = n") if the log-dir list set by `kafka_admin_MockAdminClient_Builder_set_broker_log_dirs`
+///   is shorter than `brokers`
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, `brokers` null or a valid list of valid node handles, and `out_err`
-/// a valid slot pointing at null.
+/// `self_` must be a live builder handle that no other call uses at the same time, `brokers` `NULL` or
+/// a valid list of valid node handles, and `out_err` a valid slot pointing at `NULL`.
+///
+/// The returned `self_` is borrowed: it stays owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_brokers(
@@ -524,17 +612,29 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_brokers(
     unsafe { try_update(self_, out_err, |b| b.set_brokers(brokers)) }
 }
 
-/// `Builder.numBrokers(int numBrokers)`: shrinking keeps the first brokers
-/// and log-dir lists, growing adds `Node(id, "localhost", 1000 + id)` with the
-/// default log dirs. Returns `self_` (borrowed, still owned by the caller); on
-/// failure `NULL`, the builder unchanged, with the JDK's `subList` message:
-/// "fromIndex(0) > toIndex(n)" for a negative count, "toIndex = n" when
-/// shrinking past a shorter log-dir list.
+/// `Builder.numBrokers(int numBrokers)`: shrinking keeps the first brokers and log-dir lists, growing
+/// adds `Node(id, "localhost", 1000 + id)` with the default log dirs.
+///
+/// # Parameters
+///
+/// - `num_brokers` - the broker count
+///
+/// # Returns
+///
+/// `self_`, or `NULL` on error, the builder unchanged.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` with the JDK's `subList` message:
+///   "fromIndex(0) > toIndex(n)" for a negative count, "toIndex = n" when shrinking past a shorter
+///   log-dir list
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `out_err` a valid slot pointing at null.
+/// `self_` must be a live builder handle that no other call uses at the same time, and `out_err` a
+/// valid slot pointing at `NULL`.
+///
+/// The returned `self_` is borrowed: it stays owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_num_brokers(
@@ -547,15 +647,28 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_num_brokers(
     unsafe { try_update(self_, out_err, |b| b.set_num_brokers(num_brokers)) }
 }
 
-/// `Builder.controller(int index)`: makes the broker at `index`, read at this
-/// call as Java's `brokers.get(index)`, the controller. Returns `self_`
-/// (borrowed, still owned by the caller); on failure `NULL`, the builder
-/// unchanged, with the JDK's message "Index i out of bounds for length n".
+/// `Builder.controller(int index)`: makes the broker at `index`, read at this call as Java's
+/// `brokers.get(index)`, the controller.
+///
+/// # Parameters
+///
+/// - `index` - the broker's index in the broker list
+///
+/// # Returns
+///
+/// `self_`, or `NULL` on error, the builder unchanged.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` ("Index i out of bounds for length n") if
+///   `index` is out of the broker list
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `out_err` a valid slot pointing at null.
+/// `self_` must be a live builder handle that no other call uses at the same time, and `out_err` a
+/// valid slot pointing at `NULL`.
+///
+/// The returned `self_` is borrowed: it stays owned by the caller.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_controller(
@@ -568,16 +681,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_controller(
     unsafe { try_update(self_, out_err, |b| b.set_controller(index)) }
 }
 
-/// `Builder.brokerLogDirs(List<List<String>> brokerLogDirs)`: a `kafka_List_t`
-/// of `const kafka_List_t *`, one per broker id, each of `const char *`; all
-/// copied during the call. As in Java, the length is not checked against the
-/// broker count.
+/// `Builder.brokerLogDirs(List<List<String>> brokerLogDirs)`. As in Java, the length is not checked
+/// against the broker count.
+///
+/// # Parameters
+///
+/// - `broker_log_dirs` - a `kafka_List_t` of `const kafka_List_t *`, one per broker id, each of
+///   `const char *`; all copied during the call
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `broker_log_dirs` null or a valid list whose elements are null
-/// or valid lists of C strings.
+/// `self_` must be a live builder handle that no other call uses at the same time, and
+/// `broker_log_dirs` `NULL` or a valid list whose elements are `NULL` or valid lists of C strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs(
@@ -599,14 +714,17 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_broker_log_dirs
     unsafe { update(self_, |b| b.set_broker_log_dirs(broker_log_dirs)) }
 }
 
-/// `Builder.defaultReplicationFactor(int defaultReplicationFactor)`: the
-/// replication factor `create_topics` uses when a topic gives none; `build`
-/// narrows it to 16 bits with Java's wrapping `shortValue()`.
+/// `Builder.defaultReplicationFactor(int defaultReplicationFactor)`.
+///
+/// # Parameters
+///
+/// - `default_replication_factor` - the replication factor `create_topics` uses when a topic gives
+///   none; `kafka_admin_MockAdminClient_Builder_build` narrows it to 16 bits with Java's wrapping
+///   `shortValue()`
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time.
+/// `self_` must be a live builder handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_replication_factor(
@@ -618,13 +736,15 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_replica
     unsafe { update(self_, |b| b.set_default_replication_factor(default_replication_factor)) }
 }
 
-/// `Builder.usingRaftController(boolean usingRaftController)`: `0` is `false`
-/// (the default), any other value `true`.
+/// `Builder.usingRaftController(boolean usingRaftController)`.
+///
+/// # Parameters
+///
+/// - `using_raft_controller` - `0` is `false` (the default), any other value `true`
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time.
+/// `self_` must be a live builder handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_using_raft_controller(
@@ -636,13 +756,15 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_using_raft_cont
     unsafe { update(self_, |b| b.set_using_raft_controller(using_raft_controller != 0)) }
 }
 
-/// `Builder.defaultPartitions(short numPartitions)`: the partition count
-/// `create_topics` uses when a topic gives none (default 1).
+/// `Builder.defaultPartitions(short numPartitions)`.
+///
+/// # Parameters
+///
+/// - `num_partitions` - the partition count `create_topics` uses when a topic gives none (default 1)
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time.
+/// `self_` must be a live builder handle that no other call uses at the same time.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_partitions(
@@ -654,14 +776,17 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_partiti
     unsafe { update(self_, |b| b.set_default_partitions(num_partitions)) }
 }
 
-/// `Builder.featureLevels(Map<String, Short> featureLevels)`: a `kafka_Map_t`
-/// of `const char *` to `const int16_t *`, copied during the call; null reads
-/// as empty.
+/// `Builder.featureLevels(Map<String, Short> featureLevels)`.
+///
+/// # Parameters
+///
+/// - `feature_levels` - a `kafka_Map_t` of `const char *` to `const int16_t *`, copied during the
+///   call; `NULL` reads as empty
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `feature_levels` null or a live map of the types above.
+/// `self_` must be a live builder handle that no other call uses at the same time, and
+/// `feature_levels` `NULL` or a live map of the types above.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_feature_levels(
@@ -676,14 +801,17 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_feature_levels(
     unsafe { update(self_, |b| b.set_feature_levels(feature_levels)) }
 }
 
-/// `Builder.minSupportedFeatureLevels(Map<String, Short>)`; the map as in
-/// [`kafka_admin_MockAdminClient_Builder_set_feature_levels`].
+/// `Builder.minSupportedFeatureLevels(Map<String, Short>)`.
+///
+/// # Parameters
+///
+/// - `min_supported_feature_levels` - the map as in
+///   `kafka_admin_MockAdminClient_Builder_set_feature_levels`
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `min_supported_feature_levels` null or a live map of C strings to
-/// `const int16_t *`.
+/// `self_` must be a live builder handle that no other call uses at the same time, and
+/// `min_supported_feature_levels` `NULL` or a live map of C strings to `const int16_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_min_supported_feature_levels(
@@ -699,14 +827,17 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_min_supported_f
     unsafe { update(self_, |b| b.set_min_supported_feature_levels(levels)) }
 }
 
-/// `Builder.maxSupportedFeatureLevels(Map<String, Short>)`; the map as in
-/// [`kafka_admin_MockAdminClient_Builder_set_feature_levels`].
+/// `Builder.maxSupportedFeatureLevels(Map<String, Short>)`.
+///
+/// # Parameters
+///
+/// - `max_supported_feature_levels` - the map as in
+///   `kafka_admin_MockAdminClient_Builder_set_feature_levels`
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `max_supported_feature_levels` null or a live map of C strings to
-/// `const int16_t *`.
+/// `self_` must be a live builder handle that no other call uses at the same time, and
+/// `max_supported_feature_levels` `NULL` or a live map of C strings to `const int16_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_max_supported_feature_levels(
@@ -722,15 +853,18 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_max_supported_f
     unsafe { update(self_, |b| b.set_max_supported_feature_levels(levels)) }
 }
 
-/// `Builder.defaultGroupConfigs(Map<String, String> defaultGroupConfigs)`: a
-/// `kafka_Map_t` of `const char *` to `const char *`, copied during the call;
-/// null reads as empty. The defaults are overlaid onto every group's configs.
+/// `Builder.defaultGroupConfigs(Map<String, String> defaultGroupConfigs)`: the defaults are
+/// overlaid onto every group's configs.
+///
+/// # Parameters
+///
+/// - `default_group_configs` - a `kafka_Map_t` of `const char *` to `const char *`, copied during
+///   the call; `NULL` reads as empty
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `default_group_configs` null or a valid map of C strings to C
-/// strings.
+/// `self_` must be a live builder handle that no other call uses at the same time, and
+/// `default_group_configs` `NULL` or a valid map of C strings to C strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_group_configs(
@@ -746,21 +880,26 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_set_default_group_c
     unsafe { update(self_, |b| b.set_default_group_configs(configs)) }
 }
 
-/// `Builder.build()`: a mock from the builder's current settings, owned by
-/// the caller and freed with [`kafka_admin_MockAdminClient_destroy`]. The
-/// builder is left as it is and stays the caller's to destroy, as a Java
-/// builder may build again. Defaults: the controller is the first broker, the
-/// default partition count 1 and the default replication factor
-/// `min(brokers, 3)`. Fails, with `NULL` returned, with the JDK's "Index 0 out
-/// of bounds for length 0" when there are no brokers and no controller was
-/// set (Java's `brokers.get(0)`), and with Java's "The controller node must be
-/// in the list of brokers" when the controller is no longer one of the
-/// brokers.
+/// `Builder.build()`: a mock from the builder's current settings. The builder is left as it is, as a
+/// Java builder may build again. Defaults: the controller is the first broker, the default partition
+/// count 1 and the default replication factor `min(brokers, 3)`.
+///
+/// # Returns
+///
+/// The mock, or `NULL` on error.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` with the JDK's "Index 0 out of bounds for
+///   length 0" when there are no brokers and no controller was set (Java's `brokers.get(0)`), and
+///   with Java's "The controller node must be in the list of brokers" when the controller is no
+///   longer one of the brokers
 ///
 /// # Safety
 ///
-/// `self_` must be a live builder handle that no other call uses at the same
-/// time, and `out_err` a valid slot pointing at null.
+/// `self_` must be a live builder handle that no other call uses at the same time, and `out_err` a
+/// valid slot pointing at `NULL`. The mock is owned by the caller, freed with
+/// `kafka_admin_MockAdminClient_destroy`; the builder stays the caller's to destroy.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_build(
@@ -774,11 +913,11 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_Builder_build(
     unsafe { deliver_value(result, out_err, box_mock) }
 }
 
-/// Frees a builder handle; null is a no-op. Mocks it built are unaffected.
+/// Frees a builder handle; `NULL` is a no-op. Mocks it built are unaffected.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned builder handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned builder handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

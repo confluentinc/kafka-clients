@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The coordinator is not aware of this member.
     ///
-    /// Corresponds to Java's `UnknownMemberIdException`, error code `Errors::UnknownMemberId`.
-    ///
-    /// Java `extends` chain:
-    ///    `UnknownMemberIdException` -> `ApplicationRecoverableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnknownMemberId`. Java `extends` chain: `UnknownMemberIdException` ->
+    /// `ApplicationRecoverableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownMemberIdException")]
     UnknownMemberIdError,
     code: Errors::UnknownMemberId,

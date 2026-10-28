@@ -30,6 +30,8 @@ use std::process::exit;
 
 use quote::ToTokens;
 
+use crate::javadoc::doc_summary;
+
 const PREDICATE_SOURCE: &str = "src/common/error.rs";
 const PREDICATE_RS: &str = "src/ffi/error_predicates.rs";
 
@@ -70,55 +72,6 @@ fn parse_predicates() -> anyhow::Result<Vec<Predicate>> {
         anyhow::bail!("{PREDICATE_SOURCE}: no predicates found on `impl Error`");
     }
     Ok(out)
-}
-
-/// The first paragraph of `attrs`' doc comment, joined into one line, with
-/// intra-doc links reduced to their text (C has nothing for them to resolve to).
-fn doc_summary(attrs: &[syn::Attribute]) -> String {
-    let mut lines = Vec::new();
-    for attr in attrs {
-        let syn::Meta::NameValue(nv) = &attr.meta else { continue };
-        if !nv.path.is_ident("doc") {
-            continue;
-        }
-        let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value else {
-            continue;
-        };
-        let line = s.value();
-        let line = line.trim();
-        if line.is_empty() {
-            if lines.is_empty() {
-                continue;
-            }
-            break;
-        }
-        lines.push(line.to_string());
-    }
-    strip_links(&lines.join(" "))
-}
-
-/// `text` with each Markdown link `[label](target)` replaced by its label, and
-/// each bare reference link `` [`X`] `` by its code span.
-fn strip_links(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
-        let Some(close) = after.find(']') else {
-            out.push_str(&rest[open..]);
-            return out;
-        };
-        let label = &after[..close];
-        let tail = &after[close + 1..];
-        out.push_str(label);
-        rest = match tail.strip_prefix('(').and_then(|t| t.find(')').map(|end| &t[end + 1..])) {
-            Some(after_target) => after_target,
-            None => tail,
-        };
-    }
-    out.push_str(rest);
-    out
 }
 
 /// `text` as `///` lines no wider than rustfmt's `max_width`, at item level.
@@ -181,19 +134,17 @@ use super::ffi_guard;
         out.push_str(&doc_lines(&p.summary));
         out.push_str(&format!(
             r#"///
-/// Mirrors `Error::{name}`.
-///
 /// # Parameters
 ///
-/// - `error`: Non-null error handle.
+/// - `error`: The error handle, or `NULL`.
 ///
 /// # Returns
 ///
-/// `1` if the predicate holds, `0` if not or if the handle is null.
+/// `1` if the predicate holds, `0` if not or if the handle is `NULL`.
 ///
 /// # Safety
 ///
-/// `error` must be a valid handle from a function that returned an error, or null.
+/// `error` must be a valid handle from a function that returned an error, or `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Error_t) -> i8 {{
@@ -250,20 +201,6 @@ pub fn check_error_predicates_up_to_date() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_strip_links_keeps_labels() {
-        assert_eq!(
-            strip_links("Prefer this to matching [`Error::Timeout`](Self::Timeout): a match."),
-            "Prefer this to matching `Error::Timeout`: a match."
-        );
-        assert_eq!(
-            strip_links("See [`ErrorHierarchy`] and [docs]."),
-            "See `ErrorHierarchy` and docs."
-        );
-        assert_eq!(strip_links("no links"), "no links");
-        assert_eq!(strip_links("unclosed [bracket"), "unclosed [bracket");
-    }
 
     #[test]
     fn test_doc_summary_is_the_first_paragraph() {

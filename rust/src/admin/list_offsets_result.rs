@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::list_offsets`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListOffsetsResult`.
 
 use std::collections::HashMap;
 
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The result of `Admin::list_offsets`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListOffsetsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult")]
 pub struct ListOffsetsResult {
@@ -31,20 +27,27 @@ pub struct ListOffsetsResult {
 
 impl ListOffsetsResult {
     /// Creates a result from the per-partition futures.
+    ///
+    /// # Arguments
+    ///
+    /// - `futures` - the future of each partition's offset.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#ListOffsetsResult")]
     pub fn new(futures: HashMap<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>) -> Self {
         Self { futures }
     }
 
-    /// Return a future which can be used to check the result for a given
+    /// Returns a future which can be used to check the result for a given
     /// partition.
     ///
-    /// Mirrors `partitionResult(TopicPartition)`.
+    /// # Arguments
+    ///
+    /// - `partition` - the partition to check.
     ///
     /// # Errors
     ///
-    /// Returns an error (invalid argument) if the offset for `partition` was not
-    /// attempted, mirroring Java's `IllegalArgumentException`.
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if the offset for
+    /// `partition`
+    /// was not attempted.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<ListOffsetsResultInfo>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
@@ -52,10 +55,8 @@ impl ListOffsetsResult {
         })
     }
 
-    /// Return a future which succeeds only if offsets for all specified
+    /// Returns a future which succeeds only if offsets for all specified
     /// partitions have been successfully retrieved.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartition, ListOffsetsResultInfo>> {
         KafkaFuture::join_map(self.futures.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -63,8 +64,6 @@ impl ListOffsetsResult {
 }
 
 /// Per-partition offset information returned by `Admin::list_offsets`.
-///
-/// Corresponds to `ListOffsetsResult.ListOffsetsResultInfo`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo")]
 pub struct ListOffsetsResultInfo {
@@ -75,24 +74,30 @@ pub struct ListOffsetsResultInfo {
 
 impl ListOffsetsResultInfo {
     /// Creates a new result info.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset` - the offset.
+    /// - `timestamp` - the timestamp of the record at the offset.
+    /// - `leader_epoch` - the leader epoch, or `None` if not known.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#ListOffsetsResultInfo")]
     pub fn new(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Self {
         Self { offset, timestamp, leader_epoch }
     }
 
-    /// The offset.
+    /// Returns the offset.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
-    /// The timestamp associated with the offset.
+    /// Returns the timestamp associated with the offset.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// The leader epoch associated with the offset, if known.
+    /// Returns the leader epoch associated with the offset, if known.
     #[doc(alias = "org.apache.kafka.clients.admin.ListOffsetsResult$ListOffsetsResultInfo#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch

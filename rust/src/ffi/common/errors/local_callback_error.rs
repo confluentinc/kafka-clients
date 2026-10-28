@@ -63,13 +63,16 @@ impl PayloadClass for LocalCallbackError {
     }
 }
 
-/// The payload of a foreign callback error, borrowed from the error handle, or
-/// null when the error is another class. The suffix stays because
-/// `kafka_common_Error_local_callback` is the `Error` factory.
+/// Returns the payload of a foreign callback error, or `NULL` when the error is another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
@@ -87,14 +90,18 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback_error(
     }
 }
 
-/// Builds the payload from the foreign error's text and the binding's opaque
-/// pointer to it, which the payload does not own. Owned, freed with
-/// [`kafka_common_LocalCallbackError_destroy`].
+/// Returns a new payload built from the foreign error's text and the binding's opaque pointer to
+/// it, which the payload does not own.
+///
+/// # Parameters
+///
+/// - `message` - The foreign error's text, or `NULL` for none.
+/// - `opaque` - The binding's pointer to the foreign error, handed back unchanged.
 ///
 /// # Safety
 ///
-/// `message` must be null or a valid NUL-terminated string. `opaque` is never
-/// dereferenced.
+/// `message` must be `NULL` or a valid NUL-terminated string. `opaque` is never
+/// dereferenced. The returned handle is owned, freed with `kafka_common_LocalCallbackError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
@@ -107,15 +114,15 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_new(
     Payload::boxed(LocalCallbackError::new(unsafe { c_str_to_string(message) }, opaque))
 }
 
-/// The binding's opaque pointer, exactly as it was given. A pointer the error
-/// owns (given to `kafka_common_Error_local_callback` with a release function)
-/// is valid while the error handle this view was read from lives: the view
-/// borrows from that handle, and the error releases the pointer only once its
-/// last copy drops.
+/// Returns the binding's opaque pointer, exactly as it was given.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid foreign-callback-error handle.
+///
+/// A returned pointer the error owns (given to `kafka_common_Error_local_callback` with a release
+/// function) is valid while the error handle this view was read from lives: the view borrows from
+/// that handle, and the error releases the pointer only once its last copy drops.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
@@ -128,11 +135,12 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_opaque(
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.value().opaque()
 }
 
-/// The foreign error's text: borrowed from the handle.
+/// Returns the foreign error's text.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid foreign-callback-error handle.
+/// `self_` must be a valid foreign-callback-error handle. The returned string is borrowed, valid
+/// until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
@@ -146,11 +154,12 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_message(
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.message_ptr()
 }
 
-/// The display form, as an owned string freed with `kafka_string_destroy`.
+/// Returns the display form of the error.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid foreign-callback-error handle.
+/// `self_` must be a valid foreign-callback-error handle. The returned string is owned, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
@@ -163,13 +172,13 @@ pub unsafe extern "C" fn kafka_common_LocalCallbackError_to_string(
     unsafe { Payload::<LocalCallbackError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here. The opaque pointer is not
 /// touched.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_LocalCallbackError_destroy(self_: *mut kafka_common_LocalCallbackError_t) {

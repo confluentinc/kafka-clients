@@ -241,12 +241,13 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
 /// Not a conversion of a committed test; written as the end-to-end proof that
 /// the absent-vs-present-empty distinction survives every layer. Java's two
 /// factories differ only in whether `newAssignments` is null
-/// (`NewPartitions.java:43-71`), `CreatePartitionsRequest.json:36` marks
-/// `Assignments` `"nullableVersions": "0+"` so the two produce different wire
+/// (`NewPartitions#increaseTo(int)`, `NewPartitions#increaseTo(int,List)`),
+/// `CreatePartitionsRequest.json:36` marks `Assignments` `"nullableVersions": "0+"` so the two produce different wire
 /// bytes, and the controller compares the list length against the number of
 /// partitions being added, failing with `INVALID_REPLICA_ASSIGNMENT` when they
-/// disagree (`ReplicationControlManager.java:1854-1860`). A present-but-empty
-/// list therefore fails where a null one succeeds — which is exactly what makes
+/// disagree
+/// (`ReplicationControlManager#createPartitions(ControllerRequestContext,CreatePartitionsTopic,List)`).
+/// A present-but-empty list therefore fails where a null one succeeds — which is exactly what makes
 /// the distinction observable through the broker, unlike the SCRAM salt
 /// (`admin_scram_test.rs`).
 ///

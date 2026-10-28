@@ -284,7 +284,7 @@ fn send_test_producer_config(bootstrap_servers: &str, opts: &SendTestProducerOpt
 /// (`SslProducerSendTest.scala:24-27`). It selects the listener of the
 /// producer under test and of the suite's `admin`
 /// (`BaseProducerSendTest.scala:78-82, 103-115`); the verification consumer is
-/// always PLAINTEXT (`:86-90`).
+/// always PLAINTEXT (`BaseProducerSendTest#setUp`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SendTestSecurity {
     Plaintext,
@@ -415,7 +415,7 @@ struct ConsumedRecord {
 }
 
 /// `TestUtils.pollUntilAtLeastNumRecords` (`TestUtils.scala:1184-1196`) over
-/// `pollRecordsUntilTrue` (`:709-718`): 100 ms polls, 15 s budget
+/// `TestUtils#pollRecordsUntilTrue`: 100 ms polls, 15 s budget
 /// (`DEFAULT_MAX_WAIT_MS`), same failure message.
 async fn poll_until_at_least_num_records(
     consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
@@ -834,13 +834,13 @@ async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 // ProducerCompressionTest
 // ---------------------------------------------------------------------------
 
-/// `ProducerCompressionTest.numRecords` (`ProducerCompressionTest.java:56`).
+/// `ProducerCompressionTest#numRecords`.
 const COMPRESSION_NUM_RECORDS: usize = 2000;
 
 /// Java's `org.apache.kafka.test.TestUtils.LETTERS_AND_DIGITS`.
 const LETTERS_AND_DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-/// `ProducerCompressionTest.messageValue` (`ProducerCompressionTest.java:165-172`):
+/// `ProducerCompressionTest#messageValue`:
 /// `length` random letters and digits.
 fn compression_message_value(length: usize) -> String {
     use rand::Rng;
@@ -850,14 +850,14 @@ fn compression_message_value(length: usize) -> String {
         .collect()
 }
 
-/// `ProducerCompressionTest.errorMessage` (`ProducerCompressionTest.java:174-176`).
+/// `ProducerCompressionTest#errorMessage`.
 fn compression_error_message(compression: &str) -> String {
     format!("Compression type: {compression} - Assertion failed")
 }
 
-/// Translated from `ProducerCompressionTest.testCompression`
-/// (`ProducerCompressionTest.java:63-68`): compressed messages should be able
-/// to be sent and consumed correctly, for every `CompressionType`.
+/// Translated from `ProducerCompressionTest#testCompression`: compressed
+/// messages should be able to be sent and consumed correctly, for every
+/// `CompressionType`.
 ///
 /// Native only, also under `multilanguage-tests`: the body sends 6000 records
 /// per codec with `linger.ms=200` and only then waits on the futures. The gRPC
@@ -870,8 +870,7 @@ async fn compression_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, fac
     }
 }
 
-/// `ProducerCompressionTest.processCompressionTest`
-/// (`ProducerCompressionTest.java:71-114`).
+/// `ProducerCompressionTest#processCompressionTest`.
 ///
 /// Deviations: the topic name is per-test (pooled clusters), and only the
 /// CONSUMER-protocol verification consumer is translated — the `classic` one
@@ -956,7 +955,8 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
 
     producer.close().await.expect("close should succeed");
     // "This consumer close very slowly, which may cause the entire test to time
-    // out, and we can't wait for it to auto close" (`ProducerCompressionTest.java:109-111`).
+    // out, and we can't wait for it to auto close" (in
+    // org.apache.kafka.clients.producer.ProducerCompressionTest#processCompressionTest).
     let _ = consumer
         .close_with_options(confluent_kafka::consumer::CloseOptions::new_with_timeout(Duration::from_secs(
             1,
@@ -964,8 +964,8 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
         .await;
 }
 
-/// `ProducerCompressionTest.verifyConsumerRecords`
-/// (`ProducerCompressionTest.java:116-154`), with `flagLoop` (`:156-163`)
+/// `ProducerCompressionTest#verifyConsumerRecords`, with
+/// `ProducerCompressionTest#flagLoop`
 /// folded into the record index: record `i` is message `i / 3`, flavour `i % 3`.
 async fn verify_compression_consumer_records(
     consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
@@ -1235,13 +1235,13 @@ fn small_max_bytes_cluster_config() -> ClusterConfig {
 // ProducerFailureHandlingTest fixtures
 // ---------------------------------------------------------------------------
 
-/// `ProducerFailureHandlingTest.producerBufferSize` (`ProducerFailureHandlingTest.java:79`).
+/// `ProducerFailureHandlingTest#producerBufferSize`.
 const FAILURE_PRODUCER_BUFFER_SIZE: i32 = 30000;
-/// `serverMessageMaxBytes` (`ProducerFailureHandlingTest.java:80`).
+/// `ProducerFailureHandlingTest#serverMessageMaxBytes`.
 const FAILURE_SERVER_MESSAGE_MAX_BYTES: i32 = FAILURE_PRODUCER_BUFFER_SIZE / 2;
-/// `replicaFetchMaxPartitionBytes` (`ProducerFailureHandlingTest.java:81`).
+/// `ProducerFailureHandlingTest#replicaFetchMaxPartitionBytes`.
 const FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES: i32 = FAILURE_SERVER_MESSAGE_MAX_BYTES + 200;
-/// `replicaFetchMaxResponseBytes` (`ProducerFailureHandlingTest.java:82`).
+/// `ProducerFailureHandlingTest#replicaFetchMaxResponseBytes`.
 const FAILURE_REPLICA_FETCH_MAX_RESPONSE_BYTES: i32 = FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES + 200;
 
 /// Java's `DefaultRecordBatch.RECORD_BATCH_OVERHEAD` (the Rust constant lives
@@ -1255,8 +1255,8 @@ const LOG_OVERHEAD: i32 = 12;
 /// the broker's default `message.max.bytes`.
 const MAX_MESSAGE_BYTES_DEFAULT: i32 = 1024 * 1024 + LOG_OVERHEAD;
 
-/// Broker shape of `ProducerFailureHandlingTest`'s `@ClusterTestDefaults`
-/// (`ProducerFailureHandlingTest.java:61-76`): two brokers, topic
+/// Broker shape of `ProducerFailureHandlingTest`'s `@ClusterTestDefaults`:
+/// two brokers, topic
 /// auto-creation off, `message.max.bytes=15000`,
 /// `replica.fetch.max.bytes=15200`, `offsets.topic.num.partitions=1`.
 ///
@@ -1280,8 +1280,7 @@ fn producer_failure_handling_cluster_config() -> ClusterConfig {
     cfg
 }
 
-/// `ProducerFailureHandlingTest.producerConfig(acks)`
-/// (`ProducerFailureHandlingTest.java:291-298`) plus the bootstrap servers
+/// `ProducerFailureHandlingTest#producerConfig` plus the bootstrap servers
 /// `clusterInstance.producer(..)` adds.
 fn failure_producer_config(bootstrap_servers: &str, acks: i32) -> HashMap<String, String> {
     HashMap::from([
@@ -1294,8 +1293,8 @@ fn failure_producer_config(bootstrap_servers: &str, acks: i32) -> HashMap<String
     ])
 }
 
-/// Translated from `ProducerFailureHandlingTest.testPartitionTooLargeForReplicationWithAckAll`
-/// (`ProducerFailureHandlingTest.java:125-129`): this should succeed as the
+/// Translated from `ProducerFailureHandlingTest#testPartitionTooLargeForReplicationWithAckAll`:
+/// this should succeed as the
 /// replica fetcher can handle oversized messages since KIP-74.
 async fn partition_too_large_for_replication_with_ack_all_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
@@ -1304,8 +1303,8 @@ async fn partition_too_large_for_replication_with_ack_all_inner<F: ProducerBacke
     check_too_large_record_for_replication_with_ack_all(ctx, factory, FAILURE_REPLICA_FETCH_MAX_PARTITION_BYTES).await;
 }
 
-/// Translated from `ProducerFailureHandlingTest.testResponseTooLargeForReplicationWithAckAll`
-/// (`ProducerFailureHandlingTest.java:134-138`): this should succeed as the
+/// Translated from `ProducerFailureHandlingTest#testResponseTooLargeForReplicationWithAckAll`:
+/// this should succeed as the
 /// replica fetcher can handle oversized messages since KIP-74.
 async fn response_too_large_for_replication_with_ack_all_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
@@ -1314,8 +1313,8 @@ async fn response_too_large_for_replication_with_ack_all_inner<F: ProducerBacken
     check_too_large_record_for_replication_with_ack_all(ctx, factory, FAILURE_REPLICA_FETCH_MAX_RESPONSE_BYTES).await;
 }
 
-/// `ProducerFailureHandlingTest.checkTooLargeRecordForReplicationWithAckAll`
-/// (`ProducerFailureHandlingTest.java:270-289`). The topic name is per-test
+/// `ProducerFailureHandlingTest#checkTooLargeRecordForReplicationWithAckAll`.
+/// The topic name is per-test
 /// (pooled clusters) instead of Java's fixed `topic10`.
 async fn check_too_large_record_for_replication_with_ack_all<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
@@ -1353,8 +1352,7 @@ async fn check_too_large_record_for_replication_with_ack_all<F: ProducerBackendF
     producer.close().await.expect("close should succeed");
 }
 
-/// Translated from `ProducerFailureHandlingTest.testCannotSendToInternalTopic`
-/// (`ProducerFailureHandlingTest.java:218-237`).
+/// Translated from `ProducerFailureHandlingTest#testCannotSendToInternalTopic`.
 ///
 /// Java asks the admin to create `__consumer_offsets` with the group
 /// coordinator's topic configs, without looking at the result, and then calls
@@ -1376,8 +1374,8 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
     const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
     {
         let admin = send_test_admin(ctx);
-        // `groupCoordinator().groupMetadataTopicConfigs()`
-        // (`GroupCoordinatorService.java:2324-2330`) with the default
+        // `groupCoordinator().groupMetadataTopicConfigs()`, i.e.
+        // org.apache.kafka.coordinator.group.GroupCoordinatorService#groupMetadataTopicConfigs, with the default
         // `offsets.topic.segment.bytes`.
         let topic_config = BTreeMap::from([
             ("cleanup.policy".to_string(), "compact".to_string()),
@@ -1386,9 +1384,7 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
         ]);
         let new_topic =
             NewTopic::with_num_partitions_replication_factor(GROUP_METADATA_TOPIC_NAME.to_string(), Some(1), Some(1))
-                .set_configs(Some(
-                    topic_config.into_iter().map(|(name, value)| (name, Some(value))).collect(),
-                ));
+                .set_configs(Some(topic_config));
         let _ = admin.create_topics(&[new_topic]).all().get().await;
         test_utils::wait_for_partition_leaders(admin.as_ref(), GROUP_METADATA_TOPIC_NAME, 0..1).await;
     }
@@ -1412,8 +1408,8 @@ async fn cannot_send_to_internal_topic_inner<F: ProducerBackendFactory>(ctx: &mu
     producer.close().await.expect("close should succeed");
 }
 
-/// Translated from `ProducerFailureHandlingTest.testTooLargeRecordWithAckZero`
-/// (`ProducerFailureHandlingTest.java:87-104`): with ack == 0 the future
+/// Translated from `ProducerFailureHandlingTest#testTooLargeRecordWithAckZero`:
+/// with ack == 0 the future
 /// metadata will have no errors, with offset -1.
 ///
 /// Runs on [`small_max_bytes_cluster_config`], whose `message.max.bytes`
@@ -2441,7 +2437,7 @@ async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut Te
             .unwrap_or_else(|e| panic!("Record {i} should succeed, got: {e:?}"));
     }
 
-    let snapshot = producer.metrics();
+    let snapshot = producer.metrics().snapshot();
     assert!(
         !snapshot.is_empty(),
         "{} backend: metrics() returned an empty map — the backend registry is not wired through",
@@ -2585,15 +2581,15 @@ async fn test_ssl_flush() {
 /// [`producer_failure_handling_cluster_config`]'s broker properties on a
 /// dedicated `Type.KRAFT` cluster (two brokers plus one isolated controller) —
 /// the shape `ProducerFailureHandlingTest`'s `@ClusterTestDefaults(types =
-/// {Type.KRAFT}, brokers = 2)` (`ProducerFailureHandlingTest.java:61-76`)
+/// {Type.KRAFT}, brokers = 2)`
 /// builds, required because the test stops a broker.
 fn producer_failure_handling_dedicated_cluster_config() -> ClusterConfig {
     let props = producer_failure_handling_cluster_config().server_properties;
     ClusterConfig::kraft_dedicated(2, 1).set_server_properties(props)
 }
 
-/// Translated from `ProducerFailureHandlingTest.testNotEnoughReplicasAfterBrokerShutdown`
-/// (`ProducerFailureHandlingTest.java:239-268`): with `min.insync.replicas`
+/// Translated from `ProducerFailureHandlingTest#testNotEnoughReplicasAfterBrokerShutdown`:
+/// with `min.insync.replicas`
 /// equal to the replication factor, a produce after one broker shuts down
 /// fails with not-enough-replicas (or times out).
 ///
@@ -2948,7 +2944,7 @@ impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSeri
 /// `linger.ms=Int.MaxValue` sends `numRecords` records to partition 0, none of
 /// which may be complete yet; `close(Duration.ZERO)` must then abort every one
 /// of them with a bare `KafkaException` (`Error::KafkaError`, message
-/// `"Producer is closed forcefully."`, `RecordAccumulator.java:1146`).
+/// `"Producer is closed forcefully."`, from `RecordAccumulator#abortBatches()`).
 ///
 /// Native only: the gRPC backends' `Send` RPC blocks until delivery, which with
 /// `linger.ms=Int.MaxValue` never happens.
@@ -3013,7 +3009,7 @@ async fn close_with_zero_timeout_from_caller_thread_inner<F: ProducerBackendFact
 /// The borrowed byte-slice `send` (`KafkaProducer<Vec<u8>, Vec<u8>>::send`,
 /// which the C FFI's `send_batch` and single-record sends call, so every C and
 /// Python `KafkaProducer` record) delivers the record's headers to the broker,
-/// as Java's `doSend` appends them (`KafkaProducer.java:1101`, `:1110-1111`):
+/// as `KafkaProducer#doSend` appends them:
 /// in order, an empty value and a null value kept apart. It used to append
 /// none. Rust-only: the gRPC producer proto has no headers.
 #[cfg(feature = "integration-tests")]
@@ -3146,8 +3142,8 @@ async fn test_wrong_serializer_errors_send() {
 /// Deviation (Rust has no synchronous `close`/`send`): the callback is a sync
 /// `FnOnce` running on the producer's sender task, while `close` and `send` are
 /// `async`. Awaiting them there would need `block_on` on the sender task, which
-/// is the very self-join Java's `invokedFromCallback` check
-/// (`KafkaProducer.java:1398-1403`) exists to avoid. Per CLAUDE.md §9.3 the
+/// is the very self-join Java's `invokedFromCallback` check in
+/// `KafkaProducer#close(Duration,boolean)` exists to avoid. Per CLAUDE.md §9.3 the
 /// callback instead hands its work to a detached task. To keep Java's
 /// sequential semantics — callbacks run one after another on the single I/O
 /// thread, so the first callback's sends precede every `close` — each callback
@@ -3535,7 +3531,7 @@ async fn metrics_follow_configuration_and_traffic_inner<F: ProducerBackendFactor
             .expect("produce");
     }
 
-    let snapshot = producer.metrics();
+    let snapshot = producer.metrics().snapshot();
     let number = |group: &str, name: &str, topic_tag: Option<&str>| -> f64 {
         let (_, metric) = snapshot
             .iter()

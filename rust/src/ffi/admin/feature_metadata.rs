@@ -85,13 +85,15 @@ fn sorted_feature_map<'a, V: 'a>(
     box_string_keyed_map(entries.into_iter().map(|(k, v)| (k, box_value(v))), Some(value_destroy))
 }
 
-/// `finalizedFeatures()`: an owned map of owned `char *` feature names in
-/// ascending order to owned `kafka_admin_FinalizedVersionRange_t *`, freed
-/// together with `kafka_Map_destroy`.
+/// Returns a map of finalized feature versions. Each entry in the map contains a key being a
+/// feature name and the value being a range of version levels supported by every broker in the
+/// cluster.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid feature-metadata handle.
+/// `self_` must be a valid feature-metadata handle. The returned map of `char *` feature names, in
+/// ascending order, to `kafka_admin_FinalizedVersionRange_t *` is owned, freed together with its
+/// entries by `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
@@ -106,10 +108,13 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
     )
 }
 
-/// `finalizedFeaturesEpoch()`: the epoch, or `-1` when the broker reported
-/// none (Java's empty `Optional<Long>`).
+/// The epoch for the finalized features. If the returned value is `-1`, it means the finalized
+/// features are absent/unavailable.
 ///
-/// A caught Rust panic returns -2, which is no finalized-features epoch: Java reads a negative one as `Optional.empty()`.
+/// # Returns
+///
+/// The epoch, or `-1` for Java's empty `Optional<Long>`. A caught Rust panic returns -2, which is
+/// no finalized-features epoch: Java reads a negative one as `Optional.empty()`.
 ///
 /// # Safety
 ///
@@ -124,13 +129,15 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
     unsafe { feature_metadata_ref(self_) }.finalized_features_epoch().unwrap_or(-1)
 }
 
-/// `supportedFeatures()`: an owned map of owned `char *` feature names in
-/// ascending order to owned `kafka_admin_SupportedVersionRange_t *`, freed
-/// together with `kafka_Map_destroy`.
+/// Returns a map of supported feature versions. Each entry in the map contains a key being a
+/// feature name and the value being a range of versions supported by a particular broker in the
+/// cluster.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid feature-metadata handle.
+/// `self_` must be a valid feature-metadata handle. The returned map of `char *` feature names, in
+/// ascending order, to `kafka_admin_SupportedVersionRange_t *` is owned, freed together with its
+/// entries by `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
@@ -145,11 +152,12 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
     )
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the feature metadata.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid feature-metadata handle.
+/// `self_` must be a valid feature-metadata handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
@@ -160,11 +168,11 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
     into_c_string(&unsafe { feature_metadata_ref(self_) }.to_string())
 }
 
-/// Frees an owned metadata handle; null is a no-op.
+/// Frees an owned metadata handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned metadata handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned metadata handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_cluster`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeClusterOptions`.
 
 /// Options for `Admin::describe_cluster`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeClusterOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions")]
 pub struct DescribeClusterOptions {
@@ -34,8 +30,16 @@ impl DescribeClusterOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeClusterOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -43,14 +47,22 @@ impl DescribeClusterOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set whether to include cluster authorized operations.
+    /// Sets whether to include cluster authorized operations.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_authorized_operations` - `true` to request the authorized operations.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeClusterOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations")]
     pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
@@ -58,16 +70,26 @@ impl DescribeClusterOptions {
         self
     }
 
-    /// Specify if authorized operations should be included in the response.
-    /// Note that some older brokers cannot supply this information even if it
-    /// is requested.
+    /// Specify if authorized operations should be included in the response. Note that some
+    /// older brokers cannot supply this information even if it is requested.
+    ///
+    /// # Returns
+    ///
+    /// `true` if authorized operations are requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
-    /// Set whether to include fenced brokers when they are not fenced from the
-    /// cluster (only supported by the broker endpoint at DescribeCluster v2+).
+    /// Sets whether to include fenced brokers in the response.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_fenced_brokers` - `true` to request the fenced brokers.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeClusterOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers")]
     pub fn set_include_fenced_brokers(mut self, include_fenced_brokers: bool) -> Self {
@@ -75,9 +97,12 @@ impl DescribeClusterOptions {
         self
     }
 
-    /// Specify if fenced brokers should be included in the response. Note that
-    /// some older brokers cannot supply this information even if it is
-    /// requested.
+    /// Specify if fenced brokers should be included in the response. Note that some
+    /// older brokers cannot supply this information even if it is requested.
+    ///
+    /// # Returns
+    ///
+    /// `true` if fenced brokers are requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClusterOptions#includeFencedBrokers")]
     pub fn include_fenced_brokers(&self) -> bool {
         self.include_fenced_brokers

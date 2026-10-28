@@ -68,7 +68,11 @@ fn boxed(options: ListConsumerGroupOffsetsOptions) -> *mut kafka_admin_ListConsu
 }
 
 /// `new ListConsumerGroupOffsetsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_ListConsumerGroupOffsetsOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_new() -> *mut kafka_admin_ListConsumerGroupOffsetsOptions_t
@@ -76,8 +80,13 @@ pub extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_new() -> *mut kafk
     boxed(ListConsumerGroupOffsetsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -95,8 +104,12 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_set_timeout
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -114,7 +127,12 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_timeout_ms(
         .unwrap_or(-1)
 }
 
-/// `ListConsumerGroupOffsetsOptions.requireStable(boolean requireStable)`: whether the broker must return stable offsets, retrying while a transaction is in progress.
+/// `ListConsumerGroupOffsetsOptions.requireStable(boolean requireStable)`.
+///
+/// # Parameters
+///
+/// - `require_stable` - whether the broker must return stable offsets, retrying while a transaction is
+///   in progress.
 ///
 /// # Safety
 ///
@@ -132,7 +150,11 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_set_require
     *options = std::mem::take(options).set_require_stable(require_stable != 0);
 }
 
-/// `ListConsumerGroupOffsetsOptions.requireStable()`: whether the broker must return stable offsets.
+/// `ListConsumerGroupOffsetsOptions.requireStable()`.
+///
+/// # Returns
+///
+/// Whether the broker must return stable offsets.
 ///
 /// # Safety
 ///

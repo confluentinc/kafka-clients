@@ -145,9 +145,11 @@
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
 //! consumer state reads the C handle's single-owner guard can refuse
-//! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
+//! ([`C_GUARDED_READS`]) and the map setters that refuse a `NULL` value
+//! ([`C_NULL_CHECKED_MAPS`]) are fallible in C only; an `Option<i64>` whose
 //! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
-//! flag and an out-parameter instead of a `-1` sentinel; the factories of an error
+//! flag and an out-parameter instead of a `-1` sentinel; a live map's
+//! snapshot ([`C_SNAPSHOT_ITERATORS`]) crosses as an iterator over it; the factories of an error
 //! carrying a binding's opaque pointer ([`C_RELEASE_HOOKS`]) take a trailing
 //! nullable release hook in C only; a trait
 //! method with `where Self: Sized`
@@ -168,6 +170,7 @@ use std::rc::Rc;
 use quote::ToTokens;
 use syn::ext::IdentExt;
 
+use super::baseline::{Baseline, Waivable};
 use super::{
     compact, ffi_class, has_tag, is_cfg_test, is_no_mangle, java_markers, type_ident, variant_payload, Context, Crate,
     ModPath, Rule, RUST_ONLY,
@@ -257,6 +260,28 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
     "kafka_producer_Producer_begin_transaction_cb_t",
 ];
 
+/// Rust methods returning a shared snapshot of a live map
+/// (`Arc<HashMap<..>>`), each paired with its C export, which hands out an
+/// iterator over that snapshot instead: `MetricsView::snapshot` stands for
+/// Java's weakly consistent iteration of the unmodifiable live map, so C gets
+/// `java.util.Iterator`'s `kafka_Iterator_t` of `kafka_Map_Entry_t`, not a
+/// copied `kafka_Map_t`.
+const C_SNAPSHOT_ITERATORS: &[(&str, &str)] = &[(
+    "kafka_common_metrics_MetricsView_snapshot",
+    "kafka_common_metrics_MetricsView_iterator",
+)];
+
+/// Replaces each expected snapshot method of [`C_SNAPSHOT_ITERATORS`] with its
+/// iterator export: same parameters, returning an owned `kafka_Iterator_t`.
+fn snapshot_iterators(items: &mut BTreeMap<String, Expected>) {
+    for (snapshot, iterator) in C_SNAPSHOT_ITERATORS {
+        if let Some(Expected { shape: Shape::Fn(sig), file }) = items.remove(*snapshot) {
+            let sig = Sig { ret: Some("*mut kafka_Iterator_t".to_string()), ..sig };
+            items.insert((*iterator).to_string(), Expected { shape: Shape::Fn(sig), file });
+        }
+    }
+}
+
 /// Consumer state reads that are infallible in Rust and Java's `Consumer`
 /// interface but fallible in C: the C consumer handle adds a single-owner guard
 /// (Java's `acquire()`, which `AsyncKafkaConsumer`'s `assignment()`,
@@ -271,6 +296,12 @@ const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_paused",
     "kafka_consumer_Consumer_subscription",
 ];
+
+/// Setters taking a `kafka_Map_t` of strings that are infallible in Rust but
+/// fallible in C: Rust's `String` value is never null, while a C map value may
+/// be `NULL`, so the C form refuses one through `out_err` with an
+/// `IllegalArgumentError` and leaves the object unchanged.
+const C_NULL_CHECKED_MAPS: &[&str] = &["kafka_admin_NewTopic_set_configs"];
 
 /// Methods returning `Option<i64>` whose value domain includes `-1`, so the
 /// `-1`-for-`None` mapping of a scalar `Option` would lose a value: Java's
@@ -322,9 +353,9 @@ const C_RELEASE_HOOKS: &[(&str, &str)] = &[(
 
 /// `__as_<Trait>` views of a mutable trait that take the handle `const` and
 /// still return the mutable view, as C's `strchr` does: C receives these
-/// handles read-only (a deserializer's headers, a record's `headers()`) and
+/// handles read-only (a record's `headers()`) and
 /// only the reading methods may be called on the view then, while a handle
-/// received non-`const` (a serializer's headers) may be changed through the
+/// received non-`const` (a serde's headers) may be changed through the
 /// same view. One function serves both, with no cast on the read-only side.
 const CONST_SELF_VIEWS: &[&str] = &["kafka_common_header_internals_RecordHeaders__as_Headers"];
 
@@ -366,78 +397,22 @@ impl Finding {
     }
 }
 
-/// The keys [`FFI_BASELINE`] waives.
-struct Baseline {
-    file: String,
-    keys: BTreeSet<String>,
-    /// The `prefix:` lines: every symbol starting with one is waived.
-    prefixes: Vec<String>,
-    /// Lines listed twice.
-    duplicates: Vec<String>,
-}
-
-impl Baseline {
-    fn load(path: &Path) -> Self {
-        let mut keys = BTreeSet::new();
-        let mut prefixes = Vec::new();
-        let mut duplicates = Vec::new();
-        let text = fs::read_to_string(path).unwrap_or_default();
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            if let Some(prefix) = line.strip_prefix("prefix:") {
-                if prefixes.iter().any(|p| p == prefix) {
-                    duplicates.push(line.to_string());
-                } else {
-                    prefixes.push(prefix.to_string());
-                }
-            } else if !keys.insert(line.to_string()) {
-                duplicates.push(line.to_string());
-            }
-        }
-        Baseline { file: path.display().to_string(), keys, prefixes, duplicates }
+impl Waivable for Finding {
+    fn key(&self) -> String {
+        Finding::key(self)
     }
 
-    /// Drops the waived findings and adds one per stale or duplicated line.
-    fn apply(&self, findings: Vec<Finding>) -> Vec<Finding> {
-        let mut used_keys = BTreeSet::new();
-        let mut used_prefixes = BTreeSet::new();
-        let mut kept = Vec::new();
-        for f in findings {
-            let key = f.key();
-            if self.keys.contains(&key) {
-                used_keys.insert(key);
-                continue;
-            }
-            if let Some(p) = self.prefixes.iter().find(|p| f.symbol.starts_with(p.as_str())) {
-                used_prefixes.insert(p.clone());
-                continue;
-            }
-            kept.push(f);
+    fn subject(&self) -> &str {
+        &self.symbol
+    }
+
+    fn baseline_finding(file: &str, line: String, detail: &str) -> Self {
+        Finding {
+            kind: "baseline",
+            symbol: line,
+            file: file.to_string(),
+            detail: detail.to_string(),
         }
-        for key in self.keys.difference(&used_keys) {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: key.clone(),
-                file: self.file.clone(),
-                detail: "stale entry: no finding matches it any more; delete the line".to_string(),
-            });
-        }
-        for prefix in self.prefixes.iter().filter(|p| !used_prefixes.contains(*p)) {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: format!("prefix:{prefix}"),
-                file: self.file.clone(),
-                detail: "stale entry: no finding starts with it any more; delete the line".to_string(),
-            });
-        }
-        for line in &self.duplicates {
-            kept.push(Finding {
-                kind: "baseline",
-                symbol: line.clone(),
-                file: self.file.clone(),
-                detail: "listed twice; delete one".to_string(),
-            });
-        }
-        kept
     }
 }
 
@@ -895,12 +870,31 @@ struct Expected {
 struct Expectations {
     items: BTreeMap<String, Expected>,
     findings: Vec<Finding>,
+    /// The Rust method the symbols being added translate, if any.
+    origin: Option<COrigin>,
+    /// Each symbol a Rust method implies, with that method.
+    origins: BTreeMap<String, COrigin>,
 }
 
 impl Expectations {
     fn add(&mut self, name: String, shape: Shape, file: &str) {
+        if let Some(origin) = &self.origin {
+            self.origins.entry(name.clone()).or_insert_with(|| origin.clone());
+        }
         self.items.entry(name).or_insert(Expected { shape, file: file.to_string() });
     }
+}
+
+/// The Rust method a C export translates, as `check-api-docs` needs
+/// it: the export's doc is measured against that method's Java member.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct COrigin {
+    /// `Type::method`.
+    pub(super) rust: String,
+    /// The method's Java markers.
+    pub(super) markers: Vec<String>,
+    /// Whether the method is tagged `rust-only`.
+    pub(super) rust_only: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -962,6 +956,9 @@ struct RustMethod {
     sig: syn::Signature,
     /// A trait method with a body: Java's default method, a nullable pointer in C.
     has_default: bool,
+    /// Its Java markers, and whether it is tagged `rust-only`.
+    markers: Vec<String>,
+    rust_only: bool,
 }
 
 /// A public Rust type outside the FFI.
@@ -1202,7 +1199,8 @@ impl FfiTranslation {
     /// The findings before the baseline, and how many symbols were compared.
     pub(super) fn findings(&self, krate: &Crate) -> (Vec<Finding>, usize) {
         let surface = self.rust_surface(krate);
-        let expectations = self.expectations(&surface);
+        let mut expectations = self.expectations(&surface);
+        snapshot_iterators(&mut expectations.items);
         let actual = CSurface::load(krate);
         let mut findings = expectations.findings;
         let checked = expectations.items.len() + actual.fns.len() + actual.types.len();
@@ -1215,6 +1213,11 @@ impl FfiTranslation {
         findings.sort();
         findings.dedup();
         (findings, checked)
+    }
+
+    /// The Rust method each C export translates, keyed by symbol.
+    pub(super) fn c_origins(&self, krate: &Crate) -> BTreeMap<String, COrigin> {
+        self.expectations(&self.rust_surface(krate)).origins
     }
 
     /// The C prefix of public type `name` defined in `module` with `attrs`.
@@ -1781,7 +1784,13 @@ impl FfiTranslation {
                         CType::Handle { prefix: prefix.clone(), mutable: self_mutable(recv) }.render(),
                     )
                 });
+                out.origin = Some(COrigin {
+                    rust: format!("{}::{}", ty.name, m.name),
+                    markers: m.markers.clone(),
+                    rust_only: m.rust_only,
+                });
                 expect_method(&mut out, &mapper, prefix, m, self_param, file);
+                out.origin = None;
             }
 
             if let Kind::Trait { .. } = &ty.kind {
@@ -2029,6 +2038,8 @@ fn trait_methods(
             name: f.sig.ident.unraw().to_string(),
             sig: f.sig.clone(),
             has_default: f.default.is_some(),
+            markers: java_markers(&f.attrs),
+            rust_only: has_tag(&f.attrs, RUST_ONLY),
         });
     }
     out
@@ -2093,7 +2104,13 @@ fn inherent_methods(items: &[syn::Item], name: &str) -> Vec<RustMethod> {
             if !matches!(f.vis, syn::Visibility::Public(_)) || is_cfg_test(&f.attrs) || is_hidden(&f.attrs) {
                 continue;
             }
-            out.push(RustMethod { name: f.sig.ident.unraw().to_string(), sig: f.sig.clone(), has_default: false });
+            out.push(RustMethod {
+                name: f.sig.ident.unraw().to_string(),
+                sig: f.sig.clone(),
+                has_default: false,
+                markers: java_markers(&f.attrs),
+                rust_only: has_tag(&f.attrs, RUST_ONLY),
+            });
         }
     }
     out
@@ -2269,6 +2286,9 @@ fn expect_method(
             blocking.ret = v.as_ref().map(CType::render);
         },
         (Output::Value(_), Some(v), _) => blocking.ret = Some(v.render()),
+        (Output::Unit | Output::Fluent, None, _) if C_NULL_CHECKED_MAPS.contains(&name.as_str()) => {
+            blocking.params.push(Param::out_err());
+        },
         _ => {},
     }
     if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
@@ -2996,6 +3016,8 @@ mod tests {
             is_abstract: false,
             functional_interface: false,
             supertypes: Vec::new(),
+            javadoc: None,
+            field_docs: BTreeMap::new(),
         }
     }
 
@@ -3055,7 +3077,12 @@ mod tests {
         let lib = format!("{rust}\npub mod ffi {{\n use std::ffi::{{c_char, c_void}};\n{ffi}\n}}\n");
         fs::write(dir.join("lib.rs"), lib).unwrap();
         let krate = Crate::load(&dir.join("lib.rs")).unwrap();
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
+        let ctx = Context {
+            java: Rc::new(index()),
+            ffi_baseline: None,
+            doc_baseline: None,
+            cbindgen_config: None,
+        };
         let rule = FfiTranslation::new(&ctx);
         let (findings, _) = rule.findings(&krate);
         fs::remove_dir_all(&dir).unwrap();
@@ -4647,7 +4674,12 @@ mod tests {
 
     #[test]
     fn test_prefixes_from_markers_nested_errors_and_rust_only() {
-        let ctx = Context { java: Rc::new(index()), ffi_baseline: None, cbindgen_config: None };
+        let ctx = Context {
+            java: Rc::new(index()),
+            ffi_baseline: None,
+            doc_baseline: None,
+            cbindgen_config: None,
+        };
         let rule = FfiTranslation::new(&ctx);
         let attrs = |alias: &str| -> Vec<syn::Attribute> {
             let item: syn::ItemStruct = syn::parse_str(&format!("#[doc(alias = \"{alias}\")] struct S;")).unwrap();
@@ -4771,6 +4803,41 @@ mod tests {
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
              found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, \
              out_err: *mut *mut kafka_common_Error_t) -> i64`"
+        );
+    }
+
+    /// A map setter listed in `C_NULL_CHECKED_MAPS` is expected with a trailing
+    /// `out_err` (C may pass a `NULL` value Rust cannot hold); any other fluent
+    /// setter keeps the plain form.
+    #[test]
+    fn test_null_checked_map_setters_are_fallible_in_c() {
+        let rust = r#"
+            pub mod admin {
+                #[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
+                pub struct NewTopic;
+                impl NewTopic {
+                    pub fn set_configs(self, configs: i32) -> Self { self }
+                    pub fn set_other(self, other: i32) -> Self { self }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_admin_NewTopic_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(self_: *mut kafka_admin_NewTopic_t, configs: i32) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_NewTopic_set_other(self_: *mut kafka_admin_NewTopic_t, other: i32, out_err: *mut *mut kafka_common_Error_t) {}
+        "#;
+        let findings = run("null-checked-maps", rust, ffi);
+        assert_eq!(
+            detail(&findings, "shape kafka_admin_NewTopic_set_configs"),
+            "expected `fn(self: *mut kafka_admin_NewTopic_t, configs: i32, \
+             out_err: *mut *mut kafka_common_Error_t)`, found `fn(self_: *mut kafka_admin_NewTopic_t, configs: i32)`"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_admin_NewTopic_set_other"),
+            "expected `fn(self: *mut kafka_admin_NewTopic_t, other: i32)`, \
+             found `fn(self_: *mut kafka_admin_NewTopic_t, other: i32, \
+             out_err: *mut *mut kafka_common_Error_t)`"
         );
     }
 

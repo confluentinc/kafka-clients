@@ -187,13 +187,12 @@ impl ClientUtils {
     }
 
     /// The canonical host name of `address`: Java's
-    /// `InetAddress.getCanonicalHostName()`, which `ClientUtils.resolveAddress`
+    /// `InetAddress.getCanonicalHostName()`, which `ClientUtils#resolveAddress`
     /// calls for each address in `resolve_canonical_bootstrap_servers_only`
-    /// mode (`ClientUtils.java:77`).
+    /// mode.
     ///
-    /// Translated from the JDK's `InetAddress.getHostFromNameService`
-    /// (JDK 21, `java.base/java/net/InetAddress.java:835-880`; the
-    /// security-manager check does not apply): the reverse lookup goes through
+    /// Translated from the JDK's `java.net.InetAddress#getHostFromNameService`
+    /// (JDK 21; the security-manager check does not apply): the reverse lookup goes through
     /// the system resolver's `getnameinfo` with `NI_NAMEREQD`
     /// ([`dns_lookup::lookup_addr`]), the primitive the JDK's
     /// `Inet4AddressImpl` / `Inet6AddressImpl.getHostByAddr` use, so an address
@@ -258,7 +257,7 @@ impl ClientUtils {
     /// [`BootstrapConfiguration::enabled`](crate::BootstrapConfiguration::enabled).
     ///
     /// `is_interrupted` is Java's `Thread.currentThread().isInterrupted()`,
-    /// checked before each URL (`ClientUtils.java:105-107`): once it answers
+    /// checked before each URL in `ClientUtils#parseAddresses`: once it answers
     /// `true` the loop stops and returns what it has. `NetworkClient` passes
     /// "the result receiver was dropped", which is how it cancels a resolution
     /// (Java's `shutdownNow()` interrupt on `close()`).
@@ -1520,8 +1519,8 @@ mod tests {
         );
     }
 
-    /// `parseAddresses` checks `isInterrupted()` before each URL and stops
-    /// there (`ClientUtils.java:105-107`); the addresses resolved so far are
+    /// `ClientUtils#parseAddresses` checks `isInterrupted()` before each URL and
+    /// stops there; the addresses resolved so far are
     /// returned and no further lookup runs.
     #[test]
     fn test_parse_addresses_stops_once_interrupted() {

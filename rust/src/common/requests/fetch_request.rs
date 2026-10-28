@@ -366,7 +366,7 @@ impl FetchRequest {
     /// Translates Java's `getErrorResponse(int throttleTimeMs, Throwable e)`.
     /// The Java implementation also walks per-topic per-partition data
     /// and stamps the error code on each entry for v<13 (see
-    /// `FetchRequest.java:342-380`). This Rust translation only sets the
+    /// `FetchRequest#getErrorResponse`). This Rust translation only sets the
     /// top-level error/session-id because the KIP-848 consumer always
     /// negotiates v12+ where the per-partition stamping is redundant
     /// (the per-partition status is already absent on the wire). If a

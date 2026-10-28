@@ -342,9 +342,9 @@ static void test_mock_admin_create_close_destroy(void) {
     fixture_destroy(&f);
 }
 
-/* Java's MockAdminClient.Builder throws for a zero broker count (build()
- * reads brokers.get(0), MockAdminClient.java:212) and for a negative one
- * (numBrokers calls brokers.subList(0, n), :154), rather than yielding a mock.
+/* Java's `org.apache.kafka.clients.admin.MockAdminClient.Builder` throws for a zero
+ * broker count (`Builder#build` reads brokers.get(0)) and for a negative one
+ * (`Builder#numBrokers` calls brokers.subList(0, n)), rather than yielding a mock.
  * The C setter and `_build` store the Builder's error, with the JDK's
  * message, in out_err and return NULL. */
 static void test_mock_admin_rejects_zero_brokers(void) {
@@ -1349,8 +1349,20 @@ static void test_mock_admin_new_topic_configs(void) {
     kafka_Map_t *configs = kafka_Map_new();
     kafka_Map_put(configs, (void *)"retention.ms", (void *)"60000");
     kafka_Map_put(configs, (void *)"cleanup.policy", (void *)"compact");
-    kafka_admin_NewTopic_set_configs(topic, configs);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_NewTopic_set_configs(topic, configs, &err);
+    TEST_ASSERT_NULL(err);
     kafka_Map_destroy(configs); /* copied by the setter */
+
+    /* A NULL value is refused, as the broker would reject it, and the configs stay. */
+    kafka_Map_t *null_value = kafka_Map_new();
+    kafka_Map_put(null_value, (void *)"retention.ms", NULL);
+    kafka_admin_NewTopic_set_configs(topic, null_value, &err);
+    kafka_Map_destroy(null_value);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("The value of config retention.ms must not be null", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
     kafka_Map_t *copy = kafka_admin_NewTopic_configs(topic);
     TEST_ASSERT_NOT_NULL(copy);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(copy));
@@ -1363,22 +1375,6 @@ static void test_mock_admin_new_topic_configs(void) {
                              text);
     kafka_string_destroy(text);
 
-    /* Java's `configs(Map)` stores the map as given: a NULL value is Java's
-     * null config value, read back as NULL and printed as `null`. */
-    configs = kafka_Map_new();
-    kafka_Map_put(configs, (void *)"retention.ms", (void *)"60000");
-    kafka_Map_put(configs, (void *)"cleanup.policy", NULL);
-    kafka_admin_NewTopic_set_configs(topic, configs);
-    kafka_Map_destroy(configs);
-    copy = kafka_admin_NewTopic_configs(topic);
-    TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(copy));
-    TEST_ASSERT_EQUAL_STRING("cleanup.policy", (const char *)kafka_Map_key(copy, 0));
-    TEST_ASSERT_NULL(kafka_Map_value(copy, 0));
-    kafka_Map_destroy(copy);
-    text = kafka_admin_NewTopic_to_string(topic);
-    TEST_ASSERT_NOT_NULL(strstr(text, "configs={cleanup.policy=null, retention.ms=60000}"));
-    kafka_string_destroy(text);
-
     kafka_List_t *topics = kafka_List_new();
     kafka_List_add(topics, topic);
     kafka_admin_CreateTopicsResult_t *result = kafka_admin_Admin_create_topics(f.admin, topics);
@@ -1388,11 +1384,9 @@ static void test_mock_admin_new_topic_configs(void) {
     const kafka_admin_ConfigEntry_t *entry = kafka_admin_Config_get(cfg, "retention.ms");
     TEST_ASSERT_NOT_NULL(entry);
     TEST_ASSERT_EQUAL_STRING("60000", kafka_admin_ConfigEntry_value(entry));
-    /* The mock builds the result's entries with `new ConfigEntry(key, value)`,
-     * so the null value stays null. */
     entry = kafka_admin_Config_get(cfg, "cleanup.policy");
     TEST_ASSERT_NOT_NULL(entry);
-    TEST_ASSERT_NULL(kafka_admin_ConfigEntry_value(entry));
+    TEST_ASSERT_EQUAL_STRING("compact", kafka_admin_ConfigEntry_value(entry));
     TEST_ASSERT_NULL(kafka_admin_Config_get(cfg, "no.such.config"));
     kafka_common_KafkaFuture_destroy(config);
     kafka_admin_CreateTopicsResult_destroy(result);
@@ -1777,7 +1771,7 @@ static void test_mock_admin_delete_topics_by_ids(void) {
 
 /* Java's `deleteTopics(Collection<String>)` and `(Collection<String>,
  * DeleteTopicsOptions)` wrap the names in `TopicCollection.ofTopicNames`
- * (`Admin.java:214-230`): each `_with_string_slice` form deletes the named
+ * (`Admin#deleteTopics(Collection)` and `Admin#deleteTopics(Collection,DeleteTopicsOptions)`): each `_with_string_slice` form deletes the named
  * topic and returns a result keyed by name. */
 static void test_mock_admin_delete_topics_with_string_slice(void) {
     for (int with_options = 0; with_options <= 1; with_options++) {
@@ -3167,7 +3161,7 @@ static void test_mock_admin_list_offsets_earliest_and_latest(void) {
 
 /* `OffsetSpec.forTimestamp(ts)` is its own variant, distinct from the
  * singletons, and the mock refuses it as unsupported with Java's message
- * "Not implement yet" (sic — MockAdminClient.java:1233). */
+ * "Not implement yet" (sic — `org.apache.kafka.clients.admin.MockAdminClient#listOffsets`). */
 static void test_mock_admin_list_offsets_for_timestamp_is_unsupported(void) {
     kafka_common_Error_t *err = NULL;
     fixture_t f;
@@ -3273,8 +3267,8 @@ static const kafka_admin_GroupListing_t *find_group_listing(const kafka_List_t *
 }
 
 /* The mock lists every group that has a GROUP config, building each listing
- * as CONSUMER / "consumer" / STABLE (MockAdminClient.java:730). `errors()`
- * is empty: the mock never reports a per-broker failure. */
+ * as CONSUMER / "consumer" / STABLE
+ * (`org.apache.kafka.clients.admin.MockAdminClient#listGroups`). `errors()` is empty: the mock never reports a per-broker failure. */
 static void test_mock_admin_list_groups_reports_seeded_groups(void) {
     fixture_t f;
     fixture_init(&f, 1);
@@ -3542,7 +3536,9 @@ static void test_mock_admin_list_consumer_group_offsets_filters_by_spec_partitio
  * invalid-offset sentinel — is seedable. Listing then has to build an
  * `OffsetAndMetadata` from it, which Java rejects with
  * IllegalArgumentException("Invalid negative offset")
- * (MockAdminClient.java:756, OffsetAndMetadata.java:49-50); the Rust mock
+ * (`org.apache.kafka.clients.admin.MockAdminClient#listConsumerGroupOffsets`,
+ * `org.apache.kafka.clients.consumer.OffsetAndMetadata#OffsetAndMetadata(long,Optional,String)`);
+ * the Rust mock
  * fails the group's future rather than panicking, and the handle stays
  * usable: overwriting the bad offset makes the same call succeed. */
 static void test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seeded_offset(void) {
@@ -4885,7 +4881,8 @@ static void test_mock_admin_update_features_applies_a_valid_upgrade(void) {
 
 /* An out-of-range level fails every feature's future with the mock's
  * `invalidUpdateVersion` message — an InvalidRequestException wrapping the
- * InvalidUpdateVersionException's text (MockAdminClient.java:1333,1354); an UNKNOWN upgrade type is
+ * InvalidUpdateVersionException's text
+ * (`org.apache.kafka.clients.admin.MockAdminClient#updateFeatures`); an UNKNOWN upgrade type is
  * rejected the same way; `FeatureUpdate`'s constructor refuses a level
  * below 1 with an UPGRADE type (Java's IllegalArgumentException); an empty
  * batch is accepted by the mock and yields an empty result. */

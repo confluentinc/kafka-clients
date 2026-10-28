@@ -42,12 +42,17 @@ impl PayloadClass for ConsumerCommitFailedError {
     }
 }
 
-/// The payload of a `CommitFailedException` error, borrowed from the error
-/// handle, or null when the error is another class.
+/// Returns the payload of a `CommitFailedException` error, or `NULL` when the error is another
+/// class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
@@ -66,12 +71,18 @@ pub unsafe extern "C" fn kafka_common_Error_consumer_commit_failed(
     }
 }
 
-/// `new CommitFailedException(String message)`. Owned, freed with
-/// [`kafka_common_ConsumerCommitFailedError_destroy`].
+/// `new CommitFailedException(String message)`.
+///
+/// # Parameters
+///
+/// - `message` - The error message
 ///
 /// # Safety
 ///
 /// `message` must be a valid NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_ConsumerCommitFailedError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_new(
@@ -84,6 +95,11 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_new(
 }
 
 /// `new CommitFailedException()` with Java's default message.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_ConsumerCommitFailedError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ConsumerCommitFailedError_with_default_message()
@@ -91,11 +107,12 @@ pub extern "C" fn kafka_common_ConsumerCommitFailedError_with_default_message()
     Payload::boxed(ConsumerCommitFailedError::with_default_message())
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
@@ -108,11 +125,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_message(
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
@@ -126,11 +144,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_source(
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid commit-failed handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
@@ -143,12 +162,12 @@ pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_to_string(
     unsafe { Payload::<ConsumerCommitFailedError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ConsumerCommitFailedError_destroy(

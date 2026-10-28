@@ -22,20 +22,15 @@ use crate::common::TopicPartition;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::consumer::OffsetAndMetadata;
 
-/// Log truncation was detected: the broker's log diverges from the offsets the
-/// consumer had fetched.
-///
-/// Corresponds to Java's `LogTruncationException`. It has no entry in `Errors`,
-/// so it carries no protocol code.
-///
-/// Java `extends` chain:
-///    `LogTruncationException` -> `OffsetOutOfRangeException` ->
-///   `InvalidOffsetException` -> `KafkaException`
-///
-/// The `OffsetOutOfRangeException` in that chain is the consumer package's, so
-/// this is a
-/// [`ConsumerOffsetOutOfRangeError`](super::ConsumerOffsetOutOfRangeError) too —
-/// which is why it carries the same `offset_out_of_range_partitions` map.
+/// In the event of an unclean leader election, the log will be truncated,
+/// previously committed data will be lost, and new data will be written over
+/// these offsets. When this happens, the consumer will detect the truncation
+/// and return this error (if no automatic reset policy has been defined) with
+/// the first offset known to diverge from what the consumer previously read.
+// Java `extends` chain: `LogTruncationException` -> `OffsetOutOfRangeException`
+// -> `InvalidOffsetException` -> `KafkaException`, the consumer package's
+// classes, so this is a `ConsumerOffsetOutOfRangeError` too and carries the same
+// `offset_out_of_range_partitions` map. It has no entry in `Errors`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException")]
 pub struct ConsumerLogTruncationError {
@@ -47,10 +42,13 @@ pub struct ConsumerLogTruncationError {
 }
 
 impl ConsumerLogTruncationError {
-    /// Mirrors Java's
-    /// `LogTruncationException(Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`,
-    /// which composes the message from the divergent offsets:
-    /// `"Truncated partitions detected with divergent offsets " + divergentOffsets`.
+    /// Constructs a new `ConsumerLogTruncationError` with the fetch offsets and
+    /// divergent offsets.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset_out_of_range_partitions` - The fetch offsets that were out of range
+    /// - `divergent_offsets` - The offsets where the consumer's log diverged from the broker's log
     #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#LogTruncationException")]
     pub fn new(
         offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
@@ -62,8 +60,13 @@ impl ConsumerLogTruncationError {
         Self { message, offset_out_of_range_partitions, divergent_offsets }
     }
 
-    /// Mirrors Java's three-argument
-    /// `LogTruncationException(String, Map<TopicPartition, Long>, Map<TopicPartition, OffsetAndMetadata>)`.
+    /// Constructs a new `ConsumerLogTruncationError` with a custom message.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - The detail message
+    /// - `offset_out_of_range_partitions` - The fetch offsets that were out of range
+    /// - `divergent_offsets` - The offsets where the consumer's log diverged from the broker's log
     #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#LogTruncationException")]
     pub fn with_message(
         message: impl Into<String>,
@@ -73,40 +76,49 @@ impl ConsumerLogTruncationError {
         Self { message: message.into(), offset_out_of_range_partitions, divergent_offsets }
     }
 
-    /// The out-of-range offset per partition.
+    /// Get a map of the topic partitions and the respective out-of-range fetch
+    /// offsets.
+    ///
+    /// # Returns
+    ///
+    /// The out-of-range fetch offset per partition
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#offsetOutOfRangePartitions")]
     pub fn offset_out_of_range_partitions(&self) -> &HashMap<TopicPartition, i64> {
         &self.offset_out_of_range_partitions
     }
 
-    /// The divergent offset per partition.
+    /// Get the divergent offsets for the partitions which were truncated. For
+    /// each partition, this is the first offset which is known to diverge from
+    /// what the consumer read.
+    ///
+    /// Note that there is no guarantee that this offset will be known. It is
+    /// necessary to use [`Self::partitions`] to see the set of partitions that
+    /// were truncated and then check for the presence of a divergent offset in
+    /// this map.
+    ///
+    /// # Returns
+    ///
+    /// The divergent offset per partition
     #[doc(alias = "org.apache.kafka.clients.consumer.LogTruncationException#divergentOffsets")]
     pub fn divergent_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
         &self.divergent_offsets
     }
 
-    /// The partitions this error covers.
+    /// Returns the set of partitions for which the offset was invalid.
     ///
-    /// `LogTruncationException` does not override
-    /// `OffsetOutOfRangeException.partitions()`
-    /// (`OffsetOutOfRangeException.java:64-67`), so this is the key set of
-    /// `offset_out_of_range_partitions` — NOT of
-    /// [`divergent_offsets`](Self::divergent_offsets). The distinction is the
-    /// whole point of the accessor: Java's javadoc
-    /// (`LogTruncationException.java:64-72`) tells the caller to iterate
-    /// `partitions()` and then look each one up in `divergentOffsets()`,
-    /// "because there is no guarantee that this offset will be known" for
-    /// every truncated partition.
+    /// # Returns
     ///
-    /// Returns an iterator rather than a `HashSet` for the same reason as
-    /// [`ConsumerOffsetOutOfRangeError::partitions`](super::ConsumerOffsetOutOfRangeError::partitions):
-    /// Java's `keySet()` is a view, not a copy.
+    /// The set of partitions with invalid offsets
+    ///
+    /// # Translation notes
+    ///
+    /// Iterates the keys instead of copying them.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.offset_out_of_range_partitions.keys()
     }
 
-    /// The error message.
+    /// Returns the error message.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
@@ -149,10 +161,10 @@ impl ErrorSource for ConsumerLogTruncationError {
 }
 
 impl ConsumerLogTruncationError {
-    /// Always `None`: `LogTruncationException` exposes no `Throwable cause` constructor, so its
-    /// cause is null in Java too. Present as an inherent method so it shadows
-    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
-    /// `x.source()` unambiguous and typed.
+    /// Returns the cause of this error: always `None`, as no constructor takes
+    /// one.
+    // An inherent method, so it shadows both `ErrorSource::source` and
+    // `std::error::Error::source`, keeping `x.source()` unambiguous and typed.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
@@ -177,7 +189,7 @@ mod tests {
     ///
     /// Java: `LogTruncationException(Map, Map)` composes
     /// `"Truncated partitions detected with divergent offsets " +
-    /// divergentOffsets` (`LogTruncationException.java:45-48`); Java's
+    /// divergentOffsets` (`org.apache.kafka.clients.consumer.LogTruncationException#LogTruncationException(Map,Map)`); Java's
     /// `Map.toString()` braces the entries.
     #[test]
     fn test_log_truncation_default_message_and_accessors() {
@@ -197,8 +209,8 @@ mod tests {
 
     /// `LogTruncationException` does NOT override `partitions()`, so it inherits
     /// `OffsetOutOfRangeException`'s `offsetOutOfRangePartitions.keySet()`
-    /// (`OffsetOutOfRangeException.java:64-67`). That is what makes the javadoc
-    /// at `LogTruncationException.java:64-72` meaningful: iterate
+    /// (`org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions`). That is what makes the javadoc
+    /// of `org.apache.kafka.clients.consumer.LogTruncationException#divergentOffsets` meaningful: iterate
     /// `partitions()`, then look each one up in `divergentOffsets()`, "because
     /// there is no guarantee that this offset will be known". So the two sets
     /// are deliberately allowed to differ, and `partitions()` must follow the
@@ -220,7 +232,7 @@ mod tests {
 
     /// `LogTruncationException extends OffsetOutOfRangeException extends
     /// InvalidOffsetException extends KafkaException`
-    /// (`LogTruncationException.java:35`), where the middle two are the
+    /// (`org.apache.kafka.clients.consumer.LogTruncationException`), where the middle two are the
     /// CONSUMER package's classes — so it answers to both consumer predicates
     /// and to neither `ApiException` nor `RetriableException`.
     #[test]

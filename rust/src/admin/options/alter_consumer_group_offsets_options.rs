@@ -13,13 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::alter_consumer_group_offsets`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions`.
 
 /// Options for `Admin::alter_consumer_group_offsets`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions`.
-/// Java's class adds no fields beyond `AbstractOptions` (only `timeoutMs`).
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsOptions")]
 pub struct AlterConsumerGroupOffsetsOptions {
@@ -33,7 +28,16 @@ impl AlterConsumerGroupOffsetsOptions {
         Self::default()
     }
 
-    /// Set the operation timeout in milliseconds (or `None` for the default).
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `AlterConsumerGroupOffsetsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -41,7 +45,8 @@ impl AlterConsumerGroupOffsetsOptions {
         self
     }
 
-    /// The operation timeout in milliseconds, or `None` for the default.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

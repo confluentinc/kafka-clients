@@ -146,7 +146,7 @@ impl RequestBuilder for Builder {
     }
 
     // Java's `super(ApiKeys.DELETE_GROUPS)` resolves to `latestVersion(false)`
-    // (`AbstractRequest.java:46-51`): released versions only
+    // (`org.apache.kafka.common.requests.AbstractRequest.Builder#Builder(ApiKeys)`): released versions only
     // (producer-transactions §12).
     fn latest_allowed_version(&self) -> i16 {
         ApiKeys::DELETE_GROUPS.latest_version_enable_unstable_last_version(false)

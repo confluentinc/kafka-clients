@@ -48,13 +48,22 @@ pub(crate) unsafe fn subscription_pattern_ref<'a>(
     &unsafe { &*(pattern as *const SubscriptionPatternInner) }.pattern
 }
 
-/// `new SubscriptionPattern(String pattern)`: an owned handle freed with
-/// [`kafka_consumer_SubscriptionPattern_destroy`]. The client performs no
-/// validation; the group coordinator does.
+/// Create a subscription pattern, which the group coordinator validates.
+///
+/// # Parameters
+///
+/// - `pattern` - The regular expression pattern compatible with RE2/J
+///
+/// # Returns
+///
+/// The handle.
 ///
 /// # Safety
 ///
 /// `pattern` must be a valid NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_SubscriptionPattern_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
@@ -70,11 +79,17 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_new(
     })) as *mut kafka_consumer_SubscriptionPattern_t
 }
 
-/// `pattern()`, borrowed from the handle.
+/// `pattern()`.
+///
+/// # Returns
+///
+/// Regular expression pattern compatible with RE2/J.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
@@ -87,11 +102,17 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_pattern(
     unsafe { &*(self_ as *const SubscriptionPatternInner) }.pattern_c.as_ptr()
 }
 
-/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionPattern_to_string(

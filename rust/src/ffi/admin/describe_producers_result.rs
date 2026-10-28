@@ -90,15 +90,19 @@ pub(crate) unsafe fn destroy_partition_producer_state_element(element: *mut c_vo
     }
 }
 
-/// `new PartitionProducerState(List<ProducerState> activeProducers)`:
-/// `active_producers` is a borrowed list of `const kafka_admin_ProducerState_t *`,
-/// copied during the call (null reads as empty). Owned, freed with
-/// [`kafka_admin_DescribeProducersResult_PartitionProducerState_destroy`].
+/// Creates the producer state of a partition.
+///
+/// # Parameters
+///
+/// - `active_producers` - a list of `const kafka_admin_ProducerState_t *`, copied during the call;
+///   `NULL` reads as empty
 ///
 /// # Safety
 ///
-/// `active_producers` must be null or a valid list handle, not mutated
-/// during the call, whose elements are live producer-state handles.
+/// `active_producers` must be `NULL` or a valid list handle, not mutated
+/// during the call, whose elements are live producer-state handles; the
+/// caller keeps ownership of it. The returned handle is owned and freed with
+/// `kafka_admin_DescribeProducersResult_PartitionProducerState_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_new(
@@ -116,13 +120,14 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     box_partition_producer_state(PartitionProducerState::new(active_producers))
 }
 
-/// `activeProducers()`: an owned `kafka_List_t` (freed with
-/// `kafka_List_destroy`, which frees its elements) of owned
-/// `kafka_admin_ProducerState_t *` copies, in Java's list order.
+/// Returns a `kafka_List_t` of owned `kafka_admin_ProducerState_t *` copies, in Java's list order.
 ///
 /// # Safety
 ///
 /// `self_` must be a live partition-producer-state handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_active_producers(
@@ -140,11 +145,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     box_list(elements, Some(destroy_producer_state_element))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a live partition-producer-state handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerState_to_string(
@@ -156,11 +163,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_PartitionProducerSt
     into_c_string(&unsafe { partition_producer_state_ref(self_) }.to_string())
 }
 
-/// Frees an owned partition-producer-state handle; null is a no-op.
+/// Frees an owned partition-producer-state handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -243,17 +250,23 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeProducersResult_t) -> &'a
     unsafe { result_ref(self_) }
 }
 
-/// `partitionResult(TopicPartition partition)`: returns an owned future (freed
-/// with `kafka_common_KafkaFuture_destroy`) whose `get` yields a
-/// `kafka_admin_DescribeProducersResult_PartitionProducerState_t *` owned by
-/// the future, or stores the owned `IllegalArgumentError` in `*out_err` and
-/// returns `NULL` when `partition` was not part of the request. `partition` is
-/// borrowed for the call.
+/// Returns the future of the producer state of `partition`, whose `get` yields a
+/// `kafka_admin_DescribeProducersResult_PartitionProducerState_t *` owned by the future, or `NULL`
+/// on failure.
+///
+/// # Parameters
+///
+/// - `partition` - the partition, borrowed for the call
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` - `partition` was not part of the request
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `partition` a valid topic-partition
-/// handle and `out_err` a valid slot pointing at null.
+/// handle and `out_err` a valid slot pointing at `NULL`. The returned future is
+/// owned and freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
@@ -283,15 +296,15 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_partition_result(
     }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of
-/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition
-/// and compared by value in `kafka_Map_get`, to
-/// `kafka_admin_DescribeProducersResult_PartitionProducerState_t *` values.
+/// Returns a future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and compared by value in
+/// `kafka_Map_get`, to `kafka_admin_DescribeProducersResult_PartitionProducerState_t *` values.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
@@ -306,12 +319,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), states_map, destroy_map_element) }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

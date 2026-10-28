@@ -107,25 +107,37 @@ pub(crate) unsafe fn consumer_config_ref<'a>(config: *const kafka_consumer_Consu
     &unsafe { handle_ref(config) }.config
 }
 
-/// `new ConsumerConfig(Map<String, String> props)`: validates the
-/// properties (the map stays the caller's) and delivers the configuration,
-/// owned by the caller ([`kafka_consumer_ConsumerConfig_destroy`]), or
-/// returns the `ConfigException` translation.
+/// Constructs a new ConsumerConfig with the given properties.
 ///
-/// It first sets up the default stderr logger, as creating a client does, so
-/// the warnings the configuration logs while it is built are not lost when it
-/// is created before any client; its clients do not log them again.
+/// # Parameters
+///
+/// - `props` - The consumer configuration properties
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_config_error` if a value is invalid, the settings
+///   conflict, or a SASL mechanism other than `PLAIN` is set
+/// - `kafka_common_Error_is_invalid_configuration_error` if `enable.auto.commit` is
+///   `true` without a `group.id`
+///
+/// # Translation notes
+///
+/// WARNING: `sasl.mechanism` must be `PLAIN`.
 ///
 /// # Safety
 ///
-/// `props` must be null or a valid map of `char *` keys and values; `out_err` a
-/// valid slot pointing at null.
+/// `props` must be null or a valid map of `char *` keys and values, which stays the
+/// caller's, and `out_err` a valid slot pointing at null. The configuration is owned
+/// by the caller, freed with [`kafka_consumer_ConsumerConfig_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     props: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_ConsumerConfig_t {
+    // Sets up the default stderr logger first, as creating a client does, so the warnings the
+    // configuration logs while it is built are not lost when it is created before any client;
+    // its clients do not log them again.
     init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is null or a valid map of `char *` keys and
     // values, as `map_strings` requires; they are copied into owned strings.
@@ -138,13 +150,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_new(
     }
 }
 
-/// `getShort(String key)`: the `SHORT` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+/// `getShort(String key)`: the `SHORT` configuration `key`. Reading a key marks it used
+/// ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -165,13 +189,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_short(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_short(key)) }
 }
 
-/// `getInt(String key)`: the `INT` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+/// `getInt(String key)`: the `INT` configuration `key`. Reading a key marks it used
+/// ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -192,13 +228,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_int(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_int(key)) }
 }
 
-/// `getLong(String key)`: the `LONG` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+/// `getLong(String key)`: the `LONG` configuration `key`. Reading a key marks it used
+/// ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -219,13 +267,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_long(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_long(key)) }
 }
 
-/// `getDouble(String key)`: the `DOUBLE` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+/// `getDouble(String key)`: the `DOUBLE` configuration `key`. Reading a key marks it used
+/// ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -246,13 +306,25 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_double(
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| handle.config.get_double(key)) }
 }
 
-/// `getBoolean(String key)`: the `BOOLEAN` configuration `key`. Returns `1` with the
-/// value in `*out_value`, or `0` when the key has no value (Java's `null`),
-/// `*out_value` then left unwritten. A key of another type fails with an
-/// `IllegalArgumentError`, as Java's cast does, and a key the configuration
-/// does not define with Java's `ConfigException`
-/// (`Unknown configuration '<key>'`), both through `out_err`. Reading a key
-/// marks it used ([`kafka_consumer_ConsumerConfig_unused`]).
+/// `getBoolean(String key)`: the `BOOLEAN` configuration `key`. Reading a key marks it used
+/// ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+/// - `out_value` - receives the value, when there is one
+///
+/// # Returns
+///
+/// 1 with the value in `*out_value`, or 0 when the key has no value (Java's `null`),
+/// `*out_value` then left unwritten.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
@@ -277,15 +349,30 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_boolean(
     }
 }
 
-/// `getList(String key)`: the `LIST` configuration `key`, as an owned list of
-/// `char *` the caller frees with `kafka_List_destroy`, or `NULL` with
-/// `*out_err` still `NULL` when the key has no value (Java's `null`). Fails
-/// as [`kafka_consumer_ConsumerConfig_get_int`] does.
+/// `getList(String key)`: the `LIST` configuration `key`. Reading a key marks it
+/// used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+///
+/// # Returns
+///
+/// The values, or `NULL` with `*out_err` still `NULL` when the key has no value
+/// (Java's `null`).
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
 /// `self_` must be a live handle; `key` a valid NUL-terminated string;
-/// `out_err` a valid slot pointing at null.
+/// `out_err` a valid slot pointing at null. The list of `char *` is owned by the
+/// caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
@@ -300,13 +387,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_list(
 }
 
 /// `unused()`: the keys of the properties never read through this handle's
-/// getters nor marked with [`kafka_consumer_ConsumerConfig_ignore`], as an
-/// owned, sorted list of `char *` the caller frees with `kafka_List_destroy`.
+/// getters nor marked with [`kafka_consumer_ConsumerConfig_ignore`].
+///
+/// # Returns
+///
+/// The unused keys, sorted.
+///
 /// A consumer created from the handle keeps its own record, starting empty.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The list of `char *` is owned by the caller,
+/// freed with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_unused(
@@ -316,8 +408,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_unused(
     sorted_string_list(unsafe { handle_ref(self_) }.config.unused())
 }
 
-/// `ignore(String key)`: marks the configuration `key` used without reading
-/// it.
+/// `ignore(String key)`: marks the configuration `key` used without reading it.
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
 ///
 /// # Safety
 ///
@@ -334,9 +429,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_ignore(
     unsafe { config_getters::ignore(key, |key| handle.config.ignore(key)) }
 }
 
-/// `logUnused()`: logs at INFO, in one line, the keys
-/// [`kafka_consumer_ConsumerConfig_unused`] answers, and nothing when there
-/// are none.
+/// Info level log for any unused configurations
 ///
 /// # Safety
 ///
@@ -348,8 +441,15 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_log_unused(self_: *const 
     unsafe { handle_ref(self_) }.config.log_unused();
 }
 
-/// `configNames()`: the names of the configurations `ConsumerConfig`
-/// defines, as an owned, sorted list of `char *` the caller frees with
+/// Gets the set of all consumer configuration names.
+///
+/// # Returns
+///
+/// The set of configuration names
+///
+/// # Safety
+///
+/// The sorted list of `char *` is owned by the caller, freed with
 /// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -357,21 +457,32 @@ pub extern "C" fn kafka_consumer_ConsumerConfig_config_names() -> *mut kafka_Lis
     sorted_string_list(ConsumerConfig::config_names())
 }
 
-/// `getString(String key)`: the value of the `STRING` key `key`, borrowed
-/// from the handle and valid until it is destroyed, or `NULL` with `*out_err` still
-/// `NULL` when the key has no value (Java's `null`, which is also what an unset
-/// `PASSWORD` key such as `ssl.keystore.key` answers). `client.id` is the
-/// resolved id, generated when the property is unset, under which every
-/// consumer created from the handle runs. A key of another type
-/// (`max.poll.records`, a set `PASSWORD` key) fails as Java's cast does, with an
-/// `IllegalArgumentError`, and a key the configuration does not hold is Java's
-/// `ConfigException` (`Unknown configuration '<key>'`), both delivered through
-/// `out_err`.
+/// `getString(String key)`: the `STRING` configuration `key`. Reading a key marks
+/// it used ([`kafka_consumer_ConsumerConfig_unused`]).
+///
+/// # Parameters
+///
+/// - `key` - the configuration name
+///
+/// # Returns
+///
+/// The value, or `NULL` with `*out_err` still `NULL` when the key has no value
+/// (Java's `null`, which is also what an unset `PASSWORD` key such as
+/// `ssl.keystore.key` answers). `client.id` is the resolved id, generated when the
+/// property is unset, under which every consumer created from the handle runs.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `key` has another type,
+///   as Java's cast fails
+/// - `kafka_common_Error_is_config_error` if the configuration does not define `key`
+///   (`Unknown configuration '<key>'`)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle; `key` a valid NUL-terminated string;
-/// `out_err` a valid slot pointing at null.
+/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `out_err` a valid slot pointing at null. The string is borrowed from the
+/// handle, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerConfig_get_string(

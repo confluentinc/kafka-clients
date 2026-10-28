@@ -18,14 +18,19 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// This server does not host this topic-partition.
+    /// This topic/partition doesn't exist. This error is used in contexts where a topic doesn't
+    /// seem to exist based on possibly stale metadata. This error is retriable because the topic or
+    /// partition might subsequently be created.
     ///
-    /// Corresponds to Java's `UnknownTopicOrPartitionException`, error code `Errors::UnknownTopicOrPartition`.
+    /// # See also
     ///
-    /// Java `extends` chain:
-    ///    `UnknownTopicOrPartitionException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// - `InvalidTopicError`
+    ///
+    /// # Translation notes
+    ///
+    /// Error code `Errors::UnknownTopicOrPartition`. Java `extends` chain:
+    /// `UnknownTopicOrPartitionException` -> `InvalidMetadataException` ->
+    /// `RefreshRetriableException` -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownTopicOrPartitionException")]
     UnknownTopicOrPartitionError,
     code: Errors::UnknownTopicOrPartition,

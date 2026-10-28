@@ -33,7 +33,7 @@ pub struct kafka_common_Uuid_t {
 }
 
 /// Hands `uuid` to C as an owned handle, freed with
-/// [`kafka_common_Uuid_destroy`].
+/// `kafka_common_Uuid_destroy`.
 pub(crate) fn box_uuid(uuid: Uuid) -> *mut kafka_common_Uuid_t {
     Box::into_raw(Box::new(uuid)) as *mut kafka_common_Uuid_t
 }
@@ -73,31 +73,59 @@ pub(crate) unsafe fn list_uuids(list: *const kafka_List_t) -> Vec<Uuid> {
         .collect()
 }
 
-/// `new Uuid(long mostSigBits, long leastSigBits)`, as an owned handle freed
-/// with [`kafka_common_Uuid_destroy`].
+/// Constructs a 128-bit type 4 UUID where the first long represents the most significant 64 bits
+/// and the second long represents the least significant 64 bits.
+///
+/// # Parameters
+///
+/// - `most_sig_bits` - the most significant 64 bits
+/// - `least_sig_bits` - the least significant 64 bits
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Uuid_new(most_sig_bits: i64, least_sig_bits: i64) -> *mut kafka_common_Uuid_t {
     box_uuid(Uuid::new(most_sig_bits as u64, least_sig_bits as u64))
 }
 
-/// `Uuid.randomUuid()`: a random uuid outside the reserved range, as an
-/// owned handle.
+/// Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
+///
+/// This will not generate a UUID equal to 0, 1, or one whose string representation contains a dash ("-").
+///
+/// # Returns
+///
+/// The new UUID.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Uuid_random_uuid() -> *mut kafka_common_Uuid_t {
     box_uuid(Uuid::random_uuid())
 }
 
-/// `Uuid.fromString(String)`: parses the base64 form `toString()` produces and
-/// returns an owned handle, or stores the translation of the
-/// `IllegalArgumentException` Java throws for a malformed string in `*out_err`
-/// and returns `NULL`.
+/// Creates a UUID based on a base64 string encoding used in the `kafka_common_Uuid_to_string` method.
+///
+/// # Parameters
+///
+/// - `s` - the base64 string encoding
+///
+/// # Returns
+///
+/// The UUID, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `s` is not a valid base64 encoding of 16 bytes.
+/// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the FFI boundary.
 ///
 /// # Safety
 ///
 /// `s` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at null.
+/// pointing at null. The returned handle is owned, freed with `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_from_string(
@@ -114,7 +142,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_from_string(
     }
 }
 
-/// `getMostSignificantBits()`.
+/// Returns the most significant bits of the UUID's 128 value.
 ///
 /// # Safety
 ///
@@ -127,7 +155,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_most_significant_bits(self_: *const k
     unsafe { uuid_of(self_) }.most_significant_bits() as i64
 }
 
-/// `getLeastSignificantBits()`.
+/// Returns the least significant bits of the UUID's 128 value.
 ///
 /// # Safety
 ///
@@ -140,12 +168,12 @@ pub unsafe extern "C" fn kafka_common_Uuid_least_significant_bits(self_: *const 
     unsafe { uuid_of(self_) }.least_significant_bits() as i64
 }
 
-/// `toString()`: the URL-safe base64 form, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns a base64 string encoding of the UUID.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid uuid handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Uuid_to_string(self_: *const kafka_common_Uuid_t) -> *mut c_char {

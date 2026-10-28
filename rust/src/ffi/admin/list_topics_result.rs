@@ -70,14 +70,18 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListTopicsResult_t) -> &'a Result
     unsafe { result_ref(self_) }
 }
 
-/// `namesToListings()`: an owned future freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `char *` topic names, sorted, to
-/// `kafka_admin_TopicListing_t *`.
+/// Return a future which yields a map of topic names to TopicListing objects.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *` topic names,
+/// sorted, to `kafka_admin_TopicListing_t *`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
@@ -95,13 +99,18 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names_to_listings(
     }
 }
 
-/// `listings()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of
+/// Return a future which yields a collection of TopicListing objects.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_List_t *` (owned by the future) of
 /// `kafka_admin_TopicListing_t *`, sorted by topic name.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
@@ -116,13 +125,18 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_listings(
     unsafe { h.ctx.handle_future(&h.result.listings(), listings_list, destroy_list_element) }
 }
 
-/// `names()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of `char *`
-/// topic names, sorted (Java's `Set<String>`).
+/// Return a future which yields a collection of topic names.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_List_t *` (owned by the future) of `char *` topic names,
+/// sorted (Java's `Set<String>`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
@@ -143,12 +157,12 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsResult_names(
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

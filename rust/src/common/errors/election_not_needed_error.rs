@@ -20,12 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Leader election not needed for topic partition.
     ///
-    /// Corresponds to Java's `ElectionNotNeededException`, error code `Errors::ElectionNotNeeded`.
-    ///
-    /// Java `extends` chain:
-    ///    `ElectionNotNeededException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::ElectionNotNeeded`. Java `extends` chain: `ElectionNotNeededException`
+    /// -> `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ElectionNotNeededException")]
     ElectionNotNeededError,
     code: Errors::ElectionNotNeeded,

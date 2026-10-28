@@ -13,14 +13,10 @@
 // limitations under the License.
 
 //! A listing of a group in the cluster.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.GroupListing`.
 
 use crate::common::{GroupState, GroupType};
 
 /// A listing of a group in the cluster.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.GroupListing`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.GroupListing")]
 pub struct GroupListing {
@@ -33,8 +29,12 @@ pub struct GroupListing {
 impl GroupListing {
     /// Creates a group listing.
     ///
-    /// Mirrors `new GroupListing(String, Optional<GroupType>, String,
-    /// Optional<GroupState>)`.
+    /// # Arguments
+    ///
+    /// - `group_id` - Group Id
+    /// - `group_type` - Group type
+    /// - `protocol` - Protocol
+    /// - `group_state` - Group state
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#GroupListing")]
     pub fn new(
         group_id: impl Into<String>,
@@ -45,32 +45,55 @@ impl GroupListing {
         Self { group_id: group_id.into(), group_type, protocol: protocol.into(), group_state }
     }
 
-    /// The group id. Mirrors `groupId()`.
+    /// The group id.
+    ///
+    /// # Returns
+    ///
+    /// Group Id
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupId")]
     pub fn group_id(&self) -> &str {
         &self.group_id
     }
 
-    /// The type of the group, if available. Mirrors `type()`.
+    /// The type of the group.
+    ///
+    /// If the broker returns a group type which is not recognised, as might happen when talking
+    /// to a broker with a later version, the type will be `Some(GroupType::Unknown)`. If the
+    /// broker is earlier than version 2.6.0, the group type will not be available, and the type
+    /// will be `None`.
+    ///
+    /// # Returns
+    ///
+    /// The type, if available.
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#type")]
     pub fn r#type(&self) -> Option<GroupType> {
         self.group_type
     }
 
-    /// The protocol of the group. Mirrors `protocol()`.
+    /// The protocol of the group.
+    ///
+    /// # Returns
+    ///
+    /// The protocol
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#protocol")]
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
 
-    /// The group state, if available. Mirrors `groupState()`.
+    /// The group state.
+    ///
+    /// If the broker returns a group state which is not recognised, as might happen when talking
+    /// to a broker with a later version, the state will be `Some(GroupState::Unknown)`.
+    ///
+    /// # Returns
+    ///
+    /// The state, if available.
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#groupState")]
     pub fn group_state(&self) -> Option<GroupState> {
         self.group_state
     }
 
-    /// Whether the group is a simple consumer group. Mirrors
-    /// `isSimpleConsumerGroup()`: a classic group with an empty protocol.
+    /// Returns whether the group is a simple consumer group or not.
     #[doc(alias = "org.apache.kafka.clients.admin.GroupListing#isSimpleConsumerGroup")]
     pub fn is_simple_consumer_group(&self) -> bool {
         self.group_type == Some(GroupType::Classic) && self.protocol.is_empty()

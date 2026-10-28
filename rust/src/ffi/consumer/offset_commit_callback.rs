@@ -60,7 +60,7 @@ pub struct kafka_consumer_OffsetCommitCallback_t {
 /// of a C implementation: `offsets` maps `kafka_common_TopicPartition_t *`
 /// to `kafka_consumer_OffsetAndMetadata_t *`, sorted and borrowed for the
 /// call; `error` is `NULL` on success, otherwise borrowed for the call. The
-/// method is `async` in Rust (CLAUDE.md §4 rule 3): it reports completion
+/// method is `async` in Rust: it reports completion
 /// with `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, NULL, error)`,
 /// `error` `NULL` on success or an owned `kafka_common_Error_t *`, taken over:
 /// Java's exception thrown from `onComplete`, which propagates out of the
@@ -182,10 +182,22 @@ pub(crate) unsafe fn commit_callback_adapter(
     Arc::new(CCommitCallback { registration: unsafe { commit_callback_registration(callback) }, delivery })
 }
 
-/// Registers a C implementation of `OffsetCommitCallback`. The caller owns
-/// `self_` and keeps it alive until the handle is destroyed and, once passed
-/// to a `commit_async_*`, until `onComplete` fired (or the consumer was
-/// destroyed).
+/// Registers a C implementation of `OffsetCommitCallback`.
+///
+/// # Parameters
+///
+/// - `on_complete` - `onComplete`
+///
+/// # Returns
+///
+/// The callback handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetCommitCallback_destroy`. The caller owns `self_` and keeps it alive until
+/// the handle is destroyed and, once passed to a `commit_async_*`, until `onComplete` fired (or the
+/// consumer was destroyed).
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
@@ -201,6 +213,30 @@ pub extern "C" fn kafka_consumer_OffsetCommitCallback_new(
 /// `kafka_consumer_OffsetAndMetadata_t *`) and `error` (`NULL` for
 /// success), and waits for its `__set_callback_result` report; returns the
 /// reported error (owned), or `NULL`.
+///
+/// # Parameters
+///
+/// - `offsets` - A map of the offsets and associated metadata that this callback applies to
+/// - `error` - The error raised during processing of the request, or `NULL` if the commit
+///   completed successfully
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with
+///   `KafkaConsumer::subscribe`, or if there is an active group with the same groupId which is
+///   using group management.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the commit failed because it is in the
+///   middle of a rebalance. In such cases commit could be retried after the rebalance is completed
+///   with the `KafkaConsumer::poll` call.
+/// - `kafka_common_Error_is_wakeup_error` if `KafkaConsumer::wakeup` is called before or while this
+///   function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the committed offset is invalid).
 ///
 /// # Safety
 ///
@@ -256,6 +292,32 @@ pub type kafka_consumer_OffsetCommitCallback_on_complete_cb_t =
 /// fires with the reported error when its completion is reported (a
 /// standalone callback has no callbacks vector to queue on, so `cb` runs on
 /// the reporting thread).
+///
+/// # Parameters
+///
+/// - `offsets` - A map of the offsets and associated metadata that this callback applies to
+/// - `error` - The error raised during processing of the request, or `NULL` if the commit
+///   completed successfully
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_consumer_commit_failed_error` if the commit failed and cannot be
+///   retried. This can only occur if you are using automatic group management with
+///   `KafkaConsumer::subscribe`, or if there is an active group with the same groupId which is
+///   using group management.
+/// - `kafka_common_Error_is_rebalance_in_progress_error` if the commit failed because it is in the
+///   middle of a rebalance. In such cases commit could be retried after the rebalance is completed
+///   with the `KafkaConsumer::poll` call.
+/// - `kafka_common_Error_is_wakeup_error` if `KafkaConsumer::wakeup` is called before or while this
+///   function is called
+/// - `kafka_common_Error_is_interrupt_error` if the calling thread is interrupted before or while
+///   this function is called
+/// - `kafka_common_Error_is_authorization_error` if not authorized to the topic or to the
+///   configured groupId. See the error for more details
+/// - `kafka_common_Error_is_kafka_error` for any other unrecoverable errors (e.g. if offset
+///   metadata is too large or if the committed offset is invalid).
 ///
 /// # Safety
 ///

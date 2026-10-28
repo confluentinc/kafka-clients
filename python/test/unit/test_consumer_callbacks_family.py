@@ -397,7 +397,7 @@ def test_async_kafka_consumer_close_wraps_a_raising_commit_callback(
         raised: BaseException, coroutine: bool) -> None:
     # Java's close() wraps the callback's exception, a KafkaException too, in
     # KafkaException("Failed to close kafka consumer", e)
-    # (AsyncKafkaConsumer.java:1669-1675).
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean)).
     async def main() -> None:
         consumer: AsyncKafkaConsumer[bytes, bytes] = AsyncKafkaConsumer(
             configs={**CONFIGS, "enable.auto.commit": False})
@@ -502,7 +502,8 @@ def test_async_coroutine_callback_calls_back_into_the_consumer(make: Any) -> Non
 
 # ---------------------------------------------------------------------------
 # A commit from inside a callback (the ConsumerHandle): Java's commit() runs
-# executeCallbacks() first (AsyncKafkaConsumer.java:1126-1128), so the commit
+# executeCallbacks() first
+# (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commit), so the commit
 # callbacks queued behind the running one run inside it; Java's MockConsumer
 # runs commitAsync's callback inline
 # ---------------------------------------------------------------------------

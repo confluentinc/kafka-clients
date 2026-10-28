@@ -213,7 +213,7 @@ impl FetchBuffer {
     ///
     /// Rust-only. Java's `FetchCollector.collectFetch` `peek()`s the head,
     /// initializes it and sets it next-in-line before it `poll()`s it
-    /// (`FetchCollector.java:101-122`), so the fetch never leaves the buffer.
+    /// (`FetchCollector#collectFetch`), so the fetch never leaves the buffer.
     /// The Rust collector takes ownership to initialize it; without the marker
     /// the partition would read as unbuffered in between, and the background
     /// task could fetch it again (the KAFKA-15529 duplicate fetch).
@@ -287,7 +287,7 @@ impl FetchBuffer {
     /// [`Self::take_next_in_line_fetch`], as [`Self::set_next_in_line_fetch`]
     /// does.
     ///
-    /// Rust-only: Java drains such a fetch at once (`FetchCollector.java:189-193`).
+    /// Rust-only: Java drains such a fetch at once (`FetchCollector#fetchRecords`).
     pub(crate) fn hold_exhausted(&self, completed_fetch: CompletedFetch) {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
         guard.exhausted_fetches.push(completed_fetch);
@@ -296,7 +296,7 @@ impl FetchBuffer {
 
     /// Drains the fetches [`Self::hold_exhausted`] holds, so their partitions
     /// can be fetched again: Java's `completedFetch.drain()` of an exhausted
-    /// fetch (`FetchCollector.java:189-193`), which follows the position update
+    /// fetch (`FetchCollector#fetchRecords`), which follows the position update
     /// (KAFKA-15529).
     ///
     /// The fetches are drained outside the buffer lock, since a drain locks

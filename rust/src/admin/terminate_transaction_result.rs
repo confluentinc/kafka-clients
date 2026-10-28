@@ -13,14 +13,10 @@
 // limitations under the License.
 
 //! The result of `Admin::force_terminate_transaction`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.TerminateTransactionResult`.
 
 use crate::common::KafkaFuture;
 
 /// The result of `Admin::force_terminate_transaction`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.TerminateTransactionResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionResult")]
 pub struct TerminateTransactionResult {
@@ -34,10 +30,8 @@ impl TerminateTransactionResult {
         Self { future }
     }
 
-    /// Return a future which indicates whether the transaction was successfully
+    /// Returns a future which indicates whether the transaction was successfully
     /// terminated.
-    ///
-    /// Mirrors `TerminateTransactionResult.result`.
     #[doc(alias = "org.apache.kafka.clients.admin.TerminateTransactionResult#result")]
     pub fn result(&self) -> KafkaFuture<()> {
         self.future.clone()

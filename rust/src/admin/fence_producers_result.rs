@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::fence_producers`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.FenceProducersResult`.
 
 use std::collections::HashMap;
 
@@ -22,12 +20,9 @@ use crate::common::utils::internals::ProducerIdAndEpoch;
 use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::fence_producers`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FenceProducersResult`. Java
-/// keys the per-producer futures by `CoordinatorKey`; since `CoordinatorKey` is
-/// an internal (`pub(crate)`) type, the Rust result keys them by the
-/// transactional id string, following the `DescribeConsumerGroupsResult`
-/// precedent.
+// Java keys the per-producer futures by `CoordinatorKey`; since `CoordinatorKey` is an internal
+// (`pub(crate)`) type, the Rust result keys them by the transactional id string, following the
+// `DescribeConsumerGroupsResult` precedent.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult")]
 pub struct FenceProducersResult {
@@ -41,10 +36,8 @@ impl FenceProducersResult {
         Self { futures }
     }
 
-    /// Return a map from transactional id to futures which can be used to check
+    /// Returns a map from transactional id to futures which can be used to check
     /// the status of individual fencings.
-    ///
-    /// Mirrors `FenceProducersResult.fencedProducers`.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#fencedProducers")]
     pub fn fenced_producers(&self) -> HashMap<String, KafkaFuture<()>> {
         self.futures
@@ -56,11 +49,14 @@ impl FenceProducersResult {
     /// Returns a future that provides the producer id generated while
     /// initializing the given transaction when the request completes.
     ///
-    /// Mirrors `FenceProducersResult.producerId`.
+    /// # Arguments
+    ///
+    /// - `transactional_id` - the transactional id of the transaction.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if `transactional_id`
+    /// was not
     /// included in the request.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#producerId")]
     pub fn producer_id(&self, transactional_id: &str) -> Result<KafkaFuture<i64>, Error> {
@@ -70,20 +66,21 @@ impl FenceProducersResult {
     /// Returns a future that provides the epoch generated while initializing the
     /// given transaction when the request completes.
     ///
-    /// Mirrors `FenceProducersResult.epochId`.
+    /// # Arguments
+    ///
+    /// - `transactional_id` - the transactional id of the transaction.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if `transactional_id`
+    /// was not
     /// included in the request.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#epochId")]
     pub fn epoch_id(&self, transactional_id: &str) -> Result<KafkaFuture<i16>, Error> {
         self.find_and_apply(transactional_id, |p| p.epoch)
     }
 
-    /// Return a future which succeeds only if all the producer fencings succeed.
-    ///
-    /// Mirrors `FenceProducersResult.all`.
+    /// Returns a future which succeeds only if all the producer fencings succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.FenceProducersResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

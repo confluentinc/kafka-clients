@@ -18,15 +18,17 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// There is no listener on the leader broker that matches the listener on
-    /// which metadata request was processed.
+    /// The leader does not have an endpoint corresponding to the listener on which metadata was
+    /// requested. This could indicate a broker configuration error or a transient error when
+    /// listeners are updated dynamically and client requests are processed before all brokers have
+    /// updated their listeners. This is currently used only for missing listeners on leader
+    /// brokers, but may be used for followers in future.
     ///
-    /// Corresponds to Java's `ListenerNotFoundException`, error code `Errors::ListenerNotFound`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ListenerNotFoundException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::ListenerNotFound`. Java `extends` chain: `ListenerNotFoundException` ->
+    /// `InvalidMetadataException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ListenerNotFoundException")]
     ListenerNotFoundError,
     code: Errors::ListenerNotFound,

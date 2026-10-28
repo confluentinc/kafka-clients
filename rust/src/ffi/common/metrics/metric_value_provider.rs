@@ -60,7 +60,7 @@ pub type kafka_common_metrics_MetricValueProvider_type_name_fn_t =
     Option<unsafe extern "C" fn(self_: *mut c_void) -> *const c_char>;
 
 /// A C implementation of [`MetricValueProvider`] registered through
-/// [`kafka_common_metrics_MetricValueProvider_new`].
+/// `kafka_common_metrics_MetricValueProvider_new`.
 struct CMetricValueProvider {
     self_: *mut c_void,
     value: kafka_common_metrics_MetricValueProvider_value_fn_t,
@@ -154,13 +154,25 @@ pub(crate) unsafe fn take_metric_value_provider(
     }))
 }
 
-/// Registers a C implementation of `MetricValueProvider`. The caller owns
-/// `self_` and keeps it alive until the handle is destroyed with
-/// [`kafka_common_metrics_MetricValueProvider_destroy`] or, once a `*mut`
-/// parameter consumed it, until the registry it went into is destroyed. The functions may be called from any thread,
-/// concurrently, so the C caller is responsible for their thread-safety on
-/// `self_`. `type_name` may be `NULL` (see
-/// [`kafka_common_metrics_MetricValueProvider_type_name_fn_t`]).
+/// Registers a C implementation of `MetricValueProvider`.
+///
+/// # Parameters
+///
+/// - `value` - Implements `kafka_common_metrics_MetricValueProvider_value`.
+/// - `type_name` - Implements `kafka_common_metrics_MetricValueProvider_type_name`, or `NULL`
+///   for no type name.
+///
+/// # Returns
+///
+/// The implementation's handle.
+///
+/// # Safety
+///
+/// The caller owns `self_` and keeps it alive until the handle is destroyed with
+/// `kafka_common_metrics_MetricValueProvider_destroy` or, once a `*mut` parameter consumed it,
+/// until the registry it went into is destroyed. The functions may be called from any thread,
+/// concurrently, so the C caller is responsible for their thread-safety on `self_`. The returned
+/// handle is owned.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_MetricValueProvider_new(
@@ -172,13 +184,21 @@ pub extern "C" fn kafka_common_metrics_MetricValueProvider_new(
     Interface::owned(provider) as *mut kafka_common_metrics_MetricValueProvider_t
 }
 
-/// `value(MetricConfig config, long now)`: the reading, owned and freed with
-/// `kafka_common_MetricValue_destroy`.
+/// Returns the current value associated with this metric.
+///
+/// # Parameters
+///
+/// - `config` - The configuration for this metric
+/// - `now` - The POSIX time in milliseconds the measurement is being taken
+///
+/// # Returns
+///
+/// the current metric value
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-value-provider handle and `config` a
-/// valid metric-config handle.
+/// `self_` must be a valid metric-value-provider handle and `config` a valid metric-config handle.
+/// The returned value is owned, freed with `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
@@ -197,13 +217,13 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_value(
     )
 }
 
-/// The Rust-only `type_name()`: the provider's type name as
-/// `KafkaMetric_to_string` reports it, or `NULL` for none (a closure). The
-/// string is borrowed and stays valid for the rest of the program.
+/// Returns the provider's type name, as `kafka_common_metrics_KafkaMetric_to_string` reports it,
+/// or `NULL` for none.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-value-provider handle.
+/// `self_` must be a valid metric-value-provider handle. The returned string is borrowed and stays
+/// valid for the rest of the program.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricValueProvider_type_name(

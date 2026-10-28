@@ -222,8 +222,9 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
             // nothing — the driver has already cleared the in-flight request, so it
             // re-issues the identical request under backoff until the deadline and
             // the caller sees a generic timeout with the real cause gone. Java fails
-            // the call once (`KafkaAdminClient.java:1387-1391`); see
-            // `ApiResult::failed_all`.
+            // the call once
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`);
+            // see `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
                 Error::local_illegal_state("DescribeProducersHandler received an unexpected response type"),

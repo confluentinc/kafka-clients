@@ -116,12 +116,12 @@ impl<K, V> Deserializers<K, V> {
     /// Translates Java's `void close()`, which closes each deserializer through
     /// `Utils.closeQuietly`, keeps the first failure, and after both have been
     /// closed throws it as `KafkaException("Failed to close deserializers",
-    /// cause)`. [`Deserializer::close`](crate::common::serialization::Deserializer::close)
-    /// returns nothing, so the only failure a Rust deserializer can report is a
-    /// panic: it is caught, logged as `closeQuietly` logs, and turned into the
-    /// cause, so one panicking deserializer does not keep the other from
-    /// closing. Java's `InterruptException` branch has no Rust counterpart (no
-    /// thread interruption).
+    /// cause)`. A deserializer's failure is the `Err` its
+    /// [`close`](crate::common::serialization::Deserializer::close) returns, or a
+    /// panic, which is caught so one panicking deserializer does not keep the
+    /// other from closing; either is logged as `closeQuietly` logs it and the
+    /// first becomes the cause. Java's `InterruptException` branch has no Rust
+    /// counterpart (no thread interruption).
     ///
     /// Async because a deserializer's `close` is (it may release a resource
     /// over the network). Nothing closes the deserializers on drop: the consumer
@@ -130,16 +130,14 @@ impl<K, V> Deserializers<K, V> {
     /// # Errors
     ///
     /// `KafkaError("Failed to close deserializers")`, its source the first
-    /// deserializer's failure, when either `close` panicked.
+    /// deserializer's failure, when either `close` failed.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.Deserializers#close")]
     pub(crate) async fn close(&mut self) -> Result<(), Error> {
         let mut first_error = None;
-        if let Err(payload) = AssertUnwindSafe(DynDeserializer::close(&mut *self.key)).catch_unwind().await {
-            first_error.get_or_insert(close_failure("key deserializer", &*payload));
-        }
-        if let Err(payload) = AssertUnwindSafe(DynDeserializer::close(&mut *self.value)).catch_unwind().await {
-            first_error.get_or_insert(close_failure("value deserializer", &*payload));
-        }
+        let key = AssertUnwindSafe(DynDeserializer::close(&mut *self.key)).catch_unwind().await;
+        record_close_failure(&mut first_error, "key deserializer", key);
+        let value = AssertUnwindSafe(DynDeserializer::close(&mut *self.value)).catch_unwind().await;
+        record_close_failure(&mut first_error, "value deserializer", value);
         match first_error {
             Some(error) => Err(Error::kafka_message_source("Failed to close deserializers", error)),
             None => Ok(()),
@@ -147,12 +145,21 @@ impl<K, V> Deserializers<K, V> {
     }
 }
 
-/// The error `Utils.closeQuietly` records for a deserializer whose `close`
-/// panicked, logged as `closeQuietly` logs it (`Utils.java:1143`).
-fn close_failure(name: &str, payload: &(dyn std::any::Any + Send)) -> Error {
-    let message = panic_payload_message(payload);
-    log::error!("Failed to close {name}: {message}");
-    Error::kafka_message(message.to_string())
+/// Records a deserializer's `close` failure, an `Err` or a caught panic, as
+/// `Utils.closeQuietly` records a throw: logged, and kept in `first_error` when
+/// it is the first (`Utils#closeQuietly(AutoCloseable,String,AtomicReference)`).
+fn record_close_failure(
+    first_error: &mut Option<Error>,
+    name: &str,
+    outcome: Result<Result<(), Error>, Box<dyn std::any::Any + Send>>,
+) {
+    let error = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(payload) => Error::kafka_message(panic_payload_message(&*payload).to_string()),
+    };
+    log::error!("Failed to close {name}: {error}");
+    first_error.get_or_insert(error);
 }
 
 impl<K, V> std::fmt::Debug for Deserializers<K, V> {
@@ -195,9 +202,24 @@ mod tests {
             Ok(String::new())
         }
 
-        async fn close(&mut self) {
+        async fn close(&mut self) -> Result<(), Error> {
             self.1.fetch_add(1, Ordering::SeqCst);
             panic!("{}", self.0);
+        }
+    }
+
+    /// A deserializer whose `close` counts the call, then returns an error
+    /// with the given message.
+    struct FailingOnClose(&'static str, Arc<AtomicUsize>);
+
+    impl Deserializer<String> for FailingOnClose {
+        async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+            Ok(String::new())
+        }
+
+        async fn close(&mut self) -> Result<(), Error> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Err(Error::serialization(self.0))
         }
     }
 
@@ -235,5 +257,34 @@ mod tests {
         assert_eq!("Failed to close deserializers", error.message());
         let source = std::error::Error::source(&error).expect("the failure is the source");
         assert_eq!("value close failed", source.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_close_reports_the_first_returned_error_after_closing_both() {
+        let key = FailingOnClose("key close failed", Arc::new(AtomicUsize::new(0)));
+        let value = PanickingOnClose::new("value close failed");
+        let (key_closes, value_closes) = (Arc::clone(&key.1), Arc::clone(&value.1));
+        let mut deserializers: Deserializers<String, String> = Deserializers::new(Box::new(key), Box::new(value));
+        let error = deserializers.close().await.expect_err("both closes failed");
+        assert_eq!(1, key_closes.load(Ordering::SeqCst));
+        assert_eq!(1, value_closes.load(Ordering::SeqCst));
+        assert!(error.is_kafka_error());
+        assert_eq!("Failed to close deserializers", error.message());
+        let source = Error::source(&error).expect("the first failure is the source");
+        assert!(source.is_serialization_error(), "the key's own error: {source:?}");
+        assert_eq!("key close failed", source.message());
+    }
+
+    #[tokio::test]
+    async fn test_close_reports_a_returned_value_error_as_it_is() {
+        let mut deserializers: Deserializers<String, String> = Deserializers::new(
+            Box::new(StringDeserializer::new()),
+            Box::new(FailingOnClose("value close failed", Arc::new(AtomicUsize::new(0)))),
+        );
+        let error = deserializers.close().await.expect_err("the value close failed");
+        assert_eq!("Failed to close deserializers", error.message());
+        let source = Error::source(&error).expect("the failure is the source");
+        assert!(source.is_serialization_error(), "the deserializer's own error: {source:?}");
+        assert_eq!("value close failed", source.message());
     }
 }

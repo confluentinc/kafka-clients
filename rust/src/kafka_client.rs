@@ -108,10 +108,9 @@ pub trait KafkaClient {
     /// Returns the authentication failure if authentication has failed, `None`
     /// otherwise.
     ///
-    /// Translated from `KafkaClient.authenticationException(Node)`
-    /// (`KafkaClient.java:88`), which returns the `AuthenticationException`
+    /// Translated from `KafkaClient#authenticationException`, which returns the `AuthenticationException`
     /// **object**. The whole [`Error`] is returned for the same reason: a caller
-    /// such as `KafkaAdminClient` (`KafkaAdminClient.java:1373-1376`) fails the
+    /// such as `KafkaAdminClient.AdminClientRunnable#handleResponses` fails the
     /// call with whichever subclass the channel raised —
     /// [`SaslAuthenticationError`](crate::common::errors::SaslAuthenticationError),
     /// [`SslAuthenticationError`](crate::common::errors::SslAuthenticationError),

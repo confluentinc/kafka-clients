@@ -27,15 +27,15 @@ use crate::common::Error;
 use crate::common::header::RecordHeaders;
 use crate::common::serialization::Deserializer;
 
-/// Deserializes UTF-8 encoded bytes to strings.
+/// String encoding defaults to UTF8 and can be customized by setting the
+/// property key.deserializer.encoding, value.deserializer.encoding or
+/// deserializer.encoding. The first two take precedence over the last.
 ///
-/// In Java, `StringDeserializer` supports configurable character encodings.
-/// In Rust, this deserializer always uses UTF-8: it mirrors Java's
-/// `new String(data, StandardCharsets.UTF_8)`, which replaces malformed byte
-/// sequences with the Unicode replacement character (U+FFFD) rather than
-/// failing — i.e. a lossy UTF-8 decode.
+/// # Translation notes
 ///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.StringDeserializer`.
+/// WARNING: the encoding is always UTF-8; the properties are ignored.
+// Like Java's `new String(data, StandardCharsets.UTF_8)`, malformed byte
+// sequences become U+FFFD rather than failing: a lossy UTF-8 decode.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.serialization.StringDeserializer")]
@@ -56,18 +56,15 @@ impl Deserializer<String> for StringDeserializer {
         Ok(String::from_utf8_lossy(data).into_owned())
     }
 
-    /// Decodes the record's bytes in place, without first copying them out of
-    /// the fetched buffer.
-    ///
-    /// Translates Java's override of
-    /// `deserialize(String topic, Headers headers, ByteBuffer data)`
-    /// (`StringDeserializer.java:63-73`), which decodes the buffer's backing
-    /// array directly instead of going through the interface default's
-    /// `Utils.toNullableArray` copy. The headers are ignored, as in Java.
+    // Decodes the record's bytes in place, without first copying them out of the
+    // fetched buffer, as Java's override of
+    // `deserialize(String topic, Headers headers, ByteBuffer data)` decodes the
+    // buffer's backing array directly instead of going through the interface
+    // default's `Utils.toNullableArray` copy. The headers are ignored, as in Java.
     async fn deserialize_with_headers_bytes(
         &self,
         topic: &str,
-        _headers: &RecordHeaders,
+        _headers: &mut RecordHeaders,
         data: &Bytes,
     ) -> Result<String, Error> {
         self.deserialize(topic, &data[..]).await

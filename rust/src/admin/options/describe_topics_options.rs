@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_topics_with_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsOptions`.
 
 /// Default maximum number of partitions to be returned in a single response.
 const DEFAULT_PARTITION_SIZE_LIMIT_PER_RESPONSE: i32 = 2000;
 
 /// Options for `Admin::describe_topics_with_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeTopicsOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions")]
 pub struct DescribeTopicsOptions {
@@ -47,8 +43,16 @@ impl DescribeTopicsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -56,14 +60,22 @@ impl DescribeTopicsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set whether to include authorized operations for the described topics.
+    /// Sets whether to include authorized operations for the described topics.
+    ///
+    /// # Arguments
+    ///
+    /// - `include_authorized_operations` - `true` to request the authorized operations.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#includeAuthorizedOperations")]
     pub fn set_include_authorized_operations(mut self, include_authorized_operations: bool) -> Self {
@@ -71,15 +83,26 @@ impl DescribeTopicsOptions {
         self
     }
 
-    /// Whether to include authorized operations for the described topics.
+    /// Returns whether authorized operations are requested for the described topics.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#includeAuthorizedOperations")]
     pub fn include_authorized_operations(&self) -> bool {
         self.include_authorized_operations
     }
 
-    /// Sets the maximum number of partitions to be returned in a single
-    /// response. Only effective when using topic names (not topic IDs), and
-    /// capped by the server-side `max.request.partition.size.limit`.
+    /// Sets the maximum number of partitions to be returned in a single response.
+    ///
+    /// **This option:**
+    /// - Is only effective when using topic names (not topic IDs).
+    /// - Will not be effective if it is larger than the server-side configuration
+    ///   `max.request.partition.size.limit`.
+    ///
+    /// # Arguments
+    ///
+    /// - `partition_size_limit_per_response` - the maximum number of partitions per response
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#partitionSizeLimitPerResponse")]
     pub fn set_partition_size_limit_per_response(mut self, partition_size_limit_per_response: i32) -> Self {
@@ -87,7 +110,7 @@ impl DescribeTopicsOptions {
         self
     }
 
-    /// The maximum number of partitions per response.
+    /// Returns the maximum number of partitions to be returned in a single response.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeTopicsOptions#partitionSizeLimitPerResponse")]
     pub fn partition_size_limit_per_response(&self) -> i32 {
         self.partition_size_limit_per_response

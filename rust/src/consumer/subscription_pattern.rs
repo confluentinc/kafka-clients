@@ -19,13 +19,9 @@
 use std::fmt;
 
 /// Represents a regular expression compatible with Google RE2/J, used to
-/// subscribe to topics.
-///
-/// This just keeps the [`String`] representation of the pattern; all
-/// validations to ensure it is RE2/J compatible are delegated to the broker
-/// (matching Java's behavior).
-///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.SubscriptionPattern`.
+/// subscribe to topics. This just keeps the [`String`] representation of the
+/// pattern, and all validations to ensure it is RE2/J compatible are
+/// delegated to the broker.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern")]
 pub struct SubscriptionPattern {
@@ -33,15 +29,25 @@ pub struct SubscriptionPattern {
 }
 
 impl SubscriptionPattern {
-    /// Create a new `SubscriptionPattern` for the given regex pattern.
+    /// Constructs a new subscription pattern.
     ///
-    /// The pattern is stored as-is; no client-side validation is performed.
+    /// # Arguments
+    ///
+    /// - `pattern` - The regular expression pattern compatible with RE2/J
+    ///
+    /// # Returns
+    ///
+    /// The new `SubscriptionPattern`.
     #[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern#SubscriptionPattern")]
     pub fn new(pattern: impl Into<String>) -> Self {
         Self { pattern: pattern.into() }
     }
 
-    /// Returns the regular expression pattern compatible with RE2/J.
+    /// String representation the regular expression, compatible with RE2/J.
+    ///
+    /// # Returns
+    ///
+    /// Regular expression pattern compatible with RE2/J.
     #[doc(alias = "org.apache.kafka.clients.consumer.SubscriptionPattern#pattern")]
     pub fn pattern(&self) -> &str {
         &self.pattern

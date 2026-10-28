@@ -21,11 +21,9 @@ kafka_error_type! {
     /// The producer attempted to use a producer id which is not currently
     /// assigned to its transactional id.
     ///
-    /// Corresponds to Java's `InvalidPidMappingException`, error code `Errors::InvalidProducerIdMapping`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidPidMappingException` -> `ApplicationRecoverableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidProducerIdMapping`. Java `extends` chain:
+    /// `InvalidPidMappingException` -> `ApplicationRecoverableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidPidMappingException")]
     InvalidPidMappingError,
     code: Errors::InvalidProducerIdMapping,

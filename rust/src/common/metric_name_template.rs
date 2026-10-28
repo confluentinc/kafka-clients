@@ -35,10 +35,12 @@ pub struct MetricNameTemplate {
 impl MetricNameTemplate {
     /// Create a new template. The order of the tags is preserved.
     ///
-    /// * `name` - the name of the metric
-    /// * `group` - the name of the group
-    /// * `description` - the description of the metric
-    /// * `tag_names` - the names of the metric tags in the preferred order
+    /// # Arguments
+    ///
+    /// - `name` - the name of the metric
+    /// - `group` - the name of the group
+    /// - `description` - the description of the metric
+    /// - `tag_names` - the names of the metric tags in the preferred order
     #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#MetricNameTemplate")]
     pub fn new(
         name: impl Into<String>,
@@ -55,24 +57,40 @@ impl MetricNameTemplate {
     }
 
     /// Get the name of the metric.
+    ///
+    /// # Returns
+    ///
+    /// the metric name
     #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// Get the name of the group.
+    ///
+    /// # Returns
+    ///
+    /// the group name
     #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#group")]
     pub fn group(&self) -> &str {
         &self.group
     }
 
     /// Get the description of the metric.
+    ///
+    /// # Returns
+    ///
+    /// the metric description
     #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#description")]
     pub fn description(&self) -> &str {
         &self.description
     }
 
     /// Get the ordered set of tag names for the metric.
+    ///
+    /// # Returns
+    ///
+    /// the ordered set of tag names, possibly empty
     #[doc(alias = "org.apache.kafka.common.MetricNameTemplate#tags")]
     pub fn tags(&self) -> &IndexSet<String> {
         &self.tags
@@ -90,9 +108,9 @@ impl PartialEq for MetricNameTemplate {
 impl Eq for MetricNameTemplate {}
 
 impl std::hash::Hash for MetricNameTemplate {
-    /// Java's `MetricNameTemplate.hashCode()` is `Objects.hash(name, group,
-    /// tags)`, the `LinkedHashSet` hashing independently of its order, as
-    /// equality compares it.
+    // Java's `MetricNameTemplate.hashCode()` is `Objects.hash(name, group,
+    // tags)`, the `LinkedHashSet` hashing independently of its order, as
+    // equality compares it.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.group.hash(state);

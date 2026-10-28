@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Configuration is invalid.
     ///
-    /// Corresponds to Java's `InvalidConfigurationException`, error code `Errors::InvalidConfig`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidConfig`. Java `extends` chain: `InvalidConfigurationException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidConfigurationException")]
     InvalidConfigurationError,
     code: Errors::InvalidConfig,

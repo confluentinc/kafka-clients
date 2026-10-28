@@ -22,17 +22,25 @@ use crate::common::metrics::KafkaMetric;
 /// A plugin interface to allow things to listen as new metrics are created so
 /// they can be reported.
 ///
-/// Java's `MetricsReporter extends Reconfigurable, AutoCloseable` and (via
-/// `JmxReporter`) bridges to JMX. JMX is JVM-only and out of scope; this trait
-/// keeps the registration seam (`init`/`metric_change`/`metric_removal`/`close`)
-/// so non-JMX reporters can be plugged in. All methods have a no-op default,
-/// so a do-nothing reporter only needs an empty `impl`.
+/// Implement `ClusterResourceListener` to receive cluster metadata once it's
+/// available. Please see the class documentation for `ClusterResourceListener`
+/// for more information.
+///
+/// # Translation notes
+///
+/// WARNING: implementing `ClusterResourceListener` delivers no cluster
+/// metadata: no client takes a reporter, as `metric.reporters` is class-valued.
+// Java's `MetricsReporter extends Reconfigurable, AutoCloseable` and (via
+// `JmxReporter`) bridges to JMX, which is JVM-only and out of scope. Every
+// method has a no-op default, so a do-nothing reporter needs an empty `impl`.
 #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter")]
 pub trait MetricsReporter: Send + Sync {
     /// This is called when the reporter is first registered to initially register
     /// all existing metrics.
     ///
-    /// * `metrics` - All currently existing metrics
+    /// # Arguments
+    ///
+    /// - `metrics` - All currently existing metrics
     #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#init")]
     fn init(&self, metrics: &[Arc<KafkaMetric>]) {
         let _ = metrics;
@@ -40,7 +48,9 @@ pub trait MetricsReporter: Send + Sync {
 
     /// This is called whenever a metric is updated or added.
     ///
-    /// * `metric` - The metric that has been added or changed
+    /// # Arguments
+    ///
+    /// - `metric` - The metric that has been added or changed
     #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#metricChange")]
     fn metric_change(&self, metric: &Arc<KafkaMetric>) {
         let _ = metric;
@@ -48,7 +58,9 @@ pub trait MetricsReporter: Send + Sync {
 
     /// This is called whenever a metric is removed.
     ///
-    /// * `metric` - The metric that has been removed
+    /// # Arguments
+    ///
+    /// - `metric` - The metric that has been removed
     #[doc(alias = "org.apache.kafka.common.metrics.MetricsReporter#metricRemoval")]
     fn metric_removal(&self, metric: &Arc<KafkaMetric>) {
         let _ = metric;

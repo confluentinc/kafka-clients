@@ -59,21 +59,21 @@
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testAsyncConsumerMaxPollRecords` (line 108)
+//! - `testAsyncConsumerMaxPollRecords`
 //!   → `test_async_consumer_max_poll_records`
-//! - `testAsyncConsumerMaxPollIntervalMs` (line 147)
+//! - `testAsyncConsumerMaxPollIntervalMs`
 //!   → `test_async_consumer_max_poll_interval_ms`
-//! - `testAsyncConsumerMaxPollIntervalMsDelayInRevocation` (line 186)
+//! - `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`
 //!   → `test_async_consumer_max_poll_interval_ms_delay_in_revocation`
-//! - `testAsyncConsumerMaxPollIntervalMsDelayInAssignment` (line 246)
+//! - `testAsyncConsumerMaxPollIntervalMsDelayInAssignment`
 //!   → `test_async_consumer_max_poll_interval_ms_delay_in_assignment`
-//! - `testAsyncConsumerMaxPollIntervalMsShorterThanPollTimeout` (line 282)
+//! - `testAsyncConsumerMaxPollIntervalMsShorterThanPollTimeout`
 //!   → `test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout`
-//! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout` (line 471)
+//! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout`
 //!   → `test_async_consumer_poll_eventually_returns_records_with_zero_timeout`
-//! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero` (line 494)
+//! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero`
 //!   → `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
-//! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance` (line 518)
+//! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance`
 //!   → `test_async_consumer_recovery_on_poll_after_delayed_rebalance`
 //!
 //! ## SKIPped (CONSUMER-arm) — `consumer.metrics()` deferred Milestone-8-wide
@@ -86,9 +86,9 @@
 //! metrics assertion would leave the test asserting nothing, so we SKIP
 //! the entire test rather than `#[ignore]` it.
 //!
-//! - SKIP: `testAsyncConsumerPerPartitionLeadWithMaxPollRecords` (line 314)
+//! - SKIP: `testAsyncConsumerPerPartitionLeadWithMaxPollRecords`
 //!   — metrics-suite deferred.
-//! - SKIP: `testAsyncConsumerPerPartitionLagWithMaxPollRecords` (line 350)
+//! - SKIP: `testAsyncConsumerPerPartitionLagWithMaxPollRecords`
 //!   — metrics-suite deferred.
 //!
 //! ## SKIPped (classic-protocol-only — `consumer-threading.md` §20)
@@ -110,7 +110,7 @@
 //!
 //! Four CONSUMER-named tests exercise multiple consumers in the same
 //! group with timeout-induced session expiry. They share the helper
-//! `runMultiConsumerSessionTimeoutTest` (line 407) and a
+//! `runMultiConsumerSessionTimeoutTest` and a
 //! `ConsumerAssignmentPoller` test fixture. Per PLAN.md §8, "multi-
 //! consumer-in-same-group tests will be flakier than the rest"; the
 //! ConsumerAssignmentPoller is itself a small Java test harness
@@ -184,8 +184,9 @@ type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>
 /// topic is created explicitly by [`create_test_topic`].
 fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
     // The canonical helper supplies the shared KIP-848 broker tuning,
-    // including the fast heartbeat knobs (per Java `@ClusterConfigProperty`
-    // on `PlaintextConsumerPollTest.java:78-80`) that let the
+    // including the fast heartbeat knobs (per the Java `@ClusterConfigProperty`s
+    // of the class-level `@ClusterTestDefaults` of
+    // org.apache.kafka.clients.consumer.PlaintextConsumerPollTest) that let the
     // `max.poll.interval.ms` tests observe the broker-side fence within
     // their wall-clock budgets.
     kip848_3_broker(2)
@@ -415,12 +416,13 @@ async fn await_rebalance_with_deadline(
 ///
 ///   * the coordinator's target assignment arrives as topic **IDs**, and
 ///     `maybeReconcile` reconciles only the subset it can resolve to topic
-///     names (`AbstractMembershipManager.java:830`);
+///     names (`AbstractMembershipManager#maybeReconcile`);
 ///   * on the first reconciliation `currentAssignment` is still `NONE`, so
 ///     the "resolvable fragment equals the current assignment" short-circuit
-///     at `:832` does not apply, and the reconciliation runs to completion
+///     in `AbstractMembershipManager#maybeReconcile` does not apply, and the
+///     reconciliation runs to completion
 ///     with empty added/revoked sets;
-///   * `AsyncKafkaConsumer.process(PartitionsAssignedEvent)` (`:236`) has no
+///   * `AsyncKafkaConsumer.process(PartitionsAssignedEvent)` has no
 ///     empty guard — a registered listener is invoked unconditionally.
 ///
 /// A freshly created topic makes that window easy to hit: the assignment can
@@ -461,7 +463,7 @@ async fn await_full_assignment(
     }
 }
 
-/// Mirrors Java's `ClientsTestUtils.RetryCommitCallback` (line 500):
+/// Mirrors Java's `ClientsTestUtils.RetryCommitCallback`:
 /// resend on `RetriableCommitFailedException`, otherwise record
 /// completion and the error (if any).
 ///
@@ -528,7 +530,7 @@ impl OffsetCommitCallback for RetryCommitCallback {
 }
 
 /// Translates Java's `ClientsTestUtils.sendAndAwaitAsyncCommit(consumer,
-/// Optional.empty())` (line 309).
+/// Optional.empty())`.
 ///
 /// `Optional.empty()` means `sendAsyncCommit` calls `consumer.commitAsync(callback)`
 /// — commit whatever has been consumed — so the Rust form is
@@ -565,8 +567,7 @@ async fn send_and_await_async_commit(consumer: &mut BytesConsumer) {
     panic!("Failed to observe commit callback before timeout");
 }
 
-/// Translates Java's `ClientsTestUtils.ensureNoRebalance(consumer, listener)`
-/// (line 336).
+/// Translates Java's `ClientsTestUtils.ensureNoRebalance(consumer, listener)`.
 ///
 /// Java's comment states the contract: *"The best way to verify that the
 /// current membership is still active is to commit offsets. This would fail
@@ -684,7 +685,7 @@ async fn consume_and_verify_records_with_max_poll(
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncConsumerMaxPollRecords` (line 108).
+/// Translates Java's `testAsyncConsumerMaxPollRecords`.
 ///
 /// Produces 5000 records to a single partition, assigns the partition,
 /// and consumes all 5000 records while asserting that no single `poll()`
@@ -724,7 +725,7 @@ async fn test_async_consumer_max_poll_records() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerMaxPollIntervalMs` (line 147).
+/// Translates Java's `testAsyncConsumerMaxPollIntervalMs`.
 ///
 /// Subscribes with `max.poll.interval.ms=1000`. After the initial
 /// rebalance, sleeps for 3 seconds (longer than the poll-interval) and
@@ -776,7 +777,8 @@ async fn test_async_consumer_max_poll_interval_ms() {
     // Deliberate departure from Java's `awaitRebalance` + `assertEquals(1,
     // callsToAssigned)`: the first `on_partitions_assigned` can be EMPTY when
     // the coordinator's assignment names a topic id this consumer's metadata
-    // has not resolved yet (`AbstractMembershipManager.java:830-840`; see
+    // has not resolved yet
+    // (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`; see
     // `await_partition_assigned`). Returning on that callback leaves the real
     // assignment to be reconciled on the background task during the sleep
     // below and applied only on the next `poll` — after the poll timer has
@@ -845,7 +847,7 @@ async fn test_async_consumer_max_poll_interval_ms() {
 /// Listener that sleeps inside `on_partitions_revoked` and, while still
 /// "in the group", commits offsets — proving the commit succeeds despite
 /// the rebalance taking longer than session-timeout. Mirrors Java's
-/// anonymous inner class at lines 199-219.
+/// anonymous inner class in `PlaintextConsumerPollTest#testMaxPollIntervalMsDelayInRevocation`.
 struct DelayInRevocationListener {
     counters: RebalanceCounters,
     /// Captured `consumer.handle()` — the Rust equivalent of Java's anonymous
@@ -931,8 +933,8 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
     }
 }
 
-/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`
-/// (line 186). Subscribes with a listener that sleeps + commits inside
+/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`.
+/// Subscribes with a listener that sleeps + commits inside
 /// `on_partitions_revoked`. Forces a rebalance via `subscribe(otherTopic)`
 /// and asserts that the in-callback commit succeeded.
 ///
@@ -1030,8 +1032,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // the revoked callback (`consumer_membership_manager.rs`, step 8 before step
     // 9), and `should_initialize()` is
     // `fetch_state == Initializing && !pending_revocation` — byte-for-byte Java's
-    // `SubscriptionState.java:1231`. So a position that is not already resolved
-    // when the callback runs can NEVER be resolved: the partition is excluded
+    // `org.apache.kafka.clients.consumer.internals.SubscriptionState.TopicPartitionState#shouldInitialize`.
+    // So a position that is not already resolved when the callback runs can
+    // NEVER be resolved: the partition is excluded
     // from initialization, and `position()` waits out `default.api.timeout.ms`
     // (60 s) inside the listener.
     //
@@ -1124,7 +1127,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
 }
 
 /// Listener that sleeps inside `on_partitions_assigned`. Mirrors Java's
-/// anonymous inner class at lines 256-263.
+/// anonymous inner class in `PlaintextConsumerPollTest#testMaxPollIntervalMsDelayInAssignment`.
 struct DelayInAssignmentListener {
     counters: RebalanceCounters,
 }
@@ -1146,8 +1149,8 @@ impl ConsumerRebalanceListener for DelayInAssignmentListener {
     }
 }
 
-/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInAssignment`
-/// (line 246). After the initial rebalance (with the listener sleeping
+/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInAssignment`.
+/// After the initial rebalance (with the listener sleeping
 /// inside `on_partitions_assigned`), `ensureNoRebalance` confirms the
 /// member is still in the group.
 #[tokio::test(flavor = "multi_thread")]
@@ -1202,7 +1205,7 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerMaxPollIntervalMsShorterThanPollTimeout` (line 282).
+/// `testAsyncConsumerMaxPollIntervalMsShorterThanPollTimeout`.
 ///
 /// `max.poll.interval.ms` is set to 1000ms; the test calls
 /// `poll(Duration::from_millis(2000))` which is longer than the
@@ -1237,7 +1240,7 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     // Deliberate departure from Java's `awaitRebalance`: the first
     // `on_partitions_assigned` can be EMPTY when the coordinator's assignment
     // names a topic id this consumer's metadata has not resolved yet
-    // (`AbstractMembershipManager.java:830-840`; see
+    // (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`; see
     // `await_partition_assigned`). Taking the baseline on that callback lets
     // the real assignment land during the polls below and bump
     // `callsToAssigned` although no rebalance happened. So wait for the FULL
@@ -1277,8 +1280,7 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout`
-/// (line 471).
+/// `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout`.
 ///
 /// Subscribes (not assigns), polls with `Duration::ZERO`, and asserts
 /// that all 100 produced records are eventually returned across
@@ -1337,7 +1339,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 }
 
 /// Translates Java's
-/// `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero` (line 494).
+/// `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero`.
 ///
 /// Assigns a partition with `auto.offset.reset=none` and asserts that
 /// `poll(...)` (Java uses `pollUntilTrue` waiting for the exception;
@@ -1380,7 +1382,7 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     // default 15s). The Rust translation uses a small non-zero
     // timeout per poll (see translation-deviation rustdoc above).
     //
-    // `waitForPollThrowException` (ClientsTestUtils.java:348-360) runs under
+    // `org.apache.kafka.clients.ClientsTestUtils#waitForPollThrowException` runs under
     // `TestUtils.waitForCondition`'s default 15s and returns `false` — i.e.
     // keeps polling — on an exception that is not a
     // `NoOffsetForPartitionException`, so a non-matching error is recorded
@@ -1400,8 +1402,9 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     }
     let e = no_offset_err
         .unwrap_or_else(|| panic!("Continuous poll not fail (last non-matching error: {last_other_err:?})"));
-    // Raised by `SubscriptionState.resetInitializingPositions`
-    // (SubscriptionState.java:882) through the `Collection` constructor.
+    // Raised by
+    // `org.apache.kafka.clients.consumer.internals.SubscriptionState#resetInitializingPositions(Predicate)`
+    // through the `Collection` constructor.
     assert_eq!(
         e.message(),
         format!("Undefined offset with no reset policy for partitions: [{tp}]")
@@ -1413,7 +1416,8 @@ async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
 
 /// Listener that sleeps inside `on_partitions_revoked` long enough to
 /// exceed the rebalance timeout, causing the broker to fence the
-/// member. Mirrors Java's anonymous inner class at lines 544-555.
+/// member. Mirrors Java's anonymous inner class in
+/// `PlaintextConsumerPollTest#testConsumerRecoveryOnPollAfterDelayedRebalance`.
 struct DelayedRevocationFenceListener {
     counters: RebalanceCounters,
     tp: TopicPartition,
@@ -1443,8 +1447,7 @@ impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
     }
 }
 
-/// Translates Java's `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance`
-/// (line 518).
+/// Translates Java's `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance`.
 ///
 /// Subscribes to `topic`, awaits assignment + records on `tp`, then
 /// `subscribe(otherTopic)` triggers a delayed revocation (listener
@@ -1464,8 +1467,8 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     let rebalance_timeout = Duration::from_millis(1000);
 
     create_test_topic(&ctx, &topic, 2).await;
-    // Java: `cluster.createTopic(otherTopic, 1, (short) BROKER_COUNT)`
-    // (`PlaintextConsumerPollTest.java:546`).
+    // `cluster.createTopic(otherTopic, 1, (short) BROKER_COUNT)` in Java's
+    // org.apache.kafka.clients.consumer.PlaintextConsumerPollTest#testConsumerRecoveryOnPollAfterDelayedRebalance.
     create_test_topic(&ctx, &other_topic, 1).await;
     let producer = build_producer_bytes(&ctx);
     // Java sends `numMessages` to BOTH topics. We follow the same
@@ -1552,11 +1555,10 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
-/// Java `PlaintextConsumerPollTest.BROKER_COUNT` (`PlaintextConsumerPollTest.java:85`).
+/// Java `PlaintextConsumerPollTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;
 
-/// Translates the suite's `@BeforeEach` topic setup
-/// (`PlaintextConsumerPollTest.java:97-100`):
+/// Translates the suite's `@BeforeEach` topic setup (`PlaintextConsumerPollTest#setup`):
 /// `cluster.createTopic(topic, numPartitions, (short) BROKER_COUNT)`.
 ///
 /// Creates the topic through the admin client and then waits until every

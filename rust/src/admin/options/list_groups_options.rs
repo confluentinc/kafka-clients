@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! Options for `Admin::list_groups`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListGroupsOptions`.
 
 use crate::consumer::internals::ConsumerProtocol;
 use std::collections::HashSet;
@@ -22,8 +20,6 @@ use std::collections::HashSet;
 use crate::common::{GroupState, GroupType};
 
 /// Options for `Admin::list_groups`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListGroupsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions")]
 pub struct ListGroupsOptions {
@@ -40,10 +36,8 @@ impl ListGroupsOptions {
         Self::default()
     }
 
-    /// Options selecting only consumer groups (classic + consumer types,
-    /// empty/`consumer` protocol types).
-    ///
-    /// Mirrors `ListGroupsOptions.forConsumerGroups`.
+    /// Only consumer groups will be returned by `list_groups()`.
+    /// This operation sets filters on group type and protocol type which select consumer groups.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#forConsumerGroups")]
     pub fn for_consumer_groups() -> Self {
         Self::new()
@@ -51,23 +45,31 @@ impl ListGroupsOptions {
             .with_protocol_types(HashSet::from([String::new(), ConsumerProtocol::PROTOCOL_TYPE.to_string()]))
     }
 
-    /// Options selecting only share groups.
-    ///
-    /// Mirrors `ListGroupsOptions.forShareGroups`.
+    /// Only share groups will be returned by `list_groups()`.
+    /// This operation sets a filter on group type which select share groups.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#forShareGroups")]
     pub fn for_share_groups() -> Self {
         Self::new().with_types(HashSet::from([GroupType::Share]))
     }
 
-    /// Options selecting only streams groups.
-    ///
-    /// Mirrors `ListGroupsOptions.forStreamsGroups`.
+    /// Only streams groups will be returned by `list_groups()`.
+    /// This operation sets a filter on group type which select streams groups.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#forStreamsGroups")]
     pub fn for_streams_groups() -> Self {
         Self::new().with_types(HashSet::from([GroupType::Streams]))
     }
 
-    /// Filter by group states. Mirrors `inGroupStates`.
+    /// If `group_states` is set, only groups in these states will be returned by `list_groups()`.
+    /// Otherwise, all groups are returned.
+    /// This operation is supported by brokers with version 2.6.0 or later.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_states` - the group states to filter by.
+    ///
+    /// # Returns
+    ///
+    /// This `ListGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#inGroupStates")]
     pub fn in_group_states(mut self, group_states: HashSet<GroupState>) -> Self {
@@ -75,7 +77,16 @@ impl ListGroupsOptions {
         self
     }
 
-    /// Filter by protocol types. Mirrors `withProtocolTypes`.
+    /// If protocol types is set, only groups of these protocol types will be returned by
+    /// `list_groups()`. Otherwise, all groups are returned.
+    ///
+    /// # Arguments
+    ///
+    /// - `protocol_types` - the protocol types to filter by.
+    ///
+    /// # Returns
+    ///
+    /// This `ListGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#withProtocolTypes")]
     pub fn with_protocol_types(mut self, protocol_types: HashSet<String>) -> Self {
@@ -83,7 +94,16 @@ impl ListGroupsOptions {
         self
     }
 
-    /// Filter by group types. Mirrors `withTypes`.
+    /// If types is set, only groups of these types will be returned by `list_groups()`.
+    /// Otherwise, all groups are returned.
+    ///
+    /// # Arguments
+    ///
+    /// - `types` - the group types to filter by.
+    ///
+    /// # Returns
+    ///
+    /// This `ListGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#withTypes")]
     pub fn with_types(mut self, types: HashSet<GroupType>) -> Self {
@@ -91,7 +111,16 @@ impl ListGroupsOptions {
         self
     }
 
-    /// Set the operation timeout in milliseconds (or `None` for the default).
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `ListGroupsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -99,25 +128,29 @@ impl ListGroupsOptions {
         self
     }
 
-    /// The requested group states. Mirrors `groupStates()`.
+    /// Returns the list of group states that are requested or empty if no states have been
+    /// specified.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#groupStates")]
     pub fn group_states(&self) -> &HashSet<GroupState> {
         &self.group_states
     }
 
-    /// The requested protocol types. Mirrors `protocolTypes()`.
+    /// Returns the list of protocol types that are requested or empty if no protocol types have
+    /// been specified.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#protocolTypes")]
     pub fn protocol_types(&self) -> &HashSet<String> {
         &self.protocol_types
     }
 
-    /// The requested group types. Mirrors `types()`.
+    /// Returns the list of group types that are requested or empty if no types have been
+    /// specified.
     #[doc(alias = "org.apache.kafka.clients.admin.ListGroupsOptions#types")]
     pub fn types(&self) -> &HashSet<GroupType> {
         &self.types
     }
 
-    /// The operation timeout in milliseconds, or `None` for the default.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

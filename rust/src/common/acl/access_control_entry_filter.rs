@@ -20,8 +20,6 @@ use super::access_control_entry_data::AccessControlEntryData;
 use super::{AccessControlEntry, AclOperation, AclPermissionType};
 
 /// Represents a filter which matches access control entries.
-///
-/// Corresponds to `org.apache.kafka.common.acl.AccessControlEntryFilter`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter")]
 pub struct AccessControlEntryFilter {
@@ -55,43 +53,47 @@ impl AccessControlEntryFilter {
         AccessControlEntryFilter { data }
     }
 
-    /// A filter which matches any access control entry.
+    /// Matches any access control entry.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#ANY")]
     pub fn any() -> AccessControlEntryFilter {
         AccessControlEntryFilter::new(None, None, AclOperation::Any, AclPermissionType::Any)
     }
 
-    /// Return the principal, or `None`.
+    /// Returns the principal, or `None`.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#principal")]
     pub fn principal(&self) -> Option<&str> {
         self.data.principal()
     }
 
-    /// Return the host, or `None`. The value `*` means any host.
+    /// Returns the host, or `None`. The value `*` means any host.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#host")]
     pub fn host(&self) -> Option<&str> {
         self.data.host()
     }
 
-    /// Return the `AclOperation`.
+    /// Returns the `AclOperation`.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#operation")]
     pub fn operation(&self) -> AclOperation {
         self.data.operation()
     }
 
-    /// Return the `AclPermissionType`.
+    /// Returns the `AclPermissionType`.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#permissionType")]
     pub fn permission_type(&self) -> AclPermissionType {
         self.data.permission_type()
     }
 
-    /// Return true if there are any UNKNOWN components.
+    /// Returns true if there are any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.data.is_unknown()
     }
 
     /// Returns true if this filter matches the given `AccessControlEntry`.
+    ///
+    /// # Arguments
+    ///
+    /// - `other` - the entry to match
     #[doc(alias = "org.apache.kafka.common.acl.AccessControlEntryFilter#matches")]
     pub fn matches(&self, other: &AccessControlEntry) -> bool {
         if let Some(principal) = self.principal()

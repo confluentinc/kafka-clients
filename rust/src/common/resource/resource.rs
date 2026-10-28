@@ -19,8 +19,6 @@
 use super::ResourceType;
 
 /// Represents a cluster resource with a tuple of (type, name).
-///
-/// Corresponds to `org.apache.kafka.common.resource.Resource`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.resource.Resource")]
 pub struct Resource {
@@ -48,19 +46,19 @@ impl Resource {
         Resource::new(ResourceType::Cluster, Resource::CLUSTER_NAME)
     }
 
-    /// Return the resource type.
+    /// Returns the resource type.
     #[doc(alias = "org.apache.kafka.common.resource.Resource#resourceType")]
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
-    /// Return the resource name.
+    /// Returns the resource name.
     #[doc(alias = "org.apache.kafka.common.resource.Resource#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Return true if this `Resource` has any UNKNOWN components.
+    /// Returns true if this `Resource` has any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.resource.Resource#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.resource_type.is_unknown()

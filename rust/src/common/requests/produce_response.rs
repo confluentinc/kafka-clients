@@ -155,25 +155,28 @@ pub struct PartitionResponse {
 }
 
 /// The parameters of Java's widest `ProduceResponse.PartitionResponse`
-/// constructor (`ProduceResponse.java:188`).
+/// constructor
+/// (`ProduceResponse.PartitionResponse#PartitionResponse(Errors,long,long,long,List,String,LeaderIdAndEpoch)`).
 ///
-/// Java's six constructors (`:168`, `:172`, `:176`, `:180`, `:184`, `:188`)
+/// Java's six `ProduceResponse.PartitionResponse#PartitionResponse` constructors
 /// intersect on `{error}`, so the widest form carries six parameters into its
 /// derived name. CLAUDE.md §2 caps that at three parameters and makes this
 /// struct the method's *only* parameter, so every Java parameter lives here —
 /// `error` included. This struct has no Java counterpart: it exists solely to
 /// satisfy that naming rule (DoD #7).
 ///
-/// Because the cap applies to the *whole* group, Java's `:184` and `:188` forms
+/// Because the cap applies to the *whole* group, Java's
+/// `PartitionResponse(Errors,long,long,long,List,String)` and
+/// `PartitionResponse(Errors,long,long,long,List,String,LeaderIdAndEpoch)` forms
 /// derive the same name — `with_options`, differing only in whether they supply
 /// `currentLeader`. They therefore collapse into the single constructor below,
-/// with `:184`'s `new ProduceResponseData.LeaderIdAndEpoch()` becoming this
+/// with the six-parameter form's `new ProduceResponseData.LeaderIdAndEpoch()` becoming this
 /// struct's initial `current_leader`.
 ///
 /// It deliberately has **no** `Default`. Every field *except* `error` is
 /// supplied by a narrower Java overload on the caller's behalf, and
 /// [`PartitionResponseOptionsBuilder::new`] carries exactly those values; `error` is
-/// what even Java's narrowest form (`:168`) takes from its caller, so it has no
+/// what even Java's narrowest form (`PartitionResponse(Errors)`) takes from its caller, so it has no
 /// Java-derived default — and a synthesised `Errors::None` would silently turn a
 /// failed partition into a successful one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,19 +184,21 @@ pub struct PartitionResponse {
 pub struct PartitionResponseOptions {
     /// Java's `error`.
     pub(crate) error: Errors,
-    /// Java's `baseOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
+    /// Java's `baseOffset`. Starts as `INVALID_OFFSET`, as in `PartitionResponse(Errors)`.
     pub(crate) base_offset: i64,
     /// Java's `logAppendTime`. Starts as `RecordBatch.NO_TIMESTAMP`, as in
-    /// `:168`.
+    /// `PartitionResponse(Errors)`.
     pub(crate) log_append_time: i64,
-    /// Java's `logStartOffset`. Starts as `INVALID_OFFSET`, as in `:168`.
+    /// Java's `logStartOffset`. Starts as `INVALID_OFFSET`, as in `PartitionResponse(Errors)`.
     pub(crate) log_start_offset: i64,
-    /// Java's `recordErrors`. Starts empty, as in `:176`
+    /// Java's `recordErrors`. Starts empty, as in `PartitionResponse(Errors,long,long,long)`
     /// (`Collections.emptyList()`).
     pub(crate) record_errors: Vec<RecordError>,
-    /// Java's `errorMessage`. Starts as `None`, as in `:176`/`:180`.
+    /// Java's `errorMessage`. Starts as `None`, as in `PartitionResponse(Errors,long,long,long)` /
+    /// `PartitionResponse(Errors,long,long,long,List)`.
     pub(crate) error_message: Option<String>,
-    /// Java's `currentLeader`. Starts as `new LeaderIdAndEpoch()`, as in `:184`.
+    /// Java's `currentLeader`. Starts as `new LeaderIdAndEpoch()`, as in
+    /// `PartitionResponse(Errors,long,long,long,List,String)`.
     pub(crate) current_leader: LeaderIdAndEpoch,
 }
 
@@ -308,8 +313,7 @@ impl PartitionResponseOptionsBuilder {
 impl PartitionResponse {
     /// Creates a `PartitionResponse` with just an error code (all offsets invalid).
     ///
-    /// Corresponds to Java's `PartitionResponse(Errors)`
-    /// (`ProduceResponse.java:168`), the overload whose parameters equal the
+    /// Corresponds to Java's `PartitionResponse(Errors)`, the overload whose parameters equal the
     /// group's intersection.
     #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn new(error: Errors) -> Self {
@@ -326,8 +330,7 @@ impl PartitionResponse {
 
     /// Creates a `PartitionResponse` with error and message (all offsets invalid).
     ///
-    /// Corresponds to Java's `PartitionResponse(Errors, String)`
-    /// (`ProduceResponse.java:172`).
+    /// Corresponds to Java's `PartitionResponse(Errors, String)`.
     #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn with_error_message(error: Errors, error_message: Option<String>) -> Self {
         Self {
@@ -344,13 +347,13 @@ impl PartitionResponse {
     /// Creates a `PartitionResponse` with all fields.
     ///
     /// Corresponds to Java's `PartitionResponse(Errors, long, long, long,
-    /// List<RecordError>, String)` (`ProduceResponse.java:184`) **and**
+    /// List<RecordError>, String)` **and**
     /// `PartitionResponse(Errors, long, long, long, List<RecordError>, String,
-    /// LeaderIdAndEpoch)` (`:188`): both derive this same name under CLAUDE.md
+    /// LeaderIdAndEpoch)`: both derive this same name under CLAUDE.md
     /// §2, so they collapse into one constructor, whose only parameter is
     /// [`PartitionResponseOptions`]. Leaving that struct's `current_leader` at
-    /// its initial value — `:184`'s own `new LeaderIdAndEpoch()` — gives `:184`'s
-    /// behaviour.
+    /// its initial value — the six-parameter form's own `new LeaderIdAndEpoch()` — gives that
+    /// form's behaviour.
     #[doc(alias = "org.apache.kafka.common.requests.ProduceResponse$PartitionResponse#PartitionResponse")]
     pub fn with_options(options: PartitionResponseOptions) -> Self {
         let PartitionResponseOptions {

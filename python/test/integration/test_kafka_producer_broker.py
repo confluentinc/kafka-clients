@@ -13,14 +13,14 @@
 # limitations under the License.
 
 """The producer against a broker, where Java's ``KafkaProducerTest`` scripts a
-``MockClient`` the binding cannot inject: the errors ``KafkaProducer.doSend``
-rethrows out of ``send()`` (``KafkaProducer.java:1143-1155``) rather than
+``MockClient`` the binding cannot inject: the errors
+``org.apache.kafka.clients.producer.KafkaProducer#doSend`` rethrows out of ``send()`` rather than
 giving to the callback and the future, which need the topic's metadata first
 (the record then stays in the accumulator, so its callback runs later, with
 the batch's outcome);
 
 the record size check, which runs after the metadata wait too
-(``KafkaProducer.java:1103-1105``); an open transaction, which a second
+(``KafkaProducer#ensureValidRecordSize``); an open transaction, which a second
 ``begin_transaction()`` needs; and the non-blocking send, whose record taken on
 the calling thread needs the topic's metadata cached, and whose send waiting
 for a partition that appears later must hold back no other thread's record.
@@ -101,14 +101,17 @@ def _recorder(calls: list[_Call], label: str) -> Any:
 
 
 def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
-    # TransactionManager.maybeAddPartition's IllegalStateException
-    # (TransactionManager.java:469), rethrown by doSend's catch (Exception e):
-    # send() raises it, and the callback does not run yet. doSend appended the
-    # record before (KafkaProducer.java:1108-1120), and the Sender holds its
-    # batch, which no transaction adds. close(Duration.ZERO) force-closes:
-    # abortIncompleteBatches fails it with "Producer is closed forcefully."
-    # (RecordAccumulator.java:1194), and the callback runs then, with the -1
-    # metadata of KafkaProducer.AppendCallbacks.onCompletion (:1676-1679).
+    # The IllegalStateException of
+    # org.apache.kafka.clients.producer.internals.TransactionManager#maybeAddPartition,
+    # rethrown by doSend's catch (Exception e): send() raises it, and the
+    # callback does not run yet. doSend
+    # (org.apache.kafka.clients.producer.KafkaProducer#doSend) appended the record
+    # before, and the Sender holds its batch, which no transaction adds.
+    # close(Duration.ZERO) force-closes: abortIncompleteBatches fails it with
+    # "Producer is closed forcefully."
+    # (org.apache.kafka.clients.producer.internals.RecordAccumulator#abortBatches()),
+    # and the callback runs then, with the -1 metadata of
+    # KafkaProducer.AppendCallbacks#onCompletion.
 
     topic = _topic(kafka_broker)
     calls: list[_Call] = []
@@ -135,8 +138,8 @@ def test_send_before_init_transactions_raises(kafka_broker: Any) -> None:
 
 def _outside_then_inside(inside_offset: int) -> list[tuple[int, str, str]]:
     """What a read_committed consumer reads after the two sends below and the
-    commit: both records. Java's doSend appends the record to the accumulator
-    before maybeAddPartition throws (KafkaProducer.java:1110-1120), and the
+    commit: both records. Java's doSend (org.apache.kafka.clients.producer.KafkaProducer#doSend)
+    appends the record to the accumulator before maybeAddPartition throws, and the
     Sender holds the batch until its partition joins a transaction, so the send
     that raised is committed with the transaction, ahead of the one inside it."""
     return [(0, "key", "outside"), (inside_offset, "key", "inside")]
@@ -153,7 +156,9 @@ def _callbacks_outside_then_inside(inside_offset: int) -> list[_Call]:
 
 def test_send_outside_a_transaction_raises(kafka_broker: Any) -> None:
     # After initTransactions and before beginTransaction the transaction
-    # manager is READY (TransactionManager.java:472, with Java's double space).
+    # manager is READY
+    # (org.apache.kafka.clients.producer.internals.TransactionManager#maybeAddPartition,
+    # with Java's double space).
     topic = _topic(kafka_broker)
     calls: list[_Call] = []
     producer = KafkaProducer(configs=_configs(kafka_broker), key_serializer=string_serializer(),
@@ -237,7 +242,7 @@ def _size_upper_bound(value_size: int) -> int:
     return 61 + 21 + 1 + varint + value_size + 1
 
 
-# Java's KafkaProducer.ensureValidRecordSize (KafkaProducer.java:1243-1252):
+# Java's org.apache.kafka.clients.producer.KafkaProducer#ensureValidRecordSize:
 # each limit, the producer configs that make the record exceed it, and its
 # message.
 RECORD_TOO_LARGE = [
@@ -254,7 +259,7 @@ RECORD_TOO_LARGE = [
 
 def _assert_record_too_large(topic: str, calls: list[tuple[RecordMetadata, Exception | None]],
                              error: BaseException, message: str) -> None:
-    # doSend's catch (ApiException e) (KafkaProducer.java:1130-1142) gives the
+    # The catch (ApiException e) of org.apache.kafka.clients.producer.KafkaProducer#doSend gives the
     # same exception to the callback, with metadata of no offset for the
     # record's topic-partition (-1, the record naming none), and to the failed
     # future.
@@ -402,7 +407,7 @@ def _consumed_headers(broker: Any, topic: str) -> list[tuple[str, bytes | None]]
 def test_send_delivers_the_record_headers(kafka_broker: Any) -> None:
     # Critic 75 R2-B2: the core's borrowed send, which send_batch calls for
     # every record of the C engine, appended no headers; Java's doSend appends
-    # record.headers().toArray() (KafkaProducer.java:1101, 1110-1111).
+    # record.headers().toArray() (org.apache.kafka.clients.producer.KafkaProducer#doSend).
     topic = _topic(kafka_broker)
     producer = KafkaProducer(configs={"bootstrap.servers": kafka_broker.external_bootstrap})
     try:
@@ -611,7 +616,7 @@ def test_an_async_send_with_cached_metadata_is_taken_on_the_calling_thread(
 def test_a_record_taken_at_once_is_not_held_behind_one_waiting_on_another_thread(
         kafka_broker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # Java's send() blocks in waitOnMetadata, up to max.block.ms, for a
-    # partition the topic does not have yet (KafkaProducer.java:1195-1226),
+    # partition the topic does not have yet (org.apache.kafka.clients.producer.KafkaProducer#waitOnMetadata),
     # which holds back its caller's next record but no other thread's. Here
     # such a record is queued on the submission task, which leaves it to wait
     # for the partition on a task of its own, and its send() waits for that

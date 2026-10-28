@@ -18,14 +18,16 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The replica is not available for the requested topic-partition.
+    /// The replica is not available for the requested topic partition. This may be a transient
+    /// error during reassignments. From version 2.6 onwards, Fetch requests and other requests
+    /// intended only for the leader or follower of the topic partition return
+    /// `NotLeaderOrFollowerError` if the broker is a not a replica of the partition.
     ///
-    /// Corresponds to Java's `ReplicaNotAvailableException`, error code `Errors::ReplicaNotAvailable`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ReplicaNotAvailableException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::ReplicaNotAvailable`. Java `extends` chain:
+    /// `ReplicaNotAvailableException` -> `InvalidMetadataException` -> `RefreshRetriableException`
+    /// -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ReplicaNotAvailableException")]
     ReplicaNotAvailableError,
     code: Errors::ReplicaNotAvailable,

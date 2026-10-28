@@ -18,13 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The leader epoch in the request is newer than the epoch on the broker.
+    /// The request contained a leader epoch which is larger than that on the broker that received
+    /// the request. This can happen if the client observes a metadata update before it has been
+    /// propagated to all brokers. Clients need not refresh metadata before retrying.
     ///
-    /// Corresponds to Java's `UnknownLeaderEpochException`, error code `Errors::UnknownLeaderEpoch`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnknownLeaderEpochException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::UnknownLeaderEpoch`. Java `extends` chain: `UnknownLeaderEpochException`
+    /// -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownLeaderEpochException")]
     UnknownLeaderEpochError,
     code: Errors::UnknownLeaderEpoch,

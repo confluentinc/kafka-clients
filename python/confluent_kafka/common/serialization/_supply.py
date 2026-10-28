@@ -192,7 +192,7 @@ def resolve_serde(
         raise construct_failure(exc) from exc
     # The keyword contract is a type check: Java's getConfiguredInstance checks
     # the type (and closes a wrong one) before it configures the instance
-    # (AbstractConfig.java:414-422).
+    # (org.apache.kafka.common.config.AbstractConfig#getConfiguredInstance(Object,Class,Map)).
     if not accepts_kwargs(instance):
         close_if_defined(instance)
         require_kwargs(instance, key)

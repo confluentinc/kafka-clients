@@ -18,14 +18,13 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The leader high watermark has not caught up from a recent leader election
-    /// so the offsets cannot be guaranteed to be monotonically increasing.
+    /// Indicates that the leader is not able to guarantee monotonically increasing offsets due to
+    /// the high watermark lagging behind the epoch start offset after a recent leader election
     ///
-    /// Corresponds to Java's `OffsetNotAvailableException`, error code `Errors::OffsetNotAvailable`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `OffsetNotAvailableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::OffsetNotAvailable`. Java `extends` chain: `OffsetNotAvailableException`
+    /// -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.OffsetNotAvailableException")]
     OffsetNotAvailableError,
     code: Errors::OffsetNotAvailable,

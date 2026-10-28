@@ -32,27 +32,27 @@
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testAsyncConsumerRe2JPatternSubscription` (line 277)
+//! - `testAsyncConsumerRe2JPatternSubscription`
 //!   → `test_async_consumer_re2j_pattern_subscription`
-//! - `testAsyncConsumerRe2JPatternSubscriptionFetch` (line 316)
+//! - `testAsyncConsumerRe2JPatternSubscriptionFetch`
 //!   → `test_async_consumer_re2j_pattern_subscription_fetch`
-//! - `testAsyncConsumerRe2JPatternExpandSubscription` (line 343)
+//! - `testAsyncConsumerRe2JPatternExpandSubscription`
 //!   → `test_async_consumer_re2j_pattern_expand_subscription`
-//! - `testTopicIdSubscriptionWithRe2JRegexAndOffsetsFetch` (line 378)
+//! - `testTopicIdSubscriptionWithRe2JRegexAndOffsetsFetch`
 //!   → `test_topic_id_subscription_with_re2j_regex_and_offsets_fetch`
-//! - `testRe2JPatternSubscriptionAndTopicSubscription` (line 421)
+//! - `testRe2JPatternSubscriptionAndTopicSubscription`
 //!   → `test_re2j_pattern_subscription_and_topic_subscription`
-//! - `testRe2JPatternSubscriptionInvalidRegex` (line 466)
+//! - `testRe2JPatternSubscriptionInvalidRegex`
 //!   → `test_re2j_pattern_subscription_invalid_regex`
-//! - `testAsyncConsumerExpandingTopicSubscriptions` (line 485)
+//! - `testAsyncConsumerExpandingTopicSubscriptions`
 //!   → `test_async_consumer_expanding_topic_subscriptions`
-//! - `testAsyncConsumerShrinkingTopicSubscriptions` (line 518)
+//! - `testAsyncConsumerShrinkingTopicSubscriptions`
 //!   → `test_async_consumer_shrinking_topic_subscriptions`
-//! - `testAsyncConsumerUnsubscribeTopic` (line 556)
+//! - `testAsyncConsumerUnsubscribeTopic`
 //!   → `test_async_consumer_unsubscribe_topic`
-//! - `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe` (line 579)
+//! - `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe`
 //!   → `test_async_consumer_subscribe_invalid_topic_can_unsubscribe`
-//! - `testAsyncConsumerSubscribeInvalidTopicCanClose` (line 597)
+//! - `testAsyncConsumerSubscribeInvalidTopicCanClose`
 //!   → `test_async_consumer_subscribe_invalid_topic_can_close`
 //!
 //! ## SKIPped (classic-protocol-only — `consumer-threading.md` §20)
@@ -80,11 +80,11 @@
 //! evaluation (KIP-848) instead of matching it against the consumer's
 //! own metadata.
 //!
-//! - SKIP: `testAsyncConsumerPatternSubscription` (line 92) — uses
+//! - SKIP: `testAsyncConsumerPatternSubscription` — uses
 //!   `Pattern.compile("t.*c")`, client-side regex
-//! - SKIP: `testAsyncConsumerSubsequentPatternSubscription` (line 165)
+//! - SKIP: `testAsyncConsumerSubsequentPatternSubscription`
 //!   — uses `Pattern.compile(".*o.*")`, client-side regex
-//! - SKIP: `testAsyncConsumerPatternUnsubscription` (line 235) — uses
+//! - SKIP: `testAsyncConsumerPatternUnsubscription` — uses
 //!   `Pattern.compile("t.*c")`, client-side regex
 
 use std::collections::HashMap;
@@ -251,13 +251,12 @@ async fn send_records_with_producer(
 
 // ── Topic provisioning helpers ────────────────────────────────────────
 
-/// Java `PlaintextConsumerSubscriptionTest.BROKER_COUNT`
-/// (`PlaintextConsumerSubscriptionTest.java:74`).
+/// Java `PlaintextConsumerSubscriptionTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;
 
 /// Translates `cluster.createTopic(name, numPartitions, (short) BROKER_COUNT)`
-/// — the suite's `@BeforeEach` for `topic`
-/// (`PlaintextConsumerSubscriptionTest.java:83-86`) and every per-test topic.
+/// — the suite's `@BeforeEach` for `topic` (`PlaintextConsumerSubscriptionTest#setup`)
+/// and every per-test topic.
 /// Creates the topic EMPTY, so the first produced record lands at offset 0.
 ///
 /// Creates the topic through the admin client and then waits until every
@@ -391,8 +390,8 @@ async fn consume_and_verify_records_bytes(
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncConsumerRe2JPatternSubscription`
-/// (line 277). Subscribes using a Re2J server-side pattern and verifies
+/// Translates Java's `testAsyncConsumerRe2JPatternSubscription`.
+/// Subscribes using a Re2J server-side pattern and verifies
 /// assignment. Then unsubscribes and re-subscribes with a different
 /// pattern to verify subscription replacement.
 #[tokio::test(flavor = "multi_thread")]
@@ -457,8 +456,8 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerRe2JPatternSubscriptionFetch`
-/// (line 316). Subscribes via Re2J pattern, awaits assignment,
+/// Translates Java's `testAsyncConsumerRe2JPatternSubscriptionFetch`.
+/// Subscribes via Re2J pattern, awaits assignment,
 /// produces records to one partition, and verifies they are consumed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_re2j_pattern_subscription_fetch() {
@@ -505,8 +504,8 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerRe2JPatternExpandSubscription`
-/// (line 343). Subscribes to a pattern that matches one topic, then
+/// Translates Java's `testAsyncConsumerRe2JPatternExpandSubscription`.
+/// Subscribes to a pattern that matches one topic, then
 /// re-subscribes to a broader pattern that expands the assignment.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_re2j_pattern_expand_subscription() {
@@ -559,7 +558,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
 }
 
 /// Translates Java's
-/// `testTopicIdSubscriptionWithRe2JRegexAndOffsetsFetch` (line 378).
+/// `testTopicIdSubscriptionWithRe2JRegexAndOffsetsFetch`.
 /// Subscribes via Re2J pattern, verifies assignment, produces and
 /// consumes records, calls `end_offsets` for known + unknown partitions,
 /// then produces and consumes another batch.
@@ -624,8 +623,8 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testRe2JPatternSubscriptionAndTopicSubscription`
-/// (line 421). Subscribes via pattern, unsubscribes, subscribes via
+/// Translates Java's `testRe2JPatternSubscriptionAndTopicSubscription`.
+/// Subscribes via pattern, unsubscribes, subscribes via
 /// topic list, unsubscribes, then subscribes via pattern again.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_re2j_pattern_subscription_and_topic_subscription() {
@@ -688,8 +687,8 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testRe2JPatternSubscriptionInvalidRegex`
-/// (line 466). Subscribes with an invalid regex; the next `poll()`
+/// Translates Java's `testRe2JPatternSubscriptionInvalidRegex`.
+/// Subscribes with an invalid regex; the next `poll()`
 /// should surface an `InvalidRegularExpression` error from the broker.
 /// The consumer should still be able to `unsubscribe()` afterward.
 #[tokio::test(flavor = "multi_thread")]
@@ -713,9 +712,10 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
         .expect("subscribe_with_pattern should succeed (validation is broker-side)");
 
     // Drive `poll()` until it surfaces an `InvalidRegularExpression`
-    // error or the deadline elapses. Java's `waitForPollThrowException`
-    // (ClientsTestUtils.java:348-360) polls inside `TestUtils.waitForCondition`
-    // with its 15s default (`TestUtils.DEFAULT_MAX_WAIT_MS`), and returns
+    // error or the deadline elapses. Java's
+    // `org.apache.kafka.clients.ClientsTestUtils#waitForPollThrowException` polls inside
+    // `TestUtils.waitForCondition` with its 15s default
+    // (`TestUtils.DEFAULT_MAX_WAIT_MS`), and returns
     // `false` — i.e. keeps polling — on any exception that is not an
     // `InvalidRegularExpression`; we match both. Java asserts only the
     // exception class (the message is the broker's regex-parser text), so
@@ -747,8 +747,8 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
         .expect("unsubscribe should succeed after invalid regex");
 }
 
-/// Translates Java's `testAsyncConsumerExpandingTopicSubscriptions`
-/// (line 485). Subscribes to a single topic, awaits assignment, then
+/// Translates Java's `testAsyncConsumerExpandingTopicSubscriptions`.
+/// Subscribes to a single topic, awaits assignment, then
 /// subscribes to a list including a new topic; assignment expands.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_expanding_topic_subscriptions() {
@@ -796,8 +796,8 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerShrinkingTopicSubscriptions`
-/// (line 518). Subscribes to two topics, awaits assignment, then
+/// Translates Java's `testAsyncConsumerShrinkingTopicSubscriptions`.
+/// Subscribes to two topics, awaits assignment, then
 /// subscribes to only one; assignment shrinks.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_shrinking_topic_subscriptions() {
@@ -843,7 +843,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncConsumerUnsubscribeTopic` (line 556).
+/// Translates Java's `testAsyncConsumerUnsubscribeTopic`.
 /// Subscribes to a topic with a listener, awaits the listener callback
 /// (rebalance), then re-subscribes to an empty list (== unsubscribe)
 /// and asserts the assignment is cleared.
@@ -911,7 +911,7 @@ async fn test_async_consumer_unsubscribe_topic() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe` (line 579).
+/// `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe`.
 /// Subscribes to an invalid topic name; `poll()` should surface an
 /// `InvalidTopicException`. After that, `unsubscribe()` must not panic.
 #[tokio::test(flavor = "multi_thread")]
@@ -936,7 +936,7 @@ async fn test_async_consumer_subscribe_invalid_topic_can_unsubscribe() {
 }
 
 /// Translates Java's
-/// `testAsyncConsumerSubscribeInvalidTopicCanClose` (line 597).
+/// `testAsyncConsumerSubscribeInvalidTopicCanClose`.
 /// Subscribes to an invalid topic name; `poll()` should surface an
 /// `InvalidTopicException`. After that, `close()` must not panic.
 #[tokio::test(flavor = "multi_thread")]
@@ -955,8 +955,8 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
     consumer.close().await.expect("close should succeed after invalid topic");
 }
 
-/// Translates Java's private `setupSubscribeInvalidTopic(consumer)`
-/// (line 609). Subscribes to a topic with a space in its name and
+/// Translates Java's private `setupSubscribeInvalidTopic(consumer)`.
+/// Subscribes to a topic with a space in its name and
 /// drives `poll()` until it surfaces `InvalidTopicException` or the
 /// 5s deadline elapses.
 async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
@@ -978,7 +978,8 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
             },
             // Java's `fail("An InvalidTopicException should be thrown. But " +
             // e.getClass() + " is thrown")` runs inside the `waitForCondition`
-            // lambda, and `retryOnExceptionWithTimeout` (TestUtils.java:486-507)
+            // lambda, and
+            // `org.apache.kafka.test.TestUtils#retryOnExceptionWithTimeout(long,long,ValuelessCallable)`
             // catches that `AssertionError` and retries until the 5s deadline,
             // rethrowing only the last one. So a non-InvalidTopic error is
             // recorded and polling continues; it fails the test only on timeout.
@@ -989,7 +990,8 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
         Some(other) => panic!("An InvalidTopicException should be thrown. But {other:?} is thrown"),
         None => panic!("An InvalidTopicException should be thrown."),
     });
-    // Java line 691: `assertEquals("Invalid topics: [" + invalidTopicName + "]", ...)`.
+    // org.apache.kafka.clients.consumer.PlaintextConsumerSubscriptionTest#setupSubscribeInvalidTopic:
+    // `assertEquals("Invalid topics: [" + invalidTopicName + "]", ...)`.
     assert_eq!(e.kafka_error().message(), format!("Invalid topics: [{invalid_topic_name}]"));
     assert_eq!(e.invalid_topics(), &HashSet::from([invalid_topic_name.to_string()]));
 }

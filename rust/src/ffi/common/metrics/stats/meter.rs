@@ -59,13 +59,17 @@ fn boxed(meter: Meter) -> *mut kafka_common_metrics_stats_Meter_t {
     StatHandle::boxed(meter) as *mut kafka_common_metrics_stats_Meter_t
 }
 
-/// `new Meter(MetricName rateMetricName, MetricName totalMetricName)`: per
-/// second over a `WindowedSum`; the names are copied. Owned, freed with
-/// [`kafka_common_metrics_stats_Meter_destroy`].
+/// Construct a Meter with seconds as time unit, over a `WindowedSum`.
+///
+/// # Parameters
+///
+/// - `rate_metric_name` - The name of the rate metric; copied.
+/// - `total_metric_name` - The name of the cumulative total metric; copied.
 ///
 /// # Safety
 ///
-/// Both names must be valid metric-name handles.
+/// Both names must be valid metric-name handles. The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_Meter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_new(
@@ -84,12 +88,19 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_new(
     ))
 }
 
-/// `new Meter(TimeUnit unit, MetricName rateMetricName, MetricName totalMetricName)`.
+/// Construct a Meter with provided time unit, over a `WindowedSum`.
+///
+/// # Parameters
+///
+/// - `unit` - The time unit the rate is reported in.
+/// - `rate_metric_name` - The name of the rate metric; copied.
+/// - `total_metric_name` - The name of the cumulative total metric; copied.
 ///
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton and both names valid metric-name
-/// handles.
+/// handles. The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_Meter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit(
@@ -112,13 +123,25 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit(
     ))
 }
 
-/// `new Meter(SampledStat rateStat, MetricName rateMetricName, MetricName totalMetricName)`:
-/// shares `rate_stat`, which must be a `WindowedSum` or `WindowedCount`.
+/// Construct a Meter with seconds as time unit.
+///
+/// # Parameters
+///
+/// - `rate_stat` - The sampled stat of the rate, a `WindowedSum` or `WindowedCount`; shared, the
+///   caller keeps its handle.
+/// - `rate_metric_name` - The name of the rate metric; copied.
+/// - `total_metric_name` - The name of the cumulative total metric; copied.
+///
+/// # Panics
+///
+/// If `rate_stat` is not a `WindowedSum` or `WindowedCount`; the panic is caught and `NULL`
+/// returned.
 ///
 /// # Safety
 ///
 /// `rate_stat` must be a valid sampled-stat handle and both names valid
-/// metric-name handles.
+/// metric-name handles. The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_Meter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_rate_stat(
@@ -142,13 +165,26 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_rate_stat(
     ))
 }
 
-/// `new Meter(TimeUnit unit, SampledStat rateStat, MetricName rateMetricName, MetricName totalMetricName)`:
-/// shares `rate_stat`, which must be a `WindowedSum` or `WindowedCount`.
+/// Construct a Meter with provided time unit.
+///
+/// # Parameters
+///
+/// - `unit` - The time unit the rate is reported in.
+/// - `rate_stat` - The sampled stat of the rate, a `WindowedSum` or `WindowedCount`; shared, the
+///   caller keeps its handle.
+/// - `rate_metric_name` - The name of the rate metric; copied.
+/// - `total_metric_name` - The name of the cumulative total metric; copied.
+///
+/// # Panics
+///
+/// If `rate_stat` is not a `WindowedSum` or `WindowedCount`; the panic is caught and `NULL`
+/// returned.
 ///
 /// # Safety
 ///
 /// `unit` must be a time-unit singleton, `rate_stat` a valid sampled-stat
-/// handle and both names valid metric-name handles.
+/// handle and both names valid metric-name handles. The returned handle is owned, freed with
+/// `kafka_common_metrics_stats_Meter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit_rate_stat(
@@ -176,12 +212,14 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_with_unit_rate_stat(
     ))
 }
 
-/// The meter as the `Stat` interface: a borrowed view valid as long as the
-/// handle, never passed to an interface `_destroy`.
+/// Returns the meter as the `Stat` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to an interface
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_Stat(
@@ -193,13 +231,15 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_Stat(
     unsafe { handle(self_) }.as_stat()
 }
 
-/// The meter as the `CompoundStat` interface (what
-/// `kafka_common_metrics_Sensor_add` takes): a borrowed view valid as long
-/// as the handle; the sensor shares the meter and the handle stays valid.
+/// Returns the meter as the `CompoundStat` interface (what
+/// `kafka_common_metrics_Sensor_add` takes); the sensor shares the meter and the handle stays
+/// valid.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_CompoundStat(
@@ -211,11 +251,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_Meter__as_CompoundStat(
     unsafe { handle(self_) }.as_compound_stat()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_Meter_to_string(

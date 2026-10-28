@@ -100,8 +100,7 @@ impl ChunkedRecordAccumulator {
     /// # Errors
     ///
     /// - [`Error::LocalIllegalArgument`] if `buffer_pool` serves [`AllocationMode::Full`];
-    /// - [`Error::LocalUnsupportedOperation`] (Java's `UnsupportedOperationException`,
-    ///   `ChunkedRecordAccumulator.java:85-86`) if `compression` is not `none`.
+    /// - [`Error::LocalUnsupportedOperation`] (Java's `UnsupportedOperationException`) if `compression` is not `none`.
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedRecordAccumulator#ChunkedRecordAccumulator")]
     pub(crate) fn new(

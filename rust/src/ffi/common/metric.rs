@@ -51,7 +51,7 @@ pub struct kafka_common_MetricValue_t {
 }
 
 /// The variants of [`MetricValue`], for a `switch` over
-/// [`kafka_common_MetricValue__enum`].
+/// `kafka_common_MetricValue__enum`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum kafka_common_MetricValue_e {
@@ -65,7 +65,7 @@ pub enum kafka_common_MetricValue_e {
     kafka_common_MetricValue_INT,
 }
 
-/// What a [`kafka_common_MetricValue_t`] points at: the value plus the
+/// What a `kafka_common_MetricValue_t` points at: the value plus the
 /// NUL-terminated copy of a string reading that `as_string` hands out.
 struct MetricValueInner {
     value: MetricValue,
@@ -109,7 +109,7 @@ pub(crate) unsafe fn take_metric_value(value: *mut kafka_common_MetricValue_t) -
     unsafe { Box::from_raw(value as *mut MetricValueInner) }.value
 }
 
-/// What a [`kafka_common_Metric_t`] points at: the implementation, owned by
+/// What a `kafka_common_Metric_t` points at: the implementation, owned by
 /// the class handle that produced this view, plus the metric-name handle the
 /// borrowed getter hands out.
 pub(crate) struct MetricInner {
@@ -155,11 +155,12 @@ unsafe impl Send for MetricInner {}
 // the `OnceLock<MetricNameInner>` is `Sync` itself.
 unsafe impl Sync for MetricInner {}
 
-/// `metricName()`: borrowed from the handle, valid as long as it is.
+/// Returns a name for this metric.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle.
+/// `self_` must be a valid metric handle. The returned name is borrowed, valid as long as the
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Metric_metric_name(
@@ -178,12 +179,12 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_name(
         .as_ptr()
 }
 
-/// `metricValue()`: the current reading, owned and freed with
-/// [`kafka_common_MetricValue_destroy`].
+/// Returns the value of the metric, which may be measurable or a non-measurable gauge.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric handle.
+/// `self_` must be a valid metric handle. The returned value is owned, freed with
+/// `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Metric_metric_value(
@@ -197,7 +198,7 @@ pub unsafe extern "C" fn kafka_common_Metric_metric_value(
     box_metric_value(unsafe { &*(self_ as *const MetricInner) }.metric().metric_value())
 }
 
-/// Which variant `self_` holds.
+/// Returns which variant `self_` holds.
 ///
 /// A caught Rust panic returns `kafka_common_MetricValue_DOUBLE`, the first enumerator: the enum
 /// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -222,19 +223,31 @@ pub unsafe extern "C" fn kafka_common_MetricValue__enum(
     }
 }
 
-/// `MetricValue::Double(value)`. Owned, freed with
-/// [`kafka_common_MetricValue_destroy`].
+/// Returns a double reading.
+///
+/// # Parameters
+///
+/// - `value` - The reading.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_double(value: f64) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Double(value))
 }
 
-/// `MetricValue::String(value)`: `value` is copied.
+/// Returns a string reading.
+///
+/// # Parameters
+///
+/// - `value` - The reading, copied.
 ///
 /// # Safety
 ///
-/// `value` must be a valid NUL-terminated string.
+/// `value` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -> *mut kafka_common_MetricValue_t {
@@ -244,23 +257,38 @@ pub unsafe extern "C" fn kafka_common_MetricValue_string(value: *const c_char) -
     box_metric_value(MetricValue::String(unsafe { c_str_to_string(value) }))
 }
 
-/// `MetricValue::Long(value)`.
+/// Returns a long reading.
+///
+/// # Parameters
+///
+/// - `value` - The reading.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_long(value: i64) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Long(value))
 }
 
-/// `MetricValue::Int(value)`.
+/// Returns an int reading.
+///
+/// # Parameters
+///
+/// - `value` - The reading.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_MetricValue_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_MetricValue_int(value: i32) -> *mut kafka_common_MetricValue_t {
     box_metric_value(MetricValue::Int(value))
 }
 
-/// `as_double()`: the reading when it is a double, `NaN` otherwise (a
-/// string, long or int gauge). `NaN` stands for Rust's `None` because any
-/// finite sentinel is a legitimate reading.
+/// Returns the reading when it is a double, `NaN` otherwise (a string, long or int gauge). `NaN`
+/// stands for "no double" because any finite sentinel is a legitimate reading.
 ///
 /// # Safety
 ///
@@ -274,12 +302,12 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_double(self_: *const kafka_
     unsafe { metric_value_ref(self_) }.value.as_double().unwrap_or(f64::NAN)
 }
 
-/// `as_string()`: the reading when it is a string gauge (borrowed, valid
-/// until the handle is destroyed), `NULL` otherwise.
+/// Returns the reading when it is a string gauge, `NULL` otherwise.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metric-value handle.
+/// `self_` must be a valid metric-value handle. The returned string is borrowed, valid until the
+/// handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_common_MetricValue_t) -> *const c_char {
@@ -293,9 +321,8 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_string(self_: *const kafka_
         .map_or(std::ptr::null(), |s| s.as_ptr())
 }
 
-/// `as_long()`: the reading when it is a long gauge, `-1` otherwise. A long
-/// gauge may legitimately read `-1`, so check [`kafka_common_MetricValue__enum`]
-/// first.
+/// Returns the reading when it is a long gauge, `-1` otherwise. A long gauge may legitimately
+/// read `-1`, so check `kafka_common_MetricValue__enum` first.
 ///
 /// # Safety
 ///
@@ -309,9 +336,8 @@ pub unsafe extern "C" fn kafka_common_MetricValue_as_long(self_: *const kafka_co
     unsafe { metric_value_ref(self_) }.value.as_long().unwrap_or(-1)
 }
 
-/// `as_int()`: the reading when it is an int gauge, `-1` otherwise. An int
-/// gauge may legitimately read `-1`, so check [`kafka_common_MetricValue__enum`]
-/// first.
+/// Returns the reading when it is an int gauge, `-1` otherwise. An int gauge may legitimately
+/// read `-1`, so check `kafka_common_MetricValue__enum` first.
 ///
 /// # Safety
 ///

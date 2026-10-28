@@ -18,15 +18,13 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The requested offset is not within the range of offsets maintained by
-    /// the server.
+    /// No reset policy has been defined, and the offsets for these partitions are either larger or
+    /// smaller than the range of offsets the server has for the given partition.
     ///
-    /// Corresponds to Java's `OffsetOutOfRangeException`, error code
-    /// `Errors::OffsetOutOfRange`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `OffsetOutOfRangeException` -> `InvalidOffsetException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::OffsetOutOfRange`. Java `extends` chain: `OffsetOutOfRangeException` ->
+    /// `InvalidOffsetException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.OffsetOutOfRangeException")]
     OffsetOutOfRangeError,
     code: Errors::OffsetOutOfRange,

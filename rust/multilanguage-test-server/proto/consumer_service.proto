@@ -279,6 +279,8 @@ message OffsetAndTimestamp {
 
 message OffsetMapEntry {
   TopicPartition partition = 1;
+  // Unset for a partition with no committed offset (Java's null value) in
+  // `committed`'s result.
   OffsetAndMetadata offset = 2;
 }
 
@@ -378,8 +380,8 @@ message OffsetAndTimestampMapEntry {
 }
 
 message OffsetAndTimestampMap {
-  // Only partitions with a resolved offset are present (matches the binding,
-  // which omits unresolved partitions).
+  // Every requested partition is present; one the broker could not resolve
+  // (Java's null value) has no `offset`.
   repeated OffsetAndTimestampMapEntry entries = 1;
 }
 

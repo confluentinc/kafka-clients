@@ -38,6 +38,11 @@ pub struct Meter {
 
 impl Meter {
     /// Construct a `Meter` with seconds as time unit, backed by a `WindowedSum`.
+    ///
+    /// # Arguments
+    ///
+    /// - `rate_metric_name` - the name of the rate metric
+    /// - `total_metric_name` - the name of the cumulative total metric
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn new(rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
         Self::with_unit_rate_stat(
@@ -49,6 +54,12 @@ impl Meter {
     }
 
     /// Construct a `Meter` with the provided time unit, backed by a `WindowedSum`.
+    ///
+    /// # Arguments
+    ///
+    /// - `unit` - the time unit of the rate
+    /// - `rate_metric_name` - the name of the rate metric
+    /// - `total_metric_name` - the name of the cumulative total metric
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_unit(unit: TimeUnit, rate_metric_name: MetricName, total_metric_name: MetricName) -> Self {
         Self::with_unit_rate_stat(
@@ -59,7 +70,17 @@ impl Meter {
         )
     }
 
-    /// Construct a `Meter` with seconds as time unit and a provided rate stat.
+    /// Construct a `Meter` with seconds as time unit.
+    ///
+    /// # Arguments
+    ///
+    /// - `rate_stat` - the sampled stat of the rate, a `WindowedSum` or `WindowedCount`
+    /// - `rate_metric_name` - the name of the rate metric
+    /// - `total_metric_name` - the name of the cumulative total metric
+    ///
+    /// # Panics
+    ///
+    /// If `rate_stat` is not a `WindowedSum` or `WindowedCount`.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_rate_stat(
         rate_stat: Arc<SampledStat>,
@@ -69,11 +90,20 @@ impl Meter {
         Self::with_unit_rate_stat(TimeUnit::Seconds, rate_stat, rate_metric_name, total_metric_name)
     }
 
-    /// Construct a `Meter` with the provided time unit and rate stat.
+    /// Construct a `Meter` with provided time unit.
     ///
-    /// Panics if `rate_stat` is not a `WindowedSum`/`WindowedCount`, mirroring
-    /// Java's `IllegalArgumentException` — this is a construction-time
-    /// programming error (Meter is only meaningful with a windowed sum/count).
+    /// # Arguments
+    ///
+    /// - `unit` - the time unit of the rate
+    /// - `rate_stat` - the sampled stat of the rate, a `WindowedSum` or `WindowedCount`
+    /// - `rate_metric_name` - the name of the rate metric
+    /// - `total_metric_name` - the name of the cumulative total metric
+    ///
+    /// # Panics
+    ///
+    /// If `rate_stat` is not a `WindowedSum` or `WindowedCount`, with the
+    /// message of Java's `IllegalArgumentException`: a construction-time
+    /// programming error.
     #[doc(alias = "org.apache.kafka.common.metrics.stats.Meter#Meter")]
     pub fn with_unit_rate_stat(
         unit: TimeUnit,

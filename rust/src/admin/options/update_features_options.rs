@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::update_features`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesOptions`.
 
 /// Options for `Admin::update_features`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.UpdateFeaturesOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesOptions")]
 pub struct UpdateFeaturesOptions {
@@ -33,8 +29,16 @@ impl UpdateFeaturesOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `UpdateFeaturesOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,17 +46,23 @@ impl UpdateFeaturesOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set whether the request should only be validated, without performing the
-    /// upgrade or downgrade.
+    /// Set whether the request should only be validated, without performing the upgrade or
+    /// downgrade.
     ///
-    /// Mirrors `UpdateFeaturesOptions.validateOnly(boolean)`.
+    /// # Arguments
+    ///
+    /// - `validate_only` - `true` to only validate the request.
+    ///
+    /// # Returns
+    ///
+    /// This `UpdateFeaturesOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesOptions#validateOnly")]
     pub fn set_validate_only(mut self, validate_only: bool) -> Self {
@@ -60,9 +70,7 @@ impl UpdateFeaturesOptions {
         self
     }
 
-    /// Whether the request should only be validated.
-    ///
-    /// Mirrors `UpdateFeaturesOptions.validateOnly()`.
+    /// Returns whether the request should only be validated.
     #[doc(alias = "org.apache.kafka.clients.admin.UpdateFeaturesOptions#validateOnly")]
     pub fn validate_only(&self) -> bool {
         self.validate_only

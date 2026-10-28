@@ -200,10 +200,9 @@ async fn update_features_above_max_is_rejected<F: AdminBackendFactory>(ctx: &mut
 /// (c) An **empty** update map is rejected synchronously by the client, as a
 /// whole-call error with Java's exact message.
 ///
-/// `KafkaAdminClient.updateFeatures` throws
-/// `IllegalArgumentException("Feature updates can not be null or empty.")`
-/// (`KafkaAdminClient.java:4578`), reproduced verbatim by
-/// `src/admin/kafka_admin_client.rs:4586`. No request is built, so this is the
+/// `KafkaAdminClient#updateFeatures` throws
+/// `IllegalArgumentException("Feature updates can not be null or empty.")`,
+/// reproduced verbatim by `src/admin/kafka_admin_client.rs:4586`. No request is built, so this is the
 /// only path in the harness that exercises the response's top-level error for a
 /// *synchronous* throw rather than for a transport or submission failure.
 ///
