@@ -7,6 +7,11 @@ breaking changes.
 
 ## [Unreleased]
 
+### General availability
+
+- First generally available (GA) release of the Rust client. The clients no
+  longer log a preview warning at startup.
+
 ### Admin client
 
 - **Behaviour change:** a retriable error during `close(timeout)` no longer

@@ -55,6 +55,7 @@ import _confluentkafka as _lib  # type: ignore[import-not-found]
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka._preview import PREVIEW_WARNING
 from confluent_kafka.common import KafkaError
 from confluent_kafka.common.errors import TimeoutError as KafkaTimeoutError
 from confluent_kafka.producer import (
@@ -169,8 +170,9 @@ def _core_callback_errors(capfd: pytest.CaptureFixture[str]) -> list[str]:
 
 
 def _producer_log(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    """What the producer logged."""
-    return [r for r in caplog.records if r.name == "confluent_kafka.producer"]
+    """What the producer logged, but for the preview warning of its construction."""
+    return [r for r in caplog.records if r.name == "confluent_kafka.producer"
+            and r.getMessage() != PREVIEW_WARNING]
 
 
 def _freed_once(freed: list[int], fake: FakeSendCb) -> bool:
