@@ -22,6 +22,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::BytesMut;
+
 use crate::common::Error;
 use crate::common::compress::Compression;
 use crate::common::record::TimestampType;
@@ -306,7 +308,7 @@ impl MemoryRecords {
     /// Java overload with an allocated buffer (CLAUDE.md §2).
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_buffer_magic(
-        buffer: Vec<u8>,
+        buffer: BytesMut,
         magic: i8,
         compression: Compression,
         timestamp_type: TimestampType,
@@ -418,7 +420,7 @@ impl MemoryRecords {
             delete_horizon_ms,
         } = options;
 
-        let buffer = Vec::with_capacity(initial_capacity);
+        let buffer = BytesMut::with_capacity(initial_capacity);
         match delete_horizon_ms {
             Some(delete_horizon_ms) => MemoryRecordsBuilder::new(
                 buffer,
@@ -653,7 +655,7 @@ impl MemoryRecords {
         };
 
         let mut builder = MemoryRecordsBuilder::with_default(
-            Vec::with_capacity(size_estimate),
+            BytesMut::with_capacity(size_estimate),
             0,
             magic,
             compression,
@@ -733,7 +735,7 @@ impl MemoryRecords {
         // Java: `DefaultRecordBatch.RECORD_BATCH_OVERHEAD` (defined on
         // `RecordBatch` in Rust) + `marker.endTxnMarkerValueSize()`.
         let size = RecordBatch::RECORD_BATCH_OVERHEAD + marker.end_txn_marker_value_size() as usize;
-        let buffer = Vec::with_capacity(size);
+        let buffer = BytesMut::with_capacity(size);
         // Infallible here: this builds a transactional control batch with a valid
         // producer id, so neither `append_end_txn_marker` guard can fire.
         Self::write_end_transactional_marker(
@@ -758,7 +760,7 @@ impl MemoryRecords {
     /// returns the built [`MemoryRecords`] — equivalent to Java's caller doing
     /// `buffer.flip(); readableRecords(buffer)`.
     pub fn write_end_transactional_marker(
-        buffer: Vec<u8>,
+        buffer: BytesMut,
         initial_offset: i64,
         timestamp: i64,
         partition_leader_epoch: i32,
@@ -1392,7 +1394,7 @@ mod tests {
             ];
 
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),

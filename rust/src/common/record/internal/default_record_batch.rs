@@ -1840,7 +1840,7 @@ mod tests {
         let coordinator_epoch = 15_i32;
 
         let mut builder = MemoryRecordsBuilder::with_default(
-            Vec::with_capacity(128),
+            bytes::BytesMut::with_capacity(128),
             0,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),

@@ -568,7 +568,7 @@ mod tests {
         // rather than a sentinel payload — otherwise the build fails before reaching the
         // behaviour under test.
         let mut records_builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 512],
+            bytes::BytesMut::zeroed(512),
             RecordBatch::MAGIC_VALUE_V2,
             Compression::none().build(),
             TimestampType::CreateTime,

@@ -20,7 +20,7 @@
 use std::io;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::common::Error;
 use crate::producer::internals::BufferPool;
@@ -42,11 +42,12 @@ use crate::producer::internals::BufferPool;
 /// # Rust representation
 ///
 /// - **A chunk can never grow.** Java's chunks are fixed-capacity `ByteBuffer`s, which throw on
-///   overflow. A Rust `Vec<u8>` would instead silently reallocate, breaking the pool's memory
-///   accounting, so every chunk is held as a `Box<[u8]>`: a boxed slice has no `push` / `extend`
-///   and its length is fixed for its whole life. Chunks enter as the pool's `Vec<u8>`s (whose
-///   length equals their capacity, so the conversion does not reallocate) and leave as `Vec<u8>`s
-///   again when they are returned to the pool.
+///   overflow. A growable Rust buffer would instead silently reallocate, breaking the pool's
+///   memory accounting, so the chunks are the pool's own [`BytesMut`]s, kept at full length (their
+///   length raised to their capacity when they are attached, a no-op for the pool's chunks), and
+///   the stream only ever writes *into* them by index (`copy_from_slice` on a sub-slice), never
+///   through `extend` / `put`: a write past the attached capacity is refused before it starts.
+///   They go back to the pool as they came, with the capacity the pool checks on return.
 /// - **One write position instead of one per chunk.** Java keeps a position in every
 ///   `ByteBuffer`. Writes only ever advance past a chunk once it is full, and
 ///   [`set_position`](Self::set_position) fills every chunk before the one it stops in, so every
@@ -57,8 +58,8 @@ use crate::producer::internals::BufferPool;
 ///   `buffer()` calls return the same instance, and `MemoryRecordsBuilder` writes the batch header
 ///   straight into it. Here the cache is a refcounted `Bytes`, so the builder can hand the
 ///   finished batch to `MemoryRecords` without a second copy (CLAUDE.md §14): the flatten is the
-///   single finalisation copy, exactly as `MemoryRecordsBuilder::take_batch_data` is on the
-///   single-buffer path. In-place header writes go through
+///   chunked path's one finalisation copy, the one KAFKA-20580 removes; the single-buffer path
+///   has none, its buffer being frozen in place. In-place header writes go through
 ///   [`rewrite_buffer`](Self::rewrite_buffer).
 /// - **Dropping the stream returns its chunks.** Java relies on an explicit
 ///   [`deallocate`](Self::deallocate); a Rust future can be dropped at any `.await` (CLAUDE.md
@@ -66,7 +67,7 @@ use crate::producer::internals::BufferPool;
 ///   explicit `deallocate` the stream holds no chunks and the drop is a no-op.
 #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream")]
 pub(crate) struct ChunkedByteBufferOutputStream {
-    chunks: Vec<Box<[u8]>>,
+    chunks: Vec<BytesMut>,
     chunk_size: usize,
     /// The pool the chunks are returned to. `None` only in tests, as Java's `pool` may be null.
     pool: Option<Arc<BufferPool>>,
@@ -106,12 +107,12 @@ impl ChunkedByteBufferOutputStream {
         alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#ChunkedByteBufferOutputStream"
     )]
     pub(crate) fn new(
-        initial_chunks: Vec<Vec<u8>>,
+        initial_chunks: Vec<BytesMut>,
         chunk_size: usize,
         pool: Option<Arc<BufferPool>>,
     ) -> Result<Self, Error> {
         Self::validated_first_chunk(&initial_chunks, chunk_size)?;
-        let chunks = initial_chunks.into_iter().map(Self::into_fixed_chunk).collect();
+        let chunks = initial_chunks.into_iter().map(Self::at_full_length).collect();
         Ok(Self {
             chunks,
             chunk_size,
@@ -127,7 +128,7 @@ impl ChunkedByteBufferOutputStream {
     /// `chunk_size`. Java returns the first chunk for its `super(...)` call; Rust has no base
     /// class to hand it to, so this only validates.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#validatedFirstChunk")]
-    fn validated_first_chunk(initial_chunks: &[Vec<u8>], chunk_size: usize) -> Result<(), Error> {
+    fn validated_first_chunk(initial_chunks: &[BytesMut], chunk_size: usize) -> Result<(), Error> {
         if initial_chunks.is_empty() {
             return Err(Error::local_illegal_argument("initialChunks must be non-empty"));
         }
@@ -137,7 +138,7 @@ impl ChunkedByteBufferOutputStream {
     /// Validates that every chunk's capacity equals `chunk_size`, which the stream's capacity
     /// bookkeeping relies on.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#validateChunkCapacities")]
-    fn validate_chunk_capacities(chunks: &[Vec<u8>], chunk_size: usize) -> Result<(), Error> {
+    fn validate_chunk_capacities(chunks: &[BytesMut], chunk_size: usize) -> Result<(), Error> {
         for chunk in chunks {
             if chunk.capacity() != chunk_size {
                 return Err(Error::local_illegal_argument(format!(
@@ -150,14 +151,14 @@ impl ChunkedByteBufferOutputStream {
         Ok(())
     }
 
-    /// Turns a validated pool chunk into a fixed-length one. A `ByteBuffer`'s capacity is all
-    /// writable, so the length is first raised to the capacity (a no-op for the pool's chunks,
-    /// whose length already equals their capacity); `into_boxed_slice` then has no excess
-    /// capacity to shed and does not reallocate.
-    fn into_fixed_chunk(mut chunk: Vec<u8>) -> Box<[u8]> {
+    /// Brings a validated pool chunk to its full length. A `ByteBuffer`'s capacity is all
+    /// writable, and the stream writes by index, so the length is raised to the capacity (a no-op
+    /// for the pool's chunks, whose length already equals their capacity, and never a
+    /// reallocation otherwise).
+    fn at_full_length(mut chunk: BytesMut) -> BytesMut {
         let capacity = chunk.capacity();
         chunk.resize(capacity, 0);
-        chunk.into_boxed_slice()
+        chunk
     }
 
     /// Writes one byte. Java's `write(int)`.
@@ -263,11 +264,11 @@ impl ChunkedByteBufferOutputStream {
     /// `IllegalState` after [`deallocate`](Self::deallocate) or [`close`](Self::close);
     /// `IllegalArgument` if a chunk's capacity differs from the stream's chunk size.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#addBuffers")]
-    pub(crate) fn add_buffers(&mut self, new_chunks: &mut Vec<Vec<u8>>) -> Result<(), Error> {
+    pub(crate) fn add_buffers(&mut self, new_chunks: &mut Vec<BytesMut>) -> Result<(), Error> {
         self.ensure_not_deallocated()?;
         self.ensure_writable()?;
         Self::validate_chunk_capacities(new_chunks, self.chunk_size)?;
-        self.chunks.extend(new_chunks.drain(..).map(Self::into_fixed_chunk));
+        self.chunks.extend(new_chunks.drain(..).map(Self::at_full_length));
         Ok(())
     }
 
@@ -286,7 +287,7 @@ impl ChunkedByteBufferOutputStream {
     pub(crate) fn buffer(&mut self) -> Result<&Bytes, Error> {
         self.ensure_buffer_readable()?;
         if self.flattened_buffer.is_none() {
-            self.flattened_buffer = Some(Bytes::from(self.flatten()));
+            self.flattened_buffer = Some(self.flatten().freeze());
         }
         Ok(self.flattened_buffer.as_ref().expect("populated just above"))
     }
@@ -298,24 +299,24 @@ impl ChunkedByteBufferOutputStream {
     /// the batch header into it, and `abort()` repositions it). A `Bytes` is immutable, so the
     /// mutation goes through here instead:
     ///
-    /// - before the first [`buffer`](Self::buffer) call, `f` runs on the freshly flattened `Vec`
-    ///   before it is frozen, so the first close costs exactly the one flatten copy;
-    /// - afterwards (a reopened batch being closed again), the cached `Bytes` is turned back into
-    ///   a `Vec`, which reuses the allocation when nothing else still references it and copies it
-    ///   otherwise. Copying is what keeps a `MemoryRecords` handed out by the earlier close
-    ///   unchanged, matching the single-buffer path, which also re-copies on every close.
+    /// - before the first [`buffer`](Self::buffer) call, `f` runs on the freshly flattened
+    ///   `BytesMut` before it is frozen, so the first close costs exactly the one flatten copy;
+    /// - afterwards (a reopened batch being closed again), the cached `Bytes` is made writable
+    ///   again, in place when nothing else still references it and by copying it otherwise.
+    ///   Copying is what keeps a `MemoryRecords` handed out by the earlier close unchanged, as
+    ///   `ByteBufferOutputStream::thaw` does on the single-buffer path.
     ///
     /// # Errors
     ///
     /// The same as [`buffer`](Self::buffer).
-    pub(crate) fn rewrite_buffer<R>(&mut self, f: impl FnOnce(&mut Vec<u8>) -> R) -> Result<R, Error> {
+    pub(crate) fn rewrite_buffer<R>(&mut self, f: impl FnOnce(&mut BytesMut) -> R) -> Result<R, Error> {
         self.ensure_buffer_readable()?;
         let mut flattened = match self.flattened_buffer.take() {
-            Some(bytes) => Vec::from(bytes),
+            Some(bytes) => bytes.try_into_mut().unwrap_or_else(|shared| BytesMut::from(&shared[..])),
             None => self.flatten(),
         };
         let result = f(&mut flattened);
-        self.flattened_buffer = Some(Bytes::from(flattened));
+        self.flattened_buffer = Some(flattened.freeze());
         Ok(result)
     }
 
@@ -336,9 +337,9 @@ impl ChunkedByteBufferOutputStream {
     ///
     /// Written bytes only live in chunks up to the current one; later chunks are untouched.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedByteBufferOutputStream#flatten")]
-    fn flatten(&self) -> Vec<u8> {
+    fn flatten(&self) -> BytesMut {
         let current = self.current_chunk_index.expect("checked by ensure_buffer_readable");
-        let mut flattened = Vec::with_capacity(current * self.chunk_size + self.current_chunk_position);
+        let mut flattened = BytesMut::with_capacity(current * self.chunk_size + self.current_chunk_position);
         for chunk in &self.chunks[..current] {
             flattened.extend_from_slice(chunk);
         }
@@ -366,7 +367,7 @@ impl ChunkedByteBufferOutputStream {
         // batch completion.
         for chunk in self.chunks.drain(current + 1..) {
             if let Some(pool) = &self.pool {
-                pool.deallocate(chunk.into_vec());
+                pool.deallocate(chunk);
             }
         }
     }
@@ -485,7 +486,7 @@ impl ChunkedByteBufferOutputStream {
     pub(crate) fn deallocate_with_pool(&mut self, pool: Option<&BufferPool>) {
         for chunk in self.chunks.drain(..) {
             if let Some(pool) = pool {
-                pool.deallocate(chunk.into_vec());
+                pool.deallocate(chunk);
             }
         }
         self.current_chunk_index = None;
@@ -508,7 +509,7 @@ impl ChunkedByteBufferOutputStream {
 }
 
 /// `io::Write` over the chunks, so `DefaultRecord::write_to` and the compression wrappers can
-/// write into the stream the way they write into a `Vec<u8>`.
+/// write into the stream the way they write into the single buffer.
 ///
 /// `io::Write::write` promises that an error means no bytes were written, so unlike
 /// [`write_with_bytes`](ChunkedByteBufferOutputStream::write_with_bytes) it writes only what fits and
@@ -565,7 +566,7 @@ mod tests {
         Arc::new(BufferPool::new_incremental_for_test(total, chunk_size))
     }
 
-    fn chunks(pool: &BufferPool, chunk_size: usize, count: usize) -> Vec<Vec<u8>> {
+    fn chunks(pool: &BufferPool, chunk_size: usize, count: usize) -> Vec<BytesMut> {
         pool.try_allocate_chunks((chunk_size * count) as i32)
             .expect("the test pools are large enough")
     }
@@ -607,7 +608,7 @@ mod tests {
         assert_eq!("initialChunks must be non-empty", err.message());
 
         // A chunk whose capacity doesn't match chunkSize violates the contract.
-        let wrong_size = vec![vec![0u8; chunk_size + 1]];
+        let wrong_size = vec![BytesMut::zeroed(chunk_size + 1)];
         let err = ChunkedByteBufferOutputStream::new(wrong_size, chunk_size, Some(p)).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
         assert_eq!(
@@ -642,7 +643,7 @@ mod tests {
         // Java's `write(ByteBuffer)`: the io::Write route.
         let io_err = stream.write(&[5]).unwrap_err();
         assert_eq!(DEALLOCATED, io_message(io_err));
-        let mut extra = vec![vec![0u8; chunk_size]];
+        let mut extra = vec![BytesMut::zeroed(chunk_size)];
         assert_illegal_state(stream.add_buffers(&mut extra), DEALLOCATED);
         assert_eq!(1, extra.len(), "a refused add_buffers leaves the chunks with the caller");
 
@@ -669,7 +670,7 @@ mod tests {
         assert_illegal_state(stream.write_with_bytes(&[4]), CLOSED);
         assert_eq!(CLOSED, io_message(stream.write(&[5]).unwrap_err()));
         // Attaching more chunks is a write-preparation step, so it is disallowed once closed too.
-        let mut extra = vec![vec![0u8; chunk_size]];
+        let mut extra = vec![BytesMut::zeroed(chunk_size)];
         assert_illegal_state(stream.add_buffers(&mut extra), CLOSED);
 
         // buffer() still works after close and returns the same cached instance on repeat calls.
@@ -800,7 +801,7 @@ mod tests {
         let mut stream = stream(&p, chunk_size, 1);
         // A chunk whose capacity doesn't match chunkSize violates the contract, same as the
         // constructor.
-        let mut wrong_size = vec![vec![0u8; chunk_size + 1]];
+        let mut wrong_size = vec![BytesMut::zeroed(chunk_size + 1)];
         let err = stream.add_buffers(&mut wrong_size).unwrap_err();
         assert!(matches!(err, Error::LocalIllegalArgument(_)), "got {err:?}");
         assert_eq!(

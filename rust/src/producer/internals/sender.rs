@@ -3074,6 +3074,8 @@ mod tests {
     /// it, so the manager reads the same instance the `Sender` updates (DoD #12).
     type TxnManagerBuilder = Box<dyn FnOnce(Arc<crate::Metadata>) -> Arc<Mutex<TransactionManager>>>;
 
+    use bytes::BytesMut;
+
     use super::*;
     use crate::MockClient;
     use crate::ProduceResponseData;
@@ -3587,7 +3589,7 @@ mod tests {
 
     fn make_batch(tp: TopicPartition, created_ms: i64) -> ProducerBatch {
         let records_builder = MemoryRecordsBuilder::new(
-            Vec::with_capacity(1024),
+            BytesMut::with_capacity(1024),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
@@ -3611,7 +3613,7 @@ mod tests {
     /// request is built for inspection.
     fn single_record_batch_bytes() -> bytes::Bytes {
         let mut builder = MemoryRecordsBuilder::new(
-            Vec::with_capacity(256),
+            BytesMut::with_capacity(256),
             0, // initial_position
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
@@ -5009,7 +5011,7 @@ mod tests {
     ///
     /// (PLAN §9.19 listed this method as blocked partly on "`BufferPool` does
     /// accounting only and does not hand back the same backing array". That is
-    /// wrong — `BufferPool` keeps a `VecDeque<Vec<u8>>` free list and
+    /// wrong — `BufferPool` keeps a `VecDeque<BytesMut>` free list and
     /// `allocate` pops from it, returning the same allocation. The §9.18 half of the
     /// blockage was real and is now fixed.)
     #[tokio::test]
@@ -5051,7 +5053,48 @@ mod tests {
         // comment).
         assert_eq!(pool.free_size(), 0, "Buffer should not be reused");
         let new_buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
-        assert_eq!(new_buffer.len(), BATCH_SIZE);
+        assert_eq!(new_buffer.capacity(), BATCH_SIZE);
+    }
+
+    /// Rust-only (no Java counterpart). Java's `deallocate` always returns the batch's
+    /// `ByteBuffer` to the pool; here a closed batch's buffer is frozen and shared with the
+    /// produce request's `MemoryRecords` (`MemoryRecordsBuilder::take_batch_data`), and
+    /// `take_buffer` can reclaim it only once every such view has been dropped. This pins
+    /// that the request's views are gone by the time the response completes the batch, so
+    /// the very allocation the batch was written into makes the round trip back to the pool.
+    #[tokio::test]
+    async fn test_buffer_reused_after_successful_response() {
+        const BATCH_SIZE: usize = 16 * 1024;
+        let pool = Arc::new(BufferPool::new_for_test(1024 * 1024, BATCH_SIZE));
+
+        let buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
+        let allocation = buffer.as_ptr();
+        pool.deallocate(buffer);
+        assert_eq!(pool.free_size(), 1, "the buffer we created is the pool's only free one");
+
+        let mut ctx = SenderTestContext::with_transaction_state(false, i32::MAX, None, None, Some(Arc::clone(&pool)));
+        let tp0 = ctx.tp0.clone();
+
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert_eq!(pool.free_size(), 0, "Sender should have allocated the same buffer we created");
+
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once"); // handle the response
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+        assert!(future.is_done(), "the batch must be complete");
+
+        assert_eq!(pool.free_size(), 1, "the completed batch's buffer must be back in the pool");
+        let reused = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
+        assert_eq!(allocation, reused.as_ptr(), "it must be the same allocation, not a replacement");
+        assert_eq!(BATCH_SIZE, reused.capacity());
+        assert!(
+            reused.is_empty(),
+            "a recycled buffer comes back cleared, as Java's `clear()`ed ByteBuffer"
+        );
     }
 
     /// Translated from Java `SenderTest.testResetNextBatchExpiry()`.

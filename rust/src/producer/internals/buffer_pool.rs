@@ -39,10 +39,18 @@
 //! - `allocate` checks if memory is immediately available, otherwise registers a waiter and
 //!   waits for notification (with timeout)
 //! - `deallocate` returns memory and notifies the next waiter
+//!
+//! The buffers are [`BytesMut`]s, not `Vec<u8>`s, so that `MemoryRecordsBuilder::close` can
+//! freeze a batch in place and hand `MemoryRecords` a slice of the same allocation, as Java's
+//! `builtRecords` is a `duplicate().slice()` of the builder's `ByteBuffer` (CLAUDE.md §14); the
+//! frozen buffer comes back here as a writable `BytesMut` of its original capacity once the
+//! request holding it has been dropped (`MemoryRecordsBuilder::take_buffer`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use bytes::BytesMut;
 
 use crate::common::Error;
 use crate::common::metrics::TimeUnit;
@@ -56,7 +64,7 @@ struct PoolInner {
     /// Corresponds to Java's `nonPooledAvailableMemory`.
     non_pooled_available_memory: i64,
     /// Free list of recycled buffers (only buffers of `poolable_size` capacity).
-    free: VecDeque<Vec<u8>>,
+    free: VecDeque<BytesMut>,
     /// Queue of waiters (each is a `tokio::sync::Notify` that will be notified
     /// when memory becomes available).
     waiters: VecDeque<Arc<tokio::sync::Notify>>,
@@ -65,7 +73,7 @@ struct PoolInner {
 /// Result from trying to allocate within the lock.
 enum AllocResult {
     /// Allocation succeeded immediately — here is the buffer.
-    Immediate(Vec<u8>),
+    Immediate(BytesMut),
     /// Need to wait — here is the Notify to wait on.
     NeedWait(Arc<tokio::sync::Notify>),
     /// Pool is closed.
@@ -75,7 +83,7 @@ enum AllocResult {
 /// Result from checking state after being notified.
 enum WakeResult {
     /// Got a buffer from the free list.
-    GotBuffer(Vec<u8>),
+    GotBuffer(BytesMut),
     /// Accumulated enough memory — allocate a new buffer.
     Ready,
     /// Need more memory — keep waiting.
@@ -143,7 +151,7 @@ pub struct BufferPool {
     fail_allocate_byte_buffer: AtomicBool,
     /// Test-only observer mirroring Java tests overriding `deallocate(ByteBuffer, int)` to record
     /// each buffer handed back: called with the buffer's address (its identity, which a move of
-    /// the `Vec` does not change) on every [`deallocate_with_size`](Self::deallocate_with_size).
+    /// the buffer does not change) on every [`deallocate_with_size`](Self::deallocate_with_size).
     #[cfg(test)]
     pub(crate) deallocate_observer: Mutex<Option<DeallocateObserver>>,
 }
@@ -307,8 +315,13 @@ impl BufferPool {
     /// `nonPooledAvailableMemory` in a `finally` block. In Rust, the default global
     /// allocator aborts the process on OOM (rather than throwing a recoverable exception),
     /// so the `safeAllocateByteBuffer` recovery path is intentionally omitted.
-    /// Buffer allocation (`vec![0u8; size]`) is performed outside the lock, matching
-    /// Java's design, but OOM during allocation is unrecoverable.
+    /// Buffer allocation (`BytesMut::with_capacity(size)`) is performed outside the lock,
+    /// matching Java's design, but OOM during allocation is unrecoverable.
+    ///
+    /// The returned buffer is empty with capacity `size`: the shape of Java's fresh or
+    /// `clear()`ed `ByteBuffer` (position 0, limit = capacity = `size`). Neither a fresh nor a
+    /// recycled buffer is zero-filled, as Java zero-fills neither; a `MemoryRecordsBuilder`
+    /// sizes it to the batch header and appends from there.
     ///
     /// # Arguments
     ///
@@ -328,7 +341,7 @@ impl BufferPool {
     ///
     /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#allocate")]
-    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
+    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<BytesMut, Error> {
         if self.allocation_mode != AllocationMode::Full {
             return Err(Error::local_illegal_state(format!(
                 "allocate() is not supported in {} allocation mode; use allocateChunks()",
@@ -349,10 +362,9 @@ impl BufferPool {
             if self.closed.load(Ordering::Acquire) {
                 AllocResult::Closed
             } else if size == self.poolable_size && !inner.free.is_empty() {
-                // Fast path: grab a recycled buffer
+                // Fast path: grab a recycled buffer (Java's `buffer.clear()`: no zero-fill)
                 let mut buf = inner.free.pop_front().unwrap();
                 buf.clear();
-                buf.resize(size, 0);
                 AllocResult::Immediate(buf)
             } else {
                 let free_list_size = inner.free.len() as i64 * self.poolable_size as i64;
@@ -398,7 +410,7 @@ impl BufferPool {
         size: usize,
         max_block_ms: i64,
         more_memory: &Arc<tokio::sync::Notify>,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<BytesMut, Error> {
         /// Java's inner `finally` in `BufferPool#allocate`, as a `Drop` type:
         ///
         /// ```java
@@ -470,10 +482,9 @@ impl BufferPool {
                 let mut inner = self.inner.lock().unwrap();
 
                 if guard.accumulated == 0 && size == self.poolable_size && !inner.free.is_empty() {
-                    // Grab a buffer from the free list
+                    // Grab a buffer from the free list (Java's `buffer.clear()`: no zero-fill)
                     let mut buf = inner.free.pop_front().unwrap();
                     buf.clear();
-                    buf.resize(size, 0);
                     WakeResult::GotBuffer(buf)
                 } else {
                     // Try to accumulate memory
@@ -659,7 +670,7 @@ impl BufferPool {
         &self,
         total_size: i32,
         max_time_to_block_ms: i64,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> Result<Vec<BytesMut>, Error> {
         let (num_chunks, memory_required) = self.chunk_request(total_size)?;
 
         let more_memory = {
@@ -701,7 +712,7 @@ impl BufferPool {
     ///
     /// As [`allocate_chunks`](Self::allocate_chunks), with
     /// [`Error::ProducerBufferExhausted`] whenever the memory is not available right now.
-    pub(crate) fn try_allocate_chunks(&self, total_size: i32) -> Result<Vec<Vec<u8>>, Error> {
+    pub(crate) fn try_allocate_chunks(&self, total_size: i32) -> Result<Vec<BytesMut>, Error> {
         let (num_chunks, memory_required) = self.chunk_request(total_size)?;
         {
             let mut inner = self.inner.lock().unwrap();
@@ -760,7 +771,7 @@ impl BufferPool {
         inner: &mut PoolInner,
         num_chunks: usize,
         memory_required: i64,
-    ) -> Option<Vec<Vec<u8>>> {
+    ) -> Option<Vec<BytesMut>> {
         let chunk_size = self.poolable_size as i64;
         let free_list_bytes = inner.free.len() as i64 * chunk_size;
         if inner.non_pooled_available_memory + free_list_bytes < memory_required {
@@ -791,7 +802,7 @@ impl BufferPool {
         memory_required: i64,
         max_time_to_block_ms: i64,
         more_memory: &Arc<tokio::sync::Notify>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> Result<Vec<BytesMut>, Error> {
         /// Java's `finally` blocks around the wait loop, as a `Drop` type:
         ///
         /// ```java
@@ -813,7 +824,7 @@ impl BufferPool {
             pool: &'a BufferPool,
             waiter: &'a Arc<tokio::sync::Notify>,
             /// Chunks taken from the free list (Java's `pooled`).
-            pooled: Vec<Vec<u8>>,
+            pooled: Vec<BytesMut>,
             /// Bytes drawn from non-pooled memory only, always a whole-chunk multiple (Java's
             /// `nonPoolAccumulated`).
             non_pool_accumulated: i64,
@@ -892,11 +903,17 @@ impl BufferPool {
     /// garbage). The Rust default allocator aborts on OOM rather than unwinding, so the only way
     /// to leave this loop early is a panic; the `finally` becomes a guard that runs on unwind.
     ///
-    /// Free-list chunks are handed out at full length (`resize` to their capacity). Chunks the
-    /// incremental strategy returns already have length equal to capacity, so this writes
-    /// nothing; unlike [`allocate`](Self::allocate) it does not zero recycled bytes, which, like
-    /// Java's `ByteBuffer.clear()`, nothing reads before overwriting.
-    fn allocate_reserved_chunks(&self, pooled: Vec<Vec<u8>>, num_chunks: usize, memory_required: i64) -> Vec<Vec<u8>> {
+    /// Chunks are handed out at full length (`resize` to their capacity), as the chunked stream
+    /// writes into them by index. Chunks the incremental strategy returns already have length
+    /// equal to capacity, so this writes nothing for them; a fresh chunk is zero-filled once.
+    /// Like [`allocate`](Self::allocate) and Java's `ByteBuffer.clear()`, it does not zero
+    /// recycled bytes, which nothing reads before overwriting.
+    fn allocate_reserved_chunks(
+        &self,
+        pooled: Vec<BytesMut>,
+        num_chunks: usize,
+        memory_required: i64,
+    ) -> Vec<BytesMut> {
         struct ReleaseOnUnwind<'a> {
             pool: &'a BufferPool,
             bytes: i64,
@@ -919,7 +936,12 @@ impl BufferPool {
             result.push(chunk);
         }
         for _ in 0..chunks_still_needed {
-            result.push(self.allocate_byte_buffer(self.poolable_size));
+            // A fresh chunk is empty (`allocate_byte_buffer`); the chunked stream writes by
+            // index, so a chunk is handed out at full length like a recycled one.
+            let mut chunk = self.allocate_byte_buffer(self.poolable_size);
+            let capacity = chunk.capacity();
+            chunk.resize(capacity, 0);
+            result.push(chunk);
         }
         release.error = false;
         result
@@ -982,15 +1004,17 @@ impl BufferPool {
         }
     }
 
-    /// Allocate a zeroed buffer of `size` bytes (Java's protected `allocateByteBuffer`, the
-    /// override point its tests use to inject an `OutOfMemoryError`).
+    /// Allocate an empty buffer with capacity `size` (Java's protected `allocateByteBuffer`, the
+    /// override point its tests use to inject an `OutOfMemoryError`). Like Java's
+    /// `ByteBuffer.allocate`, it does not touch the memory: a 1 MiB batch buffer is not
+    /// written until the records are.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#allocateByteBuffer")]
-    fn allocate_byte_buffer(&self, size: usize) -> Vec<u8> {
+    fn allocate_byte_buffer(&self, size: usize) -> BytesMut {
         #[cfg(test)]
         if self.fail_allocate_byte_buffer.load(Ordering::Relaxed) {
             panic!("Injected allocateByteBuffer failure");
         }
-        vec![0u8; size]
+        BytesMut::with_capacity(size)
     }
 
     /// Return buffers to the pool. If they are of the poolable size add them to the free list,
@@ -1003,7 +1027,7 @@ impl BufferPool {
     ///   than `buffer.capacity()` since the buffer may re-allocate itself during in-place
     ///   compression
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#deallocate")]
-    pub fn deallocate_with_size(&self, buffer: Vec<u8>, size: usize) {
+    pub fn deallocate_with_size(&self, buffer: BytesMut, size: usize) {
         #[cfg(test)]
         if let Some(observer) = self.deallocate_observer.lock().unwrap().clone() {
             observer(buffer.as_ptr() as usize);
@@ -1022,7 +1046,7 @@ impl BufferPool {
 
     /// Return a buffer to the pool using its full capacity as the size.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#deallocate")]
-    pub fn deallocate(&self, buffer: Vec<u8>) {
+    pub fn deallocate(&self, buffer: BytesMut) {
         let size = buffer.capacity();
         self.deallocate_with_size(buffer, size);
     }
@@ -1114,7 +1138,7 @@ mod tests {
         let pool = BufferPool::new_for_test(total_memory, size);
 
         let buffer = pool.allocate(size, max_block_ms).await.unwrap();
-        assert_eq!(size, buffer.len(), "Buffer size should equal requested size.");
+        assert_eq!(size, buffer.capacity(), "Buffer size should equal requested size.");
         assert_eq!(
             total_memory - size as i64,
             pool.unallocated_memory(),
@@ -1135,7 +1159,7 @@ mod tests {
         );
 
         let buffer = pool.allocate(size, max_block_ms).await.unwrap();
-        assert_eq!(size, buffer.len(), "Recycled buffer should be the right size.");
+        assert_eq!(size, buffer.capacity(), "Recycled buffer should be the right size.");
         pool.deallocate(buffer);
         assert_eq!(total_memory, pool.available_memory(), "All memory should be available");
         assert_eq!(
@@ -1162,7 +1186,7 @@ mod tests {
     async fn test_cant_allocate_more_memory_than_we_have() {
         let pool = BufferPool::new_for_test(1024, 512);
         let buffer = pool.allocate(1024, 10).await.unwrap();
-        assert_eq!(1024, buffer.len());
+        assert_eq!(1024, buffer.capacity());
         pool.deallocate(buffer);
 
         let result = pool.allocate(1025, 10).await;
@@ -1635,7 +1659,7 @@ mod tests {
             .expect("the live waiter must be signalled, not starved by a leaked waiter")
             .expect("the waiter task must not panic")
             .expect("memory was returned, so the allocation must succeed");
-        assert_eq!(2, buffer.len());
+        assert_eq!(2, buffer.capacity());
 
         pool.deallocate(buffer);
         assert_eq!(0, pool.queued(), "no waiter may be left behind");
@@ -1671,7 +1695,7 @@ mod chunk_allocation_tests {
         }
     }
 
-    async fn take_one(p: &BufferPool, chunk_size: usize) -> Vec<u8> {
+    async fn take_one(p: &BufferPool, chunk_size: usize) -> BytesMut {
         p.allocate_chunks(chunk_size as i32, 100).await.unwrap().pop().unwrap()
     }
 

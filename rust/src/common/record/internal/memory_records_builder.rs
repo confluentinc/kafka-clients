@@ -21,6 +21,8 @@
 
 use std::io::{self, Write};
 
+use bytes::{BufMut, Bytes, BytesMut};
+
 use crate::common::Error;
 use crate::common::compress::{CompressingWriter, Compression};
 use crate::common::header::RecordHeader;
@@ -110,7 +112,7 @@ impl MemoryRecordsBuilder {
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn new(
-        buffer: Vec<u8>,
+        buffer: BytesMut,
         initial_position: usize,
         magic: i8,
         compression: Compression,
@@ -252,6 +254,12 @@ impl MemoryRecordsBuilder {
                 }
                 initial_buffer_capacity
             },
+            // A frozen buffer belongs to a closed builder; a new builder starts from a writable one.
+            ByteBufferOutputStream::Frozen(_) => {
+                return Err(Error::local_illegal_state(
+                    "Cannot create a MemoryRecordsBuilder over a closed buffer",
+                ));
+            },
             ByteBufferOutputStream::Chunked(stream) => {
                 // Java's `bufferStream.position(initialPosition + batchHeaderSizeInBytes)`: the
                 // header slot is skipped in the chunks and written into the flattened buffer at
@@ -317,7 +325,7 @@ impl MemoryRecordsBuilder {
     #[expect(clippy::too_many_arguments)]
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#MemoryRecordsBuilder")]
     pub fn with_default(
-        buffer: Vec<u8>,
+        buffer: BytesMut,
         initial_position: usize,
         magic: i8,
         compression: Compression,
@@ -363,7 +371,8 @@ impl MemoryRecordsBuilder {
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#buffer")]
     pub fn buffer(&mut self) -> Result<&[u8], Error> {
         match &mut self.buffer_stream {
-            ByteBufferOutputStream::Single(buffer) => Ok(buffer),
+            ByteBufferOutputStream::Single(buffer) => Ok(&buffer[..]),
+            ByteBufferOutputStream::Frozen(buffer) => Ok(&buffer[..]),
             ByteBufferOutputStream::Chunked(stream) => stream.buffer().map(|bytes| &bytes[..]),
         }
     }
@@ -387,19 +396,36 @@ impl MemoryRecordsBuilder {
         self.initial_buffer_capacity
     }
 
-    /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
+    /// Takes ownership of the underlying buffer, leaving an empty one in its place.
     ///
     /// This is used by [`RecordAccumulator::deallocate`] to return the actual batch
     /// buffer to the pool rather than allocating a new one.
     ///
+    /// A closed builder's buffer is frozen (see [`ByteBufferOutputStream`]): it comes back as a
+    /// writable buffer of its original capacity when every `MemoryRecords` view of it has been
+    /// dropped, which is the case once the batch's produce request has been sent and its
+    /// response handled. While a view is still alive the allocation stays with that view and the
+    /// pool gets an empty buffer, which it accounts for (`deallocate` credits the batch's size
+    /// either way) but does not pool. Either way the builder's own view is dropped here, so the
+    /// builder is finished: `built_records` is cleared with it, the one place besides
+    /// `reopen_and_rewrite_producer_state` that does.
+    ///
     /// Single-buffer streams only: a chunked stream's memory is returned through
     /// [`buffer_stream_mut`](Self::buffer_stream_mut) and
     /// `ChunkedByteBufferOutputStream::deallocate` (Java's `ChunkedProducerBatch.deallocateBuffer`),
-    /// so for it this returns an empty `Vec` and leaves the chunks attached.
-    pub fn take_buffer(&mut self) -> Vec<u8> {
+    /// so for it this returns an empty buffer and leaves the chunks attached.
+    pub fn take_buffer(&mut self) -> BytesMut {
+        self.built_records = None;
         match &mut self.buffer_stream {
             ByteBufferOutputStream::Single(buffer) => std::mem::take(buffer),
-            ByteBufferOutputStream::Chunked(_) => Vec::new(),
+            ByteBufferOutputStream::Frozen(buffer) => match std::mem::take(buffer).try_into_mut() {
+                Ok(mut buffer) => {
+                    buffer.clear();
+                    buffer
+                },
+                Err(_shared) => BytesMut::new(),
+            },
+            ByteBufferOutputStream::Chunked(_) => BytesMut::new(),
         }
     }
 
@@ -447,8 +473,9 @@ impl MemoryRecordsBuilder {
     ///
     /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
     /// [`bytes::Bytes`], so this is an O(1) refcount bump and copies no record bytes
-    /// (CLAUDE.md §14). The single finalisation copy lives in
-    /// [`take_batch_data`](Self::take_batch_data) and runs once, inside `close()`.
+    /// (CLAUDE.md §14). Nor does `close()` copy them: it freezes the builder's buffer in
+    /// place and the batch is a slice of it ([`take_batch_data`](Self::take_batch_data)),
+    /// as Java's `builtRecords` is a `duplicate().slice()` of the builder's `ByteBuffer`.
     ///
     /// Panics if the builder has been aborted.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecordsBuilder#build")]
@@ -461,7 +488,9 @@ impl MemoryRecordsBuilder {
         // the builder was already closed, in which case the field was populated by the
         // earlier call. Only `reopen_and_rewrite_producer_state` clears it, and it
         // clears `closed` with it — so `closed ⇔ built_records.is_some()` holds at every
-        // point, and this `expect` is unreachable.
+        // point, and this `expect` is unreachable. (`take_buffer` clears it too, but it
+        // hands the buffer back to the pool, which ends the builder's life: Java's batch
+        // is not read after `deallocate` either.)
         //
         // That invariant is worth stating because it is what aligns Rust's
         // [`is_closed`](Self::is_closed) with Java's. Java has no `closed` field: its
@@ -560,6 +589,11 @@ impl MemoryRecordsBuilder {
                         buffer.truncate(header_end);
                         buffer.extend_from_slice(&compressed_data);
                     },
+                    // The buffer is frozen only by `close()`, which closes the appends first,
+                    // so the append stream is `Closed` by then and returned above.
+                    ByteBufferOutputStream::Frozen(_) => {
+                        panic!("Compressed appends finished on a closed MemoryRecordsBuilder");
+                    },
                     ByteBufferOutputStream::Chunked(stream) => {
                         // Java writes the compressor's output into the chunked stream, which
                         // throws once the attached chunks are full (growth is KAFKA-20579); the
@@ -598,11 +632,14 @@ impl MemoryRecordsBuilder {
     }
 
     /// Runs `f` on the written bytes as one contiguous, mutable buffer (Java's `bufferStream.buffer()`
-    /// written to in place): the builder's own `Vec` for a single-buffer stream, the flattened
-    /// buffer for a chunked one. Only called once the builder is closed for appends.
-    fn with_written_buffer<R>(&mut self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    /// written to in place): the builder's own buffer for a single-buffer stream, thawed first if
+    /// a previous `close()` froze it, the flattened buffer for a chunked one. Only called once the
+    /// builder is closed for appends.
+    fn with_written_buffer<R>(&mut self, f: impl FnOnce(&mut BytesMut) -> R) -> R {
+        self.buffer_stream.thaw();
         match &mut self.buffer_stream {
             ByteBufferOutputStream::Single(buffer) => f(buffer),
+            ByteBufferOutputStream::Frozen(_) => unreachable!("thawed just above"),
             // A builder's chunked stream is closed by `close_for_record_appends` and deallocated
             // only when its batch completes, after the builder's last use; any other state is a
             // bug in the caller (Java's `IllegalStateException`).
@@ -625,7 +662,11 @@ impl MemoryRecordsBuilder {
         if self.aborted {
             panic!("Should not reopen a batch which is already aborted.");
         }
+        // Drop the builder's own view before thawing, so that a buffer no other view holds (the
+        // batch's produce request has been dropped, as it has when the response that reopens it
+        // is handled) is made writable in place rather than copied.
         self.built_records = None;
+        self.buffer_stream.thaw();
         self.closed = false;
         self.producer_id = producer_id;
         self.producer_epoch = producer_epoch;
@@ -669,23 +710,23 @@ impl MemoryRecordsBuilder {
 
     /// Extract the finalized batch bytes as a refcounted [`bytes::Bytes`].
     ///
-    /// Note (Phase 1 deviation): the producer builder keeps its working buffer
-    /// as `Vec<u8>` rather than `BytesMut`. `bytes` 1.x exposes no public
-    /// zero-copy `Vec<u8> -> BytesMut` adoption (`BytesMut::from_vec` is
-    /// crate-private), so switching the builder to `BytesMut` would either copy
-    /// at construction (adopting the pooled `Vec`) or break `BufferPool` reuse
-    /// (the pool reclaims the original-capacity `Vec` via `take_buffer`). We
-    /// therefore retain the single finalization copy here — the same copy the
-    /// previous `to_vec()` performed — and wrap it in `Bytes` (which adopts the
-    /// freshly allocated `Vec` with no extra copy). The receive path, which is
-    /// the actual zero-copy target of §27, is unaffected by this.
+    /// Java's `close()` leaves the batch where it was written and sets `builtRecords` to
+    /// `buffer.duplicate().slice()`: a second view of the same `ByteBuffer`, positioned at
+    /// `initialPosition`. This is the same thing: the single buffer is frozen in place (an O(1)
+    /// `BytesMut` → `Bytes` conversion that keeps the allocation) and the batch is an O(1) slice
+    /// of it, so finalisation copies no record bytes (CLAUDE.md §14). The frozen buffer stays in
+    /// the stream for `take_buffer` to return to the pool and for
+    /// `reopen_and_rewrite_producer_state` to thaw.
     ///
-    /// A chunked stream (KIP-1332) already made its one copy when it flattened its chunks, and
-    /// caches the result as a `Bytes`, so its batch is an O(1) slice of that buffer: the chunked
-    /// path copies exactly once, like the single-buffer path.
-    fn take_batch_data(&mut self) -> bytes::Bytes {
+    /// A chunked stream (KIP-1332) made one copy when it flattened its chunks and caches the
+    /// result as a `Bytes`, so its batch is an O(1) slice of that buffer too.
+    fn take_batch_data(&mut self) -> Bytes {
+        if let ByteBufferOutputStream::Single(buffer) = &mut self.buffer_stream {
+            self.buffer_stream = ByteBufferOutputStream::Frozen(std::mem::take(buffer).freeze());
+        }
         match &mut self.buffer_stream {
-            ByteBufferOutputStream::Single(buffer) => bytes::Bytes::from(buffer[self.initial_position..].to_vec()),
+            ByteBufferOutputStream::Frozen(frozen) => frozen.slice(self.initial_position..),
+            ByteBufferOutputStream::Single(_) => unreachable!("frozen just above"),
             ByteBufferOutputStream::Chunked(stream) => match stream.buffer() {
                 Ok(flattened) => flattened.slice(self.initial_position..),
                 // See `with_written_buffer`.
@@ -982,8 +1023,19 @@ impl MemoryRecordsBuilder {
         match &mut self.append_stream {
             AppendState::Direct => {
                 let size = match &mut self.buffer_stream {
-                    ByteBufferOutputStream::Single(buffer) => {
-                        DefaultRecord::write_to(buffer, offset_delta, timestamp_delta, key, value, headers)?
+                    // `BytesMut` has no `io::Write` of its own; `BufMut::writer` adapts it
+                    // without copying (each `write` is an `extend_from_slice`).
+                    ByteBufferOutputStream::Single(buffer) => DefaultRecord::write_to(
+                        &mut buffer.writer(),
+                        offset_delta,
+                        timestamp_delta,
+                        key,
+                        value,
+                        headers,
+                    )?,
+                    // Appends are closed before the buffer is frozen (see `close`).
+                    ByteBufferOutputStream::Frozen(_) => {
+                        panic!("Tried to append a record, but MemoryRecordsBuilder is closed for record appends");
                     },
                     ByteBufferOutputStream::Chunked(stream) => {
                         DefaultRecord::write_to(stream, offset_delta, timestamp_delta, key, value, headers)?
@@ -1277,7 +1329,7 @@ mod tests {
     fn test_write_empty_record_set() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1313,7 +1365,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1349,7 +1401,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1387,7 +1439,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1425,7 +1477,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1457,7 +1509,7 @@ mod tests {
     fn test_estimated_size_in_bytes() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1503,7 +1555,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1544,7 +1596,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1587,7 +1639,7 @@ mod tests {
     fn test_appended_checksum_consistency() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(512),
+                BytesMut::with_capacity(512),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1619,7 +1671,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(512),
+                BytesMut::with_capacity(512),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1664,7 +1716,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(64),
+                BytesMut::with_capacity(64),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1708,7 +1760,7 @@ mod tests {
     fn test_append_at_invalid_offset() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1743,7 +1795,7 @@ mod tests {
     fn test_throw_on_build_when_aborted() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1787,7 +1839,7 @@ mod tests {
     fn test_build_is_idempotent() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(1024),
+                BytesMut::with_capacity(1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1832,7 +1884,7 @@ mod tests {
     fn test_reset_buffer_on_abort() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1859,7 +1911,7 @@ mod tests {
     fn test_throw_on_close_when_aborted() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1887,7 +1939,7 @@ mod tests {
     fn test_throw_on_append_when_aborted() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1915,7 +1967,7 @@ mod tests {
     fn test_throw_on_append_when_closed() {
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -1950,7 +2002,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::new(
-                Vec::with_capacity(2 * 1024 * 1024),
+                BytesMut::with_capacity(2 * 1024 * 1024),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -2010,7 +2062,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -2052,7 +2104,7 @@ mod tests {
 
         for compression in all_compressions() {
             let mut builder = MemoryRecordsBuilder::with_default(
-                Vec::with_capacity(128),
+                BytesMut::with_capacity(128),
                 0,
                 RecordBatch::MAGIC_VALUE_V2,
                 compression.clone(),
@@ -2123,7 +2175,7 @@ mod chunked_stream_tests {
 
     fn single_builder() -> MemoryRecordsBuilder {
         MemoryRecordsBuilder::with_default(
-            Vec::with_capacity(1024),
+            BytesMut::with_capacity(1024),
             0,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
@@ -2266,7 +2318,7 @@ mod chunked_stream_tests {
     #[test]
     fn test_with_buffer_stream_single_starts_at_the_position() {
         let mut builder = MemoryRecordsBuilder::with_buffer_stream(
-            ByteBufferOutputStream::Single(vec![0xAB; 3]),
+            ByteBufferOutputStream::Single(BytesMut::from(&[0xAB; 3][..])),
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -2319,7 +2371,7 @@ mod chunked_stream_tests {
         );
 
         let mut compressed = MemoryRecordsBuilder::with_default(
-            Vec::with_capacity(1024),
+            BytesMut::with_capacity(1024),
             0,
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::gzip().build(),
@@ -2341,5 +2393,140 @@ mod chunked_stream_tests {
             61 + (uncompressed as f32 * 0.5 * COMPRESSION_RATE_ESTIMATION_FACTOR) as usize,
             compressed.estimated_bytes_written_after(Some(&key), Some(&value), &[])
         );
+    }
+}
+
+/// Rust tests for the frozen single buffer: `close()` leaves the batch where it was written, as
+/// Java's `builtRecords = buffer.duplicate().slice()` does, so these pin that no copy happens
+/// (CLAUDE.md §14) and that the buffer still makes it back to the pool and through a reopen.
+#[cfg(test)]
+mod frozen_buffer_tests {
+    use super::*;
+
+    const CAPACITY: usize = 1024;
+
+    fn builder_with_producer_id(producer_id: i64) -> MemoryRecordsBuilder {
+        MemoryRecordsBuilder::with_default(
+            BytesMut::with_capacity(CAPACITY),
+            0,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none().build(),
+            TimestampType::CreateTime,
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            producer_id,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            CAPACITY,
+        )
+    }
+
+    fn new_builder() -> MemoryRecordsBuilder {
+        builder_with_producer_id(RecordBatch::NO_PRODUCER_ID)
+    }
+
+    fn append_records(builder: &mut MemoryRecordsBuilder) {
+        for i in 0..5u8 {
+            builder.append(1_700_000_000_000 + i as i64, Some(&[i; 7]), Some(&[i; 23]), &[]);
+        }
+    }
+
+    /// The batch `build()` hands out starts at the address the records were written to: closing
+    /// copies nothing.
+    #[test]
+    fn test_close_leaves_the_batch_where_it_was_written() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let written_at = builder.buffer().unwrap().as_ptr();
+        let written_len = builder.buffer().unwrap().len();
+
+        let records = builder.build();
+        assert_eq!(
+            written_at,
+            records.buffer().as_ptr(),
+            "the batch must be a view of the write buffer"
+        );
+        assert_eq!(written_len, records.size_in_bytes());
+        assert_eq!(5, records.records().count());
+        assert_eq!(
+            written_at,
+            builder.buffer().unwrap().as_ptr(),
+            "the builder still reads the same buffer after close"
+        );
+    }
+
+    /// Once every `MemoryRecords` view is gone, `take_buffer` hands the pool the very allocation
+    /// the batch was written into, at its full capacity and emptied.
+    #[test]
+    fn test_take_buffer_reclaims_the_buffer_once_the_views_are_dropped() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let written_at = builder.buffer().unwrap().as_ptr();
+
+        let records = builder.build();
+        let again = builder.build();
+        drop(records);
+        drop(again);
+
+        let reclaimed = builder.take_buffer();
+        assert_eq!(written_at, reclaimed.as_ptr(), "the pool must get the same allocation back");
+        assert_eq!(CAPACITY, reclaimed.capacity());
+        assert!(reclaimed.is_empty());
+    }
+
+    /// While a view is alive, `take_buffer` leaves the allocation with it, and the pool gets an
+    /// empty buffer: the bytes a request may still be sending are never recycled under it.
+    #[test]
+    fn test_take_buffer_leaves_the_allocation_with_a_live_view() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let records = builder.build();
+        let mut expected = new_builder();
+        append_records(&mut expected);
+        let expected = expected.build();
+
+        let taken = builder.take_buffer();
+        assert_eq!(0, taken.capacity(), "the live view keeps the allocation");
+        assert_eq!(expected.buffer(), records.buffer(), "the view is intact");
+        assert_eq!(5, records.records().count());
+    }
+
+    /// Reopening a batch whose views are gone rewrites the header in the same allocation.
+    #[test]
+    fn test_reopen_rewrites_in_place_when_no_view_is_outstanding() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let first = builder.build();
+        let written_at = first.buffer().as_ptr();
+        drop(first);
+
+        builder.reopen_and_rewrite_producer_state(42, 7, 0, false);
+        let second = builder.build();
+        assert_eq!(written_at, second.buffer().as_ptr(), "the rewrite must reuse the allocation");
+        let batch = second.batches().next().unwrap();
+        assert_eq!(42, batch.producer_id());
+        assert_eq!(7, batch.producer_epoch());
+        assert_eq!(5, second.records().count());
+    }
+
+    /// Reopening a batch while an earlier `MemoryRecords` is still held leaves that view
+    /// unchanged, as Java's earlier `builtRecords` are a view a reopen cannot reach.
+    #[test]
+    fn test_reopen_keeps_an_outstanding_view_unchanged() {
+        let mut builder = new_builder();
+        append_records(&mut builder);
+        let first = builder.build();
+
+        builder.reopen_and_rewrite_producer_state(42, 7, 0, false);
+        let second = builder.build();
+        assert_ne!(first.buffer().as_ptr(), second.buffer().as_ptr(), "the live view forces a copy");
+        let first_batch = first.batches().next().unwrap();
+        assert_eq!(RecordBatch::NO_PRODUCER_ID, first_batch.producer_id());
+        let second_batch = second.batches().next().unwrap();
+        assert_eq!(42, second_batch.producer_id());
+        assert_eq!(first.records().count(), second.records().count());
     }
 }
