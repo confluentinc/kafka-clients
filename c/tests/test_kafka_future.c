@@ -276,6 +276,34 @@ static void test_then_apply_runs_the_function_once_when_the_source_completes(voi
     kafka_producer_MockProducer_destroy(mock);
 }
 
+// Destroying the dependant before its source completes cancels the function:
+// the queued job then runs nothing, so `self` may be freed once `destroy`
+// returns (kept alive here to count the calls).
+static void test_then_apply_does_not_run_the_function_of_a_destroyed_future(void) {
+    kafka_producer_MockProducer_t *mock = kafka_producer_MockProducer_with_auto_complete(0);
+    const kafka_producer_Producer_t *producer = kafka_producer_MockProducer__as_Producer(mock);
+    kafka_common_Error_t *error = NULL;
+    kafka_producer_ProducerRecord_t *record =
+        kafka_producer_ProducerRecord_with_partition_key("topic", 0, NULL, NULL, &error);
+    TEST_ASSERT_NULL(error);
+    kafka_common_KafkaFuture_t *source = kafka_producer_Producer_send(producer, record, &error);
+    TEST_ASSERT_NULL(error);
+    kafka_producer_ProducerRecord_destroy(record);
+    kafka_producer_Producer__execute_callbacks(producer);
+
+    offset_reader_t reader = {-1, 0};
+    kafka_common_KafkaFuture_t *derived =
+        kafka_common_KafkaFuture_then_apply(source, kafka_common_KafkaFuture_BaseFunction_new(&reader, read_offset));
+    kafka_common_KafkaFuture_destroy(derived);
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(mock));
+    kafka_producer_Producer__execute_callbacks(producer);
+    TEST_ASSERT_EQUAL_INT(0, reader.calls);
+
+    kafka_common_KafkaFuture_destroy(source);
+    kafka_producer_MockProducer_destroy(mock);
+}
+
 #ifdef __linux__
 // The number of threads in this process, from /proc/self/task.
 static int thread_count(void) {
@@ -386,6 +414,7 @@ int main(void) {
     RUN_TEST(test_then_apply_runs_the_function_once_and_borrows_its_result);
     RUN_TEST(test_then_apply_fails_with_the_functions_error_or_the_sources);
     RUN_TEST(test_then_apply_runs_the_function_once_when_the_source_completes);
+    RUN_TEST(test_then_apply_does_not_run_the_function_of_a_destroyed_future);
     RUN_TEST(test_a_future_without_a_client_starts_no_thread);
     return UNITY_END();
 }
