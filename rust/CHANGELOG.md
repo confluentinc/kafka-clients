@@ -233,12 +233,13 @@ breaking changes.
   with `NULL` clears the reason instead of setting an empty one, and
   `kafka_admin_CreateDelegationTokenOptions_set_owner` with `NULL` clears the
   owner, as Java's `reason(null)` and `owner(null)` do.
-- **Breaking (C API):** `kafka_admin_NewTopic_set_configs` takes a trailing
-  `kafka_common_Error_t **out_err`. A `NULL` value fails it with an
-  `IllegalArgumentError` and leaves the configs unchanged, where it used to be
-  sent as an empty string, since the broker rejects a null config value of a
-  new topic. A `NULL` map clears the configs, as Java's `configs(null)` does,
-  where it used to set an empty map.
+- **Breaking (C API):** a config value passed to
+  `kafka_admin_NewTopic_set_configs` must not be `NULL`, a value the broker
+  rejects for a new topic; it used to be sent as an empty string. A `NULL`
+  value panics and leaves the configs unchanged, which
+  `kafka_admin_NewTopic_set_configs_err` reports as an `IllegalStateError`. A
+  `NULL` map clears the configs, as Java's `configs(null)` does, where it used
+  to set an empty map.
 - `kafka_common_acl_AclOperation_values` and
   `kafka_common_acl_AclPermissionType_values` return an owned list of the
   borrowed singletons in declaration order.

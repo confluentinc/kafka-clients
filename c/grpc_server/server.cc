@@ -3054,19 +3054,13 @@ class AdminServiceImpl final : public AdminService::Service {
             spec.name().c_str(), spec.num_partitions(),
             static_cast<int16_t>(spec.replication_factor()));
       }
-      topic_list.add(topics.add(topic));
       if (!spec.configs().empty()) {
         maps.push_back(std::make_unique<CMap>());
         CMap& configs = *maps.back();
         for (const auto& kv : spec.configs()) configs.put(kv.first.c_str(), kv.second.c_str());
-        // Only a NULL value fails it, which a proto string never is.
-        kafka_common_Error_t* configs_err = nullptr;
-        kafka_admin_NewTopic_set_configs(topic, configs.map, &configs_err);
-        if (configs_err != nullptr) {
-          fill_proto_error(resp->mutable_error(), configs_err);
-          return grpc::Status::OK;
-        }
+        kafka_admin_NewTopic_set_configs(topic, configs.map);
       }
+      topic_list.add(topics.add(topic));
     }
 
     Owned<kafka_admin_CreateTopicsOptions_t, kafka_admin_CreateTopicsOptions_destroy> opts(

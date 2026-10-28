@@ -24,8 +24,6 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 
 use crate::admin::NewTopic;
-use crate::common::Error;
-use crate::ffi::common::{kafka_common_Error_t, store_error};
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_list, box_map, box_string_keyed_map, c_str_to_string, destroy_boxed, destroy_string_element, into_c_string,
@@ -321,23 +319,21 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_replicas_assignments(
 ///
 /// - `configs` - The configuration map, copied; `NULL` clears it.
 ///
-/// # Errors
+/// # Panics
 ///
-/// - `kafka_common_Error_is_local_illegal_argument_error` if a value is `NULL`, a value the
-///   broker rejects with `INVALID_CONFIG`; the configs are then left unchanged
+/// - if a value is `NULL`, a value the broker rejects with `INVALID_CONFIG`; the configs are
+///   then left unchanged, and the `_err` twin reports it as an `IllegalStateError`
 ///
 /// # Safety
 ///
 /// `self_` must be a valid new-topic handle that no other call uses at the
-/// same time, `configs` `NULL` or a valid map whose keys are NUL-terminated
-/// strings and whose values are `NULL` or NUL-terminated strings, and `out_err`
-/// a valid slot pointing at `NULL`.
+/// same time, and `configs` `NULL` or a valid map whose keys and values are
+/// NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
     self_: *mut kafka_admin_NewTopic_t,
     configs: *const kafka_Map_t,
-    out_err: *mut *mut kafka_common_Error_t,
 ) {
     let configs: Option<BTreeMap<String, String>> = if configs.is_null() {
         None
@@ -351,12 +347,10 @@ pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(
             // SAFETY: Per this function's `# Safety`, every key is a NUL-terminated string, as
             // `c_str_to_string` requires; it is copied.
             let name = unsafe { c_str_to_string(name as *const c_char) };
-            if value.is_null() {
-                let error = Error::local_illegal_argument(format!("The value of config {name} must not be null"));
-                // SAFETY: Per this function's `# Safety`, `out_err` is as `store_error` requires.
-                return unsafe { store_error(out_err, error) };
-            }
-            // SAFETY: `value` is non-null (checked above) and, per this function's `# Safety`, a
+            // A `NULL` value breaks this function's `# Safety`; it is checked anyway, since
+            // reading it would be undefined behaviour, and refused before `self_` is touched.
+            assert!(!value.is_null(), "The value of config {name} must not be NULL");
+            // SAFETY: `value` is non-null (asserted above) and, per this function's `# Safety`, a
             // NUL-terminated string, as `c_str_to_string` requires; it is copied.
             copied.insert(name, unsafe { c_str_to_string(value as *const c_char) });
         }
@@ -438,7 +432,7 @@ mod tests {
 
     use super::*;
     use crate::ffi::common::{kafka_common_Error_destroy, kafka_common_Error_message};
-    use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_argument_error;
+    use crate::ffi::error_predicates::kafka_common_Error_is_local_illegal_state_error;
     use crate::ffi::util::{
         kafka_List_add, kafka_List_get, kafka_List_new, kafka_List_size, kafka_Map_destroy, kafka_Map_get,
         kafka_Map_key, kafka_Map_new, kafka_Map_put, kafka_Map_size, kafka_Map_value, kafka_string_destroy,
@@ -471,9 +465,7 @@ mod tests {
                 c"retention.ms".as_ptr() as *mut c_void,
                 c"1000".as_ptr() as *mut c_void,
             );
-            let mut err = ptr::null_mut();
-            kafka_admin_NewTopic_set_configs(topic, configs, &mut err);
-            assert!(err.is_null());
+            kafka_admin_NewTopic_set_configs(topic, configs);
             kafka_Map_destroy(configs);
             let configs = kafka_admin_NewTopic_configs(topic);
             assert_eq!(kafka_Map_size(configs), 1);
@@ -508,28 +500,26 @@ mod tests {
                 c"cleanup.policy".as_ptr() as *mut c_void,
                 c"compact".as_ptr() as *mut c_void,
             );
-            let mut err = ptr::null_mut();
-            kafka_admin_NewTopic_set_configs(topic, configs, &mut err);
-            assert!(err.is_null());
+            kafka_admin_NewTopic_set_configs(topic, configs);
             kafka_Map_destroy(configs);
             assert_eq!(
                 new_topic_ref(topic).configs(),
                 Some(&BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]))
             );
 
-            kafka_admin_NewTopic_set_configs(topic, ptr::null(), &mut err);
-            assert!(err.is_null());
+            kafka_admin_NewTopic_set_configs(topic, ptr::null());
             assert_eq!(new_topic_ref(topic).configs(), None);
             assert!(kafka_admin_NewTopic_configs(topic).is_null());
             kafka_admin_NewTopic_destroy(topic);
         }
     }
 
-    /// New test, no Java original: the broker rejects a null config value of a
-    /// new topic, so `kafka_admin_NewTopic_set_configs` refuses a `NULL` value
-    /// and leaves the configs as they were.
+    /// New test, no Java original: a `NULL` config value breaks
+    /// `kafka_admin_NewTopic_set_configs`' `# Safety` (the broker would reject
+    /// it), so it panics before touching the topic; the `_err` twin, the form
+    /// the bindings call, reports the panic and the configs stay as they were.
     #[test]
-    fn set_configs_refuses_a_null_value() {
+    fn set_configs_panics_on_a_null_value() {
         // SAFETY: Test code: `topic` is the owned handle the factory returned, used only on this
         // thread and destroyed once, last. Each `configs` owns nothing and holds NUL-terminated
         // string literals or a null value, alive until the call returned, then destroyed once.
@@ -543,20 +533,20 @@ mod tests {
                 c"cleanup.policy".as_ptr() as *mut c_void,
                 c"compact".as_ptr() as *mut c_void,
             );
-            let mut err = ptr::null_mut();
-            kafka_admin_NewTopic_set_configs(topic, configs, &mut err);
-            assert!(err.is_null());
+            kafka_admin_NewTopic_set_configs(topic, configs);
             kafka_Map_destroy(configs);
 
             let configs = kafka_Map_new();
             kafka_Map_put(configs, c"retention.ms".as_ptr() as *mut c_void, ptr::null_mut());
-            kafka_admin_NewTopic_set_configs(topic, configs, &mut err);
+            let mut err = ptr::null_mut();
+            kafka_admin_NewTopic_set_configs_err(topic, configs, &mut err);
             kafka_Map_destroy(configs);
             assert!(!err.is_null());
-            assert_eq!(kafka_common_Error_is_local_illegal_argument_error(err), 1);
+            assert_eq!(kafka_common_Error_is_local_illegal_state_error(err), 1);
             assert_eq!(
                 CStr::from_ptr(kafka_common_Error_message(err)).to_str().unwrap(),
-                "The value of config retention.ms must not be null"
+                "Rust panic caught at the FFI boundary in kafka_admin_NewTopic_set_configs_err: \
+                 The value of config retention.ms must not be NULL"
             );
             kafka_common_Error_destroy(err);
             assert_eq!(
