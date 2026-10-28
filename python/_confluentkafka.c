@@ -11379,7 +11379,9 @@ static PyObject* py_Admin_update_features(PyObject* self, PyObject* args) {
         const kafka_admin_FeatureUpdate_UpgradeType_t* upgrade_type = NULL;
         if (ffi_raise((upgrade_type = kafka_admin_FeatureUpdate_UpgradeType_from_code_err((int32_t)upgrade, &ffi_err), ffi_take(&ffi_err)))) goto fail;
         kafka_admin_FeatureUpdate_t* fu = NULL;
-        if (ffi_raise((fu = kafka_admin_FeatureUpdate_new((int16_t)level, upgrade_type, &ffi_err), ffi_take(&ffi_err)))) goto fail;
+        int16_t max_version_level;
+        if (int_as_i16(level, &max_version_level) < 0) goto fail;
+        if (ffi_raise((fu = kafka_admin_FeatureUpdate_new(max_version_level, upgrade_type, &ffi_err), ffi_take(&ffi_err)))) goto fail;
         if (obj_map_put(&m, (void*)feature, fu) < 0) goto fail;
     }
     {
@@ -11638,12 +11640,14 @@ static PyObject* py_Admin_abort_transaction(PyObject* self, PyObject* args) {
     const char* topic; int partition, coordinator_epoch, producer_epoch; long long producer_id;
     if (!PyArg_ParseTuple(args, "KOO", &h, &row, &opts)) return NULL;
     if (!PyArg_ParseTuple(row, "siLii", &topic, &partition, &producer_id, &producer_epoch, &coordinator_epoch)) return NULL;
+    int16_t epoch;
+    if (int_as_i16(producer_epoch, &epoch) < 0) return NULL;
     AdminHandle* a = admin_from_handle(h);
     kafka_common_TopicPartition_t* tp = NULL;
     kafka_admin_AbortTransactionSpec_t* spec = NULL;
     kafka_common_Error_t* spec_err = (tp = kafka_common_TopicPartition_new_err(topic, (int32_t)partition, &ffi_err), ffi_take(&ffi_err));
     FFI_STEP(spec_err, (spec = kafka_admin_AbortTransactionSpec_new_err(
-        tp, (int64_t)producer_id, (int16_t)producer_epoch, (int32_t)coordinator_epoch, &ffi_err), ffi_take(&ffi_err)));  // copies tp
+        tp, (int64_t)producer_id, epoch, (int32_t)coordinator_epoch, &ffi_err), ffi_take(&ffi_err)));  // copies tp
     if (tp) ffi_unraisable((kafka_common_TopicPartition_destroy_err(tp, &ffi_err), ffi_take(&ffi_err)));
     if (ffi_raise(spec_err)) {
         if (spec) ffi_unraisable((kafka_admin_AbortTransactionSpec_destroy_err(spec, &ffi_err), ffi_take(&ffi_err)));

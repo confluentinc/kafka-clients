@@ -25,7 +25,14 @@ from collections.abc import Iterator
 
 import pytest
 
-from confluent_kafka.admin import Admin, NewPartitionReassignment, NewPartitions, NewTopic
+from confluent_kafka.admin import (
+    AbortTransactionSpec,
+    Admin,
+    FeatureUpdate,
+    NewPartitionReassignment,
+    NewPartitions,
+    NewTopic,
+)
 from confluent_kafka.common import TopicPartition, Uuid
 from confluent_kafka.consumer import KafkaConsumer, MockConsumer, OffsetAndMetadata
 
@@ -131,3 +138,38 @@ def test_a_partition_count_wider_than_a_java_int_raises_overflow_error(wide: int
         for end in (_INT_MAX, _INT_MIN):
             admin.create_topics(new_topics=[NewTopic(name="t", num_partitions=end,
                                                      replication_factor=1)])
+
+
+@pytest.mark.parametrize("wide", [_SHORT_MAX + 1, 65537])
+def test_a_feature_level_wider_than_a_java_short_raises_overflow_error(wide: int) -> None:
+    """``FeatureUpdate(short maxVersionLevel, …)``: no wrap (``65537`` is not 1,
+    ``32768`` not a negative level). A negative level is ``FeatureUpdate``'s own
+    error, so the low end never reaches the FFI."""
+    with _admin() as admin:
+        for upgrade in (FeatureUpdate.UpgradeType.UPGRADE, FeatureUpdate.UpgradeType.SAFE_DOWNGRADE):
+            with pytest.raises(OverflowError) as e:
+                admin.update_features(feature_updates={"f": FeatureUpdate(
+                    max_version_level=wide, upgrade_type=upgrade)})
+            assert str(e.value) == _fits(wide, 16)
+        admin.update_features(feature_updates={"f": FeatureUpdate(
+            max_version_level=_SHORT_MAX, upgrade_type=FeatureUpdate.UpgradeType.UPGRADE)})
+        admin.update_features(feature_updates={"f": FeatureUpdate(
+            max_version_level=0, upgrade_type=FeatureUpdate.UpgradeType.SAFE_DOWNGRADE)})
+
+
+@pytest.mark.parametrize("wide", [_SHORT_MAX + 1, _SHORT_MIN - 1, 65537])
+def test_a_producer_epoch_wider_than_a_java_short_raises_overflow_error(wide: int) -> None:
+    """``AbortTransactionSpec(…, short producerEpoch, …)``: no wrap (``32768`` is
+    not a negative epoch, ``65537`` not 1)."""
+    tp = TopicPartition(topic="t", partition=0)
+
+    def spec(epoch: int) -> AbortTransactionSpec:
+        return AbortTransactionSpec(topic_partition=tp, producer_id=7, producer_epoch=epoch,
+                                    coordinator_epoch=2)
+
+    with _admin() as admin:
+        with pytest.raises(OverflowError) as e:
+            admin.abort_transaction(spec=spec(wide))
+        assert str(e.value) == _fits(wide, 16)
+        for end in (_SHORT_MAX, _SHORT_MIN):
+            admin.abort_transaction(spec=spec(end))
