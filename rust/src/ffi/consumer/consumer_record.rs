@@ -72,7 +72,7 @@ pub struct kafka_consumer_ConsumerRecordOptionsBuilder_t {
 
 /// What a record handle points at: the record, a NUL-terminated copy of its
 /// topic, the lazily built headers view and whether the `void *`s are
-/// `kafka_Bytes_t *` this record owns (see the module docs).
+/// `kafka_Bytes_t *` this record owns.
 pub(crate) struct ConsumerRecordInner {
     record: GenericRecord,
     topic_c: CString,
@@ -171,13 +171,23 @@ fn generic_ptr(value: Option<&GenericValue>) -> *mut c_void {
 // ConsumerRecord
 // ---------------------------------------------------------------------------
 
-/// `new ConsumerRecord(String topic, int partition, long offset, K key, V value)`:
-/// an owned handle freed with [`kafka_consumer_ConsumerRecord_destroy`];
-/// `key` and `value` stay the caller's (null is Java `null`).
+/// `new ConsumerRecord(String topic, int partition, long offset, K key, V value)`;
+/// a `NULL` `key` or `value` is Java `null`.
+///
+/// # Parameters
+///
+/// - `topic` - The topic this record is received from
+/// - `partition` - The partition of the topic this record is received from
+/// - `offset` - The offset of this record in the corresponding Kafka partition
+/// - `key` - The key of the record, if one exists (`NULL` is allowed)
+/// - `value` - The record contents
 ///
 /// # Safety
 ///
 /// `topic` must be a valid NUL-terminated string.
+///
+/// The returned handle is owned by the caller, freed with
+/// [`kafka_consumer_ConsumerRecord_destroy`]; `key` and `value` stay the caller's.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
@@ -198,12 +208,23 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_new(
 }
 
 /// The constructor overloads with more than three parameters, through the
-/// Rust-only options (CLAUDE.md §2): an owned handle; the options stay the
-/// caller's, and so do the key and value they carry.
+/// Rust-only options.
+///
+/// # Parameters
+///
+/// - `options` - the constructor's parameters, which stay the caller's, and so do the key and
+///   value they carry
+///
+/// # Returns
+///
+/// The record handle.
 ///
 /// # Safety
 ///
 /// `options` must be a valid options handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// [`kafka_consumer_ConsumerRecord_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
@@ -215,11 +236,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_with_options(
     box_consumer_record(GenericRecord::with_options(options), false, false)
 }
 
-/// `topic()`: borrowed from the handle.
+/// The topic this record is received from (never null).
+///
+/// # Returns
+///
+/// The topic.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
@@ -232,7 +259,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_topic(
     unsafe { inner_ref(self_) }.topic_c.as_ptr()
 }
 
-/// `partition()`.
+/// The partition from which this record is received.
+///
+/// # Returns
+///
+/// The partition.
 ///
 /// # Safety
 ///
@@ -245,7 +276,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_partition(self_: *const k
     unsafe { consumer_record_ref(self_) }.partition()
 }
 
-/// `offset()`.
+/// The position of this record in the corresponding Kafka partition.
+///
+/// # Returns
+///
+/// The offset.
 ///
 /// # Safety
 ///
@@ -258,7 +293,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_offset(self_: *const kafk
     unsafe { consumer_record_ref(self_) }.offset()
 }
 
-/// `timestamp()`.
+/// The timestamp of this record, in milliseconds elapsed since unix epoch.
+///
+/// # Returns
+///
+/// The timestamp.
 ///
 /// # Safety
 ///
@@ -271,7 +310,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp(self_: *const k
     unsafe { consumer_record_ref(self_) }.timestamp()
 }
 
-/// `timestampType()`: a borrowed singleton.
+/// The timestamp type of this record.
+///
+/// # Returns
+///
+/// The timestamp type, a borrowed singleton.
 ///
 /// # Safety
 ///
@@ -286,7 +329,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_timestamp_type(
     timestamp_type::singleton(unsafe { consumer_record_ref(self_) }.timestamp_type())
 }
 
-/// `serializedKeySize()`: `-1` for a null key.
+/// The size of the serialized, uncompressed key in bytes. If key is null, the returned size
+/// is -1.
+///
+/// # Returns
+///
+/// The serialized key size.
 ///
 /// # Safety
 ///
@@ -301,7 +349,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_key_size(
     unsafe { consumer_record_ref(self_) }.serialized_key_size()
 }
 
-/// `serializedValueSize()`: `-1` for a null value.
+/// The size of the serialized, uncompressed value in bytes. If value is null, the returned
+/// size is -1.
+///
+/// # Returns
+///
+/// The serialized value size.
 ///
 /// # Safety
 ///
@@ -316,12 +369,20 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_serialized_value_size(
     unsafe { consumer_record_ref(self_) }.serialized_value_size()
 }
 
-/// `key()`: the deserialized key (see the module docs), `NULL` for Java
-/// `null`; borrowed from the record.
+/// The key (or `NULL` if no key is specified).
+///
+/// # Returns
+///
+/// The deserialized key: what the consumer's key deserializer produced, a
+/// `kafka_Bytes_t *` for a consumer created with a `NULL` key deserializer.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle.
+/// `self_` must be a valid handle. The key is borrowed from the record: a
+/// `kafka_Bytes_t *` from a `NULL` deserializer is owned by the record and
+/// stays valid until the record is destroyed; a C deserializer's value, or the
+/// key of a record built with `kafka_consumer_ConsumerRecord_new` or
+/// `_with_options`, stays the C side's and is never freed by Rust.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
@@ -333,12 +394,21 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_key(
     generic_ptr(unsafe { consumer_record_ref(self_) }.key())
 }
 
-/// `value()`: the deserialized value (see the module docs), `NULL` for Java
-/// `null`; borrowed from the record.
+/// The value.
+///
+/// # Returns
+///
+/// The deserialized value, `NULL` for Java `null`: what the consumer's value
+/// deserializer produced, a `kafka_Bytes_t *` for a consumer created with a
+/// `NULL` value deserializer.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle.
+/// `self_` must be a valid handle. The value is borrowed from the record: a
+/// `kafka_Bytes_t *` from a `NULL` deserializer is owned by the record and
+/// stays valid until the record is destroyed; a C deserializer's value, or the
+/// value of a record built with `kafka_consumer_ConsumerRecord_new` or
+/// `_with_options`, stays the C side's and is never freed by Rust.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
@@ -350,12 +420,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_value(
     generic_ptr(unsafe { consumer_record_ref(self_) }.value())
 }
 
-/// `headers()`: borrowed from the record, valid until it is destroyed. It is
-/// handed out `const`: only read through it.
+/// The headers (never null).
+///
+/// # Returns
+///
+/// The headers, handed out `const`: only read through them.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned headers are borrowed from the record: they stay valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
@@ -380,6 +455,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
 ///
 /// A caught Rust panic returns -2, which is no leader epoch.
 ///
+/// # Returns
+///
+/// the leader epoch or empty for legacy record formats
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
@@ -397,6 +476,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_leader_epoch(
 ///
 /// A caught Rust panic returns -2, which is no delivery count.
 ///
+/// # Returns
+///
+/// the delivery count or empty when deliveries not counted
+///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
@@ -410,12 +493,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_delivery_count(
     unsafe { consumer_record_ref(self_) }.delivery_count().unwrap_or(-1)
 }
 
-/// Java `toString()`: an owned string freed with `kafka_string_destroy`. The
-/// key and value print as the `void *` addresses Rust holds for them.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form. The key and value print as the
+/// `void *` addresses Rust holds for them.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
@@ -427,8 +516,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_to_string(
     into_c_string(&unsafe { consumer_record_ref(self_) }.to_string())
 }
 
-/// Frees a handle (and the `kafka_Bytes_t`s it owns, see the module docs); a
-/// null pointer is a no-op.
+/// Frees a handle, and the key and value when they are `kafka_Bytes_t *` the
+/// record owns (from a consumer created with a `NULL` deserializer); a null
+/// pointer is a no-op.
 ///
 /// # Safety
 ///
@@ -489,7 +579,15 @@ unsafe fn with_builder(
     }
 }
 
-/// `ConsumerRecordOptionsBuilder::new()`: an owned handle freed with
+/// Creates a builder of the `ConsumerRecord` constructor's parameters.
+///
+/// # Returns
+///
+/// The builder handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_ConsumerRecordOptionsBuilder_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -498,7 +596,11 @@ pub extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_new() -> *mut kafk
     Box::into_raw(Box::new(Some(GenericBuilder::new()))) as *mut kafka_consumer_ConsumerRecordOptionsBuilder_t
 }
 
-/// `set_topic` (mandatory).
+/// Sets the topic (mandatory).
+///
+/// # Parameters
+///
+/// - `topic` - the topic
 ///
 /// # Safety
 ///
@@ -518,7 +620,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_topic(
     unsafe { with_builder(self_, |b| b.set_topic(topic)) }
 }
 
-/// `set_partition` (mandatory).
+/// Sets the partition (mandatory).
+///
+/// # Parameters
+///
+/// - `partition` - the partition
 ///
 /// # Safety
 ///
@@ -535,7 +641,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_partiti
     unsafe { with_builder(self_, |b| b.set_partition(partition)) }
 }
 
-/// `set_offset` (mandatory).
+/// Sets the offset (mandatory).
+///
+/// # Parameters
+///
+/// - `offset` - the offset
 ///
 /// # Safety
 ///
@@ -552,7 +662,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_offset(
     unsafe { with_builder(self_, |b| b.set_offset(offset)) }
 }
 
-/// `set_timestamp`.
+/// Sets the timestamp.
+///
+/// # Parameters
+///
+/// - `timestamp` - the timestamp
 ///
 /// # Safety
 ///
@@ -569,7 +683,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
     unsafe { with_builder(self_, |b| b.set_timestamp(timestamp)) }
 }
 
-/// `set_timestamp_type`.
+/// Sets the timestamp type.
+///
+/// # Parameters
+///
+/// - `timestamp_type` - the timestamp type
 ///
 /// # Safety
 ///
@@ -590,7 +708,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_timesta
     unsafe { with_builder(self_, |b| b.set_timestamp_type(timestamp_type)) }
 }
 
-/// `set_serialized_key_size`.
+/// Sets the serialized key size.
+///
+/// # Parameters
+///
+/// - `serialized_key_size` - the serialized key size
 ///
 /// # Safety
 ///
@@ -607,7 +729,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
     unsafe { with_builder(self_, |b| b.set_serialized_key_size(serialized_key_size)) }
 }
 
-/// `set_serialized_value_size`.
+/// Sets the serialized value size.
+///
+/// # Parameters
+///
+/// - `serialized_value_size` - the serialized value size
 ///
 /// # Safety
 ///
@@ -624,7 +750,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_seriali
     unsafe { with_builder(self_, |b| b.set_serialized_value_size(serialized_value_size)) }
 }
 
-/// `set_key`: the caller's `void *`, null for Java `null`.
+/// Sets the key.
+///
+/// # Parameters
+///
+/// - `key` - the caller's `void *`, `NULL` for Java `null`
 ///
 /// # Safety
 ///
@@ -641,7 +771,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_key(
     unsafe { with_builder(self_, |b| b.set_key(generic(key))) }
 }
 
-/// `set_value`: the caller's `void *`, null for Java `null`.
+/// Sets the value.
+///
+/// # Parameters
+///
+/// - `value` - the caller's `void *`, `NULL` for Java `null`
 ///
 /// # Safety
 ///
@@ -658,7 +792,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_value(
     unsafe { with_builder(self_, |b| b.set_value(generic(value))) }
 }
 
-/// `set_headers`: copied during the call.
+/// Sets the headers.
+///
+/// # Parameters
+///
+/// - `headers` - the headers, copied during the call
 ///
 /// # Safety
 ///
@@ -679,7 +817,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_headers
     unsafe { with_builder(self_, |b| b.set_headers(headers)) }
 }
 
-/// `set_leader_epoch`: a negative value is `Optional.empty()`.
+/// Sets the leader epoch.
+///
+/// # Parameters
+///
+/// - `leader_epoch` - the leader epoch, negative for `Optional.empty()`
 ///
 /// # Safety
 ///
@@ -696,7 +838,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_
     unsafe { with_builder(self_, |b| b.set_leader_epoch((leader_epoch >= 0).then_some(leader_epoch))) }
 }
 
-/// `set_delivery_count`: a negative value is `Optional.empty()`.
+/// Sets the delivery count.
+///
+/// # Parameters
+///
+/// - `delivery_count` - the delivery count, negative for `Optional.empty()`
 ///
 /// # Safety
 ///
@@ -713,15 +859,24 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_set_deliver
     unsafe { with_builder(self_, |b| b.set_delivery_count((delivery_count >= 0).then_some(delivery_count))) }
 }
 
-/// `build()`: validates the mandatory fields and returns the options, owned by
-/// the caller ([`kafka_consumer_ConsumerRecordOptions_destroy`]), or stores the
-/// owned `IllegalArgumentError` in `*out_err` and returns `NULL`. The builder
-/// is consumed either way and only waits to be destroyed.
+/// Validates the mandatory fields and builds the options. The builder is consumed either way and
+/// only waits to be destroyed.
+///
+/// # Returns
+///
+/// The options, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if a mandatory field is not set
 ///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same
 /// time, and `out_err` a valid slot pointing at null.
+///
+/// The returned options are owned by the caller, freed with
+/// [`kafka_consumer_ConsumerRecordOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerRecordOptionsBuilder_build(

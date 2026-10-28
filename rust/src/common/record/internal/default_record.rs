@@ -342,8 +342,8 @@ impl DefaultRecord {
             // records than it holds. Java's `ByteUtils.readVarint(InputStream)` takes
             // the `-1` that `read()` returns at the end of the stream for a
             // continuation byte, so it throws `IllegalArgumentException`, which
-            // `StreamRecordIterator.readNext` reports as a premature EOF
-            // (`DefaultRecordBatch.java:646-654`). That iterator is Java's one caller
+            // `org.apache.kafka.common.record.internal.DefaultRecordBatch.StreamRecordIterator#readNext`
+            // reports as a premature EOF. That iterator is Java's one caller
             // of `DefaultRecord.readFrom(InputStream)`, as `DefaultRecordBatch::iter_records`
             // is this function's; the iterator's text is chosen here because the
             // `InvalidRecordError` it receives no longer carries the I/O error kind.
@@ -364,8 +364,9 @@ impl DefaultRecord {
         // here it only gives Java's error.
         Self::check_record_body_size(size_of_body, max_record_body_size)?;
 
-        // Java allocates the declared body size before reading a byte of it
-        // (`DefaultRecord.java:302`). The size is read off the stream, so here the
+        // Java allocates the declared body size before reading a byte of it (in
+        // `org.apache.kafka.common.record.internal.DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`).
+        // The size is read off the stream, so here the
         // buffer grows with the bytes actually read instead — `take` stops the
         // read at the declared size — and a record declaring 2 GiB over three
         // bytes of payload allocates for three bytes, then fails as Java's does.
@@ -393,7 +394,7 @@ impl DefaultRecord {
 
     /// Rejects, before any of the body is read, a record whose declared
     /// (decompressed) body exceeds `max_record_body_size`
-    /// (`DefaultRecord.java:295-301`). [`Self::read_from_stream`] checks its
+    /// (`DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`). [`Self::read_from_stream`] checks its
     /// records with it, and so does the consumer, which reads a compressed
     /// batch's records itself, so the two keep Java's check alike.
     ///
@@ -1501,7 +1502,8 @@ mod tests {
     }
 
     /// D4: a declared body size is not trusted to size the read
-    /// buffer (Java allocates it up front, `DefaultRecord.java:302`). A record
+    /// buffer (Java allocates it up front, in
+    /// `DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`). A record
     /// declaring the largest size the b69c07c816 bound admits
     /// (`SOFT_MAX_ARRAY_LENGTH`; `i32::MAX` is now refused before the read)
     /// over a three-byte body allocates for the three bytes, then fails with
@@ -1536,8 +1538,7 @@ mod tests {
     /// byte, or after a continuation byte — fails with Java's premature-EOF text:
     /// `ByteUtils.readVarint(InputStream)` reads an exhausted stream's `-1` as a
     /// continuation byte and throws `IllegalArgumentException`, which
-    /// `StreamRecordIterator.readNext` reports this way
-    /// (`DefaultRecordBatch.java:646-654`). A size read in full that outruns the
+    /// `DefaultRecordBatch.StreamRecordIterator#readNext` reports this way. A size read in full that outruns the
     /// body keeps Java's end-of-payload text (the test above).
     #[test]
     fn test_read_from_stream_ending_in_the_size_is_premature_eof() {

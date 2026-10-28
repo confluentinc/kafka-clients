@@ -19,29 +19,16 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// An offset commit failed with a retriable error. This error is generated
-/// on the client side upon receiving retriable error codes from the Group
-/// Coordinator in a commit response.
+/// Error returned when an offset commit fails with a retriable error. This
+/// error is generated on the client side upon receiving retriable error codes
+/// from the Group Coordinator in a commit response.
 ///
 /// Unlike [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError), this
 /// error indicates that the commit can be retried. The consumer should attempt
 /// to commit the offsets again.
-///
-/// Corresponds to Java's `RetriableCommitFailedException`. It has no entry in
-/// `Errors`, so it carries no protocol code.
-///
-/// Java `extends` chain:
-///    `RetriableCommitFailedException` -> `RetriableException` ->
-///   `ApiException` -> `KafkaException`
-///
-/// Being its own class is what makes it retriable. The previous mapping routed
-/// it through `Errors::RequestTimedOut`
-/// solely to borrow that code's retriability, which also made it
-/// indistinguishable from a real `TimeoutException`.
-///
-/// Note the contrast with its sibling
-/// [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError), which extends
-/// `KafkaException` directly and so is neither retriable nor an `ApiException`.
+// Java `extends` chain: `RetriableCommitFailedException` -> `RetriableException`
+// -> `ApiException` -> `KafkaException`. It has no entry in `Errors`, so it
+// carries no protocol code; being its own class is what makes it retriable.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException")]
 pub struct ConsumerRetriableCommitFailedError {
@@ -55,14 +42,18 @@ impl ConsumerRetriableCommitFailedError {
     ///
     /// Java's text is "Offset commit failed with a retriable **exception**. You
     /// should retry committing the latest consumed offsets."
-    /// (`RetriableCommitFailedException.java:42-43`). CLAUDE.md §2 bars the word
+    /// (`org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException(Throwable)`). CLAUDE.md §2 bars the word
     /// "exception" from Rust code including message text, so this says "error"
     /// instead. The two strings differ by that one word and nothing else.
     pub(crate) const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
         "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
 
-    /// Create the error with the given message —
-    /// `RetriableCommitFailedException(String)`.
+    /// Constructs a new `ConsumerRetriableCommitFailedError` with the specified
+    /// detail message.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - The detail message
     #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), source: None }
@@ -74,10 +65,12 @@ impl ConsumerRetriableCommitFailedError {
         Self::new(ConsumerRetriableCommitFailedError::CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE)
     }
 
-    /// `RetriableCommitFailedException(Throwable t)` — uses the default message.
+    /// Constructs a new `ConsumerRetriableCommitFailedError` with the specified
+    /// cause.
     ///
-    /// The cause is retained and readable through [`Self::source`] /
-    /// [`Error::source`], matching Java's `getCause()`.
+    /// # Arguments
+    ///
+    /// - `source` - The cause of the error, returned by [`Self::source`]
     #[doc(alias = "org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException")]
     pub fn with_source(source: Error) -> Self {
         Self {
@@ -86,14 +79,14 @@ impl ConsumerRetriableCommitFailedError {
         }
     }
 
-    /// The error message.
+    /// Returns the error message.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    /// Returns the cause of this error, if any.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
@@ -151,7 +144,7 @@ mod tests {
     ///
     /// Java: `RetriableCommitFailedException(Throwable t)` uses the default
     /// message and keeps the cause
-    /// (`RetriableCommitFailedException.java:41-44`).
+    /// (`org.apache.kafka.clients.consumer.RetriableCommitFailedException#RetriableCommitFailedException(Throwable)`).
     #[test]
     fn test_retriable_commit_failed_default_message() {
         let cause = Error::local_illegal_state("inner");
@@ -177,7 +170,7 @@ mod tests {
     /// the [`Error`] variant that replaced it.
     ///
     /// `RetriableCommitFailedException extends RetriableException`
-    /// (`RetriableCommitFailedException.java:32`), so unlike
+    /// (`org.apache.kafka.clients.consumer.RetriableCommitFailedException`), so unlike
     /// [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError) it is
     /// both an `ApiException` and retriable.
     #[test]

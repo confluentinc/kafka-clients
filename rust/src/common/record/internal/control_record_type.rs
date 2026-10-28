@@ -89,7 +89,7 @@ pub enum ControlRecordType {
     Unknown,
 }
 
-/// `CONTROL_RECORD_KEY_SIZE` (Java 60): the minimum size of a control-record key
+/// `CONTROL_RECORD_KEY_SIZE`: the minimum size of a control-record key
 /// (`version` int16 + `type` int16).
 const CONTROL_RECORD_KEY_SIZE: usize = 4;
 
@@ -134,7 +134,7 @@ impl ControlRecordType {
 
     /// The serialized control-record key for this type.
     ///
-    /// Translated from `recordKey()` (Java 79-84). Java returns a
+    /// Translated from `recordKey()`. Java returns a
     /// `ByteBuffer.duplicate()`; the Rust equivalent hands back the owned bytes.
     ///
     /// # Errors
@@ -152,7 +152,7 @@ impl ControlRecordType {
 
     /// The size in bytes of a control-record key for this type (always 4).
     ///
-    /// Translated from `controlRecordKeySize()` (Java 86-88), which returns
+    /// Translated from `controlRecordKeySize()`, which returns
     /// `buffer.remaining()`. Unlike [`Self::record_key`] there is no `UNKNOWN`
     /// guard: Java builds the buffer for every constant, `UNKNOWN` included.
     /// Java's `buffer` is precomputed once in the enum constructor, so its
@@ -165,7 +165,7 @@ impl ControlRecordType {
 
     /// Reads the type id out of a control record's key.
     ///
-    /// Translated from `parseTypeId(ByteBuffer key)` (Java 90-108). Java reads the
+    /// Translated from `parseTypeId(ByteBuffer key)`. Java reads the
     /// version through the buffer's position and then decodes the remaining bytes
     /// with [`ControlRecordTypeSchemaData`], clamping an unknown (higher) version
     /// down to the highest supported one. A `&[u8]` is the faithful parameter — the
@@ -214,7 +214,7 @@ impl ControlRecordType {
     /// Maps a wire type id onto a variant, with unknown ids becoming
     /// [`Self::Unknown`].
     ///
-    /// Translated from `fromTypeId(short typeId)` (Java 110-130).
+    /// Translated from `fromTypeId(short typeId)`.
     #[doc(alias = "org.apache.kafka.common.record.internal.ControlRecordType#fromTypeId")]
     pub fn from_type_id(type_id: i16) -> Self {
         match type_id {
@@ -231,7 +231,7 @@ impl ControlRecordType {
 
     /// Parses a control record's key into its type.
     ///
-    /// Translated from `parse(ByteBuffer key)` (Java 132-134).
+    /// Translated from `parse(ByteBuffer key)`.
     ///
     /// # Errors
     ///

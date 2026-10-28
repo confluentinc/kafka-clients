@@ -43,7 +43,7 @@ pub struct kafka_admin_DescribeTopicsResult_t {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each be null or a valid uuid handle, alive for this
+/// `a` and `b` must each be `NULL` or a valid uuid handle, alive for this
 /// call.
 unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
@@ -125,16 +125,21 @@ unsafe fn handle<'a>(self_: *const kafka_admin_DescribeTopicsResult_t) -> &'a Re
     unsafe { result_ref(self_) }
 }
 
-/// `topicIdValues()`: for a result keyed by topic id, an owned `kafka_Map_t` (freed with
-/// `kafka_Map_destroy`, which frees its keys and values) of owned
-/// `kafka_common_Uuid_t *` keys, ordered by their string form and compared
-/// by value in `kafka_Map_get`, to owned `kafka_common_KafkaFuture_t *`
-/// whose `get` delivers a `kafka_admin_TopicDescription_t *` owned by the
-/// future; `NULL` for a result keyed by topic name.
+/// Use when `kafka_admin_Admin_describe_topics_with_topics` used a TopicIdCollection
+///
+/// # Returns
+///
+/// A map from topic IDs to futures which can be used to check the status of individual topics if
+/// the request used topic IDs, otherwise return `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is, for a result keyed by topic id, owned (freed with `kafka_Map_destroy`,
+/// which frees its keys and values), of owned `kafka_common_Uuid_t *` keys, ordered by their string
+/// form and compared by value in `kafka_Map_get`, to owned `kafka_common_KafkaFuture_t *` whose
+/// `get` delivers a `kafka_admin_TopicDescription_t *` owned by the future.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
@@ -154,15 +159,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
     }
 }
 
-/// `topicNameValues()`: for a result keyed by topic name, an owned `kafka_Map_t` (freed
-/// with `kafka_Map_destroy`, which frees its keys and values) of owned
-/// `char *` topic names, sorted, to owned `kafka_common_KafkaFuture_t *`
-/// whose `get` delivers a `kafka_admin_TopicDescription_t *` owned by the
-/// future; `NULL` for a result keyed by topic id.
+/// Use when `kafka_admin_Admin_describe_topics_with_topics` used a TopicNameCollection
+///
+/// # Returns
+///
+/// A map from topic names to futures which can be used to check the status of individual topics if
+/// the request used topic names, otherwise return `NULL`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is, for a result keyed by topic name, owned (freed with `kafka_Map_destroy`,
+/// which frees its keys and values), of owned `char *` topic names, sorted, to owned
+/// `kafka_common_KafkaFuture_t *` whose `get` delivers a `kafka_admin_TopicDescription_t *` owned
+/// by the future.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
@@ -177,14 +188,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
     }
 }
 
-/// `allTopicNames()`: for a result keyed by topic name, an owned future freed with
-/// `kafka_common_KafkaFuture_destroy` whose `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `char *` topic names, sorted, to
-/// `kafka_admin_TopicDescription_t *`; `NULL` for a result keyed by topic id.
+/// # Returns
+///
+/// A future map from topic names to descriptions which can be used to check the status of
+/// individual description if the describe topic request used topic names, otherwise return `NULL`,
+/// this request succeeds only if all the topic descriptions succeed
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is, for a result keyed by topic name, owned and freed with
+/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *` (owned by the future)
+/// of `char *` topic names, sorted, to `kafka_admin_TopicDescription_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
@@ -203,15 +219,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
     }
 }
 
-/// `allTopicIds()`: for a result keyed by topic id, an owned future freed with
-/// `kafka_common_KafkaFuture_destroy` whose `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `kafka_common_Uuid_t *` keys, ordered by their
-/// string form and compared by value in `kafka_Map_get`, to
-/// `kafka_admin_TopicDescription_t *`; `NULL` for a result keyed by topic name.
+/// # Returns
+///
+/// A future map from topic ids to descriptions which can be used to check the status of individual
+/// description if the describe topic request used topic ids, otherwise return `NULL`, this request
+/// succeeds only if all the topic descriptions succeed
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is, for a result keyed by topic id, owned and freed with
+/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *` (owned by the future)
+/// of `kafka_common_Uuid_t *` keys, ordered by their string form and compared by value in
+/// `kafka_Map_get`, to `kafka_admin_TopicDescription_t *`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
@@ -229,12 +250,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

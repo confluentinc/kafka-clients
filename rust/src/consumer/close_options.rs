@@ -19,8 +19,6 @@
 use std::time::Duration;
 
 /// Enum to specify the group membership operation upon leaving a group.
-///
-/// Corresponds to Java's `CloseOptions.GroupMembershipOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions$GroupMembershipOperation")]
@@ -35,9 +33,9 @@ pub enum GroupMembershipOperation {
     /// sent and the member will be removed by the coordinator after the
     /// session timeout expires.
     RemainInGroup,
-    /// Apply the default behavior:
-    /// - static members remain in the group;
-    /// - dynamic members leave the group.
+    /// Applies the default behavior:
+    /// - For **static members**: The consumer will remain in the group.
+    /// - For **dynamic members**: The consumer will leave the group.
     Default,
 }
 
@@ -54,10 +52,8 @@ impl std::fmt::Display for GroupMembershipOperation {
 
 /// Options for controlling the consumer close behavior.
 ///
-/// This type allows customization of the close timeout and group membership
+/// This class allows customization of the close timeout and group membership
 /// operation when a consumer is being shut down.
-///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.CloseOptions`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions")]
 pub struct CloseOptions {
@@ -66,24 +62,26 @@ pub struct CloseOptions {
 }
 
 impl CloseOptions {
-    /// Create a new `CloseOptions` with default values.
-    ///
-    /// Equivalent to Java's private no-arg constructor.
+    /// Create a new `CloseOptions` with default values (Java's private
+    /// no-arg constructor).
     fn empty() -> Self {
         Self { operation: GroupMembershipOperation::Default, timeout: None }
     }
 
     /// Static method to create a `CloseOptions` with a custom timeout.
     ///
-    /// Corresponds to Java's static `CloseOptions.timeout(Duration)`. Java
-    /// accepts a nullable `Duration` here and internally wraps it via
-    /// `Optional.ofNullable`; Rust's type system makes `Duration` non-null,
-    /// so for "no timeout, use default" callers should use
-    /// [`CloseOptions::default`] (or omit the call to `new_with_timeout`).
+    /// # Arguments
     ///
-    /// The getter [`timeout`](Self::timeout) keeps Java's name and the instance
-    /// [`with_timeout`](Self::with_timeout) takes `with_timeout`, so this static
-    /// factory is `new_with_timeout` (CLAUDE.md §2).
+    /// - `timeout` - The maximum time to wait for the consumer to close.
+    ///
+    /// # Returns
+    ///
+    /// A new `CloseOptions` instance with the specified timeout.
+    ///
+    /// # Translation notes
+    ///
+    /// `timeout` cannot be `None`: for the default timeout use
+    /// [`CloseOptions::default`].
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#timeout")]
     pub fn new_with_timeout(timeout: Duration) -> Self {
         Self::empty().with_timeout(timeout)
@@ -92,35 +90,49 @@ impl CloseOptions {
     /// Static method to create a `CloseOptions` with a specified group
     /// membership operation.
     ///
-    /// Corresponds to Java's static
-    /// `CloseOptions.groupMembershipOperation(GroupMembershipOperation operation)`.
-    /// The getter [`group_membership_operation`](Self::group_membership_operation)
-    /// keeps Java's name, so this static factory is `with_<parameters>`
-    /// (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
+    ///   `REMAIN_IN_GROUP`, or `DEFAULT`.
+    ///
+    /// # Returns
+    ///
+    /// A new `CloseOptions` instance with the specified group membership operation.
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation")]
     pub fn with_operation(operation: GroupMembershipOperation) -> Self {
         Self::empty().with_group_membership_operation(operation)
     }
 
-    /// Fluent setter for the close timeout.
+    /// Fluent method to set the timeout for the close process.
     ///
-    /// Corresponds to Java's `CloseOptions.withTimeout(Duration)` which
-    /// accepts a nullable `Duration`. In Rust, `Duration` is non-null; the
-    /// internal `Option<Duration>` field always becomes `Some(timeout)`
-    /// after this call. Callers wanting "no timeout, use default" should
-    /// leave the field at its default by skipping this setter (or via
-    /// [`CloseOptions::default`]).
+    /// # Arguments
+    ///
+    /// - `timeout` - The maximum time to wait for the consumer to close.
+    ///
+    /// # Returns
+    ///
+    /// This `CloseOptions` instance.
+    ///
+    /// # Translation notes
+    ///
+    /// `timeout` cannot be `None`: to keep the default timeout, do not call
+    /// this method.
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#withTimeout")]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    /// Fluent setter for the group membership operation upon shutdown.
+    /// Fluent method to set the group membership operation upon shutdown.
     ///
-    /// In Java, this method rejects a `null` operation via
-    /// `Objects.requireNonNull`. In Rust the type system makes the
-    /// non-null guarantee redundant.
+    /// # Arguments
+    ///
+    /// - `operation` - The group membership operation to apply. Must be one of `LEAVE_GROUP`,
+    ///   `REMAIN_IN_GROUP`, or `DEFAULT`.
+    ///
+    /// # Returns
+    ///
+    /// This `CloseOptions` instance.
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#withGroupMembershipOperation")]
     pub fn with_group_membership_operation(mut self, operation: GroupMembershipOperation) -> Self {
         self.operation = operation;
@@ -128,14 +140,20 @@ impl CloseOptions {
     }
 
     /// Returns the group membership operation configured for this close.
+    ///
+    /// # Returns
+    ///
+    /// The group membership operation
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#groupMembershipOperation")]
     pub fn group_membership_operation(&self) -> GroupMembershipOperation {
         self.operation
     }
 
-    /// Returns the timeout configured for this close: the maximum time to wait
-    /// for the close process to complete, or `None` if using the default
-    /// timeout.
+    /// Returns the timeout configured for this close.
+    ///
+    /// # Returns
+    ///
+    /// The timeout, or `None` if using the default timeout
     #[doc(alias = "org.apache.kafka.clients.consumer.CloseOptions#timeout")]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout

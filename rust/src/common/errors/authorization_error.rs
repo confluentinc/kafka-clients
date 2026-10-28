@@ -20,20 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The client is not authorized to perform the operation.
     ///
-    /// Corresponds to Java's `AuthorizationException`, which reports error code
-    /// `Errors::InvalidConfig` by inheritance.
-    ///
-    /// Java `extends` chain:
-    ///    `AuthorizationException` -> `InvalidConfigurationException` ->
-    ///   `ApiException` -> `KafkaException`
-    ///
-    /// `Errors.forException` walks the superclass chain
-    /// (`protocol/Errors.java:520-531`), and `InvalidConfigurationException` **is**
-    /// in the map — `INVALID_CONFIG(40, ..., InvalidConfigurationException::new)`
-    /// (`Errors.java:264`). So Java answers **40** for this class even though the
-    /// class itself has no entry of its own. `InvalidConfigurationError` remains
-    /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
-    /// one.
+    /// Its Java class, `AuthorizationException`, extends `InvalidConfigurationException`, and so
+    /// reports error code `Errors::InvalidConfig`: `org.apache.kafka.common.protocol.Errors#forException`
+    /// walks the superclass chain. That code's own class stays `InvalidConfigurationError`.
     #[doc(alias = "org.apache.kafka.common.errors.AuthorizationException")]
     AuthorizationError,
     code: Errors::InvalidConfig,

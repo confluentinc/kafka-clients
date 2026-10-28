@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_acls`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeAclsResult`.
 
 use crate::common::KafkaFuture;
 use crate::common::acl::AclBinding;
 
 /// The result of the `Admin::describe_acls` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeAclsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult")]
 pub struct DescribeAclsResult {
@@ -35,7 +31,7 @@ impl DescribeAclsResult {
         Self { future }
     }
 
-    /// Return a future containing the ACLs requested.
+    /// Returns a future containing the ACLs requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeAclsResult#values")]
     pub fn values(&self) -> &KafkaFuture<Vec<AclBinding>> {
         &self.future

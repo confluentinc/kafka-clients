@@ -40,8 +40,6 @@ pub enum ClientQuotaMatch {
 }
 
 /// Describes a component for applying a client quota filter.
-///
-/// Corresponds to `org.apache.kafka.common.quota.ClientQuotaFilterComponent`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent")]
 pub struct ClientQuotaFilterComponent {
@@ -53,7 +51,10 @@ impl ClientQuotaFilterComponent {
     /// Constructs and returns a filter component that exactly matches the
     /// provided entity name for the entity type.
     ///
-    /// Mirrors `ClientQuotaFilterComponent.ofEntity`.
+    /// # Arguments
+    ///
+    /// - `entity_type` - the entity type the filter component applies to
+    /// - `entity_name` - the entity name that's matched exactly
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntity")]
     pub fn of_entity(entity_type: impl Into<String>, entity_name: impl Into<String>) -> Self {
         Self {
@@ -65,7 +66,9 @@ impl ClientQuotaFilterComponent {
     /// Constructs and returns a filter component that matches the built-in
     /// default entity name for the entity type.
     ///
-    /// Mirrors `ClientQuotaFilterComponent.ofDefaultEntity`.
+    /// # Arguments
+    ///
+    /// - `entity_type` - the entity type the filter component applies to
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofDefaultEntity")]
     pub fn of_default_entity(entity_type: impl Into<String>) -> Self {
         Self { entity_type: entity_type.into(), match_spec: ClientQuotaMatch::Default }
@@ -74,27 +77,28 @@ impl ClientQuotaFilterComponent {
     /// Constructs and returns a filter component that matches any specified name
     /// for the entity type.
     ///
-    /// Mirrors `ClientQuotaFilterComponent.ofEntityType`.
+    /// # Arguments
+    ///
+    /// - `entity_type` - the entity type the filter component applies to
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#ofEntityType")]
     pub fn of_entity_type(entity_type: impl Into<String>) -> Self {
         Self { entity_type: entity_type.into(), match_spec: ClientQuotaMatch::Any }
     }
 
-    /// Returns the component's entity type.
+    /// # Returns
     ///
-    /// Mirrors `ClientQuotaFilterComponent.entityType()`.
+    /// the component's entity type
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#entityType")]
     pub fn entity_type(&self) -> &str {
         &self.entity_type
     }
 
-    /// Returns the match specification.
+    /// # Returns
     ///
-    /// Mirrors `ClientQuotaFilterComponent.match()`, whose `Optional<String>`
-    /// tri-state is modeled by [`ClientQuotaMatch`]:
-    ///   - `Exact(name)`: the name that's matched exactly,
-    ///   - `Default`: matches the default name,
-    ///   - `Any`: matches any specified name.
+    /// the match specification, where:
+    /// - `Exact(name)`: the name that's matched exactly
+    /// - `Default`: matches the default name
+    /// - `Any`: matches any specified name
     #[doc(alias = "org.apache.kafka.common.quota.ClientQuotaFilterComponent#match")]
     pub fn r#match(&self) -> &ClientQuotaMatch {
         &self.match_spec

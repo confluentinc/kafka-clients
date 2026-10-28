@@ -77,9 +77,10 @@ pub(crate) enum HandleResult {
     /// The call is finished, and the runnable moves every call that is
     /// assigned to a node but not yet sent back to the pending calls, so that
     /// a new destination is chosen from the metadata just applied. Java's
-    /// metadata calls end their `handleResponse` with
-    /// `unassignUnsentCalls(node -> true)` (`KafkaAdminClient.java:1756`,
-    /// `:1799`), a method of the runnable a Rust hook cannot call.
+    /// metadata calls (`KafkaAdminClient.AdminClientRunnable#makeControllerMetadataCall`
+    /// and `#makeBrokerMetadataCall`) end their `handleResponse` with
+    /// `unassignUnsentCalls(node -> true)`, a method of the runnable a Rust
+    /// hook cannot call.
     UnassignUnsentCalls,
     /// Enqueue a fresh follow-up call (e.g. quota-exceeded retry topics). The
     /// current call is finished.
@@ -87,8 +88,9 @@ pub(crate) enum HandleResult {
     /// Issue this same call again, keeping its deadline, tries and backoff
     /// state: Java's `runnable.call(this, now)` from inside `handleResponse`,
     /// which `describeTopicPartitions` uses to request the next page
-    /// (`KafkaAdminClient.java:2414-2416`). The Rust hook cannot hand back
-    /// `self`, so the runnable re-queues the call it just dispatched.
+    /// (`KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`).
+    /// The Rust hook cannot hand back `self`, so the runnable re-queues the
+    /// call it just dispatched.
     CallAgain,
     /// The whole call must be retried; route the error through
     /// [`fail`](super::admin_client_runnable) (respecting backoff / retries).
@@ -201,8 +203,9 @@ impl NodeProvider {
             NodeProvider::LeastLoadedBrokerOrActiveKController => {
                 if metadata_manager.is_ready()? {
                     if metadata_manager.using_bootstrap_controllers() {
-                        // `return metadataManager.controller();`
-                        // (`KafkaAdminClient.java:901-902`): with no known
+                        // `return metadataManager.controller();` in
+                        // `KafkaAdminClient.LeastLoadedBrokerOrActiveKController#provide`:
+                        // with no known
                         // controller the call stays pending, and unlike
                         // `ControllerNodeProvider` this provider does not
                         // request a metadata update for it.
@@ -264,7 +267,7 @@ pub(crate) struct Call {
 }
 
 impl std::fmt::Display for Call {
-    /// `Call.toString()` (`KafkaAdminClient.java:1082-1085`):
+    /// `KafkaAdminClient.Call#toString`:
     ///
     /// ```java
     /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
@@ -394,9 +397,9 @@ impl Call {
         let error = if cause.error() == Errors::RequestTimedOut {
             cause
         } else {
-            // `new TimeoutException(this + " timed out at " + now + " after " + tries
-            // + " attempt(s)", cause)` (`KafkaAdminClient.java:1043-1044`), where `this`
-            // renders through `Call.toString()` (`:1082-1085`).
+            // `new TimeoutException(this + " timed out at " + now + " after " + tries + " attempt(s)", cause)`
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.Call#handleTimeoutFailure`),
+            // where `this` renders through `KafkaAdminClient.Call#toString`.
             //
             // The message used to gain an invented `"Aborted due to timeout: "`
             // prefix (a string that appears nowhere in the Kafka tree), drop the
@@ -468,7 +471,7 @@ mod tests {
         manager.node_by_id(-1).is_some() && manager.needs_rebootstrap(NOW + TRIGGER_MS + 1, TRIGGER_MS)
     }
 
-    /// `MetadataUpdateNodeIdProvider.provide()` (`KafkaAdminClient.java:790-799`):
+    /// `KafkaAdminClient.MetadataUpdateNodeIdProvider#provide`:
     /// under `REBOOTSTRAP`, once bootstrapped, no node available or ready means
     /// rebootstrapping with the bootstrap cluster.
     #[test]
@@ -517,8 +520,8 @@ mod tests {
         assert!(!rebootstrapped(&manager));
     }
 
-    /// `supportsUseControllers()` of each Java `NodeProvider`
-    /// (`KafkaAdminClient.java:788-917`): `MetadataUpdateNodeIdProvider` and
+    /// `supportsUseControllers()` of each Java `NodeProvider` nested in
+    /// `KafkaAdminClient`: `MetadataUpdateNodeIdProvider` and
     /// `LeastLoadedBrokerOrActiveKController` answer `true`,
     /// `LeastLoadedNodeProvider` `false`, and `ControllerNodeProvider` /
     /// `ConstantNodeIdProvider` answer what their constructor was given.

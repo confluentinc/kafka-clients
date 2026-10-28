@@ -51,32 +51,23 @@ use crate::common::header::RecordHeaders;
 
 /// An interface for converting objects to bytes.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.Serializer<T>`.
-///
-/// # Asynchronous methods
-///
-/// Every method returns a `Send` future, so a serializer can await I/O (a
-/// schema-registry lookup, for instance) without blocking the runtime.
-/// Implementations may write them as `async fn`. The trait is not
-/// dyn-compatible, so a producer takes its serializers as `impl Serializer<K>`
-/// (`KafkaProducer::new`) and holds them behind a crate-private dyn-compatible
-/// companion, whose methods store the future inline rather than on the heap as
-/// long as it is small: a serializer that awaits a large operation only on a
-/// cache miss should `Box::pin` that operation alone, so the send path adds no
-/// heap allocation per record (CLAUDE.md §13).
-///
-/// # Borrowed output
-///
-/// The serialized bytes are a [`Cow`] that may borrow from `data`: a
-/// serializer whose input already is the bytes (`ByteArraySerializer`,
-/// `StringSerializer`) returns [`Cow::Borrowed`] and neither allocates nor
-/// copies (CLAUDE.md §14); one that builds the bytes returns [`Cow::Owned`].
-/// Either is Java's `byte[]` return.
+/// This interface can be combined with `ClusterResourceListener` to receive
+/// cluster metadata once it's available, as well as `Monitorable` to enable the
+/// serializer to register metrics. For the latter, the following tags are
+/// automatically added to all metrics registered: `config` set to either
+/// `key.serializer` or `value.serializer`, and `class` set to the serializer
+/// class name.
 ///
 /// # Type Parameters
 ///
-/// * `T` - Type to be serialized from. Use `?Sized` bounds to accept both
-///   owned and borrowed forms (e.g., `Serializer<str>` accepts `&str`).
+/// - `T` - Type to be serialized from. It may be unsized (`Serializer<str>`).
+///
+/// # Translation notes
+///
+/// WARNING: combining with `ClusterResourceListener` or `Monitorable` has no effect: no client registers either.
+///
+/// Methods return a `Send` future, which the producer stores inline: a serializer
+/// awaiting a large operation only on a cache miss should `Box::pin` it alone.
 #[doc(alias = "org.apache.kafka.common.serialization.Serializer")]
 pub trait Serializer<T: ?Sized>: Send + Sync {
     /// Convert `data` into a byte array.
@@ -95,7 +86,7 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// # Errors
     ///
     /// Whatever error the serializer reports; the producer returns it from
-    /// `send`, or fails the record's future, as Java's `doSend` does.
+    /// `send`, or fails the record's future.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
     fn serialize<'a>(
         &'a self,
@@ -105,33 +96,18 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
 
     /// Convert `data` into a byte array, with access to the record headers.
     ///
-    /// The default implementation ignores the headers and delegates to
-    /// [`serialize`](Serializer::serialize). Override this method in custom
-    /// serializer implementations that need to inspect or modify headers during
-    /// serialization (e.g., for schema registry integration).
+    /// It is recommended to serialize `None` data to `None` byte array.
     ///
-    /// The headers may be empty. The implementation is allowed to modify them,
-    /// as a side effect of serialization: it is considered best practice not to
-    /// delete or modify existing headers, but only to add new ones. The producer
-    /// sends the headers as they are after both the key and the value are
-    /// serialized, and makes them read-only from then on.
-    ///
-    /// The headers are borrowed for `'h`, a lifetime of their own, so the
-    /// serialized bytes (which live for `'a`) do not keep them borrowed: the
-    /// producer serializes the key, then lends the same headers to the value
-    /// serializer while it still holds the key's bytes.
-    ///
-    /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`
-    /// (`Serializer.java:84`). The two Java overloads intersect on
-    /// `{topic, data}`, which is exactly `serialize(String, T)` (`:64`) — so that
-    /// one keeps the plain name and this one is suffixed with the parameter that
-    /// distinguishes it (CLAUDE.md §2).
+    /// Note that the passed in headers may be empty. The implementation is allowed
+    /// to modify them, as a side effect of serialization. It is considered best
+    /// practice to not delete or modify existing headers, but rather only add new
+    /// ones.
     ///
     /// # Arguments
     ///
-    /// * `topic` - topic associated with data
-    /// * `headers` - headers associated with the record; may be modified
-    /// * `data` - typed data; may be `None`
+    /// - `topic` - topic associated with data
+    /// - `headers` - headers associated with the record
+    /// - `data` - typed data; may be `None`
     ///
     /// # Returns
     ///
@@ -140,6 +116,15 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
     /// # Errors
     ///
     /// As [`serialize`](Serializer::serialize).
+    ///
+    /// # Translation notes
+    ///
+    /// The default implementation ignores the headers and delegates to `serialize`.
+    /// The producer makes the headers read-only once both serializers ran.
+    // The headers are borrowed for `'h`, a lifetime of their own, so the
+    // serialized bytes (which live for `'a`) do not keep them borrowed: the
+    // producer serializes the key, then lends the same headers to the value
+    // serializer while it still holds the key's bytes.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#serialize")]
     fn serialize_with_headers<'a, 'h>(
         &'a self,
@@ -156,49 +141,46 @@ pub trait Serializer<T: ?Sized>: Send + Sync {
 
     /// Configure this class. The default implementation is a no-op.
     ///
-    /// Declared after the `serialize` methods, as on [`Deserializer`], so the
-    /// C constructor takes the methods in the same order for both. Corresponds
-    /// to Java's
-    /// `default void configure(Map<String, ?> configs, boolean isKey)`, and
-    /// returns `()` as Java's returns `void`.
-    ///
     /// # Arguments
     ///
-    /// * `configs` - configs in key/value pairs
-    /// * `is_key` - whether the serializer is used for the key or the value
+    /// - `configs` - configs in key/value pairs
+    /// - `is_key` - whether the serializer is used for the key or the value
+    ///
+    /// # Errors
+    ///
+    /// Whatever error the serializer reports.
+    // Declared after the `serialize` methods, as on `Deserializer`, so the C
+    // constructor takes the methods in the same order for both.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#configure")]
     fn configure<'a>(
         &'a mut self,
         configs: &'a HashMap<String, String>,
         is_key: bool,
-    ) -> impl Future<Output = ()> + Send + 'a {
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'a {
         // intentionally left blank — Java default
         let _ = (configs, is_key);
-        async {}
+        async { Ok(()) }
     }
 
-    /// Close this serializer. The default implementation is a no-op.
+    /// Close this serializer.
     ///
-    /// Corresponds to Java's `default void close()`. As in Java, the method
-    /// must be idempotent, as it may be called multiple times. The producer
-    /// calls it once: from its `close`, after its I/O task has stopped, or
-    /// from a constructor that fails, as Java's catch does
-    /// (`KafkaProducer.java:519-523`).
+    /// This method must be idempotent as it may be called multiple times.
     ///
-    /// It returns `()` as Java's returns `void`: the producer closes its
-    /// serializers with `Utils.closeQuietly`, which logs a failure rather than
-    /// stopping. An implementation reports a failing close by panicking: the
-    /// producer catches the panic, logs it and closes the other serializer;
-    /// then the producer's `close` returns `Failed to close kafka producer`,
-    /// with the panic's message as its source, while a failed constructor only
-    /// logs it.
+    /// # Errors
     ///
-    /// It takes `&self`, unlike [`Deserializer::close`]: the producer shares
-    /// its serializers with every concurrent `send` and closes through a shared
-    /// reference, so an exclusive borrow would need a lock on every send.
+    /// Whatever error the serializer reports; the producer still closes the
+    /// other serializer, then returns it as the source of its own.
+    // The producer calls it once: from its `close`, after its I/O task has
+    // stopped, or from a constructor that fails, as Java's catch does. It closes
+    // its serializers as Java's `Utils.closeQuietly` does: it logs an error (or a
+    // caught panic), keeps the first one and closes the other serializer; then the
+    // producer's `close` returns `Failed to close kafka producer`, with the first
+    // error as its source, while a failed constructor only logs it. It takes `&self`, unlike
+    // `Deserializer::close`: the producer shares its serializers with every
+    // concurrent `send`, so an exclusive borrow would need a lock on every send.
     #[doc(alias = "org.apache.kafka.common.serialization.Serializer#close")]
-    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn close(&self) -> impl Future<Output = Result<(), Error>> + Send + '_ {
         // intentionally left blank — Java default
-        async {}
+        async { Ok(()) }
     }
 }

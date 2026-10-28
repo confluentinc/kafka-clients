@@ -15,8 +15,8 @@
 //! Size constants of the message format versions 0 and 1.
 //!
 //! Translated from the constants of
-//! `org.apache.kafka.common.record.internal.LegacyRecord`
-//! (`LegacyRecord.java:45-69`). **Only the constants are translated.** Kafka
+//! `org.apache.kafka.common.record.internal.LegacyRecord`.
+//! **Only the constants are translated.** Kafka
 //! 4.0 removed message formats v0 and v1 (KIP-724), and this client reads and
 //! writes only v2, so the rest of `LegacyRecord` — the record class itself —
 //! has no Rust counterpart. The constants remain because

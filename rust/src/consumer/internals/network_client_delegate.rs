@@ -370,8 +370,8 @@ impl FutureCompletionHandler {
         let completion_time_ms = response.received_time_ms();
         if let Some(auth_error) = response.authentication_error() {
             // Java: `onFailure(completionTimeMs, response.authenticationException())`
-            // (`NetworkClientDelegate.java:443-444`) — the object, unchanged. The
-            // response now carries the typed error, so the class the channel raised
+            // (`org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.FutureCompletionHandler#onComplete`)
+            // — the object, unchanged. The response now carries the typed error, so the class the channel raised
             // is what the request's future completes with; hardcoding
             // `SASL_AUTHENTICATION_FAILED` reported code 58 for a TLS certificate
             // rejection on a connection that never performed a SASL exchange.
@@ -611,7 +611,7 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure), which
     /// delegates to `NetworkClientUtils.maybeThrowAuthFailure` and rethrows
     /// `client.authenticationException(node)` verbatim
-    /// (`NetworkClientUtils.java:141-145`) — so the class is returned unchanged
+    /// (`NetworkClientUtils#maybeThrowAuthFailure`) — so the class is returned unchanged
     /// rather than rebuilt as a SASL failure.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#maybeThrowAuthFailure")]
     pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
@@ -768,8 +768,8 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         // `Time` source plumbed in; callers thread `current_time_ms`.
         self.maybe_propagate_metadata_error(current_time_ms);
         self.check_disconnects(current_time_ms, on_close);
-        // Java NCD:169 — record the unsent-requests queue size at the end of
-        // poll (per bg poll, not per-record).
+        // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#poll(long,long,boolean)` — record the
+        // unsent-requests queue size at the end of poll (per bg poll, not per-record).
         if let Some(metrics) = &self.async_consumer_metrics {
             metrics.record_unsent_requests_queue_size(self.unsent_requests.len() as i32, current_time_ms);
         }
@@ -802,8 +802,8 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
             // Java: `unsent.timer.update(currentTimeMs)` then `isExpired`.
             if unsent.deadline_ms() >= 0 && current_time_ms >= unsent.deadline_ms() {
                 let timeout_ms = unsent.deadline_ms().saturating_sub(unsent.enqueue_time_ms());
-                // Java NCD:203 — record the queue time when an expired request
-                // is removed. Java uses `time.milliseconds()`; the Rust
+                // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#trySend` — record the queue
+                // time when an expired request is removed. Java uses `time.milliseconds()`; the Rust
                 // delegate threads `current_time_ms` (its `updatedNow`
                 // approximation), so use that for the removal timestamp.
                 self.record_unsent_requests_queue_time(&unsent, current_time_ms);
@@ -817,8 +817,8 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
                 // Not ready yet — re-queue and retry next poll.
                 requeue.push_back(unsent);
             } else {
-                // Java NCD:214 — record the queue time when a request is
-                // successfully sent and removed from the queue.
+                // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#trySend` — record the queue
+                // time when a request is successfully sent and removed from the queue.
                 self.record_unsent_requests_queue_time(&unsent, current_time_ms);
             }
         }
@@ -903,21 +903,23 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         while let Some(unsent) = queue.pop_front() {
             match unsent.node() {
                 Some(n) if self.client.connection_failed(n) => {
-                    // Java NCD:243-244 hands `client.authenticationException(node)`
-                    // to `onFailure` unchanged, and `onFailure` substitutes
+                    // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#checkDisconnects` hands
+                    // `client.authenticationException(node)` to `onFailure` unchanged, and `onFailure` substitutes
                     // `DisconnectException.INSTANCE` when it is null
-                    // (`NetworkClientDelegate.java:427-434`).
+                    // (`NetworkClientDelegate.FutureCompletionHandler#onFailure`).
                     let err = match self.client.authentication_error(n) {
                         Some(error) => error,
                         None => Error::new(Errors::NetworkError),
                     };
-                    // Java NCD:242 — record queue time on disconnect removal.
+                    // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#checkDisconnects` —
+                    // record queue time on disconnect removal.
                     self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                     unsent.handler().on_failure(current_time_ms, err);
                 },
                 None if on_close => {
                     log::debug!("Removing unsent request because the client is closing: {unsent:?}");
-                    // Java NCD:248 — record queue time on close removal.
+                    // Java `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#checkDisconnects` —
+                    // record queue time on close removal.
                     self.record_unsent_requests_queue_time(&unsent, current_time_ms);
                     unsent.handler().on_failure(current_time_ms, Error::new(Errors::NetworkError));
                 },

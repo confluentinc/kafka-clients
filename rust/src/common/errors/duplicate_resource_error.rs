@@ -20,15 +20,15 @@ use crate::common::Error;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::protocol::Errors;
 
-/// A request illegally referred to the same resource twice.
+/// Error thrown due to a request that illegally refers to the same resource twice (for
+/// example, trying to both create and delete the same SCRAM credential for a particular user in
+/// a single request).
 ///
-/// Corresponds to Java's `DuplicateResourceException`, error code `Errors::DuplicateResource`.
+/// # Translation notes
 ///
-/// Java `extends` chain:
-///    `DuplicateResourceException` -> `ApiException` -> `KafkaException`
-///
-/// Hand-written rather than declared with `kafka_error_type!` because it
-/// carries Java's `resource` field and `resource()` accessor.
+/// Error code `Errors::DuplicateResource`.
+// Hand-written rather than declared with `kafka_error_type!` because it carries Java's
+// `resource` field and `resource()` accessor.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException")]
 pub struct DuplicateResourceError {
@@ -39,41 +39,49 @@ pub struct DuplicateResourceError {
 }
 
 impl DuplicateResourceError {
-    /// Create the error with the given message and no resource — Java's
-    /// `DuplicateResourceException(String message)`.
+    /// Constructor
     ///
-    /// The three translated constructors intersect on `{message}`, which is
-    /// exactly this one — so it keeps the plain name and the other two are
-    /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#DuplicateResourceException")]
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: None, source: None }
     }
 
-    /// Create the error with the code's default message — used by
-    /// `Errors::error`.
+    /// Creates the error with the default message of `Errors::DuplicateResource`, as the
+    /// broker's error code is turned into an error.
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#DuplicateResourceException")]
     pub fn with_default_message() -> Self {
         Self::new(Errors::DuplicateResource.message())
     }
 
-    /// Create the error naming the offending resource — Java's
-    /// `DuplicateResourceException(String resource, String message)`.
-    /// Suffixed per [`new`](Self::new).
+    /// Constructor
+    ///
+    /// # Arguments
+    ///
+    /// - `resource` - the (potentially `None`) resource that was referred to twice
+    /// - `message` - the error's message
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#DuplicateResourceException")]
     pub fn with_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: Some(resource.into()), source: None }
     }
 
-    /// The offending resource, or `None` if not recorded.
+    /// # Returns
+    ///
+    /// the (potentially `None`) resource that was referred to twice
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#resource")]
     pub fn resource(&self) -> Option<&str> {
         self.resource.as_deref()
     }
 
-    /// Create the error with a resource, message, and underlying cause,
-    /// mirroring Java's `DuplicateResourceException(String resource, String message, Throwable cause)`.
-    /// Suffixed per [`new`](Self::new).
+    /// Constructor
+    ///
+    /// # Arguments
+    ///
+    /// - `resource` - the (potentially `None`) resource that was referred to twice
+    /// - `message` - the error's message
+    /// - `source` - the error's cause
     #[doc(alias = "org.apache.kafka.common.errors.DuplicateResourceException#DuplicateResourceException")]
     pub fn with_resource_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
         Self {
@@ -83,14 +91,14 @@ impl DuplicateResourceError {
         }
     }
 
-    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    /// Returns the underlying cause, if any: Java's `getCause()`.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
         self.source.as_deref()
     }
 
-    /// The error message.
+    /// Returns the error message: Java's `getMessage()`.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {

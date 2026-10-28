@@ -655,7 +655,7 @@ impl Drop for FetchRequestManager {
 mod tests {
     use super::*;
     use crate::common::IsolationLevel;
-    /// Java `FetchRequestManagerTest.retryBackoffMs`.
+    /// Java `FetchRequestManagerTest#retryBackoffMs`.
     const RETRY_BACKOFF_MS: i64 = 100;
     use crate::common::TopicPartition;
     use crate::common::internals::ClusterResourceListeners;
@@ -763,7 +763,7 @@ mod tests {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testNoFetchablePartitionsDoesNotWakeUpBuffer`
+    /// Translated from `FetchRequestManagerTest#testNoFetchablePartitionsDoesNotWakeUpBuffer`
     /// (KAFKA-20854). A bg-loop cycle that finds nothing to fetch because no
     /// partition is fetchable must NOT wake the buffer: the state only changes
     /// on an external event, so an eager wakeup would busy-loop the caller.
@@ -1080,7 +1080,7 @@ mod tests {
 /// directly to stay fast and deterministic (these are unit tests, no broker).
 #[cfg(test)]
 mod round_trip {
-    /// Java `FetchRequestManagerTest.retryBackoffMs`.
+    /// Java `FetchRequestManagerTest#retryBackoffMs`.
     const RETRY_BACKOFF_MS: i64 = 100;
     use crate::common::requests::FetchMetadata;
     use crate::consumer::internals::UnsentRequest;
@@ -1380,9 +1380,8 @@ mod round_trip {
     }
 
     /// A transactional (non-control) v2 data batch, mirroring Java's
-    /// `appendTransactionalRecords(buffer, pid, baseOffset, records...)`
-    /// (`FetchRequestManagerTest.java:3114-3128`): magic v2, CREATE_TIME,
-    /// `producer_epoch = 0`, `base_sequence = (int) base_offset`,
+    /// `FetchRequestManagerTest#appendTransactionalRecords(ByteBuffer,long,long,SimpleRecord...)`: magic v2,
+    /// CREATE_TIME, `producer_epoch = 0`, `base_sequence = (int) base_offset`,
     /// `is_transactional = true`, `NO_PARTITION_LEADER_EPOCH`. Each `(key, value)`
     /// pair is appended at consecutive offsets from `base_offset`; a `None` value
     /// mirrors Java's null-valued `SimpleRecord`.
@@ -1412,15 +1411,14 @@ mod round_trip {
     }
 
     /// A `COMMIT` end-transaction-marker control batch at `base_offset` for
-    /// `producer_id`, mirroring Java's `commitTransaction(buffer, producerId,
-    /// baseOffset)` (`FetchRequestManagerTest.java:3130-3135`).
+    /// `producer_id`, mirroring Java's
+    /// `FetchRequestManagerTest#commitTransaction`.
     fn commit_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
         end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Commit)
     }
 
     /// An `ABORT` end-transaction-marker control batch, mirroring Java's
-    /// `abortTransaction(buffer, producerId, baseOffset)`
-    /// (`FetchRequestManagerTest.java:3137-3143`). The marker consumes one offset
+    /// `FetchRequestManagerTest#abortTransaction`. The marker consumes one offset
     /// (Java returns 1), so callers tracking a running offset advance it by one.
     fn abort_transaction(base_offset: i64, producer_id: i64) -> Vec<u8> {
         end_txn_marker_batch(base_offset, producer_id, ControlRecordType::Abort)
@@ -1932,7 +1930,7 @@ mod round_trip {
 
     // ─── harness smoke / testFetchNormal ────────────────────────────────────
 
-    /// Translated from `FetchRequestManagerTest.testFetchNormal`: a full
+    /// Translated from `FetchRequestManagerTest#testFetchNormal`: a full
     /// round-trip — build request, deliver 3 records (offsets 1..3), collect
     /// them, and verify the position advances to 4.
     #[test]
@@ -1997,7 +1995,7 @@ mod round_trip {
         }
     }
 
-    /// Translated from `FetchRequestManagerTest.testEmptyFetchResponseWakesUpBuffer`
+    /// Translated from `FetchRequestManagerTest#testEmptyFetchResponseWakesUpBuffer`
     /// (pre-4.4; its wakeup moved into `removePendingFetchRequest` with
     /// KAFKA-20854): an empty incremental response still wakes the buffer.
     #[tokio::test]
@@ -2033,7 +2031,7 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testFailedFetchResponseWakesUpBuffer`.
+    /// Translated from `FetchRequestManagerTest#testFailedFetchResponseWakesUpBuffer`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFailedFetchResponseWakesUpBuffer"
@@ -2056,7 +2054,7 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchSessionErrorResponseWakesUpBuffer`.
+    /// Translated from `FetchRequestManagerTest#testFetchSessionErrorResponseWakesUpBuffer`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchSessionErrorResponseWakesUpBuffer"
@@ -2080,7 +2078,7 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testMaximumTimeToWaitUnboundedWhenFetchSent`.
+    /// Translated from `FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenFetchSent`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenFetchSent"
@@ -2095,7 +2093,7 @@ mod round_trip {
         assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(0));
     }
 
-    /// Translated from `FetchRequestManagerTest.testMaximumTimeToWaitBoundedWhenNoInflightRequest`.
+    /// Translated from `FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenNoInflightRequest`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenNoInflightRequest"
@@ -2126,7 +2124,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight`.
+    /// `FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight"
@@ -2167,7 +2165,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff`.
+    /// `FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff"
@@ -2190,7 +2188,7 @@ mod round_trip {
         assert_eq!(i64::MAX, rt.mgr.maximum_time_to_wait(500));
     }
 
-    /// Translated from `FetchRequestManagerTest.testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer`.
+    /// Translated from `FetchRequestManagerTest#testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer`.
     #[tokio::test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer"
@@ -2230,7 +2228,7 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchWithTopicId`: a
+    /// Translated from `FetchRequestManagerTest#testFetchWithTopicId`: a
     /// non-zero topic-id negotiates the LATEST fetch version and carries the
     /// topic-id on the wire; records decode and the position advances.
     #[test]
@@ -2257,7 +2255,7 @@ mod round_trip {
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchWithNoTopicId`: a
+    /// Translated from `FetchRequestManagerTest#testFetchWithNoTopicId`: a
     /// ZERO topic-id falls back to fetch version 12 (the topic-id-less wire
     /// format); records still decode and the position advances.
     #[test]
@@ -2283,7 +2281,7 @@ mod round_trip {
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
-    /// Translated from `FetchRequestManagerTest.testEpochSetInFetchRequest`:
+    /// Translated from `FetchRequestManagerTest#testEpochSetInFetchRequest`:
     /// the outgoing FetchRequest carries the partition's current leader epoch
     /// (here 99 from the metadata update).
     #[test]
@@ -2325,7 +2323,7 @@ mod round_trip {
         let _ = topic_id;
     }
 
-    /// Translated from `FetchRequestManagerTest.testSubscriptionPositionUpdatedWithEpoch`'s
+    /// Translated from `FetchRequestManagerTest#testSubscriptionPositionUpdatedWithEpoch`'s
     /// core assertion that the consumer position advances after a fetch (the
     /// metadata-epoch-divergence half is covered by the leadership tests).
     #[test]
@@ -2347,7 +2345,7 @@ mod round_trip {
         assert_eq!(Some(4), rt.position(&tp(0)), "position advanced to 4");
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchSessionIdError`: a
+    /// Translated from `FetchRequestManagerTest#testFetchSessionIdError`: a
     /// top-level `FETCH_SESSION_TOPIC_ID_ERROR` yields no records, does not
     /// advance the position, and leaves the fetch handled (node removed from
     /// the pending set).
@@ -2376,7 +2374,7 @@ mod round_trip {
         let _ = topic_id;
     }
 
-    /// Translated from `FetchRequestManagerTest.testRecordLatencyOnFetchResponseLevelError`
+    /// Translated from `FetchRequestManagerTest#testRecordLatencyOnFetchResponseLevelError`
     /// (KAFKA-20585, c3a830f8d2): latency is recorded on response-level errors
     /// (e.g. `FETCH_SESSION_TOPIC_ID_ERROR`) since the round trip completed.
     /// Java verifies `metricsManager.recordLatency(anyString(), anyLong())` on a
@@ -2422,7 +2420,7 @@ mod round_trip {
         assert_eq!(42.0, value(&registry.fetch_latency_avg));
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchResponseWithUnexpectedPartitionIsIgnored`
+    /// Translated from `FetchRequestManagerTest#testFetchResponseWithUnexpectedPartitionIsIgnored`
     /// (KAFKA-20733, 7c010c7583, as 624ca392ef extended it): only tp0 is
     /// assigned, and the response also carries tp1, which is not part of the
     /// fetch session. `FetchSessionHandler` rejects the whole response, so the
@@ -2463,7 +2461,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchForgetTopicIdWhenUnassigned`: after a
+    /// `FetchRequestManagerTest#testFetchForgetTopicIdWhenUnassigned`: after a
     /// partition is unassigned and a different one assigned, the next
     /// incremental fetch carries the old partition on the forget list.
     #[test]
@@ -2507,7 +2505,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchForgetTopicIdWhenReplaced`: when a
+    /// `FetchRequestManagerTest#testFetchForgetTopicIdWhenReplaced`: when a
     /// partition's topic-id changes (foo old-id -> foo new-id), the next
     /// incremental fetch forgets the old topic-id.
     #[test]
@@ -2553,7 +2551,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchTopicIdUpgradeDowngrade`: a session
+    /// `FetchRequestManagerTest#testFetchTopicIdUpgradeDowngrade`: a session
     /// that starts topic-id-less (v12) upgrades to topic-ids (latest version)
     /// and back, with the wire version tracking the topic-id presence.
     #[test]
@@ -2611,7 +2609,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testConsumingViaIncrementalFetchRequests`: an
+    /// `FetchRequestManagerTest#testConsumingViaIncrementalFetchRequests`: an
     /// incremental fetch session delivers records across several rounds; the
     /// position advances per partition and a partial buffered record is
     /// returned on a subsequent collect with no new fetch.
@@ -2677,12 +2675,12 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchCompletedBeforeHandlerAdded`: a
+    /// `FetchRequestManagerTest#testFetchCompletedBeforeHandlerAdded`: a
     /// success response for a node with NO session handler is ignored (no
     /// panic, no buffered fetch).
     ///
     /// Also pins Java's `finally { removePendingFetchRequest(...) }`
-    /// (`AbstractFetch.java:253-255`), which runs even on the `handler == null`
+    /// (`AbstractFetch#handleFetchSuccess`), which runs even on the `handler == null`
     /// early `return`. Skipping it would leave the node in
     /// `nodes_with_pending_fetch_requests` forever, and
     /// `prepare_fetch_requests` skips every node in that set — so every
@@ -2725,11 +2723,11 @@ mod round_trip {
 
     /// Java's `catch (Throwable t) { pendingFetchRequestFuture
     /// .completeExceptionally(t); return PollResult.EMPTY; }`
-    /// (`FetchRequestManager.java:172-175`) hands `t` to the application
+    /// (`FetchRequestManager#pollInternal`) hands `t` to the application
     /// **unchanged**.
     ///
     /// The only error exit from `prepare_fetch_requests` is
-    /// `maybe_throw_auth_failure(node)` (`AbstractFetch.java:452-457`, reached
+    /// `maybe_throw_auth_failure(node)` (`AbstractFetch#prepareFetchRequests`, reached
     /// when the node is inside the reconnect-backoff window), so this drives
     /// that path with a failing auth closure and pins that the class, the
     /// error code, the message and the `source()` all survive.
@@ -2950,7 +2948,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitions`: a node
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitions`: a node
     /// hosting buffered data is skipped; once collected, the node is fetched
     /// again. (Single-node simplification of the multi-node Java test.)
     #[test]
@@ -2983,7 +2981,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionNotAssigned`.
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionNotAssigned`.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionNotAssigned"
@@ -3001,7 +2999,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingLeader`.
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionMissingLeader`.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionMissingLeader"
@@ -3017,14 +3015,13 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionMissingPosition`
-    /// (`FetchRequestManagerTest.java:3697`).
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionMissingPosition`.
     ///
     /// Java's scenario: tp1 is fetched and BUFFERED, then its position is
     /// overwritten to `null` via `subscriptions.position(tp1, null)` while it
     /// is still assigned and still buffered. Java's `createFetchRequests`
     /// future then THROWS `IllegalStateException` (via `positionForPartition`,
-    /// `AbstractFetch.java:508-515`), and the user's `poll()` surfaces it.
+    /// `AbstractFetch#positionForPartition`), and the user's `poll()` surfaces it.
     ///
     /// **Deliberate divergence from Java (documented, regression-tested).**
     /// In Rust the per-partition build loop (`abstract_fetch.rs`
@@ -3084,7 +3081,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPaused`.
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPaused`.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPaused"
@@ -3098,7 +3095,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPendingAssignment`.
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPendingAssignment`.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPendingAssignment"
@@ -3116,8 +3113,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionPendingRevocation`
-    /// (`FetchRequestManagerTest.java:3760`): a buffered partition that is
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionPendingRevocation`:
+    /// a buffered partition that is
     /// marked pending-revocation is unfetchable, so the next build excludes it
     /// and fetches only the collected partition.
     #[test]
@@ -3136,7 +3133,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionResetOffset`.
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionResetOffset`.
     #[test]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testFetchRequestWithBufferedPartitionResetOffset"
@@ -3150,7 +3147,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchRequestWithBufferedPartitionUnfetchable`
+    /// `FetchRequestManagerTest#testFetchRequestWithBufferedPartitionUnfetchable`
     /// (the shared helper; here exercised via pause as the unfetchable mutator).
     #[test]
     #[doc(
@@ -3171,7 +3168,7 @@ mod round_trip {
 
     /// Translated (parameterized over FENCED_LEADER_EPOCH /
     /// NOT_LEADER_OR_FOLLOWER) from
-    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation`:
+    /// `FetchRequestManagerTest#testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation`:
     /// a leadership-change error that carries new leader info (id 999, epoch
     /// validLeaderEpoch+100) applies the new leader+node to metadata and
     /// validates the position; tp1 (no error) is unaffected.
@@ -3239,8 +3236,7 @@ mod round_trip {
 
     /// Translated (parameterized over FENCED_LEADER_EPOCH /
     /// NOT_LEADER_OR_FOLLOWER) from
-    /// `FetchRequestManagerTest.testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation`
-    /// (`FetchRequestManagerTest.java:3190`).
+    /// `FetchRequestManagerTest#testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation`.
     ///
     /// Two partitions: tp0 hits a leadership-change error with NO new leader
     /// info; tp1 is fetched without error. Both partitions first have a
@@ -3399,7 +3395,7 @@ mod round_trip {
         pd
     }
 
-    /// Translated from `FetchRequestManagerTest.testHeaders`: record headers
+    /// Translated from `FetchRequestManagerTest#testHeaders`: record headers
     /// survive decode into `ConsumerRecord` through the fetch path.
     #[test]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest#testHeaders")]
@@ -3425,7 +3421,7 @@ mod round_trip {
         assert_eq!(Some(b"hv1".as_slice()), hdrs[0].value());
     }
 
-    /// Translated from `FetchRequestManagerTest.testLeaderEpochInConsumerRecord`:
+    /// Translated from `FetchRequestManagerTest#testLeaderEpochInConsumerRecord`:
     /// each record's `leader_epoch()` reflects its batch's partition leader
     /// epoch (three batches with epochs 1, 8, 13).
     #[test]
@@ -3455,7 +3451,7 @@ mod round_trip {
         }
     }
 
-    /// Translated from `FetchRequestManagerTest.testMissingLeaderEpochInRecords`:
+    /// Translated from `FetchRequestManagerTest#testMissingLeaderEpochInRecords`:
     /// a batch with `NO_PARTITION_LEADER_EPOCH` yields records whose
     /// `leader_epoch()` is `None`.
     #[test]
@@ -3478,7 +3474,7 @@ mod round_trip {
         }
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchMaxPollRecords`: with
+    /// Translated from `FetchRequestManagerTest#testFetchMaxPollRecords`: with
     /// max.poll.records=2, a 3-record fetch returns 2 then 1, advancing the
     /// position across each collect; a second fetch returns the next batch.
     #[test]
@@ -3515,7 +3511,7 @@ mod round_trip {
         assert_eq!(Some(6), rt.position(&tp(0)));
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchNonContinuousRecords`:
+    /// Translated from `FetchRequestManagerTest#testFetchNonContinuousRecords`:
     /// a compacted topic with offset gaps (15, 20, 30) decodes all records and
     /// advances the position to last-offset + 1 (31).
     #[test]
@@ -3538,7 +3534,7 @@ mod round_trip {
         assert_eq!(Some(31), rt.position(&tp(0)));
     }
 
-    /// Translated from `FetchRequestManagerTest.testUpdatePositionOnEmptyBatch`:
+    /// Translated from `FetchRequestManagerTest#testUpdatePositionOnEmptyBatch`:
     /// an empty batch (no records) still advances the position to
     /// last-offset + 1.
     #[test]
@@ -3561,7 +3557,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testUpdatePositionWithLastRecordMissingFromBatch`:
+    /// `FetchRequestManagerTest#testUpdatePositionWithLastRecordMissingFromBatch`:
     /// a batch whose declared `last_offset` is past its last present record
     /// (compaction removed the tail) advances the position to the batch's
     /// next-offset, not the last present record + 1.
@@ -3590,7 +3586,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testReturnAbortedTransactionsInUncommittedMode`:
+    /// `FetchRequestManagerTest#testReturnAbortedTransactionsInUncommittedMode`:
     /// under READ_UNCOMMITTED, aborted-transaction records ARE returned.
     #[test]
     #[doc(
@@ -3616,8 +3612,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testConsumerPositionUpdatedWhenSkippingAbortedTransactions`
-    /// (`FetchRequestManagerTest.java:2951-2985`): under READ_COMMITTED an
+    /// `FetchRequestManagerTest#testConsumerPositionUpdatedWhenSkippingAbortedTransactions`:
+    /// under READ_COMMITTED an
     /// all-aborted transactional data batch plus its ABORT marker returns NO
     /// records, but the consumer position still advances past both.
     #[test]
@@ -3657,8 +3653,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testReadCommittedWithCommittedAndAbortedTransactions`
-    /// (`FetchRequestManagerTest.java:2613-2686`): two interleaved producers whose
+    /// `FetchRequestManagerTest#testReadCommittedWithCommittedAndAbortedTransactions`:
+    /// two interleaved producers whose
     /// transactions commit and abort in turn under READ_COMMITTED; only the three
     /// committed records survive the filtering.
     #[test]
@@ -3719,8 +3715,8 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testMultipleAbortMarkers`
-    /// (`FetchRequestManagerTest.java:2688-2735`): an aborted transaction followed
+    /// Translated from `FetchRequestManagerTest#testMultipleAbortMarkers`:
+    /// an aborted transaction followed
     /// by a DUPLICATE abort marker (which must be ignored) and then a committed
     /// transaction; only the two committed records are returned.
     #[test]
@@ -3775,8 +3771,8 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testReadCommittedAbortMarkerWithNoData`
-    /// (`FetchRequestManagerTest.java:2737-2775`): an ABORT marker whose
+    /// Translated from `FetchRequestManagerTest#testReadCommittedAbortMarkerWithNoData`:
+    /// an ABORT marker whose
     /// transactional data is no longer in the log, followed by a committed batch of
     /// null-valued records; the committed records are returned and the marker with
     /// no data is skipped.
@@ -3810,7 +3806,7 @@ mod round_trip {
         assert_eq!(vec![6, 7, 8], offsets);
     }
 
-    /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
+    /// Translated from `FetchRequestManagerTest#testReadCommittedWithCompactedTopic`:
     /// interleaved committed/aborted transactional batches under READ_COMMITTED
     /// return only the committed records, in offset order.
     #[test]
@@ -3838,7 +3834,7 @@ mod round_trip {
         assert_eq!(vec![3, 4, 30, 31, 32], offsets, "only committed records, aborted skipped");
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchPositionAfterException`:
+    /// Translated from `FetchRequestManagerTest#testFetchPositionAfterException`:
     /// when one partition (tp0) fails with OFFSET_OUT_OF_RANGE and another
     /// (tp1) returns records, tp1's records are returned and its position
     /// advances; tp0's position is unchanged and the OOR error surfaces.
@@ -3950,7 +3946,7 @@ mod round_trip {
         assert_eq!(Some(4), rt.position(&tp(1)), "tp1 position unchanged");
     }
 
-    /// Translated from `FetchRequestManagerTest.testStaleOutOfRangeError`: an
+    /// Translated from `FetchRequestManagerTest#testStaleOutOfRangeError`: an
     /// OFFSET_OUT_OF_RANGE that arrives after a seek to a DIFFERENT offset is
     /// stale and must NOT reset the position or raise.
     #[test]
@@ -3979,7 +3975,7 @@ mod round_trip {
         );
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchedRecordsAfterSeek`:
+    /// Translated from `FetchRequestManagerTest#testFetchedRecordsAfterSeek`:
     /// (AutoOffsetReset NONE) an OOR followed by a seek past the fetched offset
     /// yields an empty fetch without raising.
     #[test]
@@ -4034,7 +4030,7 @@ mod round_trip {
         assert!(recs.is_empty(), "no records after seeking past the OOR offset");
     }
 
-    /// Translated from `FetchRequestManagerTest.testFetchDisconnected`: a
+    /// Translated from `FetchRequestManagerTest#testFetchDisconnected`: a
     /// transport disconnect yields no records, does not reset, and leaves the
     /// partition fetchable at its original position.
     #[test]
@@ -4057,7 +4053,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testClearBufferedDataForTopicPartitions`: after
+    /// `FetchRequestManagerTest#testClearBufferedDataForTopicPartitions`: after
     /// a normal fetch buffers data, clearing buffered data for partitions not
     /// in the new assignment empties the buffer.
     #[test]
@@ -4077,7 +4073,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testInflightFetchOnPendingPartitions`: a fetch
+    /// `FetchRequestManagerTest#testInflightFetchOnPendingPartitions`: a fetch
     /// request is NOT issued for a partition awaiting an on-assigned callback
     /// (pending), even though it has a valid position.
     #[test]
@@ -4099,8 +4095,8 @@ mod round_trip {
         let _ = topic_id;
     }
 
-    /// Mirrors Java's `assertNonEmptyFetch` helper
-    /// (`FetchRequestManagerTest.java:343`): build a request for tp0, deliver
+    /// Mirrors Java's `FetchRequestManagerTest#assertNonEmptyFetch` helper:
+    /// build a request for tp0, deliver
     /// 3 records (offsets 1..3), assert there is a completed fetch, collect,
     /// and assert tp0's position is 4. Like Java, this asserts the POSITION
     /// (not the per-call record count) — records at offsets below the current
@@ -4119,8 +4115,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion`
-    /// (`FetchRequestManagerTest.java:323`): while tp0 is marked
+    /// `FetchRequestManagerTest#testFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion`:
+    /// while tp0 is marked
     /// pending-on-assigned-callback, no fetch request is issued and no fetch
     /// completes for it; once the callback is enabled the partition resumes
     /// fetching.
@@ -4151,8 +4147,8 @@ mod round_trip {
     // ── pause / resume / seek family ────────────────────────────────────────
 
     /// Translated from
-    /// `FetchRequestManagerTest.testInFlightFetchOnPausedPartition`
-    /// (`FetchRequestManagerTest.java:1370`): a fetch is issued for tp0, then
+    /// `FetchRequestManagerTest#testInFlightFetchOnPausedPartition`:
+    /// a fetch is issued for tp0, then
     /// tp0 is paused BEFORE the response arrives. On delivery + collect, no
     /// records are returned for the paused partition.
     #[test]
@@ -4185,8 +4181,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchOnCompletedFetchesForSomePausedPartitions`
-    /// (`FetchRequestManagerTest.java:1432`): tp0 and tp1 are fetched (on
+    /// `FetchRequestManagerTest#testFetchOnCompletedFetchesForSomePausedPartitions`:
+    /// tp0 and tp1 are fetched (on
     /// separate nodes), then tp0 is paused before collecting. Only tp1's
     /// records are returned; tp0's completed fetch is retained.
     #[test]
@@ -4237,8 +4233,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testPartialFetchWithPausedPartitions`
-    /// (`FetchRequestManagerTest.java:1495`): with maxPollRecords=2, a fetch of
+    /// `FetchRequestManagerTest#testPartialFetchWithPausedPartitions`:
+    /// with maxPollRecords=2, a fetch of
     /// 3 records is partially collected (2 records), then the partition is
     /// paused — the remaining record stays cached — then resumed, and the last
     /// record is returned.
@@ -4291,8 +4287,8 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchDiscardedAfterPausedPartitionResumedAndSeekedToNewOffset`
-    /// (`FetchRequestManagerTest.java:1533`): a fetch is issued, the partition
+    /// `FetchRequestManagerTest#testFetchDiscardedAfterPausedPartitionResumedAndSeekedToNewOffset`:
+    /// a fetch is issued, the partition
     /// is paused, the response is delivered, then the partition is re-seeked to
     /// a new offset and resumed. The buffered fetch is DISCARDED (its base
     /// offset no longer matches the position) and no records are returned.
@@ -4331,8 +4327,8 @@ mod round_trip {
         assert!(!rt.has_completed_fetches(), "discarded fetch removed from buffer");
     }
 
-    /// Translated from `FetchRequestManagerTest.testSeekBeforeException`
-    /// (`FetchRequestManagerTest.java:1841`): tp0 returns 4 records, collected
+    /// Translated from `FetchRequestManagerTest#testSeekBeforeException`:
+    /// tp0 returns 4 records, collected
     /// 2-at-a-time; then tp1 is added, returns OFFSET_OUT_OF_RANGE, but a seek
     /// on tp1 before collecting suppresses the OOR error so the subsequent
     /// collect returns no records and does not raise.
@@ -4450,7 +4446,7 @@ mod round_trip {
         RoundTrip::new(2, i32::MAX, IsolationLevel::ReadCommitted, ids)
     }
 
-    /// Translated from `FetchRequestManagerTest.testPreferredReadReplica`: a
+    /// Translated from `FetchRequestManagerTest#testPreferredReadReplica`: a
     /// preferred-read-replica is set from the response, honored, and reverts to
     /// the leader when the response names a replica absent from metadata.
     #[test]
@@ -4480,7 +4476,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchDisconnectedShouldClearPreferredReadReplica`:
+    /// `FetchRequestManagerTest#testFetchDisconnectedShouldClearPreferredReadReplica`:
     /// a disconnect clears the preferred read replica.
     #[test]
     #[doc(
@@ -4504,7 +4500,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchDisconnectedShouldNotClearPreferredReadReplicaIfUnassigned`:
+    /// `FetchRequestManagerTest#testFetchDisconnectedShouldNotClearPreferredReadReplicaIfUnassigned`:
     /// a disconnect for an UNASSIGNED partition does not (and cannot) keep a
     /// preferred replica — once unassigned, the partition has no state.
     #[test]
@@ -4528,7 +4524,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testFetchErrorShouldClearPreferredReadReplica`:
+    /// `FetchRequestManagerTest#testFetchErrorShouldClearPreferredReadReplica`:
     /// a per-partition NOT_LEADER_OR_FOLLOWER error clears the preferred read
     /// replica (via the metadata-refresh-errors path).
     #[test]
@@ -4553,7 +4549,7 @@ mod round_trip {
     }
 
     /// Translated from
-    /// `FetchRequestManagerTest.testPreferredReadReplicaOffsetError`: an
+    /// `FetchRequestManagerTest#testPreferredReadReplicaOffsetError`: an
     /// OFFSET_OUT_OF_RANGE error clears the preferred read replica.
     #[test]
     #[doc(

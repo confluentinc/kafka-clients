@@ -18,14 +18,22 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Disk error when trying to access log file on the disk.
+    /// Miscellaneous disk-related `IOException` occurred when handling a request. Client should
+    /// request metadata update and retry if the response shows `KafkaStorageError`
     ///
-    /// Corresponds to Java's `KafkaStorageException`, error code `Errors::KafkaStorageError`.
+    /// Here are the guidelines on how to handle `KafkaStorageError` and `IOException`:
     ///
-    /// Java `extends` chain:
-    ///    `KafkaStorageException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// 1. If the server has not finished loading logs, `IOException` does not need to be
+    ///    converted to `KafkaStorageError`
+    /// 2. After the server has finished loading logs, `IOException` should be caught and trigger
+    ///    `LogDirFailureChannel.maybeAddOfflineLogDir()`. Then the `IOException` should either be
+    ///    swallowed and logged, or be converted and re-thrown as `KafkaStorageError`
+    /// 3. It is preferred for `IOException` to be caught in Log rather than in ReplicaManager or
+    ///    LogSegment.
+    ///
+    /// # Translation notes
+    ///
+    /// Error code `Errors::KafkaStorageError`.
     #[doc(alias = "org.apache.kafka.common.errors.KafkaStorageException")]
     KafkaStorageError,
     code: Errors::KafkaStorageError,

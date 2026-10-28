@@ -50,12 +50,6 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// A class representing a delegation token.
-///
-/// Corresponds to
-/// `org.apache.kafka.common.security.token.delegation.DelegationToken`.
-///
-/// Both [`fmt::Display`] and [`fmt::Debug`] render Java's `toString()`, which
-/// redacts the HMAC.
 #[derive(Clone, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken")]
 pub struct DelegationToken {
@@ -65,14 +59,17 @@ pub struct DelegationToken {
 
 impl DelegationToken {
     /// Creates a delegation token from its information and HMAC bytes.
+    ///
+    /// # Arguments
+    ///
+    /// - `token_information` - the token information
+    /// - `hmac` - the token's HMAC bytes
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#DelegationToken")]
     pub fn new(token_information: TokenInformation, hmac: Vec<u8>) -> Self {
         Self { token_information, hmac }
     }
 
     /// Returns the token information.
-    ///
-    /// Mirrors `DelegationToken.tokenInfo`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#tokenInfo")]
     pub fn token_info(&self) -> &TokenInformation {
         &self.token_information
@@ -87,16 +84,12 @@ impl DelegationToken {
     }
 
     /// Returns the HMAC bytes.
-    ///
-    /// Mirrors `DelegationToken.hmac`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmac")]
     pub fn hmac(&self) -> &[u8] {
         &self.hmac
     }
 
     /// Returns the HMAC bytes as a standard Base64 string.
-    ///
-    /// Mirrors `DelegationToken.hmacAsBase64String`.
     #[doc(alias = "org.apache.kafka.common.security.token.delegation.DelegationToken#hmacAsBase64String")]
     pub fn hmac_as_base64_string(&self) -> String {
         base64_encode(&self.hmac)
@@ -115,8 +108,8 @@ impl fmt::Display for DelegationToken {
 }
 
 impl fmt::Debug for DelegationToken {
-    /// Delegates to [`fmt::Display`]: Java has a single `toString()`, and it
-    /// redacts the HMAC, so the Rust `Debug` must not print it either.
+    // Delegates to `fmt::Display`: Java has a single `toString()`, and it
+    // redacts the HMAC, so the Rust `Debug` must not print it either.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }

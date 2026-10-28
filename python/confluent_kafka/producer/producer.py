@@ -207,12 +207,12 @@ class _Completion:
 
     def resolve(self, error: int) -> None:
         """The handover: the error the Rust send() returned, if any, which
-        send() rethrows, as Java's doSend does (KafkaProducer.java:1143-1155).
-        The Callback may still run, once, if the record had reached the
-        accumulator: doSend appends the record, its appendCallbacks carrying the
-        Callback, before maybeAddPartition throws (KafkaProducer.java:1110-1120),
-        so such a record completes with its batch; one rejected before the
-        append never does. Runs on the sending thread, inside
+        send() rethrows, as Java's
+        org.apache.kafka.clients.producer.KafkaProducer#doSend does. The Callback
+        may still run, once, if the record had reached the accumulator: doSend
+        appends the record, its appendCallbacks carrying the Callback, before
+        maybeAddPartition throws, so such a record completes with its batch; one
+        rejected before the append never does. Runs on the sending thread, inside
         Producer_send_cb, for a record the producer takes or refuses at
         once, and on the pump for one that waited in the core for its topic's
         metadata or for buffer space."""
@@ -527,16 +527,15 @@ class Producer(Generic[K, V], _ProducerState):
         future: _KafkaFutureImpl[RecordMetadata] = _KafkaFutureImpl()
         cb = _Completion(self, callback, future, topic, partition, self._discard_future)
         # send() returns once the record is handed over and raises the error
-        # the Rust send() returned: Java's doSend rethrows those
-        # (KafkaProducer.java:1143-1155), where an ApiException reaches the
-        # callback and the future (:1130-1142). The record's Callback may still
-        # run after such an error: doSend appends the record, its
-        # appendCallbacks carrying the Callback, before maybeAddPartition throws
-        # (KafkaProducer.java:1110-1120), so a record that had reached the
-        # accumulator completes with its batch (once); one rejected before the
-        # append never does. A close() that began since the check above (the
-        # serializers ran in between) refuses the record as Java's
-        # RecordAccumulator.append does.
+        # the Rust send() returned: Java's
+        # org.apache.kafka.clients.producer.KafkaProducer#doSend rethrows those,
+        # where an ApiException reaches the callback and the future. The
+        # record's Callback may still run after such an error: doSend appends
+        # the record, its appendCallbacks carrying the Callback, before
+        # maybeAddPartition throws, so a record that had reached the accumulator
+        # completes with its batch (once); one rejected before the append never
+        # does. A close() that began since the check above (the serializers ran
+        # in between) refuses the record as Java's RecordAccumulator.append does.
         if in_any_callback():
             # A queued record's handover would run on the completion thread,
             # which a callback of this producer blocks; and two producers whose
@@ -676,7 +675,7 @@ class Producer(Generic[K, V], _ProducerState):
 
         def force() -> None:
             # Java's sender.forceClose() for a close() an interrupt stopped
-            # (KafkaProducer.close(Duration, boolean), KafkaProducer.java:1506-1524:
+            # (org.apache.kafka.clients.producer.KafkaProducer#close(Duration,boolean):
             # the interrupt is kept and the close proceeds to force-close and
             # join): a close with a zero timeout fails the records still pending.
             _lib.Producer_close_with_timeout_cb(c_producer, 0, free_error)

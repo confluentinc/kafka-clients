@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The regular expression is not valid.
+    /// Thrown when a regular expression received in a request is not valid.
     ///
-    /// Corresponds to Java's `InvalidRegularExpression`, error code `Errors::InvalidRegularExpression`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidRegularExpression` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidRegularExpression`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidRegularExpression")]
     InvalidRegularExpression,
     code: Errors::InvalidRegularExpression,

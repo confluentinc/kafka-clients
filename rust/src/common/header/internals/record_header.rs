@@ -23,8 +23,6 @@ use crate::common::header::Header;
 /// In Java, `RecordHeader` supports lazy deserialization from `ByteBuffer`.
 /// In Rust, we always store the deserialized `String` key and `Option<Vec<u8>>`
 /// value directly, since there is no equivalent lazy pattern needed.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeader`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader")]
 // the only `Header` implementation; users build one to attach headers to a ProducerRecord, as Java users do despite the internals package
@@ -37,10 +35,10 @@ pub struct RecordHeader {
 impl RecordHeader {
     /// Create a new `RecordHeader` with the given key and value.
     ///
-    /// # Panics
+    /// # Arguments
     ///
-    /// This method does not panic. The key must be a valid `String`
-    /// (Rust's type system guarantees non-null).
+    /// - `key` - the header's key
+    /// - `value` - the header's value, `None` for no value
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader")]
     pub fn new(key: String, value: Option<Vec<u8>>) -> Self {
         Self { key, value }

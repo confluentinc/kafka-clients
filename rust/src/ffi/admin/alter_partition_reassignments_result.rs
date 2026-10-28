@@ -67,16 +67,24 @@ unsafe fn destroy_topic_partition_element(element: *mut c_void) {
     unsafe { kafka_common_TopicPartition_destroy(element as *mut kafka_common_TopicPartition_t) }
 }
 
-/// `AlterPartitionReassignmentsResult.values()`: an owned map, sorted by
-/// topic then partition, of owned `kafka_common_TopicPartition_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers
-/// `NULL`). Freed with `kafka_Map_destroy`, which frees the keys and the
-/// futures.
+/// Return a map from partitions to futures which can be used to check the status of the
+/// reassignment. Possible error codes: INVALID_REPLICA_ASSIGNMENT (39) - if the specified replica
+/// assignment was not valid -- for example, if it included negative numbers, repeated numbers, or
+/// specified a broker ID that the controller was not aware of. NO_REASSIGNMENT_IN_PROGRESS (85) -
+/// if the request wants to cancel reassignments but none exist UNKNOWN (-1)
+///
+/// # Returns
+///
+/// A map, sorted by topic then partition, of owned `kafka_common_TopicPartition_t *` keys (compared
+/// by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get`
+/// delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_values(
@@ -96,13 +104,18 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_values(
     )
 }
 
-/// `AlterPartitionReassignmentsResult.all()`: an owned `KafkaFuture<Void>`
-/// (its `get` delivers `NULL`) that succeeds once every reassignment was
-/// accepted, freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the reassignments were successfully initiated.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every reassignment was
+/// accepted.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
@@ -114,12 +127,12 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

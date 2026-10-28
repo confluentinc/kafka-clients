@@ -17,17 +17,13 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// A blocking operation was preempted by `wakeup()`.
+    /// Error used to indicate preemption of a blocking operation by an external task. For example,
+    /// `KafkaConsumer::wakeup` can be used to break out of an active `KafkaConsumer::poll`, which
+    /// would return this error.
     ///
-    /// Corresponds to Java's `WakeupException`, thrown from a blocking
-    /// `Consumer` call when another task invokes `wakeup()`. It has no entry in
-    /// `Errors`, so it carries no protocol code.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `WakeupException` -> `KafkaException`
-    ///
-    /// Like [`SerializationError`](super::SerializationError) it bypasses
-    /// `ApiException`.
+    /// No protocol code. Java `extends` chain: `WakeupException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.WakeupException")]
     WakeupError,
     extends: [

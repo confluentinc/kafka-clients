@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The given update version was invalid.
     ///
-    /// Corresponds to Java's `InvalidUpdateVersionException`, error code `Errors::InvalidUpdateVersion`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidUpdateVersionException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidUpdateVersion`. Java `extends` chain:
+    /// `InvalidUpdateVersionException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidUpdateVersionException")]
     InvalidUpdateVersionError,
     code: Errors::InvalidUpdateVersion,

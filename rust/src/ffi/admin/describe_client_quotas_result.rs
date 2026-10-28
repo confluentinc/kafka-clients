@@ -123,13 +123,13 @@ fn box_entities(entities: Entities) -> *mut kafka_Map_t {
     )
 }
 
-/// Reads the C shape built by [`box_entities`] back; null reads as empty.
+/// Reads the C shape built by [`box_entities`] back; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map handle, alive and not mutated for this
+/// `map` must be `NULL` or a valid map handle, alive and not mutated for this
 /// call, whose keys are valid client-quota-entity handles and whose values
-/// are null or valid map handles, likewise alive and not mutated, of valid
+/// are `NULL` or valid map handles, likewise alive and not mutated, of valid
 /// NUL-terminated strings to pointers to readable, aligned `double`s.
 unsafe fn entities_of(map: *const kafka_Map_t) -> Entities {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and not
@@ -192,22 +192,25 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `new DescribeClientQuotasResult(KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>> entities)`:
-/// `entities` is a borrowed future whose value has the shape
-/// [`kafka_admin_DescribeClientQuotasResult_entities`] documents; the value
-/// is copied during the call and the caller keeps ownership of the future
-/// and of everything the value points at. Only a future that is already
-/// complete (`kafka_common_KafkaFuture_is_done`) can be copied across the
-/// boundary: its outcome is taken as it stands, and a future still pending
-/// stands as one failed with the translation of `IllegalArgumentException`.
-/// Owned, freed with [`kafka_admin_DescribeClientQuotasResult_destroy`].
+/// Maps an entity to its configured quota value(s). Note if no value is defined for a quota type
+/// for that entity's config, then it is not included in the resulting value map.
+///
+/// # Parameters
+///
+/// - `entities` - future for the collection of entities that matched the filter, whose value has
+///   the shape `kafka_admin_DescribeClientQuotasResult_entities` documents; copied during the call
 ///
 /// # Safety
 ///
 /// `entities` must be a valid future handle whose value, when it has one,
-/// is null or a valid map of the documented shape: valid
-/// client-quota-entity handles to null or valid maps of valid NUL-terminated
-/// strings to pointers to readable, aligned `double`s.
+/// is `NULL` or a valid map of the documented shape: valid
+/// client-quota-entity handles to `NULL` or valid maps of valid NUL-terminated
+/// strings to pointers to readable, aligned `double`s. The caller keeps
+/// ownership of the future and of everything its value points at. The future
+/// should already be complete (`kafka_common_KafkaFuture_is_done`): its
+/// outcome is copied as it stands, and one still pending stands as one failed
+/// with `kafka_common_Error_is_local_illegal_argument_error`. The returned
+/// handle is owned and freed with `kafka_admin_DescribeClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
@@ -242,17 +245,22 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_new(
     )
 }
 
-/// `DescribeClientQuotasResult.entities()`: the future of the matching
-/// quotas, borrowed from the result handle (valid until it is destroyed,
-/// never passed to `kafka_common_KafkaFuture_destroy`). Its `get` delivers
-/// a `kafka_Map_t *` owned by the future: `kafka_common_quota_ClientQuotaEntity_t *`
-/// keys (sorted by entry, compared by value in `kafka_Map_get`) to
-/// `kafka_Map_t *` values of `char *` quota names (sorted) to `double *`
-/// quota values.
+/// Returns a map from quota entity to a future which can be used to check the status of the
+/// operation.
+///
+/// # Returns
+///
+/// The future of the matching quotas. Its `get` delivers a `kafka_Map_t *` owned
+/// by the future: `kafka_common_quota_ClientQuotaEntity_t *` keys (sorted by entry, compared by
+/// value in `kafka_Map_get`) to `kafka_Map_t *` values of `char *` quota names (sorted) to `double
+/// *` quota values.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is borrowed from `self_`, valid until it is destroyed, and is never passed
+/// to `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
@@ -263,11 +271,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasResult_entities(
     unsafe { handle(self_) }.result.entities
 }
 
-/// Frees a result handle and the future borrowed from it; null is a no-op.
+/// Frees a result handle and the future borrowed from it; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

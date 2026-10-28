@@ -32,11 +32,11 @@
 //! inspect a *received* v4+ request, which only a broker does. Verified callers,
 //! none under `clients/src/main`:
 //!
-//!   - `Builder.forBroker` → `server/.../AddPartitionsToTxnManager.java:343`
-//!   - `normalizeRequest` → `core/.../KafkaApis.scala:1852`
-//!   - `partitionsByTransaction` → `KafkaApis.scala:1857`, `:1895`
-//!   - `errorResponseForTransaction` → `KafkaApis.scala:1899`, `:1938`
-//!   - `allVerifyOnlyRequest` → `core/.../network/RequestChannel.scala:228`
+//!   - `Builder.forBroker` → `org.apache.kafka.server.transaction.AddPartitionsToTxnManager#generateRequests`
+//!   - `normalizeRequest` → `kafka.server.KafkaApis#handleAddPartitionsToTxnRequest`
+//!   - `partitionsByTransaction` → `kafka.server.KafkaApis#handleAddPartitionsToTxnRequest`
+//!   - `errorResponseForTransaction` → `kafka.server.KafkaApis#handleAddPartitionsToTxnRequest`
+//!   - `allVerifyOnlyRequest` → `org.apache.kafka.network.Request#updateRequestMetrics`
 //!
 //! They are omitted for the same reason `WriteTxnMarkers` and
 //! `EndTransactionMarker` are out of scope for this client-only port (see

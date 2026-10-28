@@ -164,9 +164,10 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, DeletedRecords> {
         let ConcreteResponse::DeleteRecords(response) = response else {
-            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
-            // result would silently re-issue the request until the deadline. See
-            // `ApiResult::failed_all`.
+            // Java fails the call once
+            // (`org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`);
+            // an empty result would silently re-issue the request until the
+            // deadline. See `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
                 Error::local_illegal_state("DeleteRecordsHandler received an unexpected response type"),
@@ -196,10 +197,11 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                // `new ApiException(..)` (`DeleteRecordsHandler.java:136-140`) — the
-                // concrete base class, which `Error::Api` translates. Spelling it
-                // `Errors::UnknownServerError` resolved to the `UnknownServerError`
-                // *subclass* instead (finding 246).
+                // `new ApiException(..)`
+                // (`org.apache.kafka.clients.admin.internals.DeleteRecordsHandler#handleResponse`) —
+                // the concrete base class, which `Error::Api` translates. Spelling
+                // it `Errors::UnknownServerError` resolved to the
+                // `UnknownServerError` *subclass* instead (finding 246).
                 let sanity_check_error = Error::Api(ApiError::new(format!(
                     "The response from broker {} did not contain a result for topic partition {}",
                     broker.id(),
@@ -410,10 +412,10 @@ mod tests {
     }
 
     /// A response of the wrong type is what Java's
-    /// `catch (Throwable t) { call.fail(now, t) }`
-    /// (`KafkaAdminClient.java:1387-1391`) exists for: the `(XResponse)
-    /// abstractResponse` downcast throws `ClassCastException`, the affected call
-    /// fails once, and the client keeps serving everything else.
+    /// `catch (Throwable t) { call.fail(now, t) }` (in
+    /// `KafkaAdminClient.AdminClientRunnable#handleResponses`) exists for: the
+    /// `(XResponse) abstractResponse` downcast throws `ClassCastException`, the
+    /// affected call fails once, and the client keeps serving everything else.
     ///
     /// This handler used to return an empty `ApiResult`, which completes nothing,
     /// fails nothing and unmaps nothing — the driver has already cleared the

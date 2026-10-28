@@ -240,7 +240,7 @@ __all__ = ["Admin"]
 _LOG = logging.getLogger("confluent_kafka.admin")
 
 #: Java's message for a call on a closing ``KafkaAdminClient``
-#: (``KafkaAdminClient.java:1601``).
+#: (``org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#call``).
 CLOSED_MESSAGE = "Cannot accept new calls when AdminClient is closing."
 
 

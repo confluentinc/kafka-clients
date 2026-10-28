@@ -59,8 +59,22 @@ pub(crate) unsafe fn destroy_replica_info_element(element: *mut c_void) {
     unsafe { kafka_admin_ReplicaInfo_destroy(element as *mut kafka_admin_ReplicaInfo_t) }
 }
 
-/// `new ReplicaInfo(long size, long offsetLag, boolean isFuture)`. Owned,
-/// freed with [`kafka_admin_ReplicaInfo_destroy`].
+/// Creates the description of a replica's log directory placement.
+///
+/// # Parameters
+///
+/// - `size` - the total size of the log segments in this replica, in bytes.
+/// - `offset_lag` - the lag of the log's LEO with respect to the partition's high watermark, or
+///   to the current replica's LEO for a future log.
+/// - `is_future` - 1 if this is the future log of the partition, else 0.
+///
+/// # Returns
+///
+/// The replica info.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ReplicaInfo_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ReplicaInfo_new(
@@ -71,7 +85,8 @@ pub extern "C" fn kafka_admin_ReplicaInfo_new(
     box_replica_info(ReplicaInfo::new(size, offset_lag, is_future != 0))
 }
 
-/// `size()`: the total size of the log segments in this replica, in bytes.
+/// Returns the total size of the log segments in this replica in bytes. This value does not
+/// include the size of data stored in remote storage.
 ///
 /// A caught Rust panic returns -1, which no replica size is.
 ///
@@ -86,8 +101,9 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_size(self_: *const kafka_admin_
     unsafe { replica_info_ref(self_) }.size()
 }
 
-/// `offsetLag()`: the lag of the log's LEO with respect to the partition's
-/// high watermark (or the current replica's LEO for a future log).
+/// Returns the lag of the log's LEO with respect to the partition's high watermark (if it is the
+/// current log for the partition) or the current replica's LEO (if it is the future log for the
+/// partition).
 ///
 /// # Safety
 ///
@@ -103,6 +119,11 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_offset_lag(self_: *const kafka_
 /// `isFuture()`: whether this replica has been created by an
 /// `alterReplicaLogDirs` and will replace the current one.
 ///
+/// # Returns
+///
+/// true if this log is created by AlterReplicaLogDirsRequest and will replace the current log of
+/// the replica at some time in the future.
+///
 /// # Safety
 ///
 /// `self_` must be a valid replica-info handle.
@@ -114,11 +135,12 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_is_future(self_: *const kafka_a
     i8::from(unsafe { replica_info_ref(self_) }.is_future())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the replica info.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid replica-info handle.
+/// `self_` must be a valid replica-info handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_admin_ReplicaInfo_t) -> *mut c_char {
@@ -127,11 +149,11 @@ pub unsafe extern "C" fn kafka_admin_ReplicaInfo_to_string(self_: *const kafka_a
     into_c_string(&unsafe { replica_info_ref(self_) }.to_string())
 }
 
-/// Frees an owned replica-info handle; null is a no-op.
+/// Frees an owned replica-info handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

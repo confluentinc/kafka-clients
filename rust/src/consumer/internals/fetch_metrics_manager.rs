@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{Metrics, Sensor, gauge};
 use crate::common::{Error, TopicPartition};
@@ -86,8 +87,8 @@ impl FetchMetricsManager {
     /// (CLAUDE.md §12.1 — do not panic where recovery is possible).
     ///
     /// Java throws `IllegalArgumentException` from `Metrics.registerMetric`
-    /// (`Metrics.java:520`) and lets it propagate out of the fetch path. We
-    /// deliberately do NOT propagate: these `record_*` methods are a side channel,
+    /// (`Metrics#addMetric(MetricName,MetricConfig,MetricValueProvider)`) and lets it propagate out of the fetch path.
+    /// We deliberately do NOT propagate: these `record_*` methods are a side channel,
     /// and failing a user's fetch is worse than the metric being absent. The
     /// failure is reported rather than hidden.
     fn resolve_sensor(built: Result<Arc<Sensor>, Error>, what: &str) -> Option<Arc<Sensor>> {
@@ -127,8 +128,8 @@ impl FetchMetricsManager {
     /// `-lag-avg`, `-lag-max`, `{tp}.records-lead`, `-lead-min`, `-lead-avg`)
     /// are ALSO registered at INFO — full Java parity. Java's `SensorBuilder`
     /// creates every sensor (including these per-partition detail sensors,
-    /// `FetchMetricsManager.java:144,159`) via `metrics.sensor(name)`, which
-    /// defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
+    /// `FetchMetricsManager#recordPartitionLag` and `FetchMetricsManager#recordPartitionLead`) via
+    /// `metrics.sensor(name)`, which defaults to `RecordingLevel.INFO`. There is NO DEBUG gating in Java's
     /// fetch metrics, so we record the full per-partition metric set per
     /// partition per poll at the default INFO level — the accepted Java-parity
     /// cost (to be measured in M8). The metric VALUES are Java-identical.
@@ -258,11 +259,11 @@ impl FetchMetricsManager {
     /// and, if present, the per-node latency sensor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordLatency")]
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        self.fetch_latency.record_with_value(request_latency_ms as f64);
+        record_or_log(self.fetch_latency.record_with_value(request_latency_ms as f64));
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.inner.metrics().get_sensor(&node_time_name) {
-                node_request_time.record_with_value(request_latency_ms as f64);
+                record_or_log(node_request_time.record_with_value(request_latency_ms as f64));
             }
         }
     }
@@ -270,13 +271,13 @@ impl FetchMetricsManager {
     /// Records the number of bytes fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordBytesFetched")]
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        self.bytes_fetched.record_with_value(bytes as f64);
+        record_or_log(self.bytes_fetched.record_with_value(bytes as f64));
     }
 
     /// Records the number of records fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordRecordsFetched")]
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        self.records_fetched.record_with_value(records as f64);
+        record_or_log(self.records_fetched.record_with_value(records as f64));
     }
 
     /// Records the number of bytes fetched for a single topic.
@@ -299,7 +300,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        bytes_fetched.record_with_value(bytes as f64);
+        record_or_log(bytes_fetched.record_with_value(bytes as f64));
     }
 
     /// Records the number of records fetched for a single topic.
@@ -322,7 +323,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_fetched.record_with_value(records as f64);
+        record_or_log(records_fetched.record_with_value(records as f64));
     }
 
     /// Records the lag for a single partition.
@@ -334,7 +335,7 @@ impl FetchMetricsManager {
     /// metric set per partition per poll — the accepted Java-parity cost.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLag")]
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        self.records_lag.record_with_value(lag as f64);
+        record_or_log(self.records_lag.record_with_value(lag as f64));
 
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
 
@@ -350,7 +351,7 @@ impl FetchMetricsManager {
         let Some(records_lag) = FetchMetricsManager::resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        records_lag.record_with_value(lag as f64);
+        record_or_log(records_lag.record_with_value(lag as f64));
     }
 
     /// Records the lead for a single partition.
@@ -360,7 +361,7 @@ impl FetchMetricsManager {
     /// as Java does (see [`Self::record_partition_lag`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLead")]
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        self.records_lead.record_with_value(lead as f64);
+        record_or_log(self.records_lead.record_with_value(lead as f64));
 
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
 
@@ -377,7 +378,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        records_lead.record_with_value(lead as f64);
+        record_or_log(records_lead.record_with_value(lead as f64));
     }
 
     /// Called before requesting fetches to update the set of per-partition
@@ -453,7 +454,7 @@ impl FetchMetricsManager {
     /// Removes every sensor and metric this manager registered, including the
     /// per-topic and per-partition ones created on the fetch path. Java
     /// inherits `AbstractConsumerMetricsManager.close()` (KAFKA-19542);
-    /// `AsyncKafkaConsumer.close()` calls it (`AsyncKafkaConsumer.java:1676`).
+    /// `AsyncKafkaConsumer#close(Duration,GroupMembershipOperation,boolean)` calls it.
     pub(crate) fn close(&self) {
         self.inner.close();
     }
@@ -946,7 +947,8 @@ mod tests {
     /// `records-lag-max` / `records-lead-min` AND the DETAILED per-partition
     /// lag/lead sensors are recorded — there is NO DEBUG gating (Java's
     /// `SensorBuilder` defaults every fetch sensor to `RecordingLevel.INFO`,
-    /// including the per-partition detail at `FetchMetricsManager.java:144,159`).
+    /// including the per-partition detail in `FetchMetricsManager#recordPartitionLag` and
+    /// `FetchMetricsManager#recordPartitionLead`).
     #[test]
     fn test_partition_metrics_recording_level() {
         let f = setup();
@@ -979,9 +981,9 @@ mod tests {
     fn test_throttle_time_sensor_records() {
         let f = setup();
         let sensor = f.manager.throttle_time_sensor();
-        sensor.record_with_value(100.0);
+        sensor.record_with_value(100.0).unwrap();
         f.time.sleep(time_window_ms(&f) + 1);
-        sensor.record_with_value(200.0);
+        sensor.record_with_value(200.0).unwrap();
 
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_avg) - 150.0).abs() < EPSILON);
         assert!((metric_value_template(&f, &f.registry.fetch_throttle_time_max) - 200.0).abs() < EPSILON);

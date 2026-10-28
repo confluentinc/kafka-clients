@@ -213,10 +213,11 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for AlterConsumerGroupOffs
 
         let ConcreteResponse::OffsetCommit(response) = response else {
             // Java's `(OffsetCommitResponse) abstractResponse` downcast throws
-            // `ClassCastException`, which `KafkaAdminClient.java:1387-1391` catches
-            // and turns into `call.fail(now, t)` — this RPC fails, the client keeps
-            // serving everything else. A `panic!` here instead killed the admin
-            // background task and poisoned the driver mutex.
+            // `ClassCastException`, which
+            // `org.apache.kafka.clients.admin.KafkaAdminClient.AdminClientRunnable#handleResponses`
+            // catches and turns into `call.fail(now, t)` — this RPC fails, the
+            // client keeps serving everything else. A `panic!` here instead killed
+            // the admin background task and poisoned the driver mutex.
             return ApiResult::failed_all(
                 group_ids,
                 Error::local_illegal_state("AlterConsumerGroupOffsetsHandler received an unexpected response type"),

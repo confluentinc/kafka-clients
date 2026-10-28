@@ -96,7 +96,7 @@ pub(crate) trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static 
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -110,19 +110,31 @@ pub(crate) trait DynDeserializer<T>: private::Sealed<T> + Send + Sync + 'static 
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> InlineFuture<'a, Result<T, Error>>
     where
         T: 'a;
 
     /// See [`Deserializer::configure`].
-    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>
+    ///
+    /// # Errors
+    ///
+    /// As [`Deserializer::configure`].
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> InlineFuture<'a, Result<(), Error>>
     where
         T: 'a;
 
     /// See [`Deserializer::close`].
-    fn close<'a>(&'a mut self) -> InlineFuture<'a, ()>
+    ///
+    /// # Errors
+    ///
+    /// As [`Deserializer::close`].
+    fn close<'a>(&'a mut self) -> InlineFuture<'a, Result<(), Error>>
     where
         T: 'a;
 }
@@ -138,7 +150,7 @@ impl<T, D: Deserializer<T>> DynDeserializer<T> for D {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -150,7 +162,7 @@ impl<T, D: Deserializer<T>> DynDeserializer<T> for D {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> InlineFuture<'a, Result<T, Error>>
     where
@@ -159,14 +171,18 @@ impl<T, D: Deserializer<T>> DynDeserializer<T> for D {
         InlineFuture::new(Deserializer::deserialize_with_headers_bytes(self, topic, headers, data))
     }
 
-    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> InlineFuture<'a, Result<(), Error>>
     where
         T: 'a,
     {
         InlineFuture::new(Deserializer::configure(self, configs, is_key))
     }
 
-    fn close<'a>(&'a mut self) -> InlineFuture<'a, ()>
+    fn close<'a>(&'a mut self) -> InlineFuture<'a, Result<(), Error>>
     where
         T: 'a,
     {
@@ -186,7 +202,7 @@ impl<T: 'static> Deserializer<T> for dyn DynDeserializer<T> {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         DynDeserializer::deserialize_with_headers(self, topic, headers, data)
@@ -195,7 +211,7 @@ impl<T: 'static> Deserializer<T> for dyn DynDeserializer<T> {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<T, Error>> + Send + 'a {
         DynDeserializer::deserialize_with_headers_bytes(self, topic, headers, data)
@@ -205,11 +221,11 @@ impl<T: 'static> Deserializer<T> for dyn DynDeserializer<T> {
         &'a mut self,
         configs: &'a HashMap<String, String>,
         is_key: bool,
-    ) -> impl Future<Output = ()> + Send + 'a {
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'a {
         DynDeserializer::configure(self, configs, is_key)
     }
 
-    fn close(&mut self) -> impl Future<Output = ()> + Send {
+    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send {
         DynDeserializer::close(self)
     }
 }
@@ -250,8 +266,8 @@ mod tests {
         let boxed: Box<dyn DynDeserializer<Bytes>> = Box::new(BytesDeserializer::new());
         let source = Bytes::from(vec![1u8, 2, 3, 4]);
         let data = source.slice(1..3);
-        let headers = RecordHeaders::new();
-        let result = DynDeserializer::deserialize_with_headers_bytes(&*boxed, "topic", &headers, &data)
+        let mut headers = RecordHeaders::new();
+        let result = DynDeserializer::deserialize_with_headers_bytes(&*boxed, "topic", &mut headers, &data)
             .await
             .expect("deserialize");
         assert_eq!(
@@ -271,13 +287,16 @@ mod tests {
         // Slicing promotes the buffer to a shared one, so the clone below is a
         // reference count increment.
         let data = source.slice(1..3);
-        let headers = RecordHeaders::new();
+        let mut headers = RecordHeaders::new();
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let (count, result) = {
             let _guard = crate::AllocTrackingGuard::new();
             crate::AllocTrackingGuard::reset();
             let mut future = std::pin::pin!(DynDeserializer::deserialize_with_headers_bytes(
-                &*boxed, "topic", &headers, &data
+                &*boxed,
+                "topic",
+                &mut headers,
+                &data
             ));
             let result = future.as_mut().poll(&mut cx);
             (crate::AllocTrackingGuard::count(), result)
@@ -296,19 +315,25 @@ mod tests {
             async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
                 Ok(String::new())
             }
-            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
                 assert!(is_key);
                 self.0.fetch_add(configs.len(), Ordering::SeqCst);
+                Ok(())
             }
-            async fn close(&mut self) {
+            async fn close(&mut self) -> Result<(), Error> {
                 self.1.fetch_add(1, Ordering::SeqCst);
+                Err(Error::serialization("close failed"))
             }
         }
         let (configured, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let mut boxed: Box<dyn DynDeserializer<String>> = Box::new(Counting(configured.clone(), closed.clone()));
         let configs = HashMap::from([("a".to_string(), "b".to_string())]);
-        DynDeserializer::configure(&mut *boxed, &configs, true).await;
-        DynDeserializer::close(&mut *boxed).await;
+        DynDeserializer::configure(&mut *boxed, &configs, true)
+            .await
+            .expect("configure");
+        let error = DynDeserializer::close(&mut *boxed).await.expect_err("close fails");
+        assert!(error.is_serialization_error());
+        assert_eq!("close failed", error.message());
         assert_eq!(1, configured.load(Ordering::SeqCst));
         assert_eq!(1, closed.load(Ordering::SeqCst));
     }

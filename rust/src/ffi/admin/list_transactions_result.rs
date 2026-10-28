@@ -45,7 +45,7 @@ fn box_i32(broker_id: &i32) -> *mut c_void {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each be null or point at a readable, aligned
+/// `a` and `b` must each be `NULL` or point at a readable, aligned
 /// `int32_t`.
 unsafe fn i32_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
@@ -112,14 +112,19 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListTransactionsResult_t) -> &'a 
     unsafe { result_ref(self_) }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of
-/// `kafka_admin_TransactionListing_t *` from every broker, sorted by
-/// transactional id.
+/// `all()`: a future; its `get` delivers a `kafka_List_t *` (owned by the future) of
+/// `kafka_admin_TransactionListing_t *` from every broker, sorted by transactional id.
+///
+/// # Returns
+///
+/// A future containing the collection of transaction listings. The future completes when all
+/// transaction listings are available and fails after any non-retriable error.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
@@ -134,18 +139,24 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), sorted_listings_list, destroy_list_element) }
 }
 
-/// `byBrokerId()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of `int32_t *`
-/// broker ids, sorted and compared by value in `kafka_Map_get`, to
-/// `kafka_common_KafkaFuture_t *` (owned by the map) whose own `get`
-/// delivers that broker's `kafka_List_t *` of
-/// `kafka_admin_TransactionListing_t *`, in the order the broker returned
-/// them. The outer future completes once the brokers are known, the inner
-/// ones once each broker has answered.
+/// `byBrokerId()`: a future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `int32_t *` broker ids, sorted and compared by value in `kafka_Map_get`, to
+/// `kafka_common_KafkaFuture_t *` (owned by the map) whose own `get` delivers that broker's
+/// `kafka_List_t *` of `kafka_admin_TransactionListing_t *`, in the order the broker returned them.
+/// The outer future completes once the brokers are known, the inner ones once each broker has
+/// answered.
+///
+/// # Returns
+///
+/// A future containing a map of futures by broker which complete individually when their respective
+/// transaction listings are available. The top-level future returned from this method may fail if
+/// the admin client is unable to lookup the available brokers in the cluster.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
@@ -175,16 +186,22 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_by_broker_id(
     }
 }
 
-/// `allByBrokerId()`: an owned future freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `int32_t *` broker ids, sorted and compared by
-/// value in `kafka_Map_get`, to that broker's `kafka_List_t *` of
-/// `kafka_admin_TransactionListing_t *`, in the order the broker returned
-/// them; it completes once every broker has answered.
+/// `allByBrokerId()`: a future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `int32_t *` broker ids, sorted and compared by value in `kafka_Map_get`, to that broker's
+/// `kafka_List_t *` of `kafka_admin_TransactionListing_t *`, in the order the broker returned them;
+/// it completes once every broker has answered.
+///
+/// # Returns
+///
+/// A future containing a map from the broker ID to the transactions hosted by that broker
+/// respectively. This future completes when all transaction listings are available and fails after
+/// any non-retriable error.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
@@ -202,12 +219,12 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_all_by_broker_id(
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

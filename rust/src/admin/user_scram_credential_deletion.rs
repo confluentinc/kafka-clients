@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A request to delete a SASL/SCRAM credential for a user.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.UserScramCredentialDeletion`.
 
 use super::ScramMechanism;
 
@@ -31,8 +29,10 @@ pub struct UserScramCredentialDeletion {
 impl UserScramCredentialDeletion {
     /// Creates a new deletion.
     ///
-    /// * `user` — the mandatory user
-    /// * `mechanism` — the mandatory mechanism
+    /// # Arguments
+    ///
+    /// - `user` - the mandatory user
+    /// - `mechanism` - the mandatory mechanism
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialDeletion#UserScramCredentialDeletion")]
     pub fn new(user: impl Into<String>, mechanism: ScramMechanism) -> Self {
         Self { user: user.into(), mechanism }

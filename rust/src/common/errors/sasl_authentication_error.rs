@@ -18,13 +18,23 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// SASL Authentication failed.
+    /// This error indicates that SASL authentication has failed. The error message in the error
+    /// indicates the actual cause of failure.
     ///
-    /// Corresponds to Java's `SaslAuthenticationException`, error code `Errors::SaslAuthenticationFailed`.
+    /// SASL authentication failures typically indicate invalid credentials, but could also include
+    /// other failures specific to the SASL mechanism used for authentication.
     ///
-    /// Java `extends` chain:
-    ///    `SaslAuthenticationException` -> `AuthenticationException` ->
-    ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    /// **Note:**If `SaslServer::evaluateResponse(byte[])` throws this error during authentication,
+    /// the message from the error will be sent to clients in the SaslAuthenticate response. Custom
+    /// `SaslServer` implementations may throw this error in order to provide custom error messages
+    /// to clients, but should take care not to include any security-critical information in the
+    /// message that should not be leaked to unauthenticated clients.
+    ///
+    /// # Translation notes
+    ///
+    /// Error code `Errors::SaslAuthenticationFailed`. Java `extends` chain:
+    /// `SaslAuthenticationException` -> `AuthenticationException` ->
+    /// `InvalidConfigurationException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.SaslAuthenticationException")]
     SaslAuthenticationError,
     code: Errors::SaslAuthenticationFailed,

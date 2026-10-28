@@ -28,7 +28,7 @@ pub struct kafka_common_metrics_Quota_t {
 }
 
 /// Hands `quota` to C as an owned handle, freed with
-/// [`kafka_common_metrics_Quota_destroy`].
+/// `kafka_common_metrics_Quota_destroy`.
 pub(crate) fn box_quota(quota: Quota) -> *mut kafka_common_metrics_Quota_t {
     Box::into_raw(Box::new(quota)) as *mut kafka_common_metrics_Quota_t
 }
@@ -47,29 +47,53 @@ pub(crate) unsafe fn quota_of<'a>(quota: *const kafka_common_metrics_Quota_t) ->
     unsafe { &*(quota as *const Quota) }
 }
 
-/// `new Quota(double bound, boolean upper)`. Owned, freed with
-/// [`kafka_common_metrics_Quota_destroy`].
+/// Creates a quota.
+///
+/// # Parameters
+///
+/// - `bound` - The bound.
+/// - `upper` - `1` for an upper bound, `0` for a lower bound.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_metrics_Quota_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_new(bound: f64, upper: i8) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::new(bound, upper != 0))
 }
 
-/// `Quota.upperBound(double upperBound)`. Owned.
+/// Returns an upper-bound quota.
+///
+/// # Parameters
+///
+/// - `upper_bound` - The bound.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_metrics_Quota_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_upper_bound(upper_bound: f64) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::upper_bound(upper_bound))
 }
 
-/// `Quota.lowerBound(double lowerBound)`. Owned.
+/// Returns a lower-bound quota.
+///
+/// # Parameters
+///
+/// - `lower_bound` - The bound.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_metrics_Quota_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_Quota_lower_bound(lower_bound: f64) -> *mut kafka_common_metrics_Quota_t {
     box_quota(Quota::lower_bound(lower_bound))
 }
 
-/// `isUpperBound()`.
+/// Returns `1` if this is an upper bound, `0` if a lower bound.
 ///
 /// # Safety
 ///
@@ -82,7 +106,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_is_upper_bound(self_: *const
     unsafe { quota_of(self_) }.is_upper_bound() as i8
 }
 
-/// `bound()`.
+/// Returns the bound.
 ///
 /// # Safety
 ///
@@ -95,7 +119,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_bound(self_: *const kafka_co
     unsafe { quota_of(self_) }.bound()
 }
 
-/// `acceptable(double value)`: whether `value` is within the quota.
+/// Returns `1` if `value` is within the quota, `0` otherwise.
+///
+/// # Parameters
+///
+/// - `value` - The value to check.
 ///
 /// # Safety
 ///
@@ -111,11 +139,12 @@ pub unsafe extern "C" fn kafka_common_metrics_Quota_acceptable(
     unsafe { quota_of(self_) }.acceptable(value) as i8
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the quota.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid quota handle.
+/// `self_` must be a valid quota handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Quota_to_string(

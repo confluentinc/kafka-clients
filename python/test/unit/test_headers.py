@@ -619,7 +619,7 @@ def test_consumer_record_keeps_a_headers_argument() -> None:
 
 def test_mock_producer_leaves_the_headers_writable() -> None:
     # Java's MockProducer.send serializes with record.headers() and never
-    # calls setReadOnly (MockProducer.java:614-615).
+    # calls setReadOnly (org.apache.kafka.clients.producer.MockProducer#partition).
     producer: MockProducer[bytes, bytes] = MockProducer(
         auto_complete=True, partitioner=None, key_serializer=bytes_serializer(),
         value_serializer=bytes_serializer())

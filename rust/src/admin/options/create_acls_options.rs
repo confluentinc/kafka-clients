@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::create_acls`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.CreateAclsOptions`.
 
 /// Options for `Admin::create_acls`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.CreateAclsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions")]
 pub struct CreateAclsOptions {
@@ -32,8 +28,16 @@ impl CreateAclsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `CreateAclsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -41,8 +45,8 @@ impl CreateAclsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.CreateAclsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms

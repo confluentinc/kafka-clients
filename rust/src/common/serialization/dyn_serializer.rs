@@ -103,10 +103,22 @@ pub(crate) trait DynSerializer<T: ?Sized>: private::Sealed<T> + Send + Sync {
         'a: 'h;
 
     /// See [`Serializer::configure`].
-    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()>;
+    ///
+    /// # Errors
+    ///
+    /// As [`Serializer::configure`].
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> InlineFuture<'a, Result<(), Error>>;
 
     /// See [`Serializer::close`].
-    fn close(&self) -> InlineFuture<'_, ()>;
+    ///
+    /// # Errors
+    ///
+    /// As [`Serializer::close`].
+    fn close(&self) -> InlineFuture<'_, Result<(), Error>>;
 }
 
 impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
@@ -130,11 +142,15 @@ impl<T: ?Sized, S: Serializer<T>> DynSerializer<T> for S {
         InlineFuture::new(Serializer::serialize_with_headers(self, topic, headers, data))
     }
 
-    fn configure<'a>(&'a mut self, configs: &'a HashMap<String, String>, is_key: bool) -> InlineFuture<'a, ()> {
+    fn configure<'a>(
+        &'a mut self,
+        configs: &'a HashMap<String, String>,
+        is_key: bool,
+    ) -> InlineFuture<'a, Result<(), Error>> {
         InlineFuture::new(Serializer::configure(self, configs, is_key))
     }
 
-    fn close(&self) -> InlineFuture<'_, ()> {
+    fn close(&self) -> InlineFuture<'_, Result<(), Error>> {
         InlineFuture::new(Serializer::close(self))
     }
 }
@@ -168,11 +184,11 @@ impl<T: ?Sized> Serializer<T> for dyn DynSerializer<T> + '_ {
         &'a mut self,
         configs: &'a HashMap<String, String>,
         is_key: bool,
-    ) -> impl Future<Output = ()> + Send + 'a {
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'a {
         DynSerializer::configure(self, configs, is_key)
     }
 
-    fn close(&self) -> impl Future<Output = ()> + Send + '_ {
+    fn close(&self) -> impl Future<Output = Result<(), Error>> + Send + '_ {
         DynSerializer::close(self)
     }
 }
@@ -271,21 +287,27 @@ mod tests {
             ) -> Result<Option<Cow<'a, [u8]>>, Error> {
                 Ok(None)
             }
-            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
+            async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
                 assert!(is_key);
                 self.0.fetch_add(configs.len(), Ordering::SeqCst);
+                Err(Error::serialization("configure failed"))
             }
-            async fn close(&self) {
+            async fn close(&self) -> Result<(), Error> {
                 self.1.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }
         }
         let (configured, closed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let mut boxed: Box<dyn DynSerializer<str>> = Box::new(Counting(configured.clone(), closed.clone()));
         let configs = HashMap::from([("a".to_string(), "b".to_string())]);
-        DynSerializer::configure(&mut *boxed, &configs, true).await;
-        DynSerializer::close(&*boxed).await;
+        let error = DynSerializer::configure(&mut *boxed, &configs, true)
+            .await
+            .expect_err("configure fails");
+        assert!(error.is_serialization_error());
+        assert_eq!("configure failed", error.message());
+        DynSerializer::close(&*boxed).await.expect("close");
         // And through the `Serializer` impl on the trait object.
-        Serializer::close(&*boxed).await;
+        Serializer::close(&*boxed).await.expect("close");
         assert_eq!(1, configured.load(Ordering::SeqCst));
         assert_eq!(2, closed.load(Ordering::SeqCst));
     }
@@ -293,8 +315,10 @@ mod tests {
     #[tokio::test]
     async fn test_configure_and_close_default_to_no_ops() {
         let mut boxed: Box<dyn DynSerializer<str>> = Box::new(StringSerializer::new());
-        DynSerializer::configure(&mut *boxed, &HashMap::new(), false).await;
-        DynSerializer::close(&*boxed).await;
+        DynSerializer::configure(&mut *boxed, &HashMap::new(), false)
+            .await
+            .expect("configure");
+        DynSerializer::close(&*boxed).await.expect("close");
         assert_eq!(b"v".to_vec(), through_generic(&*boxed, "v").await);
     }
 

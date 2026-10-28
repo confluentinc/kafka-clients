@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// A partition reassignment is in progress.
+    /// Thrown if a request cannot be completed because a partition reassignment is in progress.
     ///
-    /// Corresponds to Java's `ReassignmentInProgressException`, error code `Errors::ReassignmentInProgress`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `ReassignmentInProgressException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::ReassignmentInProgress`.
     #[doc(alias = "org.apache.kafka.common.errors.ReassignmentInProgressException")]
     ReassignmentInProgressError,
     code: Errors::ReassignmentInProgress,

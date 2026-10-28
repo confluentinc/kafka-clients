@@ -93,15 +93,18 @@ pub(crate) unsafe fn destroy_config_element(element: *mut c_void) {
     unsafe { kafka_admin_Config_destroy(element as *mut kafka_admin_Config_t) };
 }
 
-/// `new Config(Collection<ConfigEntry> entries)`: a borrowed list of
-/// `const kafka_admin_ConfigEntry_t *` whose elements are copied (`NULL`
-/// reads as empty); a later entry with the same name replaces an earlier
-/// one, as in Java. Owned, freed with [`kafka_admin_Config_destroy`].
+/// Create a configuration instance with the provided entries.
+///
+/// # Parameters
+///
+/// - `entries` - a borrowed list of `const kafka_admin_ConfigEntry_t *`, copied, `NULL` reading as
+///   empty; a later entry with the same name replaces an earlier one, as in Java
 ///
 /// # Safety
 ///
-/// `entries` must be null or a valid list whose elements are valid
-/// config-entry handles, all kept alive and not mutated for this call.
+/// `entries` must be `NULL` or a valid list whose elements are valid config-entry handles, all kept
+/// alive and not mutated for this call. The config is owned by the caller, freed with
+/// `kafka_admin_Config_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) -> *mut kafka_admin_Config_t {
@@ -117,13 +120,16 @@ pub unsafe extern "C" fn kafka_admin_Config_new(entries: *const kafka_List_t) ->
     box_config(Config::new(entries))
 }
 
-/// `entries()`: an owned list of owned `kafka_admin_ConfigEntry_t *` copies,
-/// sorted by name (Java's collection order is unspecified), freed together
-/// with `kafka_List_destroy`.
+/// Configuration entries for a resource.
+///
+/// # Returns
+///
+/// The entries, sorted by name (Java's collection order is unspecified).
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config handle.
+/// `self_` must be a valid config handle. The list of owned `kafka_admin_ConfigEntry_t *` copies is
+/// owned by the caller, freed together with `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_entries(self_: *const kafka_admin_Config_t) -> *mut kafka_List_t {
@@ -138,14 +144,20 @@ pub unsafe extern "C" fn kafka_admin_Config_entries(self_: *const kafka_admin_Co
     box_list(elements, Some(destroy_config_entry_element))
 }
 
-/// `get(String name)`: a borrowed handle valid as long as the config, never
-/// passed to `kafka_admin_ConfigEntry_destroy`; `NULL` when there is no
-/// entry with that name (Java returns null).
+/// Get the configuration entry with the provided name or `NULL` if there isn't one.
+///
+/// # Parameters
+///
+/// - `name` - the configuration name
+///
+/// # Returns
+///
+/// The entry, or `NULL` when there is no entry with that name.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config handle and `name` a valid NUL-terminated
-/// string.
+/// `self_` must be a valid config handle and `name` a valid NUL-terminated string. The entry is
+/// borrowed, valid as long as the config, and never passed to `kafka_admin_ConfigEntry_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_get(
@@ -165,11 +177,12 @@ pub unsafe extern "C" fn kafka_admin_Config_get(
         .map_or(std::ptr::null(), ConfigEntryInner::as_ptr)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the config's string form, as Java's `toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config handle.
+/// `self_` must be a valid config handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Config_to_string(self_: *const kafka_admin_Config_t) -> *mut c_char {
@@ -178,11 +191,11 @@ pub unsafe extern "C" fn kafka_admin_Config_to_string(self_: *const kafka_admin_
     into_c_string(&unsafe { config_ref(self_) }.to_string())
 }
 
-/// Frees an owned config handle; null is a no-op.
+/// Frees an owned config handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned config handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned config handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards, nor are the
 /// entry views `kafka_admin_Config_get` handed out.
 #[ffi_guard]

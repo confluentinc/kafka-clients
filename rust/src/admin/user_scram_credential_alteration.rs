@@ -13,23 +13,18 @@
 // limitations under the License.
 
 //! A request to alter a user's SASL/SCRAM credentials.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.UserScramCredentialAlteration`.
 
 use super::{UserScramCredentialDeletion, UserScramCredentialUpsertion};
 
 /// A request to alter a user's SASL/SCRAM credentials.
 ///
-/// Java models this as an `abstract` base with the two concrete subclasses
-/// `UserScramCredentialUpsertion` and `UserScramCredentialDeletion`. Rust models
-/// the closed subclass hierarchy as an enum: the Java `instanceof` dispatch in
-/// `KafkaAdminClient.alterUserScramCredentials` becomes a `match` here, and the
-/// shared `user()` accessor of the abstract base becomes a method delegating to
-/// the active variant. This is faithful because the Java hierarchy is sealed
-/// (both subclasses live in the same package and there is no public subclassing
-/// contract).
-///
 /// See [KIP-554: Add Broker-side SCRAM Config API](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554%3A+Add+Broker-side+SCRAM+Config+API).
+// Java models this as an `abstract` base with the two concrete subclasses
+// `UserScramCredentialUpsertion` and `UserScramCredentialDeletion`. Rust models
+// the closed subclass hierarchy as an enum: the Java `instanceof` dispatch in
+// `KafkaAdminClient.alterUserScramCredentials` becomes a `match` here, and the
+// shared `user()` accessor of the abstract base becomes a method delegating to
+// the active variant.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialAlteration")]
@@ -42,8 +37,6 @@ pub enum UserScramCredentialAlteration {
 
 impl UserScramCredentialAlteration {
     /// Returns the always non-null user.
-    ///
-    /// Mirrors `UserScramCredentialAlteration.user()`.
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialAlteration#user")]
     pub fn user(&self) -> &str {
         match self {

@@ -18,17 +18,18 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// For requests intended only for the leader, this error indicates that the
-    /// broker is not the current leader. For requests intended for any replica,
-    /// this error indicates that the broker is not a replica of the topic
-    /// partition.
+    /// Broker returns this error if a request could not be processed because the broker is not the
+    /// leader or follower for a topic partition. This could be a transient error during leader
+    /// elections and reassignments. For `Produce` and other requests which are intended only for
+    /// the leader, this error indicates that the broker is not the current leader. For consumer
+    /// `Fetch` requests which may be satisfied by a leader or follower, this error indicates that
+    /// the broker is not a replica of the topic partition.
     ///
-    /// Corresponds to Java's `NotLeaderOrFollowerException`, error code `Errors::NotLeaderOrFollower`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `NotLeaderOrFollowerException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::NotLeaderOrFollower`. Java `extends` chain:
+    /// `NotLeaderOrFollowerException` -> `InvalidMetadataException` -> `RefreshRetriableException`
+    /// -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NotLeaderOrFollowerException")]
     NotLeaderOrFollowerError,
     code: Errors::NotLeaderOrFollower,

@@ -1176,7 +1176,7 @@ mod tests {
     use crate::common::requests::RequestHeaderOptionsBuilder;
 
     /// Java's `AbstractRequest.serializeWithHeader` builds the message by
-    /// concatenating the two `ApiKeys` values (`AbstractRequest.java:117`).
+    /// concatenating the two `ApiKeys` values.
     /// `ApiKeys` overrides no `toString()`, so each renders as its enum
     /// **constant**, bare — not quoted, and not the specification spelling
     /// carried by the public `name` field.
@@ -1205,7 +1205,7 @@ mod tests {
         );
     }
 
-    /// Java's version mismatch branch (`AbstractRequest.java:120`) interpolates
+    /// Java's version mismatch branch in `AbstractRequest#serializeWithHeader` interpolates
     /// only the two versions, so it is unaffected by the `ApiKeys` rendering —
     /// pinned here so the pair of messages stays covered together.
     #[test]
@@ -1231,7 +1231,7 @@ mod tests {
 
     /// Java's `parseRequest` default arm throws an `AssertionError` whose text
     /// interpolates the `ApiKeys` value — the enum constant — and ends with the
-    /// "code should be updated" clause (`AbstractRequest.java:358-359`). The
+    /// "code should be updated" clause (`AbstractRequest#doParseRequest`). The
     /// method name is snake_cased per CLAUDE.md §2; the rest is verbatim.
     #[test]
     fn test_parse_request_unhandled_api_key_message() {

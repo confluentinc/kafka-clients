@@ -91,15 +91,22 @@ pub(crate) unsafe fn destroy_group_listing_element(element: *mut c_void) {
     unsafe { kafka_admin_GroupListing_destroy(element as *mut kafka_admin_GroupListing_t) }
 }
 
-/// `new GroupListing(String groupId, Optional<GroupType> type, String
-/// protocol, Optional<GroupState> groupState)`; `group_type` and
-/// `group_state` are singletons or null for `Optional.empty()`. Owned, freed
-/// with [`kafka_admin_GroupListing_destroy`].
+/// `new GroupListing(String groupId, Optional<GroupType> type, String protocol, Optional<GroupState> groupState)`;
+/// `group_type` and `group_state` are singletons or `NULL` for `Optional.empty()`.
+///
+/// # Parameters
+///
+/// - `group_id` - Group Id
+/// - `group_type` - Group type, `NULL` for none
+/// - `protocol` - Protocol
+/// - `group_state` - Group state
 ///
 /// # Safety
 ///
 /// `group_id` and `protocol` must be valid NUL-terminated strings;
-/// `group_type` and `group_state` null or singletons of their types.
+/// `group_type` and `group_state` `NULL` or singletons of their types.
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_GroupListing_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_new(
@@ -136,11 +143,17 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_new(
     ))
 }
 
-/// `groupId()`: borrowed from the handle.
+/// `groupId()`.
+///
+/// # Returns
+///
+/// Group Id
 ///
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(self_: *const kafka_admin_GroupListing_t) -> *const c_char {
@@ -150,8 +163,12 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_id(self_: *const kafka_a
     unsafe { inner_ref(self_) }.group_id_c.as_ptr()
 }
 
-/// `type()`: the `kafka_common_GroupType_t` singleton (never freed), or null
+/// `type()`: the `kafka_common_GroupType_t` singleton (never freed), or `NULL`
 /// for `Optional.empty()`.
+///
+/// # Returns
+///
+/// An Optional containing the type, if available
 ///
 /// # Safety
 ///
@@ -168,11 +185,17 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_type(
         .map_or(ptr::null(), group_type::singleton)
 }
 
-/// `protocol()`: borrowed from the handle.
+/// `protocol()`.
+///
+/// # Returns
+///
+/// The protocol
 ///
 /// # Safety
 ///
 /// `self_` must be a valid group-listing handle.
+///
+/// The returned string is borrowed from `self_`, valid as long as it is.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(self_: *const kafka_admin_GroupListing_t) -> *const c_char {
@@ -183,7 +206,11 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_protocol(self_: *const kafka_a
 }
 
 /// `groupState()`: the `kafka_common_GroupState_t` singleton (never freed),
-/// or null for `Optional.empty()`.
+/// or `NULL` for `Optional.empty()`.
+///
+/// # Returns
+///
+/// An Optional containing the state, if available.
 ///
 /// # Safety
 ///
@@ -200,7 +227,11 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_group_state(
         .map_or(ptr::null(), group_state::singleton)
 }
 
-/// `isSimpleConsumerGroup()`: a classic group with an empty protocol.
+/// If the group is a simple consumer group or not.
+///
+/// # Returns
+///
+/// 1 for a classic group with an empty protocol, else 0.
 ///
 /// # Safety
 ///
@@ -215,11 +246,12 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_is_simple_consumer_group(
     i8::from(unsafe { group_listing_ref(self_) }.is_simple_consumer_group())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the listing.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid group-listing handle.
+/// `self_` must be a valid group-listing handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_GroupListing_to_string(self_: *const kafka_admin_GroupListing_t) -> *mut c_char {
@@ -228,11 +260,11 @@ pub unsafe extern "C" fn kafka_admin_GroupListing_to_string(self_: *const kafka_
     into_c_string(&unsafe { group_listing_ref(self_) }.to_string())
 }
 
-/// Frees an owned group-listing handle; null is a no-op.
+/// Frees an owned group-listing handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

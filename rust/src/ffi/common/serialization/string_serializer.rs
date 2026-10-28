@@ -100,12 +100,12 @@ impl Serializer<GenericValue> for GenericStringSerializer {
         let data: Option<&'a str> = unsafe { string(data) }?;
         Serializer::<str>::serialize_with_headers(&self.0, topic, headers, data).await
     }
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        Serializer::<str>::configure(&mut self.0, configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        Serializer::<str>::configure(&mut self.0, configs, is_key).await
     }
 
-    async fn close(&self) {
-        Serializer::<str>::close(&self.0).await;
+    async fn close(&self) -> Result<(), Error> {
+        Serializer::<str>::close(&self.0).await
     }
 }
 
@@ -121,8 +121,16 @@ unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringSerializer_t
     unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
 }
 
-/// `new StringSerializer()`. Owned, freed with
-/// [`kafka_common_serialization_StringSerializer_destroy`].
+/// `new StringSerializer()`.
+///
+/// WARNING: the encoding is always UTF-8; the `key.serializer.encoding`,
+/// `value.serializer.encoding` and `serializer.encoding` properties are
+/// ignored.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_StringSerializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafka_common_serialization_StringSerializer_t
@@ -131,13 +139,15 @@ pub extern "C" fn kafka_common_serialization_StringSerializer_new() -> *mut kafk
         as *mut kafka_common_serialization_StringSerializer_t
 }
 
-/// The serializer as a `Serializer`: a borrowed view valid as long as the
-/// handle, never passed to `Serializer_destroy`. Its `data` is a
+/// Returns the serializer as a `Serializer`. Its `data` is a
 /// NUL-terminated UTF-8 `const char *`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid string-serializer handle.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to
+/// `kafka_common_serialization_Serializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_StringSerializer__as_Serializer(

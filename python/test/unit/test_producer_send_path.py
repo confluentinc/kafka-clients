@@ -34,8 +34,8 @@ and what ``send()`` makes of each answer:
 
 - taken: the future is tracked and returned pending;
 - refused, at once or once queued: ``send()`` raises the error, the callback
-  does not run and nothing is tracked, as Java's ``doSend`` rethrows it
-  (``KafkaProducer.java:1143-1155``);
+  does not run and nothing is tracked, as Java's
+  ``org.apache.kafka.clients.producer.KafkaProducer#doSend`` rethrows it;
 - queued: ``send()`` waits for the handover, as Java's waits in ``doSend``;
 - rejected: ``send()`` raises the C API's error.
 
@@ -225,10 +225,11 @@ def test_a_record_refused_at_once_raises_inside_send_and_runs_no_callback(
         monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
         capfd: pytest.CaptureFixture[str], freed_errors: list[int],
         configs: dict[str, Any], refusal: tuple[type[Exception], str]) -> None:
-    # Java's doSend rethrows an error that is not an ApiException, as the
+    # Java's org.apache.kafka.clients.producer.KafkaProducer#doSend rethrows an
+    # error that is not an ApiException, as the
     # closing metadata's KafkaException or the transaction manager's
     # IllegalStateException for a send outside a transaction, and the callback
-    # does not run then (KafkaProducer.java:1143-1155). Refused as it is handed
+    # does not run then. Refused as it is handed
     # over, inside Producer_send_cb, the record leaves send() nothing to
     # wait for: send() raises inside the call, the future, which it does not
     # return, is not tracked for flush(), and nothing is logged.

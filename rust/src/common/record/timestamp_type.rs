@@ -19,8 +19,6 @@
 use crate::common::Error;
 
 /// The timestamp type of the records.
-///
-/// Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 // `NoTimestampType` repeats the enum name because that is Java's constant
@@ -56,10 +54,14 @@ impl TimestampType {
 
     /// Look up a `TimestampType` by name.
     ///
+    /// # Arguments
+    ///
+    /// - `name` - the type name, as `Display` prints it
+    ///
     /// # Errors
     ///
-    /// Returns a `Error` if the name is not recognized, matching Java's
-    /// `NoSuchElementException` thrown by `TimestampType.forName()`.
+    /// [`Error::is_local_illegal_argument_error`] if the name is not
+    /// recognized, where Java throws `NoSuchElementException`.
     #[doc(alias = "org.apache.kafka.common.record.TimestampType#forName")]
     pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
@@ -67,7 +69,7 @@ impl TimestampType {
             "CreateTime" => Ok(Self::CreateTime),
             "LogAppendTime" => Ok(Self::LogAppendTime),
             // Java: `throw new NoSuchElementException("Invalid timestamp type " + name)`
-            // (`TimestampType.java:39`). `NoSuchElementException` is a plain
+            // (`TimestampType#forName`). `NoSuchElementException` is a plain
             // `java.util` `RuntimeException`, so — exactly like
             // `IllegalArgumentException` — it sits OUTSIDE the `KafkaException`
             // hierarchy: `is_kafka_error()` and `is_api_error()` both answer
@@ -119,7 +121,7 @@ mod tests {
     fn test_for_name_unknown() {
         let err = TimestampType::for_name("Unknown").unwrap_err();
         // Java: `new NoSuchElementException("Invalid timestamp type " + name)`
-        // (`TimestampType.java:39`).
+        // (`TimestampType#forName`).
         assert_eq!(err.message(), "Invalid timestamp type Unknown");
         // `NoSuchElementException` is outside the `KafkaException` hierarchy, so
         // both predicates must answer `false`.

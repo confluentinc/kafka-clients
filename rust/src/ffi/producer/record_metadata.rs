@@ -80,13 +80,21 @@ unsafe fn inner<'a>(metadata: *const kafka_producer_RecordMetadata_t) -> &'a Rec
     unsafe { &*(metadata as *const RecordMetadataInner) }
 }
 
-/// `new RecordMetadata(TopicPartition, long baseOffset, int batchIndex, long
-/// timestamp, int serializedKeySize, int serializedValueSize)`: owned, freed
-/// with [`kafka_producer_RecordMetadata_destroy`].
+/// Creates a new instance with the provided parameters.
+///
+/// # Parameters
+///
+/// - `topic_partition` - the partition
+/// - `base_offset` - the batch's base offset
+/// - `batch_index` - the record's index in the batch
+/// - `timestamp` - the timestamp
+/// - `serialized_key_size` - the key size, or -1
+/// - `serialized_value_size` - the value size, or -1
 ///
 /// # Safety
 ///
-/// `topic_partition` must be a live handle.
+/// `topic_partition` must be a live handle, which stays the caller's. The metadata
+/// is owned by the caller, freed with [`kafka_producer_RecordMetadata_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
@@ -111,7 +119,11 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_new(
     ))
 }
 
-/// `RecordMetadata.hasOffset()`.
+/// Indicates whether the record metadata includes the offset.
+///
+/// # Returns
+///
+/// 1 if the offset is included in the metadata, 0 otherwise.
 ///
 /// # Safety
 ///
@@ -124,7 +136,11 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_offset(self_: *const 
     i8::from(unsafe { record_metadata_ref(self_) }.has_offset())
 }
 
-/// `RecordMetadata.offset()`: `-1` when unknown.
+/// The offset of the record in the topic/partition.
+///
+/// # Returns
+///
+/// the offset of the record, or -1 if `kafka_producer_RecordMetadata_has_offset` returns 0.
 ///
 /// # Safety
 ///
@@ -137,7 +153,11 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_offset(self_: *const kafk
     unsafe { record_metadata_ref(self_) }.offset()
 }
 
-/// `RecordMetadata.hasTimestamp()`.
+/// Indicates whether the record metadata includes the timestamp.
+///
+/// # Returns
+///
+/// 1 if a valid timestamp exists, 0 otherwise.
 ///
 /// # Safety
 ///
@@ -152,7 +172,11 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_has_timestamp(
     i8::from(unsafe { record_metadata_ref(self_) }.has_timestamp())
 }
 
-/// `RecordMetadata.timestamp()`: `-1` when unknown.
+/// The timestamp of the record in the topic/partition.
+///
+/// # Returns
+///
+/// the timestamp of the record, or -1 if `kafka_producer_RecordMetadata_has_timestamp` returns 0.
 ///
 /// # Safety
 ///
@@ -165,7 +189,10 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(self_: *const k
     unsafe { record_metadata_ref(self_) }.timestamp()
 }
 
-/// `RecordMetadata.serializedKeySize()`: `-1` for a `null` key.
+/// # Returns
+///
+/// The size of the serialized, uncompressed key in bytes. If key is null, the
+/// returned size is -1.
 ///
 /// # Safety
 ///
@@ -180,7 +207,10 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_key_size(
     unsafe { record_metadata_ref(self_) }.serialized_key_size()
 }
 
-/// `RecordMetadata.serializedValueSize()`: `-1` for a `null` value.
+/// # Returns
+///
+/// The size of the serialized, uncompressed value in bytes. If value is null, the
+/// returned size is -1.
 ///
 /// # Safety
 ///
@@ -195,11 +225,13 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_serialized_value_size(
     unsafe { record_metadata_ref(self_) }.serialized_value_size()
 }
 
-/// `RecordMetadata.topic()`: borrowed, valid until the handle is destroyed.
+/// # Returns
+///
+/// The topic the record was appended to
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is borrowed, valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
@@ -211,7 +243,9 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_topic(
     unsafe { inner(self_) }.topic_c.as_ptr()
 }
 
-/// `RecordMetadata.partition()`.
+/// # Returns
+///
+/// The partition the record was sent to
 ///
 /// # Safety
 ///
@@ -224,11 +258,15 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(self_: *const k
     unsafe { record_metadata_ref(self_) }.partition()
 }
 
-/// `RecordMetadata.toString()`: owned, freed with `kafka_string_destroy`.
+/// `RecordMetadata.toString()`.
+///
+/// # Returns
+///
+/// The metadata as a string.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_RecordMetadata_to_string(

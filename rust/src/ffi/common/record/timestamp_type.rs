@@ -44,7 +44,7 @@ pub enum kafka_common_record_TimestampType_e {
 }
 
 /// One static instance per value, indexed by
-/// [`kafka_common_record_TimestampType_e`].
+/// `kafka_common_record_TimestampType_e`.
 static VARIANTS: [TimestampType; 3] = [
     TimestampType::NoTimestampType,
     TimestampType::CreateTime,
@@ -85,28 +85,40 @@ pub(crate) unsafe fn value_of(timestamp_type: *const kafka_common_record_Timesta
     unsafe { *(timestamp_type as *const TimestampType) }
 }
 
-/// `TimestampType.NO_TIMESTAMP_TYPE`.
+/// Returns the `TimestampType.NO_TIMESTAMP_TYPE` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_no_timestamp_type() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::NoTimestampType)
 }
 
-/// `TimestampType.CREATE_TIME`.
+/// Returns the `TimestampType.CREATE_TIME` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_create_time() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::CreateTime)
 }
 
-/// `TimestampType.LOG_APPEND_TIME`.
+/// Returns the `TimestampType.LOG_APPEND_TIME` singleton.
+///
+/// # Safety
+///
+/// The returned singleton is static, never freed, and comparable with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_record_TimestampType_log_append_time() -> *const kafka_common_record_TimestampType_t {
     singleton(TimestampType::LogAppendTime)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_record_TimestampType_NO_TIMESTAMP_TYPE`, the first
 /// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
@@ -125,7 +137,7 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType__enum(
     enum_of(unsafe { value_of(self_) })
 }
 
-/// `id`: `-1`, `0` or `1`.
+/// Returns the id of the type (Java's `id` field): `-1`, `0` or `1`.
 ///
 /// A caught Rust panic returns -2, which is no id of this enum: its ids are -1, 0 and 1.
 ///
@@ -142,11 +154,12 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_id(
     unsafe { value_of(self_) }.id()
 }
 
-/// `name`: a static string, never freed.
+/// Returns the name of the type (Java's `name` field).
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is static, never
+/// freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
@@ -158,14 +171,23 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_name(
     NAMES[enum_of(unsafe { value_of(self_) }) as usize].as_ptr()
 }
 
-/// `TimestampType.forName(String name)`: returns the singleton, or stores the
-/// owned `NoSuchElementException` translation in `*out_err` and returns `NULL`
-/// for an unknown name.
+/// Returns the type whose name is `name` (`TimestampType.forName(String name)`).
+///
+/// # Parameters
+///
+/// - `name` - The name of the type, as `kafka_common_record_TimestampType_to_string` prints it.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `name` is not the name of a type,
+///   where Java throws `NoSuchElementException`.
+/// - `kafka_common_Error_is_local_illegal_state_error` if a Rust panic is caught.
 ///
 /// # Safety
 ///
 /// `name` must be a valid NUL-terminated string and `out_err` a valid slot
-/// pointing at null.
+/// pointing at `NULL`. The returned singleton is static, never freed, and comparable
+/// with `==`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
@@ -182,12 +204,12 @@ pub unsafe extern "C" fn kafka_common_record_TimestampType_for_name(
     }
 }
 
-/// `toString()`: the name, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns the text form of the type (`toString()`): its name.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_record_TimestampType_to_string(

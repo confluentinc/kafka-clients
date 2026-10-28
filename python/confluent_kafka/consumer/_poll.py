@@ -34,8 +34,8 @@ it, and otherwise the next poll fetches and fails on it again. A poll that does
 not return its records at all (Ctrl+C or a cancellation while it waited, or
 during those seeks back) seeks each partition back to its first fetched record
 instead (``fetched_positions``, ``Deserialized.unreturned``): Java's
-``AsyncKafkaConsumer.poll`` never loses records the positions have moved past
-(``AsyncKafkaConsumer.java:940-960``).
+``org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#poll`` never loses
+records the positions have moved past.
 """
 
 from __future__ import annotations

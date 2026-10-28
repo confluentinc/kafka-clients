@@ -66,7 +66,7 @@ pub type kafka_common_metrics_CompoundStat_record_fn_t = unsafe extern "C" fn(
 pub type kafka_common_metrics_CompoundStat_stats_fn_t = unsafe extern "C" fn(self_: *mut c_void) -> *mut kafka_List_t;
 
 /// A C implementation of [`CompoundStat`] registered through
-/// [`kafka_common_metrics_CompoundStat_new`].
+/// `kafka_common_metrics_CompoundStat_new`.
 struct CCompoundStat {
     self_: *mut c_void,
     record: kafka_common_metrics_CompoundStat_record_fn_t,
@@ -181,10 +181,25 @@ pub(crate) unsafe fn take_compound_stat(stat: *mut kafka_common_metrics_Compound
 
 /// Registers a C implementation of `CompoundStat`. The caller owns `self_`
 /// and keeps it alive until the handle is destroyed with
-/// [`kafka_common_metrics_CompoundStat_destroy`] or, once a `*mut` parameter
+/// `kafka_common_metrics_CompoundStat_destroy` or, once a `*mut` parameter
 /// consumed it, until the sensor it went into is destroyed with its
 /// registry. The functions may be called from any thread, concurrently, so
 /// the C caller is responsible for their thread-safety on `self_`.
+///
+/// # Parameters
+///
+/// - `self_` - The implementation's state, passed back to every function.
+/// - `record` - Its `record(MetricConfig, double, long)`.
+/// - `stats` - Its `stats()`.
+///
+/// # Returns
+///
+/// A compound-stat handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_CompoundStat_destroy` unless a `*mut` parameter consumed it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_CompoundStat_new(
@@ -197,6 +212,12 @@ pub extern "C" fn kafka_common_metrics_CompoundStat_new(
 }
 
 /// `record(MetricConfig config, double value, long timeMs)`.
+///
+/// # Parameters
+///
+/// - `config` - The configuration to use for this metric
+/// - `value` - The value to record
+/// - `time_ms` - The POSIX time in milliseconds this value occurred
 ///
 /// # Safety
 ///
@@ -216,13 +237,17 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_record(
     unsafe { compound_stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
 }
 
-/// `stats()`: an owned list of owned
-/// `kafka_common_metrics_CompoundStat_NamedMeasurable_t *` elements, freed
-/// together with `kafka_List_destroy`.
+/// `stats()`.
+///
+/// # Returns
+///
+/// The named measurables of the stat.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid compound-stat handle.
+/// `self_` must be a valid compound-stat handle. The returned list is owned, its
+/// `kafka_common_metrics_CompoundStat_NamedMeasurable_t *` elements too, freed together with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_stats(
@@ -258,7 +283,7 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_destroy(self_: *mut k
 // CompoundStat.NamedMeasurable
 // ---------------------------------------------------------------------------
 
-/// What a [`kafka_common_metrics_CompoundStat_NamedMeasurable_t`] points at:
+/// What a `kafka_common_metrics_CompoundStat_NamedMeasurable_t` points at:
 /// the pair plus the metric-name handle the borrowed getter hands out.
 struct NamedMeasurableInner {
     named: NamedMeasurable,
@@ -287,15 +312,23 @@ unsafe fn named_inner<'a>(
     unsafe { &*(self_ as *const NamedMeasurableInner) }
 }
 
-/// `new NamedMeasurable(MetricName name, Measurable stat)`: `name` is
-/// copied, `stat` is consumed (an owned handle is freed, a view is shared).
-/// Owned, freed with [`kafka_common_metrics_CompoundStat_NamedMeasurable_destroy`]
-/// or taken over by Rust when returned from a `stats` implementation.
+/// `new NamedMeasurable(MetricName name, Measurable stat)`.
+///
+/// # Parameters
+///
+/// - `name` - The name of the measurable; copied.
+/// - `stat` - The measurable; consumed (an owned handle is freed, a view is shared).
+///
+/// # Returns
+///
+/// The named measurable.
 ///
 /// # Safety
 ///
 /// `name` must be a valid metric-name handle and `stat` a valid measurable
-/// handle, not used again by the caller when it was owned.
+/// handle, not used again by the caller when it was owned. The returned handle is owned, freed
+/// with `kafka_common_metrics_CompoundStat_NamedMeasurable_destroy` or taken over by Rust when
+/// returned from a `stats` implementation.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
@@ -312,11 +345,16 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_new(
     box_named_measurable(NamedMeasurable::new(name, stat))
 }
 
-/// `name()`: borrowed from the handle, valid as long as it is.
+/// `name()`.
+///
+/// # Returns
+///
+/// The name of the measurable.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid named-measurable handle.
+/// `self_` must be a valid named-measurable handle. The returned handle is borrowed, valid as
+/// long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
@@ -329,12 +367,16 @@ pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_name(
     unsafe { named_inner(self_) }.name.as_ptr()
 }
 
-/// `stat()`: an owned handle sharing the measurable, freed with
-/// `kafka_common_metrics_Measurable_destroy`.
+/// `stat()`.
+///
+/// # Returns
+///
+/// The measurable.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid named-measurable handle.
+/// `self_` must be a valid named-measurable handle. The returned handle is owned and shares the
+/// measurable, freed with `kafka_common_metrics_Measurable_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_CompoundStat_NamedMeasurable_stat(

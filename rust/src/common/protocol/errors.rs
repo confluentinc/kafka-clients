@@ -208,7 +208,7 @@ impl Errors {
     /// `name()` — is what every `"..." + error` / `String.format("%s", error)`
     /// site renders. `Sender.formatErrMsg`'s own javadoc spells the expected
     /// output: `"NETWORK_EXCEPTION. Error Message: Disconnected from node 0"`
-    /// (`Sender.java:742`).
+    /// (`Sender#formatErrMsg`).
     ///
     /// It is **not** [`message`](Self::message), the long human description
     /// carried as the constant's second constructor argument, and not
@@ -467,7 +467,7 @@ impl Errors {
             Self::KafkaStorageError => "Disk error when trying to access log file on the disk.",
             Self::LogDirNotFound => "The user-specified log directory is not found in the broker config.",
             Self::SaslAuthenticationFailed => "SASL Authentication failed.",
-            // Java (`Errors.java:310-314`): "This exception is raised by the broker
+            // Java (`Errors#UNKNOWN_PRODUCER_ID`): "This exception is raised by the broker
             // if it could not locate the producer metadata associated with the
             // producerId in question. ... future appends by the producer will
             // return this exception." CLAUDE.md §2 bans the word from Rust code,
@@ -601,7 +601,7 @@ impl Errors {
 
     /// The exception class this code names, with its default message.
     ///
-    /// Translates Java's `Errors.exception()` (`protocol/Errors.java:452`). Java
+    /// Translates Java's `Errors.exception()` (`org.apache.kafka.common.protocol.Errors#exception`). Java
     /// stores a `Function<String, ApiException>` per constant and applies it to
     /// the constant's message literal; this match is that per-constant factory,
     /// and the literals stay in [`message`](Self::message) exactly as Java keeps
@@ -931,7 +931,7 @@ impl Errors {
     /// The name of the error class this code names, or `None` for
     /// [`Errors::None`].
     ///
-    /// Translates Java's `Errors.exceptionName()` (`protocol/Errors.java:474`),
+    /// Translates Java's `Errors.exceptionName()` (`org.apache.kafka.common.protocol.Errors#exceptionName`),
     /// which returns `exception.getClass().getName()` — the *fully qualified*
     /// name, e.g. `org.apache.kafka.common.errors.UnknownServerException`. Rust
     /// has no Java package to report, so this returns the bare Rust type name
@@ -939,7 +939,7 @@ impl Errors {
     /// translates `Throwable.toString()`, which uses the same
     /// `getClass().getName()`.
     ///
-    /// Java's only client-side caller is `FetchCollector.java:325`
+    /// Java's only client-side caller is `FetchCollector#handleInitializeErrors`
     /// (`log.debug("Error in fetch for partition {}: {}", tp,
     /// error.exceptionName())`), which names the class when a fetch response
     /// carries an error.
@@ -1024,9 +1024,7 @@ impl Errors {
                 Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message)))
             },
             Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-            Self::GroupAuthorizationFailed => {
-                Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
-            },
+            Self::GroupAuthorizationFailed => Some(Error::GroupAuthorization(GroupAuthorizationError::new(message))),
             Self::GroupDeletionFailed => Some(Error::GroupDeletionFailed(GroupDeletionFailedError::new(message))),
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
@@ -2105,7 +2103,7 @@ mod tests {
 
     /// `RequestUtils.isFatalException` (translated in `request_utils::RequestUtils::is_fatal_error`) must be `true` for **exactly** the error codes whose
     /// Java exception class satisfies `RequestUtils.isFatalException`
-    /// (`common/requests/RequestUtils.java:88`). Java has no per-exception
+    /// (`org.apache.kafka.common.requests.RequestUtils#isFatalException`). Java has no per-exception
     /// fatal flag, so that class test IS the definition; if this set drifts,
     /// `AdminMetadataManager::update_failed` — Java's only caller — stops
     /// recording fatal errors that Java records, or starts recording ones it
@@ -2525,7 +2523,8 @@ mod tests {
         }
     }
 
-    /// The codes Kafka 4.4 adds or rewords (`Errors.java:415,425-427`), pinned
+    /// The codes Kafka 4.4 adds or rewords (`FENCED_STATE_EPOCH`, `GROUP_DELETION_FAILED`,
+    /// `STREAMS_TOPOLOGY_DESCRIPTION_UPDATE_FAILED`, `CONTROLLER_ID_NOT_REGISTERED`), pinned
     /// to Java's exact text, constant name and class.
     ///
     /// The message is the class's default text (`Errors.exception()`), so it is

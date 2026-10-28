@@ -21,15 +21,10 @@ use std::fmt;
 use crate::common::Error;
 
 /// A container class for offset and timestamp.
-///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.OffsetAndTimestamp`.
-///
-/// **`offsets_for_times` mapping note:** this value is non-nullable, so when
-/// it is the value type of an `offsets_for_times` result map, an unresolved
-/// partition (queried but with no offset at/after the target time) is
-/// **omitted from the map** (key absent) rather than present with a `null`
-/// value as in Java. See
-/// [`Consumer::offsets_for_times`](crate::consumer::Consumer::offsets_for_times).
+// In an `offsets_for_times` result map the value is an
+// `Option<OffsetAndTimestamp>`: an unresolved partition (queried but with no
+// offset at/after the target time) is present with `None`, as Java maps it to
+// `null` (see `Consumer::offsets_for_times`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp")]
 pub struct OffsetAndTimestamp {
@@ -39,23 +34,43 @@ pub struct OffsetAndTimestamp {
 }
 
 impl OffsetAndTimestamp {
-    /// Create a new `OffsetAndTimestamp` with no leader epoch.
+    /// Constructs a new OffsetAndTimestamp with the given offset and timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset` - The offset
+    /// - `timestamp` - The timestamp
+    ///
+    /// # Returns
+    ///
+    /// The new `OffsetAndTimestamp`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
-    /// negative (matching Java's `IllegalArgumentException`).
+    /// - `Error::is_local_illegal_argument_error` If the offset or timestamp is
+    ///   negative
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp")]
     pub fn new(offset: i64, timestamp: i64) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, timestamp, None)
     }
 
-    /// Create a new `OffsetAndTimestamp` with an optional leader epoch.
+    /// Constructs a new OffsetAndTimestamp with the given offset, timestamp,
+    /// and leader epoch.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset` - The offset
+    /// - `timestamp` - The timestamp
+    /// - `leader_epoch` - The leader epoch
+    ///
+    /// # Returns
+    ///
+    /// The new `OffsetAndTimestamp`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
-    /// negative (matching Java's `IllegalArgumentException`).
+    /// - `Error::is_local_illegal_argument_error` If the offset or timestamp is
+    ///   negative
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#OffsetAndTimestamp")]
     pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, Error> {
         if offset < 0 {
@@ -68,12 +83,20 @@ impl OffsetAndTimestamp {
     }
 
     /// The timestamp.
+    ///
+    /// # Returns
+    ///
+    /// The timestamp
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     /// The offset.
+    ///
+    /// # Returns
+    ///
+    /// The offset
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
@@ -82,6 +105,10 @@ impl OffsetAndTimestamp {
     /// Get the leader epoch corresponding to the offset that was found (if
     /// one exists). This can be provided to `seek()` to ensure the log hasn't
     /// been truncated prior to fetching.
+    ///
+    /// # Returns
+    ///
+    /// The leader epoch or empty if it is not known
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetAndTimestamp#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
@@ -89,8 +116,8 @@ impl OffsetAndTimestamp {
 }
 
 impl fmt::Display for OffsetAndTimestamp {
-    /// Matches Java's `toString()`:
-    /// `(timestamp=N, leaderEpoch=X, offset=M)`
+    // Matches Java's `toString()`:
+    // `(timestamp=N, leaderEpoch=X, offset=M)`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

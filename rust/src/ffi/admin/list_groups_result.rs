@@ -69,14 +69,20 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ListGroupsResult_t) -> &'a Result
     unsafe { result_ref(self_) }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of
-/// `kafka_admin_GroupListing_t *`, or fails with the first broker's error
-/// when any broker failed.
+/// Returns a future that yields either an error, or the full set of group listings.
+///
+/// In the event of a failure, the future yields nothing but the first error which occurred.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_List_t *` (owned by the future) of
+/// `kafka_admin_GroupListing_t *`, or fails with the first broker's error when any broker failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
@@ -91,14 +97,24 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), listings_list, destroy_list_element) }
 }
 
-/// `valid()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of the
-/// `kafka_admin_GroupListing_t *` the brokers that succeeded returned,
-/// never failing because of a broker that did not.
+/// Returns a future which yields just the valid listings.
+///
+/// This future never fails with an error, no matter what happens. Errors are completely ignored. If
+/// nothing can be fetched, an empty collection is yielded. If there is an error, but some results
+/// can be returned, this future will yield those partial results. When using this future, it is a
+/// good idea to also check the errors future so that errors can be displayed and handled.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_List_t *` (owned by the future) of the
+/// `kafka_admin_GroupListing_t *` the brokers that succeeded returned, never failing because of a
+/// broker that did not.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
@@ -113,13 +129,24 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_valid(
     unsafe { h.ctx.handle_future(&h.result.valid(), listings_list, destroy_list_element) }
 }
 
-/// `errors()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of
+/// Returns a future which yields just the errors which occurred.
+///
+/// If this future yields a non-empty collection, it is very likely that elements are missing from
+/// the valid() set.
+///
+/// This future itself never fails with an error. In the event of an error, this future will
+/// successfully yield a collection containing at least one error.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_List_t *` (owned by the future) of
 /// `kafka_common_Error_t *`, one per broker that failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
@@ -143,12 +170,12 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_errors(
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

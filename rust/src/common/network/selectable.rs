@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 /// See [`Selectable::connect`] — use the platform default buffer size.
 ///
-/// Java `Selectable.USE_DEFAULT_BUFFER_SIZE` (`Selectable.java:36`), an interface
+/// Java `Selectable#USE_DEFAULT_BUFFER_SIZE`, an interface
 /// field and therefore implicitly `public static final`.
 ///
 /// Module-level rather than an associated const on [`Selectable`], per CLAUDE.md

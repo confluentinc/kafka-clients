@@ -86,7 +86,7 @@ pub use isolation_level::IsolationLevel;
 // alike — use the inherent methods on `Error`.
 pub use kafka_error::KafkaError;
 pub use kafka_future::KafkaFuture;
-pub(crate) use kafka_future::KafkaFutureOps;
+pub(crate) use kafka_future::{CompletionCallback, KafkaFutureOps};
 // The five JDK classes the client raises itself. Re-exported here rather than
 // from `common::errors`, which is Java's `org.apache.kafka.common.errors`
 // package and holds none of them.

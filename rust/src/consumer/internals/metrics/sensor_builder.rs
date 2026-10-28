@@ -60,7 +60,7 @@ impl<'a> SensorBuilder<'a> {
     ///
     /// `tags` is a closure, not a map, so it is invoked **only when the sensor is
     /// newly created** — exactly what Java's `Supplier` achieves
-    /// (`SensorBuilder.java:51-64`). This matters because the per-topic and
+    /// (`SensorBuilder#SensorBuilder(MetricsLedger,String,Supplier)`). This matters because the per-topic and
     /// per-partition builders in
     /// [`crate::consumer::internals::FetchMetricsManager`]
     /// run on the per-fetch record path: with a by-value `BTreeMap` the caller
@@ -190,7 +190,7 @@ mod tests {
     /// `with_tags` used to take a `BTreeMap` by value, so the caller built the map
     /// — and its `String` keys and values — on every call, discarding it whenever
     /// the sensor already existed. Java passes a `Supplier<Map>` and invokes it
-    /// only when creating (`SensorBuilder.java:51-64`). These builders sit on the
+    /// only when creating (`SensorBuilder#SensorBuilder(MetricsLedger,String,Supplier)`). These builders sit on the
     /// per-fetch record path, so the difference is tens of thousands of
     /// allocations per second at 200 partitions.
     #[test]

@@ -96,7 +96,7 @@ impl From<InvalidReceiveError> for io::Error {
 ///
 /// The Rust equivalent of `e instanceof InvalidReceiveException` on the error
 /// closing a channel. Java's `Selector.pollSelectionKeys` logs an `IOException`
-/// disconnect at DEBUG and every other error at WARN (`Selector.java:600-626`),
+/// disconnect at DEBUG and every other error at WARN,
 /// and `InvalidReceiveException` is a `KafkaException`, so it is one of the
 /// others. Like [`is_authentication_error`](super::is_authentication_error) it
 /// classifies by the typed payload, never by the [`io::ErrorKind`].

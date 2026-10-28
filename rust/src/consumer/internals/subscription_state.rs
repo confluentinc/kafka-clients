@@ -2105,7 +2105,7 @@ mod tests {
     }
 
     /// Translation of Java's `MockRebalanceListener`
-    /// (`SubscriptionStateTest.java:980-996`): counts callback invocations.
+    /// (`SubscriptionStateTest.MockRebalanceListener`): counts callback invocations.
     /// Currently no Phase-4 test asserts on the counters, but Phase-11
     /// rebalance-listener regression tests will inspect them.
     struct MockListener {

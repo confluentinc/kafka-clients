@@ -20,10 +20,12 @@ use crate::common::metrics::{MetricConfig, MetricValueProvider};
 
 /// A gauge metric is an instantaneous reading of a particular value.
 ///
-/// In Java `Gauge<T> extends MetricValueProvider<T>` and declares nothing of
-/// its own: a gauge is a functional interface whose single method is
-/// [`MetricValueProvider::value`]. Because the public metric value is
-/// type-erased, the Rust gauge produces a [`MetricValue`].
+/// # Translation notes
+///
+/// It yields a [`MetricValue`].
+// Java's `Gauge<T> extends MetricValueProvider<T>` declares nothing of its own:
+// its single method is `MetricValueProvider::value`. The public metric value is
+// type-erased, so the Rust gauge produces a `MetricValue`.
 #[doc(alias = "org.apache.kafka.common.metrics.Gauge")]
 pub trait Gauge: MetricValueProvider {}
 
@@ -31,6 +33,14 @@ pub trait Gauge: MetricValueProvider {}
 /// implementing `Gauge` (e.g. `(config, now) -> metrics.size()`): `function`
 /// is [`MetricValueProvider::value`]. A method Java adds later as an overload
 /// of `value` gets its own factory, `with_<parameter>`.
+///
+/// # Arguments
+///
+/// - `function` - computes the value from the config and the time in milliseconds
+///
+/// # Returns
+///
+/// The gauge calling `function`.
 ///
 /// ```
 /// use confluent_kafka::common::MetricValue;
@@ -42,7 +52,7 @@ pub trait Gauge: MetricValueProvider {}
 ///     .add_metric_with_metric_value_provider(name, Box::new(gauge::new(|_config, _now| MetricValue::Int(42))))
 ///     .unwrap();
 /// ```
-// stands in for a Java lambda implementing `Gauge` (CLAUDE.md §3)
+// stands in for a Java lambda implementing `Gauge`
 #[doc(alias = "rust-only")]
 pub fn new<F>(function: F) -> impl Gauge
 where
@@ -58,7 +68,7 @@ where
             (self.0)(config, now)
         }
 
-        /// A function is Rust's lambda, which Java's `KafkaMetric.toString` omits.
+        // A function is Rust's lambda, which Java's `KafkaMetric.toString` omits.
         fn type_name(&self) -> Option<&'static str> {
             None
         }

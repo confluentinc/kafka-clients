@@ -33,18 +33,39 @@ static NO_NODE: std::sync::LazyLock<Node> = std::sync::LazyLock::new(|| Node::ne
 
 impl Node {
     /// Creates a new `Node` with no rack and not fenced.
+    ///
+    /// # Arguments
+    ///
+    /// - `id` - the node id
+    /// - `host` - the host name
+    /// - `port` - the port
     #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int)")]
     pub fn new(id: i32, host: String, port: i32) -> Self {
         Self::with_rack(id, host, port, None)
     }
 
     /// Creates a new `Node` with the given rack.
+    ///
+    /// # Arguments
+    ///
+    /// - `id` - the node id
+    /// - `host` - the host name
+    /// - `port` - the port
+    /// - `rack` - the rack, or `None` if unknown
     #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String)")]
     pub fn with_rack(id: i32, host: String, port: i32, rack: Option<String>) -> Self {
         Self::with_rack_is_fenced(id, host, port, rack, false)
     }
 
     /// Creates a new `Node` with the given rack and fenced status.
+    ///
+    /// # Arguments
+    ///
+    /// - `id` - the node id
+    /// - `host` - the host name
+    /// - `port` - the port
+    /// - `rack` - the rack, or `None` if unknown
+    /// - `is_fenced` - whether the broker is fenced
     #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String,boolean)")]
     pub fn with_rack_is_fenced(id: i32, host: String, port: i32, rack: Option<String>, is_fenced: bool) -> Self {
         Self::with_rack_is_fenced_id_string(id, host, port, rack, is_fenced, id.to_string())
@@ -53,7 +74,7 @@ impl Node {
     /// Creates a new `Node` whose [`id_string`](Self::id_string) is given
     /// explicitly instead of being derived from `id`.
     ///
-    /// Java's `protected` constructor (`Node.java:54-61`, KAFKA-20246 3/N),
+    /// Java's `protected` constructor (KAFKA-20246 3/N),
     /// whose only caller is the consumer's `GroupCoordinatorNode` subclass,
     /// hence crate-private here.
     #[doc(alias = "org.apache.kafka.common.Node#Node(int,String,int,String,boolean,String)")]
@@ -76,18 +97,22 @@ impl Node {
 
     /// Check whether this node is empty, which may be the case if `no_node()` is used
     /// as a placeholder in a response payload with an error.
+    ///
+    /// # Returns
+    ///
+    /// true if it is, false otherwise
     #[doc(alias = "org.apache.kafka.common.Node#isEmpty")]
     pub fn is_empty(&self) -> bool {
         self.host.is_empty() || self.port < 0
     }
 
-    /// The node id of this node.
+    /// Returns the node id of this node.
     #[doc(alias = "org.apache.kafka.common.Node#id")]
     pub fn id(&self) -> i32 {
         self.id
     }
 
-    /// String representation of the node id.
+    /// Returns the string representation of the node id.
     /// Typically, the integer id is used to serialize over the wire, the string
     /// representation is used as an identifier with NetworkClient code.
     #[doc(alias = "org.apache.kafka.common.Node#idString")]
@@ -95,25 +120,25 @@ impl Node {
         &self.id_string
     }
 
-    /// The host name for this node.
+    /// Returns the host name for this node.
     #[doc(alias = "org.apache.kafka.common.Node#host")]
     pub fn host(&self) -> &str {
         &self.host
     }
 
-    /// The port for this node.
+    /// Returns the port for this node.
     #[doc(alias = "org.apache.kafka.common.Node#port")]
     pub fn port(&self) -> i32 {
         self.port
     }
 
-    /// True if this node has a defined rack.
+    /// Returns true if this node has a defined rack.
     #[doc(alias = "org.apache.kafka.common.Node#hasRack")]
     pub fn has_rack(&self) -> bool {
         self.rack.is_some()
     }
 
-    /// The rack for this node.
+    /// Returns the rack for this node.
     #[doc(alias = "org.apache.kafka.common.Node#rack")]
     pub fn rack(&self) -> Option<&str> {
         self.rack.as_deref()
@@ -129,7 +154,7 @@ impl Node {
     }
 }
 
-/// Java's `Node.equals` (`Node.java:147-158`) first requires
+/// Java's `Node.equals` first requires
 /// `getClass() == obj.getClass()`, so a `GroupCoordinatorNode` never equals a
 /// plain `Node` with the same fields. Rust has no subclass to compare, so
 /// `id_string` stands in for the class: a plain node's is `id.to_string()` and

@@ -28,14 +28,12 @@ use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// A fetch asked for an offset outside the range the broker retains.
-///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.OffsetOutOfRangeException`.
-/// It has no entry in `Errors`, so it carries no protocol code — the wire code
-/// `OFFSET_OUT_OF_RANGE` builds the `common.errors` class instead.
-///
-/// Java `extends` chain:
-///    `OffsetOutOfRangeException` -> `InvalidOffsetException` -> `KafkaException`
+/// No reset policy has been defined, and the offsets for these partitions are
+/// either larger or smaller than the range of offsets the server has for the
+/// given partition.
+// Java `extends` chain: `OffsetOutOfRangeException` -> `InvalidOffsetException`
+// -> `KafkaException`. It has no entry in `Errors`: the wire code
+// `OFFSET_OUT_OF_RANGE` builds the `common.errors` class instead.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException")]
 pub struct ConsumerOffsetOutOfRangeError {
@@ -47,8 +45,12 @@ pub struct ConsumerOffsetOutOfRangeError {
 }
 
 impl ConsumerOffsetOutOfRangeError {
-    /// Create the error, mirroring Java's
-    /// `OffsetOutOfRangeException(Map<TopicPartition, Long>)`.
+    /// Constructs a new `ConsumerOffsetOutOfRangeError` with the offsets that
+    /// are out of range.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#OffsetOutOfRangeException")]
     pub fn new(offset_out_of_range_partitions: HashMap<TopicPartition, i64>) -> Self {
         let mut items: Vec<String> = offset_out_of_range_partitions.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -60,8 +62,12 @@ impl ConsumerOffsetOutOfRangeError {
         Self { message, offset_out_of_range_partitions, source: None }
     }
 
-    /// Create the error with a caller-supplied message, mirroring Java's
-    /// `OffsetOutOfRangeException(String, Map<TopicPartition, Long>)`.
+    /// Constructs a new `ConsumerOffsetOutOfRangeError` with a custom message.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - The detail message
+    /// - `offset_out_of_range_partitions` - Map of partition to the out-of-range offset
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#OffsetOutOfRangeException")]
     pub fn with_message(
         message: impl Into<String>,
@@ -70,32 +76,32 @@ impl ConsumerOffsetOutOfRangeError {
         Self { message: message.into(), offset_out_of_range_partitions, source: None }
     }
 
-    /// The out-of-range offset per partition.
+    /// Get a map of the topic partitions and the respective out-of-range fetch
+    /// offsets.
+    ///
+    /// # Returns
+    ///
+    /// The out-of-range fetch offset per partition
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#offsetOutOfRangePartitions")]
     pub fn offset_out_of_range_partitions(&self) -> &HashMap<TopicPartition, i64> {
         &self.offset_out_of_range_partitions
     }
 
-    /// The partitions this error covers.
+    /// Returns the set of partitions for which the offset was invalid.
     ///
-    /// Mirrors Java's `OffsetOutOfRangeException.partitions()`
-    /// (`OffsetOutOfRangeException.java:64-67`), which is
-    /// `return offsetOutOfRangePartitions.keySet();` — the override of the
-    /// single abstract member `InvalidOffsetException` declares
-    /// (`InvalidOffsetException.java:49`), so it is available uniformly across
-    /// the family that
-    /// `is_consumer_invalid_offset_error`
-    /// recognises.
+    /// # Returns
     ///
-    /// Returns an iterator rather than a `HashSet`: Java's `keySet()` is a
-    /// *view* over the map, so materialising a set here would allocate where
-    /// Java does not (CLAUDE.md §13/§14).
+    /// The set of partitions with invalid offsets
+    ///
+    /// # Translation notes
+    ///
+    /// Iterates the keys instead of copying them.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions")]
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
         self.offset_out_of_range_partitions.keys()
     }
 
-    /// The error message.
+    /// Returns the error message.
     // Java's Throwable.getMessage, a JDK method
     #[doc(alias = "rust-only")]
     pub fn message(&self) -> &str {
@@ -136,8 +142,7 @@ impl ErrorSource for ConsumerOffsetOutOfRangeError {
 }
 
 impl ConsumerOffsetOutOfRangeError {
-    /// The underlying source, if any. Mirrors Java's `getCause()`
-    /// (`OffsetOutOfRangeException(String, Throwable)`).
+    /// Returns the cause of this error, if any.
     // Java's Throwable.getCause, a JDK method
     #[doc(alias = "rust-only")]
     pub fn source(&self) -> Option<&Error> {
@@ -162,7 +167,7 @@ mod tests {
     ///
     /// Java: `OffsetOutOfRangeException(Map<TopicPartition, Long>)` composes
     /// `"Offsets out of range with no configured reset policy for partitions: "
-    /// + offsetOutOfRangePartitions` (`OffsetOutOfRangeException.java:41-44`),
+    /// + offsetOutOfRangePartitions` (`org.apache.kafka.clients.consumer.OffsetOutOfRangeException#OffsetOutOfRangeException(Map)`),
     /// and Java's `Map.toString()` braces the entries — hence `{t-0=5}`.
     ///
     /// The exact encoding is asserted because the split changed it and no test
@@ -180,9 +185,9 @@ mod tests {
 
     /// Java: `OffsetOutOfRangeException.partitions()` is
     /// `offsetOutOfRangePartitions.keySet()`
-    /// (`OffsetOutOfRangeException.java:64-67`) — the override of
+    /// (`org.apache.kafka.clients.consumer.OffsetOutOfRangeException#partitions`) — the override of
     /// `InvalidOffsetException`'s single abstract member
-    /// (`InvalidOffsetException.java:49`), which Kafka's own javadoc tells
+    /// (`org.apache.kafka.clients.consumer.InvalidOffsetException#partitions`), which Kafka's own javadoc tells
     /// callers to use.
     #[test]
     fn test_offset_out_of_range_partitions_accessor() {
@@ -194,7 +199,7 @@ mod tests {
     }
 
     /// `OffsetOutOfRangeException extends InvalidOffsetException extends
-    /// KafkaException` (`OffsetOutOfRangeException.java:31`) — the CONSUMER
+    /// KafkaException` (`org.apache.kafka.clients.consumer.OffsetOutOfRangeException`) — the CONSUMER
     /// package's `InvalidOffsetException`, so it is not an `ApiException`,
     /// unlike the identically-named `common.errors` class.
     #[test]

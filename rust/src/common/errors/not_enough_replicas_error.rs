@@ -18,14 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Messages are rejected since there are fewer in-sync replicas than
-    /// required.
+    /// Number of insync replicas for the partition is lower than min.insync.replicas
     ///
-    /// Corresponds to Java's `NotEnoughReplicasException`, error code `Errors::NotEnoughReplicas`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `NotEnoughReplicasException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::NotEnoughReplicas`.
     #[doc(alias = "org.apache.kafka.common.errors.NotEnoughReplicasException")]
     NotEnoughReplicasError,
     code: Errors::NotEnoughReplicas,

@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Number of partitions is below 1.
     ///
-    /// Corresponds to Java's `InvalidPartitionsException`, error code `Errors::InvalidPartitions`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidPartitionsException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidPartitions`. Java `extends` chain: `InvalidPartitionsException`
+    /// -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidPartitionsException")]
     InvalidPartitionsError,
     code: Errors::InvalidPartitions,

@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! Mechanism and iterations for a SASL/SCRAM credential.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ScramCredentialInfo`.
 
 use super::ScramMechanism;
 
@@ -31,9 +29,10 @@ pub struct ScramCredentialInfo {
 impl ScramCredentialInfo {
     /// Creates a new credential info.
     ///
-    /// * `mechanism` — the required mechanism
-    /// * `iterations` — the number of iterations used when creating the
-    ///   credential
+    /// # Arguments
+    ///
+    /// - `mechanism` - the required mechanism
+    /// - `iterations` - the number of iterations used when creating the credential
     #[doc(alias = "org.apache.kafka.clients.admin.ScramCredentialInfo#ScramCredentialInfo")]
     pub fn new(mechanism: ScramMechanism, iterations: i32) -> Self {
         Self { mechanism, iterations }

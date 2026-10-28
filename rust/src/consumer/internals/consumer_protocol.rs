@@ -36,7 +36,7 @@ use crate::consumer_protocol_assignment_data::TopicPartition as AssignmentTopicP
 use crate::consumer_protocol_subscription_data::TopicPartition as SubscriptionTopicPartition;
 
 /// Safety check translating Java's `static { }` initializer
-/// (`ConsumerProtocol.java:47-58`), which refuses to load the class when the
+/// of `ConsumerProtocol`, which refuses to load the class when the
 /// two halves of the protocol have drifted apart:
 ///
 /// ```java
@@ -96,7 +96,7 @@ impl ConsumerProtocol {
     /// [`std::io::Error`], which has no Java class. It is carried as an
     /// [`Error::schema`] with the reader's diagnostic, the class Java's own
     /// `Schema` / `ArrayOf` / `Struct` raise for these malformed-buffer cases
-    /// (`protocol/types/ArrayOf.java:73,76`), so the diagnostic stays reachable
+    /// (`ArrayOf#read`), so the diagnostic stays reachable
     /// through [`std::error::Error::source`].
     fn decode_cause(e: std::io::Error) -> Error {
         Error::schema(e.to_string())
@@ -699,7 +699,7 @@ mod tests {
 
     /// Java's `static { }` initializer refuses to load `ConsumerProtocol` when
     /// the subscription and assignment schemas disagree on either version bound
-    /// (`ConsumerProtocol.java:47-58`). The `const` block above this module is
+    /// The `const` block above this module is
     /// the build-time half of that; this test pins the two messages, which a
     /// `const` panic cannot express, and states why the check matters:
     /// `check_subscription_version` and `check_assignment_version` clamp to

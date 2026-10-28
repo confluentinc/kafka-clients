@@ -82,14 +82,18 @@ pub(crate) unsafe fn user_scram_credential_deletion_ref<'a>(
     &unsafe { inner_ref(deletion) }.deletion
 }
 
-/// `new UserScramCredentialDeletion(String user, ScramMechanism mechanism)`;
-/// `mechanism` is a `kafka_admin_ScramMechanism_t` singleton. Owned, freed
-/// with [`kafka_admin_UserScramCredentialDeletion_destroy`].
+/// Creates the deletion.
+///
+/// # Parameters
+///
+/// - `user` - the mandatory user
+/// - `mechanism` - the mandatory mechanism
 ///
 /// # Safety
 ///
 /// `user` must be a valid NUL-terminated string and `mechanism` a
-/// SCRAM-mechanism singleton.
+/// `kafka_admin_ScramMechanism_t` singleton. The returned handle is owned, freed with
+/// [`kafka_admin_UserScramCredentialDeletion_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
@@ -104,11 +108,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_new(
     }))
 }
 
-/// `user()`: borrowed from the handle.
+/// # Returns
+///
+/// the always non-`NULL` user
 ///
 /// # Safety
 ///
-/// `self_` must be a valid deletion handle.
+/// `self_` must be a valid deletion handle. The returned string is borrowed, valid as long as the
+/// deletion.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_user(
@@ -120,11 +127,14 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_user(
     unsafe { inner_ref(self_) }.user_c.as_ptr()
 }
 
-/// `mechanism()`: the `kafka_admin_ScramMechanism_t` singleton, never freed.
+/// # Returns
+///
+/// the always non-`NULL` mechanism
 ///
 /// # Safety
 ///
-/// `self_` must be a valid deletion handle.
+/// `self_` must be a valid deletion handle. The returned `kafka_admin_ScramMechanism_t` singleton
+/// is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_mechanism(
@@ -135,11 +145,11 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialDeletion_mechanism(
     scram_mechanism_singleton(unsafe { user_scram_credential_deletion_ref(self_) }.mechanism())
 }
 
-/// Frees an owned deletion handle; null is a no-op.
+/// Frees an owned deletion handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

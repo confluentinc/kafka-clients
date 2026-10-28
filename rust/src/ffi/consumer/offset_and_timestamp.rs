@@ -57,17 +57,18 @@ pub(crate) unsafe fn offset_and_timestamp_ref<'a>(
 /// Hands a Java `Map<TopicPartition, OffsetAndTimestamp>` to C as an owned
 /// map: keys are owned `kafka_common_TopicPartition_t *`, values owned
 /// `kafka_consumer_OffsetAndTimestamp_t *`, entries ordered by topic then
-/// partition, and `kafka_Map_get` compares keys by value. An unresolved
-/// partition is absent (see the Rust `offsets_for_times` contract note).
-pub(crate) fn offset_and_timestamp_map(map: &HashMap<TopicPartition, OffsetAndTimestamp>) -> *mut kafka_Map_t {
-    let mut entries: Vec<(&TopicPartition, &OffsetAndTimestamp)> = map.iter().collect();
+/// partition, and `kafka_Map_get` compares keys by value. A partition
+/// without an offset (Java's `null` value) has a `NULL` value.
+pub(crate) fn offset_and_timestamp_map(map: &HashMap<TopicPartition, Option<OffsetAndTimestamp>>) -> *mut kafka_Map_t {
+    let mut entries: Vec<(&TopicPartition, &Option<OffsetAndTimestamp>)> = map.iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
     let entries = entries
         .into_iter()
         .map(|(tp, oat)| {
             (
                 box_topic_partition(tp.clone()) as *mut c_void,
-                box_offset_and_timestamp(oat.clone()) as *mut c_void,
+                oat.as_ref()
+                    .map_or(std::ptr::null_mut(), |oat| box_offset_and_timestamp(oat.clone()) as *mut c_void),
             )
         })
         .collect();
@@ -95,13 +96,24 @@ unsafe fn deliver(
     unsafe { deliver_value(oat, out_err, box_offset_and_timestamp) }
 }
 
-/// `new OffsetAndTimestamp(long offset, long timestamp)`: returns an owned
-/// handle. A negative offset stores the Java `IllegalArgumentException` in
+/// `new OffsetAndTimestamp(long offset, long timestamp)`. A negative offset stores the Java `IllegalArgumentException` in
 /// `*out_err` and returns `NULL`.
+///
+/// # Parameters
+///
+/// - `offset` - The offset
+/// - `timestamp` - The timestamp
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the offset or timestamp is negative
 ///
 /// # Safety
 ///
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndTimestamp_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
@@ -116,9 +128,22 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_new(
 /// `new OffsetAndTimestamp(long offset, long timestamp, Optional<Integer> leaderEpoch)`;
 /// a negative `leader_epoch` is `Optional.empty()`.
 ///
+/// # Parameters
+///
+/// - `offset` - The offset
+/// - `timestamp` - The timestamp
+/// - `leader_epoch` - The leader epoch
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` If the offset or timestamp is negative
+///
 /// # Safety
 ///
 /// `out_err` must be a valid slot pointing at null.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_OffsetAndTimestamp_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
@@ -133,11 +158,17 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_with_leader_epoch(
     unsafe { deliver(OffsetAndTimestamp::with_leader_epoch(offset, timestamp, leader_epoch), out_err) }
 }
 
-/// Java `toString()`: an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
@@ -149,6 +180,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_to_string(
 }
 
 /// `offset()`.
+///
+/// # Returns
+///
+/// The offset
 ///
 /// # Safety
 ///
@@ -164,6 +199,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_offset(
 }
 
 /// `timestamp()`: milliseconds since the epoch.
+///
+/// # Returns
+///
+/// The timestamp
 ///
 /// # Safety
 ///
@@ -181,6 +220,10 @@ pub unsafe extern "C" fn kafka_consumer_OffsetAndTimestamp_timestamp(
 /// `leaderEpoch()`: the epoch, or `-1` for `Optional.empty()`.
 ///
 /// A caught Rust panic returns -2, which is no leader epoch.
+///
+/// # Returns
+///
+/// The leader epoch or empty if it is not known
 ///
 /// # Safety
 ///
@@ -219,8 +262,9 @@ mod tests {
     use std::ffi::CStr;
 
     use super::*;
+    use crate::ffi::common::topic_partition::topic_partition_ref;
     use crate::ffi::common::{error_ref, kafka_common_Error_destroy};
-    use crate::ffi::util::kafka_string_destroy;
+    use crate::ffi::util::{kafka_Map_destroy, kafka_string_destroy, map_entries};
 
     #[test]
     fn constructors_and_getters() {
@@ -261,5 +305,39 @@ mod tests {
         assert!(unsafe { error_ref(error) }.error.is_local_illegal_argument_error());
         // SAFETY: Test code: `error` is the owned error stored above, destroyed once.
         unsafe { kafka_common_Error_destroy(error) };
+    }
+
+    /// Java's `offsetsForTimes` maps a partition without an offset for its timestamp to `null`:
+    /// the C map keeps the partition as a key, with a `NULL` value, and frees only the non-`NULL`
+    /// values.
+    #[test]
+    fn map_keeps_a_partition_without_an_offset_as_a_null_value() {
+        let map = HashMap::from([
+            (TopicPartition::new("a", 0), Some(OffsetAndTimestamp::new(5, 100).unwrap())),
+            (TopicPartition::new("a", 1), None),
+        ]);
+        let c_map = offset_and_timestamp_map(&map);
+        // SAFETY: Test code: `c_map` is the live map just built, not mutated while its entries
+        // are read; every key is a live topic-partition handle and every non-null value a live
+        // offset-and-timestamp handle the map owns.
+        let entries: Vec<_> = unsafe { map_entries(c_map) }
+            .iter()
+            .map(|&(k, v)| unsafe {
+                (
+                    topic_partition_ref(k as *const _).clone(),
+                    (!v.is_null()).then(|| offset_and_timestamp_ref(v as *const _).offset()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (TopicPartition::new("a", 0), Some(5)),
+                (TopicPartition::new("a", 1), None)
+            ]
+        );
+        // SAFETY: Test code: `c_map` is the map built above, destroyed once; its destructor skips
+        // the `NULL` value.
+        unsafe { kafka_Map_destroy(c_map) };
     }
 }

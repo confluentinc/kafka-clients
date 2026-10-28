@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! Details about an update to a finalized feature.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
 
 use crate::common::Error;
 
 /// Indicates what kind of upgrade should be performed for a
 /// [`FeatureUpdate`].
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate.UpgradeType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType")]
@@ -51,8 +47,6 @@ impl std::fmt::Display for UpgradeType {
 
 impl UpgradeType {
     /// Returns the wire-protocol code for this upgrade type.
-    ///
-    /// Mirrors `UpgradeType.code()`.
     #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#code")]
     pub fn code(&self) -> i8 {
         match self {
@@ -66,7 +60,9 @@ impl UpgradeType {
     /// Returns the upgrade type for the given wire-protocol code, falling back
     /// to [`UpgradeType::Unknown`] for unrecognized codes.
     ///
-    /// Mirrors `UpgradeType.fromCode(int)`.
+    /// # Arguments
+    ///
+    /// - `code` - the wire-protocol code.
     #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate$UpgradeType#fromCode")]
     pub fn from_code(code: i32) -> UpgradeType {
         match code {
@@ -79,8 +75,6 @@ impl UpgradeType {
 }
 
 /// Encapsulates details about an update to a finalized feature.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate")]
 pub struct FeatureUpdate {
@@ -91,15 +85,20 @@ pub struct FeatureUpdate {
 impl FeatureUpdate {
     /// Creates a new `FeatureUpdate`.
     ///
-    /// `max_version_level` is the new maximum version level for the finalized
-    /// feature. A value of zero is special and indicates that the update is
-    /// intended to delete the finalized feature, and should be accompanied by
-    /// setting `upgrade_type` to a safe or unsafe downgrade.
+    /// # Arguments
+    ///
+    /// - `max_version_level` - The new maximum version level for the finalized feature. a value of
+    ///   zero is special and indicates that the update is intended to delete the finalized feature,
+    ///   and should be accompanied by setting the `upgrade_type` to safe or unsafe.
+    /// - `upgrade_type` - Indicate what kind of upgrade should be performed in this operation. -
+    ///   UPGRADE: upgrading the feature level - SAFE_DOWNGRADE: only downgrades which do not result
+    ///   in metadata loss are permitted - UNSAFE_DOWNGRADE: any downgrade, including those which
+    ///   may result in metadata loss, are permitted
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] (mirroring Java's
-    /// `IllegalArgumentException`) if `max_version_level` is zero while
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if
+    /// `max_version_level` is zero while
     /// `upgrade_type` is [`UpgradeType::Upgrade`], or if `max_version_level` is
     /// negative.
     #[doc(alias = "org.apache.kafka.clients.admin.FeatureUpdate#FeatureUpdate")]

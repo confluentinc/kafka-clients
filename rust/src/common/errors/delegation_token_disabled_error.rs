@@ -20,10 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// Delegation Token feature is not enabled.
     ///
-    /// Corresponds to Java's `DelegationTokenDisabledException`, error code `Errors::DelegationTokenAuthDisabled`.
-    ///
-    /// Java `extends` chain:
-    ///    `DelegationTokenDisabledException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::DelegationTokenAuthDisabled`. Java `extends` chain:
+    /// `DelegationTokenDisabledException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.DelegationTokenDisabledException")]
     DelegationTokenDisabledError,
     code: Errors::DelegationTokenAuthDisabled,

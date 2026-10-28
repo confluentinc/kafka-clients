@@ -26,8 +26,6 @@
 /// - `ALLOW DELETE` implies `ALLOW DESCRIBE`
 /// - `ALLOW ALTER` implies `ALLOW DESCRIBE`
 /// - `ALLOW ALTER_CONFIGS` implies `ALLOW DESCRIBE_CONFIGS`
-///
-/// Corresponds to `org.apache.kafka.common.acl.AclOperation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.acl.AclOperation")]
@@ -71,9 +69,7 @@ pub enum AclOperation {
 // used to describe ACL operations in MetadataResponse.
 
 impl AclOperation {
-    /// All operations, in declaration (code) order.
-    ///
-    /// Mirrors `AclOperation.values()`.
+    /// Returns all operations, in declaration (code) order.
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#values")]
     pub fn values() -> &'static [Self] {
         &[
@@ -96,7 +92,7 @@ impl AclOperation {
         ]
     }
 
-    /// Return the code of this operation.
+    /// Returns the code of this operation.
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#code")]
     pub fn code(&self) -> i8 {
         match self {
@@ -119,8 +115,12 @@ impl AclOperation {
         }
     }
 
-    /// Return the `AclOperation` with the provided code or [`AclOperation::Unknown`]
+    /// Returns the `AclOperation` with the provided code or [`AclOperation::Unknown`]
     /// if one cannot be found.
+    ///
+    /// # Arguments
+    ///
+    /// - `code` - the code to look up
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#fromCode")]
     pub fn from_code(code: i8) -> AclOperation {
         match code {
@@ -146,8 +146,13 @@ impl AclOperation {
 
     /// Parse the given string as an ACL operation.
     ///
-    /// Returns the `AclOperation`, or [`AclOperation::Unknown`] if the string
-    /// could not be matched (case-insensitive).
+    /// # Arguments
+    ///
+    /// - `str` - The string to parse.
+    ///
+    /// # Returns
+    ///
+    /// The `AclOperation`, or `UNKNOWN` if the string could not be matched.
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#fromString")]
     pub fn from_string(str: &str) -> AclOperation {
         match str.to_uppercase().as_str() {
@@ -171,7 +176,7 @@ impl AclOperation {
         }
     }
 
-    /// Return true if this operation is [`AclOperation::Unknown`].
+    /// Returns true if this operation is [`AclOperation::Unknown`].
     #[doc(alias = "org.apache.kafka.common.acl.AclOperation#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         *self == AclOperation::Unknown

@@ -20,6 +20,7 @@ mod error_hierarchy;
 mod error_predicates;
 mod java;
 mod java_parse;
+mod javadoc;
 mod lint_custom;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +49,10 @@ fn main() -> anyhow::Result<()> {
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
+        Some("doc-baseline") => lint_custom::write_doc_baseline()?,
+        Some("javadoc") => lint_custom::javadoc(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("doc-fill") => lint_custom::doc_fill(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("doc-report") => lint_custom::doc_report()?,
         Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
 
         Some("doc-hygiene") => doc_hygiene()?,
@@ -2610,9 +2615,15 @@ fn print_help() {
                     check-derive-translation              a public type derives what its Java class overrides
                     check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
+                    check-api-docs                        public API docs list parameters, returns and errors
                   With a rule name only that rule runs; `--no-baseline` ignores
-                  xtask/ffi-baseline.txt so every FFI finding is shown
+                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
+  doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
+  javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit
+  doc-report      Print the open check-api-docs findings per module and per kind
+  doc-fill        Insert the missing # Arguments / # Returns / # Errors entries Java's
+                  tags give into the docs under the paths; `--write` applies them
   lint            Run doc-hygiene plus clippy lints (warnings are errors);
                   `--keep-going` runs every step even after one fails, then
                   fails if any did
@@ -2695,6 +2706,10 @@ Usage:
   cargo xtask java-deprecated [kafka-ref ...]
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
+  cargo xtask doc-baseline
+  cargo xtask javadoc <marker|rust-path|C symbol>
+  cargo xtask doc-report
+  cargo xtask doc-fill [--write] <path>...
   cargo xtask lint [--keep-going]
 
   cargo xtask doc-hygiene

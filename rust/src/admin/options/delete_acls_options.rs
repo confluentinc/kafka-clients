@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::delete_acls`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteAclsOptions`.
 
 /// Options for `Admin::delete_acls`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteAclsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsOptions")]
 pub struct DeleteAclsOptions {
@@ -32,8 +28,16 @@ impl DeleteAclsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DeleteAclsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -41,8 +45,8 @@ impl DeleteAclsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteAclsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
