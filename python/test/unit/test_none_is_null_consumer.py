@@ -109,6 +109,12 @@ async def raises(error: type[BaseException], message: str, fn: Callable[[], Any]
 class _Listener(ConsumerRebalanceListener):
     pass
 
+    def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+        pass
+
+    def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+        pass
+
 
 # ---- subscribe ---------------------------------------------------------------
 @pytest.mark.parametrize("kind", KINDS)

@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ __all__ = ["ListTransactionsResult"]
 _BrokerFutures = Mapping[int, "KafkaFuture[list[TransactionListing]] | AsyncKafkaFuture[list[TransactionListing]]"]
 
 
-class ListTransactionsResult(Generic[KindT]):
+class ListTransactionsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.list_transactions()`` call.
 
     Java: ``org.apache.kafka.clients.admin.ListTransactionsResult``.

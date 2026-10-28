@@ -49,7 +49,8 @@ from confluent_kafka.admin import (
     TerminateTransactionOptions,
     TransactionState,
 )
-from confluent_kafka.common import GroupState, GroupType, IsolationLevel, KafkaPrincipal
+from confluent_kafka.common import GroupState, GroupType, IsolationLevel
+from confluent_kafka.common.security.auth import KafkaPrincipal
 
 OPTIONS = [
     "AbortTransactionOptions", "AlterClientQuotasOptions", "AlterConfigsOptions",
@@ -135,8 +136,10 @@ def test_positional_construction_raises_type_error(name: str) -> None:
 
 
 def test_abstract_options_is_abstract() -> None:
-    with pytest.raises(TypeError, match="AbstractOptions is an abstract class"):
+    with pytest.raises(TypeError) as e:
         AbstractOptions()
+    assert str(e.value) == ("AbstractOptions cannot be constructed directly; use one of its "
+                            "subclasses")
 
 
 def test_timeout_ms_keyword_and_setter() -> None:

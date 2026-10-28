@@ -295,8 +295,3 @@ class SubscriptionState:
 
     def rebalance_listener(self) -> ConsumerRebalanceListener | None:
         return self._rebalance_listener
-
-    def release_rebalance_listener(self) -> None:
-        """Drop the listener (``close()`` releases every callback the client
-        holds, CLAUDE.md, Python Binding Conventions, Threads and callbacks)."""
-        self._rebalance_listener = None

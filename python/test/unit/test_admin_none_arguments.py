@@ -44,6 +44,7 @@ from confluent_kafka.admin import (
     ConfigEntry,
     FeatureUpdate,
     ListConsumerGroupOffsetsSpec,
+    ListPartitionReassignmentsOptions,
     MemberToRemove,
     MockAdminClient,
     NewPartitionReassignment,
@@ -56,23 +57,16 @@ from confluent_kafka.admin import (
     ScramMechanism,
     UserScramCredentialDeletion,
 )
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
-    ClientQuotaAlteration,
-    ClientQuotaEntity,
-    ClientQuotaFilter,
-    ElectionType,
-    Node,
-    PatternType,
-    ResourcePattern,
-    ResourceType,
-    TopicPartition,
-    TopicPartitionReplica,
 )
+from confluent_kafka.common.quota import ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter
+from confluent_kafka.common import ElectionType, Node, TopicPartition, TopicPartitionReplica
+from confluent_kafka.common.resource import PatternType, ResourcePattern, ResourceType
 from confluent_kafka.common.config.config_resource import ConfigResource
 from confluent_kafka.consumer import OffsetAndMetadata
 
@@ -129,6 +123,7 @@ RPCS: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
  "elect_leaders": ({"election_type": ElectionType.PREFERRED, "partitions": {TP}}, {"partitions": [None]}),
  "alter_partition_reassignments": ({"reassignments": {TP: NewPartitionReassignment(target_replicas=[1])}}, {"reassignments": {None: None}}),
  "list_partition_reassignments": ({"partitions": {TP}}, {"partitions": [None]}),
+ "list_partition_reassignments#options": ({"partitions": {TP}, "options": ListPartitionReassignmentsOptions()}, {"partitions": [None]}),
  "remove_members_from_consumer_group": ({"group_id": "g", "options": RemoveMembersFromConsumerGroupOptions(members=[MemberToRemove(group_instance_id="i")])}, {}),
  "alter_consumer_group_offsets": ({"group_id": "g", "offsets": {TP: OffsetAndMetadata(offset=1)}}, {"offsets": {TP: None}}),
  "list_offsets": ({"topic_partition_offsets": {TP: OffsetSpec.latest()}}, {"topic_partition_offsets": {TP: None}}),
@@ -219,6 +214,9 @@ ADMIN_ROWS: list[Row] = [
     ('list_partition_reassignments', 'partitions', True, 'TypeError', 'partitions must not be None'),
     ('list_partition_reassignments', 'options', True, 'TypeError', 'options must not be None'),
     ('list_partition_reassignments', 'partitions', False, 'TypeError', 'partitions must not contain None'),
+    # With options, a None is the (Optional<Set>, options) form's Optional.empty(): every partition.
+    ('list_partition_reassignments#options', 'partitions', True, 'OK', None),
+    ('list_partition_reassignments#options', 'partitions', False, 'TypeError', 'partitions must not contain None'),
     ('remove_members_from_consumer_group', 'group_id', True, 'TypeError', 'group_id must not be None'),
     ('remove_members_from_consumer_group', 'options', True, 'TypeError', 'options must not be None'),
     ('alter_consumer_group_offsets', 'group_id', True, 'TypeError', 'group_id must not be None'),
@@ -334,6 +332,8 @@ MOCK_ROWS: list[Row] = [
     ('list_partition_reassignments', 'partitions', True, 'TypeError', 'partitions must not be None'),
     ('list_partition_reassignments', 'options', True, 'OK', None),
     ('list_partition_reassignments', 'partitions', False, 'OK', None),
+    ('list_partition_reassignments#options', 'partitions', True, 'OK', None),
+    ('list_partition_reassignments#options', 'partitions', False, 'OK', None),
     ('remove_members_from_consumer_group', 'group_id', True, 'UnsupportedOperationError', 'Not implemented yet'),
     ('remove_members_from_consumer_group', 'options', True, 'UnsupportedOperationError', 'Not implemented yet'),
     ('alter_consumer_group_offsets', 'group_id', True, 'UnsupportedOperationError', 'Not implement yet'),
@@ -642,12 +642,9 @@ def _empty_input_rows() -> list[tuple[str, dict[str, Any], str | None]]:
     result)``: the empty input and the null element of each RPC whose Java body reads
     ``options`` only after its loop over the arguments, and only for a non-empty
     input; the element's NPE comes first."""
-    from confluent_kafka.common import (
-        AccessControlEntryFilter,
-        ResourcePatternFilter,
-        TopicCollection,
-        Uuid,
-    )
+    from confluent_kafka.common.acl import AccessControlEntryFilter
+    from confluent_kafka.common.resource import ResourcePatternFilter
+    from confluent_kafka.common import TopicCollection, Uuid
 
     unknown = AclBindingFilter(
         pattern_filter=ResourcePatternFilter(resource_type=ResourceType.UNKNOWN, name=None,

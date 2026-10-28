@@ -30,7 +30,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ __all__ = ["DescribeTopicsResult"]
 _T = TypeVar("_T")
 
 
-class DescribeTopicsResult(Generic[KindT]):
+class DescribeTopicsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_topics()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeTopicsResult``.

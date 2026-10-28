@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.topic_listing import TopicListing
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 __all__ = ["ListTopicsResult"]
 
 
-class ListTopicsResult(Generic[KindT]):
+class ListTopicsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.list_topics()`` call.
 
     Java: ``org.apache.kafka.clients.admin.ListTopicsResult``.

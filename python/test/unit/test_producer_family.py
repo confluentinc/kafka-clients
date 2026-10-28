@@ -247,10 +247,11 @@ def test_parameter_names_and_order_are_javas() -> None:
 def test_module_exports() -> None:
     import confluent_kafka.producer as module
 
-    assert module.__all__ == ["AsyncKafkaProducer", "AsyncMockProducer", "AsyncProducer",
+    assert module.__all__ == ["AsyncCallback", "AsyncKafkaProducer", "AsyncMockProducer",
+                              "AsyncProducer",
                               "Callback", "KafkaProducer", "MockProducer", "Partitioner",
-                              "Producer", "ProducerRecord", "RecordMetadata",
-                              "BufferExhaustedError"]
+                              "Producer", "ProducerConfig", "ProducerRecord",
+                              "RecordMetadata", "BufferExhaustedError"]
     assert not hasattr(module, "DeliveryCallback")
     assert Partitioner is object
     # A Protocol of Java's onCompletion parameters, keyword-only plus **kwargs.

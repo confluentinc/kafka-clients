@@ -43,7 +43,7 @@ through the ``Builder``'s three feature-level setters, as Python does; the five
 ``mock_update_features_rejects_*`` tests are one parametrized test; a describe of
 every token passes ``owners=[]``, as Java's default ``null`` owners raise
 ``TypeError`` (its own test); with no renewer
-``create_delegation_token`` raises ``IndexError`` from the call (Java's
+``create_delegation_token`` raises ``IndexOutOfBoundsError`` from the call (Java's
 ``renewers().get(0)``), and a negative seeded offset raises ``IllegalArgumentError``
 from the call (Java's ``new OffsetAndMetadata(-1)``), where the Rust core fails the
 future; that test's spec lists ``[]`` partitions, as Java's default spec (``null``)
@@ -58,6 +58,7 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalStateError
+from confluent_kafka import IndexOutOfBoundsError
 
 from confluent_kafka import ExecutionError
 
@@ -76,6 +77,7 @@ from confluent_kafka.admin import (
     ListConsumerGroupOffsetsOptions,
     ListConsumerGroupOffsetsSpec,
     ListGroupsOptions,
+    ListPartitionReassignmentsOptions,
     MockAdminClient,
     NewPartitionReassignment,
     NewTopic,
@@ -86,14 +88,13 @@ from confluent_kafka.admin import (
     SupportedVersionRange,
     UpdateFeaturesOptions,
 )
+from confluent_kafka.common.acl import AclBindingFilter
+from confluent_kafka.common.quota import ClientQuotaFilter
+from confluent_kafka.common.security.token.delegation import DelegationToken
 from confluent_kafka.common import (
-    AclBindingFilter,
-    ClientQuotaFilter,
-    DelegationToken,
     ElectionType,
     GroupState,
     GroupType,
-    KafkaPrincipal,
     Node,
     TopicCollection,
     TopicPartition,
@@ -101,6 +102,7 @@ from confluent_kafka.common import (
     TopicPartitionReplica,
     Uuid,
 )
+from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common.config import ConfigResource
 from confluent_kafka.common.errors.delegation_token_not_found_error import (
     DelegationTokenNotFoundError,
@@ -171,7 +173,7 @@ def partition_info(partition: int, leader: Node | None, replicas: list[Node],
 def test_create_rejects_zero_brokers_rather_than_fabricating_a_controller() -> None:
     # Java's build() reads brokers.get(0) on an empty list (the Rust mock reports
     # "num_brokers must be at least 1, was 0" instead).
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         admin(0)
     assert str(e.value) == "Index 0 out of bounds for length 0"
 
@@ -231,7 +233,7 @@ def test_mock_create_topics_rejects_a_leader_with_no_log_directories() -> None:
     client = MockAdminClient.Builder(
         brokers=[seeded_broker(0), seeded_broker(1), seeded_broker(2)],
         broker_log_dirs=[[], ["/a"], ["/b"]]).build()
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.create_topics(new_topics=[new_topic("t", 1, 1)])
     assert str(e.value) == "Index 0 out of bounds for length 0"
 
@@ -434,6 +436,23 @@ def test_alter_then_list_partition_reassignments_reports_adding_and_removing() -
     assert value_of(client.list_partition_reassignments().reassignments()) == {}
 
 
+def test_list_partition_reassignments_optional_empty_lists_every_partition() -> None:
+    """Java's ``listPartitionReassignments(Optional<Set>, options)``: with
+    ``options`` given, ``partitions=None`` is ``Optional.empty()``, every
+    partition, as ``(options=o)``; without ``options`` it is ``Optional.of(null)``."""
+    client, tp = admin_with_reassignment()
+    options = ListPartitionReassignmentsOptions()
+    every = value_of(client.list_partition_reassignments(partitions=None, options=options)
+                     .reassignments())
+    assert set(every) == {tp}
+    assert every[tp].removing_replicas() == [0]
+    plain = value_of(client.list_partition_reassignments(options=options).reassignments())
+    assert set(plain) == {tp}
+    with pytest.raises(TypeError) as e:
+        client.list_partition_reassignments(partitions=None)  # type: ignore[call-overload]
+    assert str(e.value) == "partitions must not be None"
+
+
 def test_list_partition_reassignments_after_topic_deletion_fails_the_future() -> None:
     # delete_topics leaves the reassignment behind, as Java's does; Java's
     # findPartitionReassignment then throws its RuntimeException out of the call
@@ -458,7 +477,7 @@ def test_list_partition_reassignments_after_topic_shrink_fails_the_future() -> N
     value_of(client.alter_partition_reassignments(reassignments={tp: target}).all())
     value_of(client.delete_topics(topics=TopicCollection.of_topic_names(topics=["rt2"])).all())
     value_of(client.create_topics(new_topics=[new_topic("rt2", 1, 3)]).all())
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.list_partition_reassignments()
     assert str(e.value) == "Index 1 out of bounds for length 1"
 
@@ -519,7 +538,7 @@ def test_mock_add_topic_rejects_a_leader_with_no_log_directories() -> None:
     # no log directories.").
     mock = MockAdminClient.Builder(broker_log_dirs=[[]]).build()
     partitions = [partition_info(0, seeded_broker(0), [seeded_broker(0)], [])]
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         mock.add_topic(internal=False, name="topic", partitions=partitions, configs={})
     assert str(e.value) == "Index 0 out of bounds for length 0"
 
@@ -591,10 +610,16 @@ def test_builder_num_brokers_shrinks_and_grows() -> None:
         seeded_broker(i) for i in range(4)]
 
 
-def test_builder_controller_out_of_range_raises_index_error() -> None:
-    with pytest.raises(IndexError) as e:
+def test_builder_controller_out_of_range_raises_index_out_of_bounds_error() -> None:
+    # Java's brokers.get(index): IndexOutOfBoundsException, the root
+    # IndexOutOfBoundsError, which is an IndexError and a RuntimeError (Types).
+    with pytest.raises(IndexOutOfBoundsError) as e:
         MockAdminClient.Builder(controller=5)
     assert str(e.value) == "Index 5 out of bounds for length 1"
+    assert isinstance(e.value, IndexError) and isinstance(e.value, RuntimeError)
+    with pytest.raises(IndexOutOfBoundsError) as e:
+        MockAdminClient.Builder().controller(index=1)
+    assert str(e.value) == "Index 1 out of bounds for length 1"
 
 
 def test_builder_default_replication_factor_is_short_value() -> None:
@@ -720,8 +745,9 @@ def test_broker_accessors() -> None:
     copy.clear()
     assert len(client.brokers()) == 3
     assert client.broker(index=2) == seeded_broker(2)
-    with pytest.raises(IndexError):
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.broker(index=3)
+    assert str(e.value) == "Index 3 out of bounds for length 3"
 
 
 def test_describe_configs_other_resources() -> None:
@@ -796,7 +822,7 @@ def test_replica_log_dirs() -> None:
     assert (moved.current_replica_log_dir(), moved.future_replica_log_dir()) == ("/a", "/b")
     none = value_of(infos[beyond])
     assert (none.current_replica_log_dir(), none.current_replica_offset_lag()) == (None, -1)
-    with pytest.raises(IndexError):
+    with pytest.raises(IndexOutOfBoundsError):
         client.alter_replica_log_dirs(
             replica_assignment={TopicPartitionReplica(topic="t", partition=0, broker_id=4): "/a"})
 
@@ -898,14 +924,14 @@ def test_public_constructors_keep_java_collections_index_messages() -> None:
     # nCopies(1, DEFAULT_LOG_DIRS): their get says "Index: i, Size: n". The leader
     # Node.no_node() has id -1.
     client = MockAdminClient()
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.create_topics(new_topics=[new_topic("t", 1, 1)])
     assert str(e.value) == "Index: -1, Size: 1"
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.broker(index=1)
     assert str(e.value) == "Index: 1, Size: 1"
     two = MockAdminClient(brokers=[seeded_broker(0), seeded_broker(1)], controller=seeded_broker(0))
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         two.alter_replica_log_dirs(replica_assignment={
             TopicPartitionReplica(topic="t", partition=0, broker_id=2): "/a"})
     assert str(e.value) == "Index: 2, Size: 2"
@@ -1106,11 +1132,12 @@ def test_create_delegation_token_without_a_renewer_reports_an_error() -> None:
     # IndexOutOfBoundsException out of the call on the options' default LinkedList;
     # the Rust core fails the future instead, as it cannot panic across the FFI.
     client = admin()
-    with pytest.raises(IndexError) as e:
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.create_delegation_token(options=CreateDelegationTokenOptions())
     assert str(e.value) == "Index: 0, Size: 0"
-    with pytest.raises(IndexError):
+    with pytest.raises(IndexOutOfBoundsError) as e:
         client.create_delegation_token()
+    assert str(e.value) == "Index: 0, Size: 0"
     # Nothing was stored, so a describe still finds no tokens.
     assert all_tokens(client) == []
 

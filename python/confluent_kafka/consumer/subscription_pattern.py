@@ -38,9 +38,14 @@ class SubscriptionPattern:
         return self._pattern
 
     def __str__(self) -> str:
-        return self._pattern
+        # Java's toString() returns the pattern, null included, which prints as
+        # Python's None (Idiom translations).
+        return "None" if self._pattern is None else self._pattern
 
     def __hash__(self) -> int:
+        if self._pattern is None:
+            # Java's pattern.hashCode() dereferences it (Types).
+            raise TypeError("pattern must not be None")
         return hash(self._pattern)
 
     def __eq__(self, other: object) -> bool:

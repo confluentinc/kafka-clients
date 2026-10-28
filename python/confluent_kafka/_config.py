@@ -23,8 +23,10 @@ Conventions, Configuration, and Implementation over the FFI, exception 2):
   key's type as ``ConfigDef.parseType`` checks the object's type (a wrong Python
   type raises ``ConfigError`` with Java's message) and converted to the string
   the FFI takes (``True`` is ``"true"``, a list is joined with commas, ``None``
-  is left out); the core checks the value itself (ranges, enums, boolean and
-  number text, trimming);
+  is left out); a ``None`` for a key whose validator rejects ``null`` raises
+  ``ConfigError`` with that validator's message, as ``ConfigDef.parseValue``
+  runs the validator on ``null``; the core checks the value itself (ranges,
+  enums, boolean and number text, trimming);
 - the serializer keys of the client's own role stay with the binding: a
   producer's ``key.serializer``, ``value.serializer``, ``serializer.encoding``,
   ``key.serializer.encoding`` and ``value.serializer.encoding``, a consumer's
@@ -49,7 +51,7 @@ from confluent_kafka._java import java_str
 from confluent_kafka.common.config.config_error import ConfigError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
-__all__ = ["check_type", "convert_to_string", "duration_to_ms", "prepare"]
+__all__ = ["check_null", "check_type", "convert_to_string", "duration_to_ms", "prepare"]
 
 Client = Literal["producer", "consumer", "admin"]
 
@@ -60,6 +62,14 @@ _TYPES: dict[str, dict[str, str]] = {
     "producer": _config_types.PRODUCER,
     "consumer": _config_types.CONSUMER,
     "admin": _config_types.ADMIN,
+}
+
+# The keys whose ``ConfigDef`` validator rejects an explicit ``null``, with the
+# ``ConfigException`` Java throws for it (``_config_types``).
+_NULLS: dict[str, dict[str, tuple[Literal["named", "plain"], str]]] = {
+    "producer": _config_types.PRODUCER_NULL,
+    "consumer": _config_types.CONSUMER_NULL,
+    "admin": _config_types.ADMIN_NULL,
 }
 
 # The serializer keys of each client's own role: resolved by the binding
@@ -126,6 +136,23 @@ def check_type(name: str, value: object, type_name: str) -> object:
     raise ConfigError(name=name, value=value, message=f"Unknown type {type_name}")
 
 
+def check_null(name: str, refused: Mapping[str, tuple[Literal["named", "plain"], str]]) -> None:
+    """The validator half of ``ConfigDef.parseValue`` for an explicit ``None``:
+    Java runs the key's validator on ``null``, so a key whose validator rejects
+    it raises ``ConfigError`` built from Java's arguments (``Range``: "Value must
+    be non-null"; ``ValidString``: "String must be one of: …"; a ``ValidList``
+    that refuses nulls: "Configuration '<key>' values must not be null.").
+    Any other ``None`` is left to reach the core as not set *(deviation: Java
+    holds ``null`` for a key without a validator)*."""
+    rule = refused.get(name)
+    if rule is None:
+        return
+    form, message = rule
+    if form == "named":
+        raise ConfigError(name=name, value=None, message=message)
+    raise ConfigError(message=message)
+
+
 def _core_str(value: object) -> str:
     """One value as the text the core parses: Java's ``String.valueOf`` spelling
     (``null``, ``true``, ``false``), which ``java_str`` no longer uses for ``str()``."""
@@ -182,6 +209,8 @@ def prepare(configs: Mapping[str, Any], *, client: Client,
         if key in given_serdes:
             continue
         type_name = types.get(key)
+        if value is None and key not in serde_keys:
+            check_null(key, _NULLS[client])
         parsed = check_type(key, value, type_name) if type_name is not None else value
         text = convert_to_string(parsed, type_name)
         if key in serde_keys or text is None:

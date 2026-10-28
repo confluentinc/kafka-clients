@@ -55,7 +55,9 @@ class TransactionDescription:
         self._producer_epoch = producer_epoch
         self._transaction_timeout_ms = transaction_timeout_ms
         self._transaction_start_time_ms = transaction_start_time_ms
-        self._topic_partitions = frozenset(topic_partitions)
+        # A None is stored, as Java's constructor stores it (Class family).
+        self._topic_partitions: frozenset[TopicPartition] | None = (
+            None if topic_partitions is None else frozenset(topic_partitions))
 
     def coordinator_id(self) -> int:
         return self._coordinator_id
@@ -76,7 +78,7 @@ class TransactionDescription:
         return self._transaction_start_time_ms
 
     def topic_partitions(self) -> set[TopicPartition]:
-        return set(self._topic_partitions)
+        return None if self._topic_partitions is None else set(self._topic_partitions)  # type: ignore[return-value]  # a None given, as Java returns it
 
     def __eq__(self, other: object) -> bool:
         if self is other:

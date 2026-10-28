@@ -60,7 +60,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -350,34 +350,21 @@ def free_error_payload(payload: tuple[Any, ...]) -> None:
     free_error(payload[-1])
 
 
-class _Use:
-    """One call into the native producer: while it runs, ``close()`` does not
-    free the handle (see ``_ProducerState``)."""
+def _closed_error() -> IllegalStateError:
+    """The error of a call on a closed producer (``_use()``)."""
+    return IllegalStateError(message=CLOSED_MESSAGE)
 
-    __slots__ = ("_state", "_error")
 
-    def __init__(self, state: _ProducerState,
-                 error: Callable[[], BaseException] | None) -> None:
-        self._state = state
-        self._error = error
+class _Use(Protocol):
+    """One call into the native producer (the extension's ``Use``): while it
+    runs, ``close()`` does not free the handle (see ``_ProducerState``). It is
+    taken and ended in the C extension, under the C lock, so a
+    ``KeyboardInterrupt`` can neither leave it counted nor the lock held
+    (CLAUDE.md, Python Binding Conventions, Implementation over the FFI)."""
 
-    def __enter__(self) -> int:
-        state = self._state
-        with state._lifecycle_lock:
-            if state._closed:
-                raise self._error() if self._error is not None else IllegalStateError(
-                    message=CLOSED_MESSAGE)
-            state._uses += 1
-        return state._c_producer
+    def __enter__(self) -> Any: ...
 
-    def __exit__(self, *exc: object) -> None:
-        state = self._state
-        with state._lifecycle_lock:
-            state._uses -= 1
-            # Only a close() waits for the uses to end, and it sets _closed
-            # under this lock before it waits: with none begun, nobody waits.
-            if state._uses == 0 and state._closed:
-                state._lifecycle.notify_all()
+    def __exit__(self, *exc: object) -> None: ...
 
 
 class _ProducerState:
@@ -385,7 +372,7 @@ class _ProducerState:
 
     The handle lives until ``close()`` frees it, and the producer is
     thread-safe: every native call runs inside ``_use()``, which counts it under
-    ``_lifecycle`` and refuses to start once ``_closed`` is set. ``close()`` sets
+    ``_lifecycle_lock`` and refuses to start once ``_closed`` is set. ``close()`` sets
     ``_closed`` under the same lock (so exactly one ``close()`` tears the
     producer down) and waits for the calls in flight to end before it frees the
     handle. A use covers only the native call itself, never a wait for a
@@ -398,8 +385,9 @@ class _ProducerState:
     def __init__(self) -> None:
         self._c_producer: int = 0
         self._closed = False
-        # The Condition's own lock, taken directly on the per-send path (see
-        # _Use): the same lock, without the Condition's Python-level wrappers.
+        # The lifecycle lock is the C RLock, taken directly (never through the
+        # Condition's Python-level __enter__ / __exit__, where a Ctrl+C could
+        # leave it held); the Condition over it only waits and wakes.
         self._lifecycle_lock = threading.RLock()
         self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
@@ -413,12 +401,13 @@ class _ProducerState:
         # How send() calls them, chosen once (_kwargs.serde_caller).
         self._key_serialize = serde_caller(self._key_serializer, SERIALIZER_NAMES)
         self._value_serialize = serde_caller(self._value_serializer, SERIALIZER_NAMES)
-        # The use of every send(), built once: a _Use holds no per-use state.
-        self._send_use = _Use(self, closed_while_sending)
+        # The use of every send(), built once: a call use holds no per-use
+        # state, so one serves every send() at once.
+        self._send_use = self._use(closed_while_sending)
         # ProducerConfig max.block.ms: what bounds a wait that cannot be
         # serviced (see CALLBACK_WAIT_TIMEOUT_MESSAGE).
         self._max_block_ms = _DEFAULT_MAX_BLOCK_MS
-        # Set (under _lifecycle) once Producer_destroy has run: the callback
+        # Set (under _lifecycle_lock) once Producer_destroy has run: the callback
         # pump must not touch the handle after that.
         self._destroyed = False
 
@@ -438,7 +427,8 @@ class _ProducerState:
         the handle, or raises what ``error()`` builds (by default Java's closed
         ``IllegalStateError``) once ``close()`` has begun. ``error`` builds the
         error only then, so a call that goes through allocates none."""
-        return _Use(self, error)
+        return _lib.Use(self, _lib.USE_CALL, "_c_producer",  # type: ignore[no-any-return]
+                        error=error if error is not None else _closed_error)
 
     def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
         """``fn(handle, *args)`` as one use of the handle."""
@@ -447,7 +437,7 @@ class _ProducerState:
 
     def _begin_close(self) -> bool:
         """Set ``_closed``; whether this call did (and so must tear down)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if self._closed:
                 return False
             self._closed = True
@@ -456,7 +446,7 @@ class _ProducerState:
     def _wait_for_uses(self) -> None:
         """Wait until no call into the native producer is in flight (none can
         start: ``_closed`` is set)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             while self._uses:
                 self._lifecycle.wait()
 
@@ -515,10 +505,10 @@ class _ProducerState:
     def _destroy(self) -> None:
         """Wait until no call into the native producer is in flight, then
         ``Producer_destroy`` it (which runs the callbacks still pending, on
-        this thread), once. ``_destroyed`` is set under ``_lifecycle`` with no
+        this thread), once. ``_destroyed`` is set under ``_lifecycle_lock`` with no
         use in flight, so a callback pump that has not started by then never
         will (see :meth:`_pump_use`)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             while self._uses:
                 self._lifecycle.wait()
             if self._destroyed:
@@ -526,22 +516,14 @@ class _ProducerState:
             self._destroyed = True
         _lib.Producer_destroy(self._c_producer)
 
-    def _pump_use(self) -> bool:
-        """Count a run of the callback pump as a use of the handle, unlike
+    def _pump_use(self) -> _Use:
+        """A run of the callback pump, counted as a use of the handle, unlike
         :meth:`_use` also once ``close()`` has begun (its completions still
-        need the pump); ``False`` once the handle is destroyed. The caller
-        ends the use with :meth:`_end_use`."""
-        with self._lifecycle:
-            if self._destroyed:
-                return False
-            self._uses += 1
-            return True
-
-    def _end_use(self) -> None:
-        with self._lifecycle:
-            self._uses -= 1
-            if self._uses == 0:
-                self._lifecycle.notify_all()
+        need the pump): ``with self._pump_use() as counted:``, ``counted``
+        being ``False`` (and nothing counted) before the native producer exists
+        or once it is destroyed."""
+        return _lib.Use(self, _lib.USE_PUMP, "_c_producer",  # type: ignore[no-any-return]
+                        flag="_destroyed")
 
     def _check_not_closed(self) -> None:
         """Java's ``throwIfProducerClosed()``."""

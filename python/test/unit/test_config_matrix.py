@@ -99,10 +99,22 @@ def test_a_value_of_the_wrong_type_is_rejected(client: Any, key: str, type_name:
 
 
 @pytest.mark.parametrize("client,key,type_name", CASES, ids=IDS)
-def test_none_is_not_set(client: Any, key: str, type_name: str) -> None:
-    # A None value reaches the core as not set, so the core's default applies.
-    copy, native = _config.prepare({key: None}, client=client)
-    assert copy == {key: None} and native == {}
+def test_none_follows_the_keys_validator(client: Any, key: str, type_name: str) -> None:
+    # A None for a key whose validator rejects null raises Java's ConfigException
+    # (ConfigDef.parseValue runs the validator on null); any other None reaches
+    # the core as not set, so the core's default applies.
+    refused = getattr(_config_types, f"{client.upper()}_NULL").get(key)
+    if refused is None or key in _config._SERDE_KEYS[client]:
+        copy, native = _config.prepare({key: None}, client=client)
+        assert copy == {key: None} and native == {}
+        return
+    form, message = refused
+    with pytest.raises(ConfigError) as exc:
+        _config.prepare({key: None}, client=client)
+    if form == "named":
+        assert str(exc.value) == f"Invalid value None for configuration {key}: {message}"
+    else:
+        assert str(exc.value) == message
 
 
 # One key of every type, SSL and SASL keys included; the values are in Java's

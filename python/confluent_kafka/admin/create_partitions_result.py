@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 __all__ = ["CreatePartitionsResult"]
 
 
-class CreatePartitionsResult(Generic[KindT]):
+class CreatePartitionsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.create_partitions()`` call.
 
     Java: ``org.apache.kafka.clients.admin.CreatePartitionsResult``.
@@ -50,7 +50,7 @@ class CreatePartitionsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> CreatePartitionsResult[Any]:
         """Java's package-private ``CreatePartitionsResult(values)``."""
         result = cls.__new__(cls)
-        result._values = dict(values)
+        result._values = None if values is None else dict(values)
         result._kind = kind
         return result
 

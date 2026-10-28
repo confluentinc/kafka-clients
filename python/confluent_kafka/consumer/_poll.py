@@ -44,8 +44,8 @@ from collections.abc import Mapping
 from typing import Any, Callable, NamedTuple, cast
 
 from confluent_kafka.common.errors.record_deserialization_error import RecordDeserializationError
-from confluent_kafka.common.headers import Headers
-from confluent_kafka.common.timestamp_type import TimestampType
+from confluent_kafka.common.header.headers import Headers
+from confluent_kafka.common.record.timestamp_type import TimestampType
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_record import ConsumerRecord
@@ -132,7 +132,10 @@ def _build(native_records: Any, grouped: dict[TopicPartition, list[ConsumerRecor
                                                  leader_epoch=recs[-1].leader_epoch(), metadata="")
     if not grouped and not next_offsets:
         return ConsumerRecords.empty()
-    return ConsumerRecords(records=grouped, next_offsets=next_offsets)
+    records = ConsumerRecords(records=grouped, next_offsets=next_offsets)
+    # The core's fetch: not copied or pickled (ConsumerRecords.__reduce_ex__).
+    records._fetched = True
+    return records
 
 
 def deserialize_batch(

@@ -276,6 +276,9 @@ def test_a_listener_reads_metadata_and_timed_offsets_through_the_handle(
                 seen["partitions_for"] = consumer.partitions_for(topic=topic)
                 seen["end_offsets"] = consumer.end_offsets(partitions=partitions, timeout=10.0)
 
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
+
     class AsyncListener(ConsumerRebalanceListener):
         async def on_partitions_assigned(  # type: ignore[override]
                 self, partitions: set[TopicPartition]) -> None:
@@ -283,6 +286,9 @@ def test_a_listener_reads_metadata_and_timed_offsets_through_the_handle(
                 seen["partitions_for"] = await consumer.partitions_for(topic=topic)
                 seen["end_offsets"] = await consumer.end_offsets(partitions=partitions,
                                                                  timeout=10.0)
+
+        def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+            pass
 
     async def body() -> None:
         try:

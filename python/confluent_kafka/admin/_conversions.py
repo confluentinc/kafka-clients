@@ -36,12 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import functools
 from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from confluent_kafka._args import MISSING, reject_str
 from confluent_kafka._errors import from_borrowed_ffi_error
-from confluent_kafka.admin._futures import Async, Sync
+from confluent_kafka.admin._futures import Async, Sync, over_client
 from confluent_kafka.common.errors.api_error import ApiError
 from confluent_kafka.common.kafka_future import (
     _CANCELLED,
@@ -83,10 +84,7 @@ if TYPE_CHECKING:
     )
     from confluent_kafka.admin.create_delegation_token_result import CreateDelegationTokenResult
     from confluent_kafka.admin.create_partitions_result import CreatePartitionsResult
-    from confluent_kafka.admin.create_topics_result import (
-        CreateTopicsResult,
-        _TopicMetadataAndConfig,
-    )
+    from confluent_kafka.admin.create_topics_result import CreateTopicsResult
     from confluent_kafka.admin.delete_acls_result import DeleteAclsResult
     from confluent_kafka.admin.delete_consumer_group_offsets_result import (
         DeleteConsumerGroupOffsetsResult,
@@ -161,17 +159,16 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.user_scram_credentials_description import (
         UserScramCredentialsDescription,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common.quota import (
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
-        DelegationToken,
-        KafkaPrincipal,
-        Uuid,
     )
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.security.token.delegation import DelegationToken
+    from confluent_kafka.common.security.auth import KafkaPrincipal
+    from confluent_kafka.common import Uuid
+    from confluent_kafka.common.acl.acl_operation import AclOperation
     from confluent_kafka.common.config.config_resource import ConfigResource
     from confluent_kafka.common.election_type import ElectionType
     from confluent_kafka.common.node import Node
@@ -470,7 +467,7 @@ def optional_node_from_tuple(raw: tuple[int, str, int, str | None] | None) -> No
 def acl_operations_from_codes(codes: list[int] | None) -> set[AclOperation] | None:
     """Java's ``AdminUtils.validAclOperations`` result: ``None`` when the broker did not
     report the operations (Java's ``null``), else the operations of the codes."""
-    from confluent_kafka.common.acl_operation import AclOperation
+    from confluent_kafka.common.acl.acl_operation import AclOperation
 
     return None if codes is None else {AclOperation.from_code(code=code) for code in codes}
 
@@ -508,6 +505,10 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
             # INVALID_CONFIG, and the FFI refuses it: TypeError up front.
             raise TypeError("new_topics must not contain a NewTopic with a None config value")
         assignments = topic.replicas_assignments()
+        if assignments is not None and any(v is None for v in assignments.values()):
+            # Java's convertToCreatableTopic stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_topics must not contain a NewTopic with a None replica assignment")
         spec.append((
             topic.name(), topic.num_partitions(), topic.replication_factor(),
             None if configs is None else list(configs.items()),
@@ -541,6 +542,22 @@ _CREATE_TOPICS_REFINEMENTS: dict[str, Callable[[Any], Any] | None] = {
 }
 
 
+_Build = TypeVar("_Build", bound=Callable[..., Any])
+
+
+def _client_result(build: _Build) -> _Build:
+    """A conversion that builds a ``*Result`` over the client's C result: the
+    result it returns is marked as such, so it refuses ``copy``, ``deepcopy`` and
+    ``pickle`` (``_futures._Result``), whatever shape holds the C result."""
+
+    @functools.wraps(build)
+    def built(*args: Any, **kwargs: Any) -> Any:
+        return over_client(build(*args, **kwargs))
+
+    return cast(_Build, built)
+
+
+@_client_result
 def create_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                          ) -> CreateTopicsResult[Any]:
     """The ``CreateTopicsResult`` over the C result: the per-topic ``values()``
@@ -554,6 +571,18 @@ def create_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoo
         kind, loop, native.futures("values"))
 
     def refine(topic: str, accessor: str) -> KafkaFuture[Any] | AsyncKafkaFuture[Any]:
+        if topic is None:
+            # A null topic is never in the request, and cannot cross the FFI: the
+            # future the core's accessor gives a topic not in the request
+            # (exception 4).
+            from confluent_kafka.illegal_argument_error import IllegalArgumentError
+
+            failed: _KafkaFutureImpl[Any] = _KafkaFutureImpl()
+            failed.complete_with_error(IllegalArgumentError(
+                message="Topic None was not part of the createTopics request"))
+            if kind is Async:
+                return AsyncKafkaFuture._of_impl(failed, loop)
+            return KafkaFuture._of_impl(failed)
         source = wrap(kind, loop, native.future(accessor, topic,
                                                 _CREATE_TOPICS_REFINEMENTS[accessor]))
         key_future = futures.get(topic)
@@ -623,6 +652,7 @@ def delete_topics_args(topics: Any, by_ids: bool, keys: list[Any]) -> tuple[Any,
     return (DELETE_TOPIC_NAMES, keys)
 
 
+@_client_result
 def delete_topics_result(native: Any, by_ids: bool, kind: Kind,
                          loop: asyncio.AbstractEventLoop | None) -> DeleteTopicsResult[Any]:
     """The ``DeleteTopicsResult`` over the C result: keyed by topic id for a
@@ -651,6 +681,7 @@ def _listings(rows: Mapping[str, tuple[str, str, int]]) -> dict[str, TopicListin
             for key, (name, topic_id, internal) in rows.items()}
 
 
+@_client_result
 def list_topics_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                        ) -> ListTopicsResult[Any]:
     """The ``ListTopicsResult`` over the C result's ``namesToListings()`` future."""
@@ -731,6 +762,7 @@ def describe_topics_args(form: int, keys: list[Any]) -> tuple[Any, ...]:
     return (form, targets)
 
 
+@_client_result
 def describe_topics_result(native: Any, by_ids: bool, kind: Kind,
                            loop: asyncio.AbstractEventLoop | None) -> DescribeTopicsResult[Any]:
     """The ``DescribeTopicsResult`` over the C result: keyed by topic id for a
@@ -763,6 +795,7 @@ def _cluster_controller(raw: tuple[int, str, int, str | None, bool] | None) -> N
     return None if raw is None else _cluster_node(raw)
 
 
+@_client_result
 def describe_cluster_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                             ) -> DescribeClusterResult[Any]:
     """The ``DescribeClusterResult`` over the C result's four futures."""
@@ -799,15 +832,13 @@ def _acl_binding_filter_args(acl_filter: AclBindingFilter) -> tuple[Any, ...]:
 
 def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
     """``acl_binding_to_py``'s seven-tuple as an ``AclBinding``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntry,
         AclBinding,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePattern,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePattern, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBinding(
@@ -821,15 +852,13 @@ def _to_acl_binding(raw: tuple[Any, ...]) -> AclBinding:
 
 def _to_acl_binding_filter(raw: tuple[Any, ...]) -> AclBindingFilter:
     """``acl_binding_filter_to_py``'s seven-tuple as an ``AclBindingFilter``."""
-    from confluent_kafka.common import (
+    from confluent_kafka.common.acl import (
         AccessControlEntryFilter,
         AclBindingFilter,
         AclOperation,
         AclPermissionType,
-        PatternType,
-        ResourcePatternFilter,
-        ResourceType,
     )
+    from confluent_kafka.common.resource import PatternType, ResourcePatternFilter, ResourceType
 
     resource_type, name, pattern_type, principal, host, operation, permission_type = raw
     return AclBindingFilter(
@@ -853,6 +882,7 @@ def _acl_bindings(rows: Iterable[tuple[Any, ...]]) -> list[AclBinding]:
     return [_to_acl_binding(raw) for raw in rows]
 
 
+@_client_result
 def describe_acls_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                          ) -> DescribeAclsResult[Any]:
     """The ``DescribeAclsResult`` over the C result's ``values()`` future."""
@@ -868,6 +898,7 @@ def create_acls_args(acls: Iterable[AclBinding]) -> tuple[Any, ...]:
     return ([_acl_binding_args(element(acl, "acls")) for acl in acls],)
 
 
+@_client_result
 def create_acls_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                        ) -> CreateAclsResult[Any]:
     """The ``CreateAclsResult`` over the C result's per-binding ``values()``
@@ -903,6 +934,7 @@ def _filter_results(rows: Iterable[tuple[Any, Any]]) -> Any:
     return DeleteAclsResult.FilterResults._new(values=values)
 
 
+@_client_result
 def delete_acls_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                        ) -> DeleteAclsResult[Any]:
     """The ``DeleteAclsResult`` over the C result's per-filter ``values()``
@@ -952,6 +984,7 @@ def _config_entry(raw: tuple[Any, ...]) -> ConfigEntry:
         documentation=documentation)
 
 
+@_client_result
 def describe_configs_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                             ) -> DescribeConfigsResult[Any]:
     """The ``DescribeConfigsResult`` over the C result's ``values()``."""
@@ -979,6 +1012,7 @@ def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[Alt
     return (spec,)
 
 
+@_client_result
 def incremental_alter_configs_result(native: Any, kind: Kind,
                                      loop: asyncio.AbstractEventLoop | None
                                      ) -> AlterConfigsResult[Any]:
@@ -1007,6 +1041,7 @@ def alter_replica_log_dirs_args(replica_assignment: Mapping[TopicPartitionReplic
              for replica, log_dir in replica_assignment.items()],)
 
 
+@_client_result
 def alter_replica_log_dirs_result(native: Any, kind: Kind,
                                   loop: asyncio.AbstractEventLoop | None
                                   ) -> AlterReplicaLogDirsResult[Any]:
@@ -1049,6 +1084,7 @@ def _log_dir_descriptions(dirs: Mapping[str, tuple[Any, ...]]) -> dict[str, LogD
     return descriptions
 
 
+@_client_result
 def describe_log_dirs_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                              ) -> DescribeLogDirsResult[Any]:
     """The ``DescribeLogDirsResult`` over the C result's ``descriptions()``, keyed by
@@ -1080,6 +1116,7 @@ def _replica_log_dir_info(info: tuple[Any, ...]) -> Any:
         future_replica_log_dir=future_dir, future_replica_offset_lag=future_lag)
 
 
+@_client_result
 def describe_replica_log_dirs_result(native: Any, kind: Kind,
                                      loop: asyncio.AbstractEventLoop | None
                                      ) -> DescribeReplicaLogDirsResult[Any]:
@@ -1097,11 +1134,19 @@ def create_partitions_args(new_partitions: Mapping[str, NewPartitions]) -> tuple
     """``Admin_create_partitions(h, rows, options)``'s arguments: each entry as
     ``(topic, totalCount(), assignments() or None)`` (``None`` is Java's
     ``increaseTo(int)``, an empty list ``increaseTo(int, List.of())``)."""
-    return ([(topic, element(partitions, "new_partitions").total_count(),
-              partitions.assignments())
-             for topic, partitions in new_partitions.items()],)
+    rows = []
+    for topic, partitions in new_partitions.items():
+        total = element(partitions, "new_partitions").total_count()
+        assignments = partitions.assignments()
+        if assignments is not None and any(a is None for a in assignments):
+            # Java's CreatePartitionsRequest stores the null broker list, which fails
+            # the request; the FFI cannot carry it (exception 4).
+            raise TypeError("new_partitions must not contain a NewPartitions with a None assignment")
+        rows.append((topic, total, assignments))
+    return (rows,)
 
 
+@_client_result
 def create_partitions_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                              ) -> CreatePartitionsResult[Any]:
     """The ``CreatePartitionsResult`` over the C result's ``values()``."""
@@ -1126,6 +1171,7 @@ def _deleted_records(low_watermark: int) -> DeletedRecords:
     return DeletedRecords(low_watermark=low_watermark)
 
 
+@_client_result
 def delete_records_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                           ) -> DeleteRecordsResult[Any]:
     """The ``DeleteRecordsResult`` over the C result's ``lowWatermarks()``."""
@@ -1143,7 +1189,7 @@ def _principal_args(principal: KafkaPrincipal) -> tuple[str, str]:
 
 def _to_kafka_principal(raw: tuple[str, str, bool]) -> KafkaPrincipal:
     """``kafka_principal_to_py``'s ``(principal_type, name, token_authenticated)``."""
-    from confluent_kafka.common import KafkaPrincipal
+    from confluent_kafka.common.security.auth import KafkaPrincipal
 
     principal_type, name, token_authenticated = raw
     return KafkaPrincipal(principal_type=principal_type, name=name,
@@ -1156,7 +1202,7 @@ def _to_delegation_token(raw: tuple[Any, ...]) -> DelegationToken:
     ``KafkaAdminClient`` builds it (``new TokenInformation(tokenId, owner,
     tokenRequester, renewers, issue, max, expiry)``); the class computes the base64
     form itself."""
-    from confluent_kafka.common import DelegationToken, TokenInformation
+    from confluent_kafka.common.security.token.delegation import DelegationToken, TokenInformation
 
     (token_id, owner, requester, renewers, issue_timestamp, expiry_timestamp,
      max_timestamp, hmac, _hmac_base64) = raw
@@ -1193,6 +1239,7 @@ def _optional_principal_args(principal: KafkaPrincipal | None) -> tuple[str, str
     return None if principal is None else _principal_args(principal)
 
 
+@_client_result
 def create_delegation_token_result(native: Any, kind: Kind,
                                    loop: asyncio.AbstractEventLoop | None
                                    ) -> CreateDelegationTokenResult[Any]:
@@ -1206,6 +1253,7 @@ def create_delegation_token_result(native: Any, kind: Kind,
     return CreateDelegationTokenResult._new(delegation_token=future, kind=kind)
 
 
+@_client_result
 def renew_delegation_token_result(native: Any, kind: Kind,
                                   loop: asyncio.AbstractEventLoop | None
                                   ) -> RenewDelegationTokenResult[Any]:
@@ -1217,6 +1265,7 @@ def renew_delegation_token_result(native: Any, kind: Kind,
     return RenewDelegationTokenResult._new(expiry_timestamp=future, kind=kind)
 
 
+@_client_result
 def expire_delegation_token_result(native: Any, kind: Kind,
                                    loop: asyncio.AbstractEventLoop | None
                                    ) -> ExpireDelegationTokenResult[Any]:
@@ -1249,6 +1298,7 @@ def _delegation_tokens(rows: Iterable[tuple[Any, ...]]) -> list[DelegationToken]
     return [_to_delegation_token(raw) for raw in rows]
 
 
+@_client_result
 def describe_delegation_token_result(native: Any, kind: Kind,
                                      loop: asyncio.AbstractEventLoop | None
                                      ) -> DescribeDelegationTokenResult[Any]:
@@ -1310,6 +1360,7 @@ def _consumer_group_description(raw: tuple[Any, ...]) -> ConsumerGroupDescriptio
         target_assignment_epoch=target_assignment_epoch)
 
 
+@_client_result
 def describe_consumer_groups_result(native: Any, kind: Kind,
                                     loop: asyncio.AbstractEventLoop | None
                                     ) -> DescribeConsumerGroupsResult[Any]:
@@ -1362,6 +1413,7 @@ def _group_offsets(raw: Mapping[tuple[str, int], tuple[int, str, int | None] | N
         for (topic, partition), value in raw.items()}
 
 
+@_client_result
 def list_consumer_group_offsets_result(group_ids: Iterable[str], native: Any, kind: Kind,
                                        loop: asyncio.AbstractEventLoop | None
                                        ) -> ListConsumerGroupOffsetsResult[Any]:
@@ -1380,6 +1432,7 @@ def list_consumer_group_offsets_result(group_ids: Iterable[str], native: Any, ki
     return ListConsumerGroupOffsetsResult._new(futures=futures, kind=kind)
 
 
+@_client_result
 def delete_consumer_groups_result(native: Any, kind: Kind,
                                   loop: asyncio.AbstractEventLoop | None
                                   ) -> DeleteConsumerGroupsResult[Any]:
@@ -1436,6 +1489,7 @@ def delete_consumer_group_offsets_args(group_id: str, partitions: Iterable[Topic
                        for tp in partitions])
 
 
+@_client_result
 def delete_consumer_group_offsets_result(partitions: Iterable[TopicPartition], native: Any,
                                          kind: Kind, loop: asyncio.AbstractEventLoop | None
                                          ) -> DeleteConsumerGroupOffsetsResult[Any]:
@@ -1495,6 +1549,7 @@ def _errors(raw: list[tuple[Any, ...]]) -> list[BaseException]:
     return [from_borrowed_ffi_error(row) for row in raw]
 
 
+@_client_result
 def list_groups_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                        ) -> ListGroupsResult[Any]:
     """The ``ListGroupsResult`` over the C result's ``all()``, ``valid()`` and
@@ -1529,6 +1584,7 @@ def _elections(rows: Mapping[tuple[str, int], Any]
             for key, raw_error in rows.items()}
 
 
+@_client_result
 def elect_leaders_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                          ) -> ElectLeadersResult[Any]:
     """The ``ElectLeadersResult`` over the C result's ``partitions()`` future."""
@@ -1558,6 +1614,7 @@ def alter_partition_reassignments_args(
              for partition, reassignment in reassignments.items()],)
 
 
+@_client_result
 def alter_partition_reassignments_result(native: Any, kind: Kind,
                                          loop: asyncio.AbstractEventLoop | None
                                          ) -> AlterPartitionReassignmentsResult[Any]:
@@ -1589,6 +1646,7 @@ def _reassignments(rows: Mapping[tuple[str, int], tuple[list[int], list[int], li
             for key, (replicas, adding, removing) in rows.items()}
 
 
+@_client_result
 def list_partition_reassignments_result(native: Any, kind: Kind,
                                         loop: asyncio.AbstractEventLoop | None
                                         ) -> ListPartitionReassignmentsResult[Any]:
@@ -1614,6 +1672,7 @@ def remove_members_from_consumer_group_args(group_id: str,
     return (group_id, [member.group_instance_id() for member in options.members()])
 
 
+@_client_result
 def remove_members_from_consumer_group_result(
         options: RemoveMembersFromConsumerGroupOptions, native: Any, kind: Kind,
         loop: asyncio.AbstractEventLoop | None) -> RemoveMembersFromConsumerGroupResult[Any]:
@@ -1649,6 +1708,7 @@ def alter_consumer_group_offsets_args(group_id: str,
     return (group_id, rows)
 
 
+@_client_result
 def alter_consumer_group_offsets_result(native: Any, kind: Kind,
                                         loop: asyncio.AbstractEventLoop | None
                                         ) -> AlterConsumerGroupOffsetsResult[Any]:
@@ -1713,6 +1773,7 @@ def _listed_offset(info: tuple[int, int, int | None]) -> Any:
         offset=offset, timestamp=timestamp, leader_epoch=leader_epoch)
 
 
+@_client_result
 def list_offsets_result(native: Any, partitions: Iterable[TopicPartition], kind: Kind,
                         loop: asyncio.AbstractEventLoop | None) -> ListOffsetsResult[Any]:
     """The ``ListOffsetsResult`` over the C result: one future per requested
@@ -1740,8 +1801,14 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
     private ``_match_is_null``, decision log 25) specified, an empty one default,
     else exact."""
     components: list[tuple[str, int, str | None]] = []
-    for component in quota_filter.components():
-        match = component.match()
+    # Java's DescribeClientQuotasRequest.Builder dereferences the components and
+    # each component: a None the FFI cannot carry is reported here (Types;
+    # exception 4).
+    filter_components = quota_filter.components()
+    if filter_components is None:
+        raise TypeError("ClientQuotaFilter.components must not be None")
+    for component in filter_components:
+        match = element(component, "ClientQuotaFilter.components").match()
         if component._match_is_null:
             components.append((component.entity_type(), _MATCH_TYPE_SPECIFIED, None))
         elif match is None:
@@ -1753,7 +1820,7 @@ def describe_client_quotas_args(quota_filter: ClientQuotaFilter) -> tuple[Any, .
 
 def _to_client_quota_entity(pairs: Iterable[tuple[str, str | None]]) -> ClientQuotaEntity:
     """``client_quota_entity_to_py``'s ``(entity_type, name or None)`` pairs."""
-    from confluent_kafka.common import ClientQuotaEntity
+    from confluent_kafka.common.quota import ClientQuotaEntity
 
     return ClientQuotaEntity(entries=dict(pairs))
 
@@ -1764,6 +1831,7 @@ def _quota_entities(rows: Mapping[Any, list[tuple[str, float]]]
     return {_to_client_quota_entity(pairs): dict(quotas) for pairs, quotas in rows.items()}
 
 
+@_client_result
 def describe_client_quotas_result(native: Any, kind: Kind,
                                   loop: asyncio.AbstractEventLoop | None
                                   ) -> DescribeClientQuotasResult[Any]:
@@ -1779,11 +1847,26 @@ def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration]) -> tuple[
     """``Admin_alter_client_quotas(h, entries, options)``'s plain arguments: each
     alteration as ``(entity, ops)``, the entity's ``(type, name or None)`` pairs and
     the ops' ``(key, value or None)``, ``None`` removing the quota."""
-    rows = [(list(element(entry, "entries").entity().entries().items()),
-             [(op.key(), op.value()) for op in entry.ops()]) for entry in entries]
+    rows = []
+    for entry in entries:
+        # Java's AlterClientQuotasRequest.Builder dereferences, in this order, the
+        # entry, its entity, the entity's entries, its ops and each op: a None the
+        # FFI cannot carry is reported here (Types; exception 4).
+        entity = element(entry, "entries").entity()
+        if entity is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None entity")
+        entity_entries = entity.entries()
+        if entity_entries is None:
+            raise TypeError("entries must not contain a ClientQuotaEntity with a None entries")
+        ops = entry.ops()
+        if ops is None:
+            raise TypeError("entries must not contain a ClientQuotaAlteration with a None ops")
+        rows.append((list(entity_entries.items()),
+                     [(element(op, "ClientQuotaAlteration.ops").key(), op.value()) for op in ops]))
     return (rows,)
 
 
+@_client_result
 def alter_client_quotas_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                                ) -> AlterClientQuotasResult[Any]:
     """The ``AlterClientQuotasResult`` over the C result's per-entity ``values()``
@@ -1828,6 +1911,7 @@ def _scram_descriptions(rows: Mapping[str, Iterable[tuple[int, int]]]
     return {user: _scram_description(user, infos) for user, infos in rows.items()}
 
 
+@_client_result
 def describe_user_scram_credentials_result(
         native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
 ) -> DescribeUserScramCredentialsResult[Any]:
@@ -1877,6 +1961,7 @@ def alter_user_scram_credentials_args(alterations: Iterable[UserScramCredentialA
     return ([_scram_alteration_row(element(a, "alterations")) for a in alterations],)
 
 
+@_client_result
 def alter_user_scram_credentials_result(native: Any, kind: Kind,
                                         loop: asyncio.AbstractEventLoop | None
                                         ) -> AlterUserScramCredentialsResult[Any]:
@@ -1909,6 +1994,7 @@ def _to_feature_metadata(drained: tuple[list[tuple[str, int, int]], int | None,
             for name, min_version, max_version in supported})
 
 
+@_client_result
 def describe_features_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                              ) -> DescribeFeaturesResult[Any]:
     """The ``DescribeFeaturesResult`` over the C result's ``featureMetadata()``
@@ -1928,6 +2014,7 @@ def update_features_args(feature_updates: Mapping[str, FeatureUpdate]) -> tuple[
     return (rows,)
 
 
+@_client_result
 def update_features_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                            ) -> UpdateFeaturesResult[Any]:
     """The ``UpdateFeaturesResult`` over the C result's per-feature ``values()``
@@ -1965,6 +2052,7 @@ def _partition_producer_state(states: Iterable[tuple[Any, ...]]) -> Any:
              start_offset) in states])
 
 
+@_client_result
 def describe_producers_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None,
                               partitions: Iterable[TopicPartition]
                               ) -> DescribeProducersResult[Any]:
@@ -2010,6 +2098,7 @@ def _transaction_description(description: tuple[Any, ...]) -> TransactionDescrip
         topic_partitions=[topic_partition_from_tuple(tp) for tp in topic_partitions])
 
 
+@_client_result
 def describe_transactions_result(native: Any, kind: Kind,
                                  loop: asyncio.AbstractEventLoop | None,
                                  transactional_ids: Iterable[str]
@@ -2033,6 +2122,7 @@ def abort_transaction_args(spec: AbortTransactionSpec) -> tuple[Any, ...]:
              spec.producer_epoch(), spec.coordinator_epoch()),)
 
 
+@_client_result
 def abort_transaction_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None,
                              spec: AbortTransactionSpec) -> AbortTransactionResult[Any]:
     """The ``AbortTransactionResult`` over the C result: Java's one entry, for the
@@ -2066,6 +2156,7 @@ def _transaction_listings(rows: Iterable[tuple[str, int, str]]) -> list[Transact
             for transactional_id, producer_id, state in rows]
 
 
+@_client_result
 def list_transactions_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None
                              ) -> ListTransactionsResult[Any]:
     """The ``ListTransactionsResult`` over the C result's ``byBrokerId()`` future:
@@ -2091,6 +2182,7 @@ def fence_producers_args(transactional_ids: Iterable[str]) -> tuple[Any, ...]:
     return (list(dict.fromkeys(transactional_ids)),)
 
 
+@_client_result
 def fence_producers_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop | None,
                            transactional_ids: Iterable[str]) -> FenceProducersResult[Any]:
     """The ``FenceProducersResult`` over the C result: Java's per-id future of the
@@ -2139,6 +2231,7 @@ def _config_resources(rows: list[tuple[int, str]]) -> list[ConfigResource]:
     return [config_resource_from_tuple(raw) for raw in rows]
 
 
+@_client_result
 def list_config_resources_result(native: Any, kind: Kind,
                                  loop: asyncio.AbstractEventLoop | None
                                  ) -> ListConfigResourcesResult[Any]:
@@ -2149,6 +2242,7 @@ def list_config_resources_result(native: Any, kind: Kind,
     return ListConfigResourcesResult._new(future=future, kind=kind)
 
 
+@_client_result
 def unregister_controller_result(native: Any, kind: Kind,
                                  loop: asyncio.AbstractEventLoop | None
                                  ) -> UnregisterControllerResult[Any]:
@@ -2179,6 +2273,7 @@ def _classic_group_description(raw: tuple[Any, ...]) -> ClassicGroupDescription:
         authorized_operations=acl_operations_from_codes(operations))
 
 
+@_client_result
 def describe_classic_groups_result(native: Any, kind: Kind,
                                    loop: asyncio.AbstractEventLoop | None
                                    ) -> DescribeClassicGroupsResult[Any]:
@@ -2193,6 +2288,7 @@ def describe_classic_groups_result(native: Any, kind: Kind,
     return DescribeClassicGroupsResult._new(futures=futures, kind=kind)
 
 
+@_client_result
 def force_terminate_transaction_result(native: Any, kind: Kind,
                                        loop: asyncio.AbstractEventLoop | None
                                        ) -> TerminateTransactionResult[Any]:

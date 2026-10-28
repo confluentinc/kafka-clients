@@ -24,16 +24,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.acl import AclBinding
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["CreateAclsResult"]
 
 
-class CreateAclsResult(Generic[KindT]):
+class CreateAclsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.create_acls()`` call.
 
     Java: ``org.apache.kafka.clients.admin.CreateAclsResult``.
@@ -51,7 +51,7 @@ class CreateAclsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> CreateAclsResult[Any]:
         """Java's package-private ``CreateAclsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 
