@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.classic_group_description import ClassicGroupDescription
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeClassicGroupsResult"]
 
 
-class DescribeClassicGroupsResult(Generic[KindT]):
+class DescribeClassicGroupsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_classic_groups()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeClassicGroupsResult``.

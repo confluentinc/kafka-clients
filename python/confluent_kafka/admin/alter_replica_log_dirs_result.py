@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartitionReplica
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 __all__ = ["AlterReplicaLogDirsResult"]
 
 
-class AlterReplicaLogDirsResult(Generic[KindT]):
+class AlterReplicaLogDirsResult(_Result, Generic[KindT]):
     """The result of ``Admin.alter_replica_log_dirs()``.
 
     To retrieve the detailed result per specified ``TopicPartitionReplica``, use

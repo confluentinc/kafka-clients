@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import (
     _MemberIdentity,
@@ -58,7 +58,7 @@ __all__ = ["RemoveMembersFromConsumerGroupResult"]
 _MemberErrors = Mapping[_MemberIdentity, "BaseException | None"]
 
 
-class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
+class RemoveMembersFromConsumerGroupResult(_Result, Generic[KindT]):
     """The result of the ``Admin.remove_members_from_consumer_group()`` call.
 
     The API of this class is evolving, see ``Admin`` for details.

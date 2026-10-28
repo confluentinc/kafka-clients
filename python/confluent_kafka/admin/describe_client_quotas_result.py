@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeClientQuotasResult"]
 
 
-class DescribeClientQuotasResult(Generic[KindT]):
+class DescribeClientQuotasResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_client_quotas()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeClientQuotasResult``.

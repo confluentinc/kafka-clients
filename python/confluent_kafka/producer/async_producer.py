@@ -70,7 +70,7 @@ import socket
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, Protocol, SupportsIndex, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -83,6 +83,7 @@ from confluent_kafka._async import (
     call_soon_on,
 )
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._native_copy import not_copyable
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _PENDING, AsyncKafkaFuture, _FutureState
@@ -256,6 +257,12 @@ class _AsyncRecord(AsyncRecordFuture, _FutureState[RecordMetadata]):
     @property
     def _impl(self) -> _AsyncRecord:  # type: ignore[override]
         return self
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> str | tuple[Any, ...]:
+        """``copy``, ``deepcopy`` and ``pickle``: refused, as for a future over
+        a C handle: the record is what the native send completes, so a copy
+        would never complete."""
+        raise not_copyable("AsyncKafkaFuture", "it is the record the producer's send completes")
 
     def __init__(self, producer: AsyncProducer[Any, Any], callback: Callback | AsyncCallback | None,
                  topic: str, partition: int | None, loop: asyncio.AbstractEventLoop) -> None:

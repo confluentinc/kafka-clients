@@ -37,7 +37,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import MISSING, Form, java_forms
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -52,7 +52,7 @@ __all__ = ["CreateTopicsResult"]
 _UNKNOWN = -1
 
 
-class CreateTopicsResult(Generic[KindT]):
+class CreateTopicsResult(_Result, Generic[KindT]):
     """The result of ``Admin.create_topics()``.
 
     Java: ``org.apache.kafka.clients.admin.CreateTopicsResult``.

@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 __all__ = ["DeleteConsumerGroupsResult"]
 
 
-class DeleteConsumerGroupsResult(Generic[KindT]):
+class DeleteConsumerGroupsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_consumer_groups()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteConsumerGroupsResult``.

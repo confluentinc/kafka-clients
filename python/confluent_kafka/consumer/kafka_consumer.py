@@ -29,9 +29,10 @@ run in Python on the caller's thread.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
 from confluent_kafka._args import MISSING
+from confluent_kafka._native_copy import CLIENT_HANDLE, not_copyable
 
 from .consumer import Consumer
 
@@ -91,3 +92,17 @@ class KafkaConsumer(Consumer[K, V]):
         # config key"): the config route (Signatures, the serde exception).
         self._start(configs, None if key_deserializer is MISSING else key_deserializer,
                     None if value_deserializer is MISSING else value_deserializer)
+
+    # Java's class is neither ``Cloneable`` nor ``Serializable``, and the client
+    # holds its native handle, which a copy would share and the original's
+    # ``close()`` free under it: ``copy``, ``deepcopy`` and ``pickle`` are refused
+    # (CLAUDE.md, Python Binding Conventions, Types, the ``java.io.Serializable``
+    # row). The mocks hold no native object and keep Python's default.
+    def __copy__(self) -> NoReturn:
+        raise not_copyable("KafkaConsumer", CLIENT_HANDLE)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> NoReturn:
+        raise not_copyable("KafkaConsumer", CLIENT_HANDLE)
+
+    def __reduce__(self) -> NoReturn:
+        raise not_copyable("KafkaConsumer", CLIENT_HANDLE)

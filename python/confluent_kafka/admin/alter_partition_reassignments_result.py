@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 __all__ = ["AlterPartitionReassignmentsResult"]
 
 
-class AlterPartitionReassignmentsResult(Generic[KindT]):
+class AlterPartitionReassignmentsResult(_Result, Generic[KindT]):
     """The result of ``Admin.alter_partition_reassignments()``.
 
     Java: ``org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult``.

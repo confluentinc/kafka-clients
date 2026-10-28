@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import MISSING
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 from confluent_kafka.illegal_state_error import IllegalStateError
 
@@ -48,7 +48,7 @@ __all__ = ["ListConsumerGroupOffsetsResult"]
 _Offsets = dict["TopicPartition", "OffsetAndMetadata | None"]
 
 
-class ListConsumerGroupOffsetsResult(Generic[KindT]):
+class ListConsumerGroupOffsetsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.list_consumer_group_offsets()`` call.
 
     Java: ``org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult``.

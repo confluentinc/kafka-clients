@@ -31,7 +31,7 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.admin._internals import _sub_level_error
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 __all__ = ["DeleteConsumerGroupOffsetsResult"]
 
 
-class DeleteConsumerGroupOffsetsResult(Generic[KindT]):
+class DeleteConsumerGroupOffsetsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_consumer_group_offsets()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteConsumerGroupOffsetsResult``.

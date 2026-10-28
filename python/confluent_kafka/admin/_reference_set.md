@@ -59,7 +59,9 @@ constructor `@overload`: any subset is a form.
 
 ## Result classes
 
-Every result is `Generic[KindT]`, `__slots__` including `_kind`; methods returning a future (or a
+Every result is `Generic[KindT]` over the private base `_futures._Result` (in the `.py` only; it
+refuses `copy` / `deepcopy` / `pickle` of a result over the client's C result), `__slots__` including
+`_kind`; methods returning a future (or a
 map of futures) have one `@overload` per kind (`self: X[Sync]` -> `KafkaFuture[...]`,
 `self: X[Async]` -> `AsyncKafkaFuture[...]`). `__init__` of a non-public constructor raises
 `TypeError("<Class> cannot be constructed directly; use the admin client's <method>()")`.

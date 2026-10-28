@@ -132,7 +132,10 @@ def _build(native_records: Any, grouped: dict[TopicPartition, list[ConsumerRecor
                                                  leader_epoch=recs[-1].leader_epoch(), metadata="")
     if not grouped and not next_offsets:
         return ConsumerRecords.empty()
-    return ConsumerRecords(records=grouped, next_offsets=next_offsets)
+    records = ConsumerRecords(records=grouped, next_offsets=next_offsets)
+    # The core's fetch: not copied or pickled (ConsumerRecords.__reduce_ex__).
+    records._fetched = True
+    return records
 
 
 def deserialize_batch(

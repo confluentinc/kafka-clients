@@ -2522,7 +2522,7 @@ impl Renderer<'_> {
             imp.first("confluent_kafka._args", "Form");
             imp.first("confluent_kafka._args", "java_forms");
         }
-        for n in ["Async", "KindT", "Sync"] {
+        for n in ["Async", "KindT", "Sync", "_Result"] {
             imp.first("confluent_kafka.admin._futures", n);
         }
         for h in self.uses.helpers.clone() {
@@ -2581,7 +2581,7 @@ impl Renderer<'_> {
 
         let py = format!(
             "{LICENSE}\n{}\n\nfrom __future__ import annotations\n\n{py_imports}__all__ = [\"{cls}\"]\n{py_items}\n\nclass \
-             {cls}(Generic[KindT]):\n{}\n\n{}\n",
+             {cls}(_Result, Generic[KindT]):\n{}\n\n{}\n",
             self.module_doc(),
             self.class_doc(),
             py_members.join("\n\n")

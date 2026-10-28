@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.admin._internals import _CoordinatorKey, _ProducerIdAndEpoch
 from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -41,7 +41,7 @@ __all__ = ["FenceProducersResult"]
 _T = TypeVar("_T")
 
 
-class FenceProducersResult(Generic[KindT]):
+class FenceProducersResult(_Result, Generic[KindT]):
     """The result of the ``Admin.fence_producers()`` call.
 
     Java: ``org.apache.kafka.clients.admin.FenceProducersResult``.

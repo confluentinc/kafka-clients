@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartitionReplica
@@ -44,7 +44,7 @@ __all__ = ["DescribeReplicaLogDirsResult"]
 _INVALID_OFFSET_LAG = -1
 
 
-class DescribeReplicaLogDirsResult(Generic[KindT]):
+class DescribeReplicaLogDirsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_replica_log_dirs()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult``.

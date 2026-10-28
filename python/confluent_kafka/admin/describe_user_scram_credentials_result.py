@@ -40,7 +40,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.admin._internals import (
     _DescribeUserScramCredentialsResponseData,
     _errors_for_code,
@@ -63,7 +63,7 @@ _RESOURCE_NOT_FOUND_CODE = 91
 _UserResult = _DescribeUserScramCredentialsResponseData.DescribeUserScramCredentialsResult
 
 
-class DescribeUserScramCredentialsResult(Generic[KindT]):
+class DescribeUserScramCredentialsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_user_scram_credentials()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult``.

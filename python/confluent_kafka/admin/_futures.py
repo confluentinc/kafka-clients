@@ -30,12 +30,13 @@ the static ``all_of`` and for a future over a ``_KafkaFutureImpl``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any, ClassVar, TypeVar
+from collections.abc import Iterable, Mapping
+from typing import Any, ClassVar, SupportsIndex, TypeVar
 
-from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
+from confluent_kafka._native_copy import not_copyable
+from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture, _KafkaFutureBase
 
-__all__ = ["Async", "KindT", "Sync", "_kind_of"]
+__all__ = ["Async", "KindT", "Sync", "_Result", "_kind_of"]
 
 
 class Sync:
@@ -74,3 +75,41 @@ def _kind_of(futures: Iterable[Any]) -> type[Sync] | type[Async]:
     for future in futures:
         return Async if isinstance(future, AsyncKafkaFuture) else Sync
     return Sync
+
+
+def _holds_native(value: Any, depth: int = 0) -> bool:
+    """Whether ``value`` is, or holds within a few levels of containers, a future
+    over a C handle."""
+    if isinstance(value, _KafkaFutureBase):
+        return value._native is not None
+    if depth > 3:
+        return False
+    if isinstance(value, Mapping):
+        return any(_holds_native(v, depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_holds_native(v, depth + 1) for v in value)
+    return False
+
+
+class _Result:
+    """The base of every admin ``*Result`` class: ``copy``, ``deepcopy`` and
+    ``pickle`` of a result built over the admin client's C result, whose futures
+    are over C handles, are refused with ``TypeError``, as Java's results are
+    neither ``Cloneable`` nor ``Serializable`` and a copy would share the native
+    futures (CLAUDE.md, Python Binding Conventions, Types, the
+    ``java.io.Serializable`` row); a result a mock builds, over Python state,
+    keeps Python's default."""
+
+    __slots__ = ()
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> str | tuple[Any, ...]:
+        values = list(getattr(self, "__dict__", {}).values())
+        for cls in type(self).__mro__:
+            slots = cls.__dict__.get("__slots__", ())
+            for name in (slots,) if isinstance(slots, str) else slots:
+                if name not in ("__dict__", "__weakref__"):
+                    values.append(getattr(self, name, None))
+        if _holds_native(values):
+            raise not_copyable(type(self).__name__, "it holds the admin client's native result")
+        return super().__reduce_ex__(protocol)
+

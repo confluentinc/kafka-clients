@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.deleted_records import DeletedRecords
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 __all__ = ["DeleteRecordsResult"]
 
 
-class DeleteRecordsResult(Generic[KindT]):
+class DeleteRecordsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_records()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteRecordsResult``.

@@ -24,9 +24,10 @@ constructor takes the records and their next offsets.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, ClassVar, Generic, TypeVar, overload
+from typing import Any, ClassVar, Generic, SupportsIndex, TypeVar, overload
 
 from confluent_kafka._args import MISSING, Form, java_forms
+from confluent_kafka._native_copy import not_copyable
 from confluent_kafka.common.topic_partition import TopicPartition
 
 from .consumer_record import ConsumerRecord
@@ -48,7 +49,7 @@ class ConsumerRecords(Generic[K, V]):
 
     EMPTY: ClassVar[ConsumerRecords[Any, Any]]
 
-    __slots__ = ("_records", "_next_offsets")
+    __slots__ = ("_records", "_next_offsets", "_fetched")
 
     def __init__(self, *,
                  records: Mapping[TopicPartition, Sequence[ConsumerRecord[K, V]]],
@@ -69,6 +70,9 @@ class ConsumerRecords(Generic[K, V]):
         if any(k is None or v is None for k, v in next_offsets.items()):
             raise TypeError("next_offsets must not contain None")
         self._next_offsets: dict[TopicPartition, OffsetAndMetadata] = dict(next_offsets)
+        # Set by a KafkaConsumer / AsyncKafkaConsumer poll(): the records of the
+        # core's fetch (see __reduce_ex__).
+        self._fetched = False
 
     @overload
     def records(self, *, partition: TopicPartition) -> list[ConsumerRecord[K, V]]: ...
@@ -138,6 +142,17 @@ class ConsumerRecords(Generic[K, V]):
     @staticmethod
     def empty() -> ConsumerRecords[Any, Any]:
         return ConsumerRecords.EMPTY
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> str | tuple[Any, ...]:
+        """``copy``, ``deepcopy`` and ``pickle``: refused for the records a
+        ``KafkaConsumer`` / ``AsyncKafkaConsumer`` ``poll()`` returns, which hold
+        views into the core's fetched batch, as Java's ``ConsumerRecords`` is
+        neither ``Cloneable`` nor ``Serializable`` (CLAUDE.md, Python Binding
+        Conventions, Types, the ``java.io.Serializable`` row); records built in
+        Python (``MockConsumer``, the constructor) keep Python's default."""
+        if self._fetched:
+            raise not_copyable("ConsumerRecords", "it holds the consumer's fetched records")
+        return super().__reduce_ex__(protocol)
 
 
 def _given(recs: tuple[ConsumerRecord[Any, Any], ...] | None) -> tuple[ConsumerRecord[Any, Any], ...]:

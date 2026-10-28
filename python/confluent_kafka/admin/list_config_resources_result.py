@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 __all__ = ["ListConfigResourcesResult"]
 
 
-class ListConfigResourcesResult(Generic[KindT]):
+class ListConfigResourcesResult(_Result, Generic[KindT]):
     """The result of the ``Admin.list_config_resources()`` call.
 
     Java: ``org.apache.kafka.clients.admin.ListConfigResourcesResult``.

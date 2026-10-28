@@ -34,7 +34,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import _errors_exception
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 __all__ = ["AlterConsumerGroupOffsetsResult"]
 
 
-class AlterConsumerGroupOffsetsResult(Generic[KindT]):
+class AlterConsumerGroupOffsetsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.alter_consumer_group_offsets()`` call.
 
     Java: ``org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult``.

@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeProducersResult"]
 
 
-class DescribeProducersResult(Generic[KindT]):
+class DescribeProducersResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_producers()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeProducersResult``.

@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 __all__ = ["DeleteAclsResult"]
 
 
-class DeleteAclsResult(Generic[KindT]):
+class DeleteAclsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_acls()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteAclsResult``.
