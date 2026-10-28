@@ -1,6 +1,6 @@
 [package]
 name = "multilanguage-test-server"
-version = "0.3.0-beta.1"
+version = "1.0.0-rc.1"
 edition = "2024"
 publish = false
 description = "Proto definitions and generated tonic stubs for the multilanguage integration test harness."
