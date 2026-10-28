@@ -56,7 +56,9 @@ class NewPartitions:
         partitions = cls.__new__(cls)
         partitions._total_count = total_count
         partitions._new_assignments = (
-            None if new_assignments is None else tuple(tuple(a) for a in new_assignments))
+            # Java stores the list as given, a None element included (Class family).
+            None if new_assignments is None
+            else tuple(None if a is None else tuple(a) for a in new_assignments))
         return partitions
 
     @overload
@@ -102,7 +104,7 @@ class NewPartitions:
         assignment will be done by the controller."""
         if self._new_assignments is None:
             return None
-        return [list(a) for a in self._new_assignments]
+        return [None if a is None else list(a) for a in self._new_assignments]
 
     def __str__(self) -> str:
         return ("(totalCount=" + str(self.total_count()) + ", newAssignments="

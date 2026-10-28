@@ -30,6 +30,11 @@ Serializer)`` and ``()``, are one keyword-only ``__init__`` checked by
 serializer excepted, which may be left out (then ``bytes_serializer()``), so a
 cluster alone or ``auto_complete`` alone matches none of them. ``()`` passes
 ``(Cluster.empty(), false, null, null, null)`` to the first.
+
+``disableTelemetry`` / ``injectTimeoutException`` / ``setClientInstanceId``
+serve only ``clientInstanceId``, and ``addedMetrics`` only
+``registerMetricForSubscription``, which are not generated (their FFI entry
+points are missing), so they are dropped too *(deviation)*.
 """
 
 from __future__ import annotations

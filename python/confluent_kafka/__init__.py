@@ -21,7 +21,8 @@ every type is imported from its module (``from confluent_kafka.consumer import
 KafkaConsumer``). By rule 3 the root exports only ``Duration`` and the Java
 built-in exception classes the translated code throws (``IllegalStateError``,
 ``IllegalArgumentError``, ``ConcurrentModificationError``, ``TimeoutError``,
-``NoSuchElementError``, ``ExecutionError``, ``UnsupportedOperationError``),
+``NoSuchElementError``, ``ExecutionError``, ``UnsupportedOperationError``,
+``IndexOutOfBoundsError``),
 generated with the rest of the
 error hierarchy by ``cargo xtask generate-error-codes``.
 """
@@ -42,6 +43,7 @@ from .concurrent_modification_error import ConcurrentModificationError as Concur
 from .execution_error import ExecutionError as ExecutionError
 from .illegal_argument_error import IllegalArgumentError as IllegalArgumentError
 from .illegal_state_error import IllegalStateError as IllegalStateError
+from .index_out_of_bounds_error import IndexOutOfBoundsError as IndexOutOfBoundsError
 from .no_such_element_error import NoSuchElementError as NoSuchElementError
 from .timeout_error import TimeoutError as TimeoutError
 from .unsupported_operation_error import UnsupportedOperationError as UnsupportedOperationError
@@ -50,6 +52,7 @@ __all__ += [
     "ExecutionError",
     "IllegalArgumentError",
     "IllegalStateError",
+    "IndexOutOfBoundsError",
     "NoSuchElementError",
     "TimeoutError",
     "UnsupportedOperationError",

@@ -27,16 +27,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import ClientQuotaEntity
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.common.quota import ClientQuotaEntity
 
 __all__ = ["AlterClientQuotasResult"]
 
 
-class AlterClientQuotasResult(Generic[KindT]):
+class AlterClientQuotasResult(_Result, Generic[KindT]):
     """The result of the ``Admin.alter_client_quotas()`` call.
 
     Java: ``org.apache.kafka.clients.admin.AlterClientQuotasResult``.
@@ -51,6 +51,8 @@ class AlterClientQuotasResult(Generic[KindT]):
 
         :param futures: maps entity to its alteration result
         """
+        if futures is None:
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -64,7 +66,7 @@ class AlterClientQuotasResult(Generic[KindT]):
         :param futures: maps entity to its alteration result
         """
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

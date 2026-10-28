@@ -67,4 +67,4 @@ class OffsetOutOfRangeError(InvalidOffsetError):
 
     def partitions(self) -> set[TopicPartition]:
         """Java's ``partitions()``."""
-        return set(self._offset_out_of_range_partitions.keys())
+        return set(_throwable.non_null(self._offset_out_of_range_partitions, "offset_out_of_range_partitions").keys())

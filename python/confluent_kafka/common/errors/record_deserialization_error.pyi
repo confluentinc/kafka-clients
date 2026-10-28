@@ -16,12 +16,12 @@
 
 import enum
 from collections.abc import Iterable
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.header import Header
-from confluent_kafka.common.headers import Headers
-from confluent_kafka.common.timestamp_type import TimestampType
+from confluent_kafka.common.header.header import Header
+from confluent_kafka.common.header.headers import Headers
+from confluent_kafka.common.record.timestamp_type import TimestampType
 from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = ["RecordDeserializationError"]
@@ -40,3 +40,5 @@ class RecordDeserializationError(SerializationError):
     def key_buffer(self) -> memoryview | None: ...
     def value_buffer(self) -> memoryview | None: ...
     def headers(self) -> Headers: ...
+    def __reduce__(self) -> str | tuple[Any, ...]: ...
+    def __copy__(self) -> RecordDeserializationError: ...

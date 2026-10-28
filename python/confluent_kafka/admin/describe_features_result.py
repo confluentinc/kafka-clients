@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.feature_metadata import FeatureMetadata
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeFeaturesResult"]
 
 
-class DescribeFeaturesResult(Generic[KindT]):
+class DescribeFeaturesResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_features()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeFeaturesResult``.

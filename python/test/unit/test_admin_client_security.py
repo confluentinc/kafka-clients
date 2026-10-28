@@ -92,25 +92,27 @@ from confluent_kafka.admin import (
 from confluent_kafka.admin import _conversions
 from confluent_kafka.admin._futures import Sync
 from confluent_kafka.admin._internals import _CoordinatorKey
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AccessControlEntryFilter,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
-    AsyncKafkaFuture,
+)
+from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture, TopicPartition
+from confluent_kafka.common.quota import (
     ClientQuotaAlteration,
     ClientQuotaEntity,
     ClientQuotaFilter,
     ClientQuotaFilterComponent,
-    KafkaFuture,
-    KafkaPrincipal,
+)
+from confluent_kafka.common.security.auth import KafkaPrincipal
+from confluent_kafka.common.resource import (
     PatternType,
     ResourcePattern,
     ResourcePatternFilter,
     ResourceType,
-    TopicPartition,
 )
 from confluent_kafka.common.errors import (
     ClusterAuthorizationError,

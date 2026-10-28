@@ -65,12 +65,18 @@ class TopicCollection:
     @staticmethod
     def of_topic_ids(*, topics: Iterable[Uuid]) -> TopicCollection.TopicIdCollection:
         """A collection of topics defined by topic ID."""
+        if topics is None:
+            # Java's ``new ArrayList<>(topicIds)`` dereferences it (Types).
+            raise TypeError("topics must not be None")
         return _TopicIdCollection._new(topic_ids=topics)
 
     @staticmethod
     def of_topic_names(*, topics: Iterable[str]) -> TopicCollection.TopicNameCollection:
         """A collection of topics defined by topic name."""
         reject_str("topics", topics)
+        if topics is None:
+            # Java's ``new ArrayList<>(topicNames)`` dereferences it (Types).
+            raise TypeError("topics must not be None")
         return _TopicNameCollection._new(topic_names=topics)
 
 

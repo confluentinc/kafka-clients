@@ -70,7 +70,7 @@ import socket
 import threading
 import weakref
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, Protocol, SupportsIndex, TypeVar, cast, overload
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -83,6 +83,7 @@ from confluent_kafka._async import (
     call_soon_on,
 )
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._native_copy import not_copyable
 from confluent_kafka.common.errors.timeout_error import TimeoutError as KafkaTimeoutError
 from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.common.kafka_future import _PENDING, AsyncKafkaFuture, _FutureState
@@ -119,6 +120,8 @@ if TYPE_CHECKING:
     from confluent_kafka.common.metric import Metric
     from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata
 
+    from .async_callback import AsyncCallback
+    from .callback import Callback
     from .producer_record import ProducerRecord
 
 __all__ = ["AsyncProducer"]
@@ -128,14 +131,6 @@ V = TypeVar("V")
 R = TypeVar("R")
 
 _LOG = logging.getLogger("confluent_kafka.producer")
-
-class _AsyncCallback(Protocol):
-    """The ``send()`` callback of the asyncio producer: Java's ``Callback``,
-    which by rule 3 may also be an ``async def``, awaited on the record's
-    event loop."""
-
-    def __call__(self, *, metadata: RecordMetadata, exception: Exception | None,
-                 **kwargs: Any) -> Awaitable[None] | None: ...
 
 # The producers (by id) whose ``async def`` send() callback the current task
 # awaits, Java's ``Thread.currentThread() == this.ioThread``: the C API waits
@@ -263,7 +258,13 @@ class _AsyncRecord(AsyncRecordFuture, _FutureState[RecordMetadata]):
     def _impl(self) -> _AsyncRecord:  # type: ignore[override]
         return self
 
-    def __init__(self, producer: AsyncProducer[Any, Any], callback: _AsyncCallback | None,
+    def __reduce_ex__(self, protocol: SupportsIndex) -> str | tuple[Any, ...]:
+        """``copy``, ``deepcopy`` and ``pickle``: refused, as for a future over
+        a C handle: the record is what the native send completes, so a copy
+        would never complete."""
+        raise not_copyable("AsyncKafkaFuture", "it is the record the producer's send completes")
+
+    def __init__(self, producer: AsyncProducer[Any, Any], callback: Callback | AsyncCallback | None,
                  topic: str, partition: int | None, loop: asyncio.AbstractEventLoop) -> None:
         # The future (AsyncKafkaFuture's slots; _native is the class attribute).
         self._inner = None
@@ -493,13 +494,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         producer exists and until it is destroyed: on the producer's loop, or
         on the helper thread once that loop has closed (see
         :meth:`_schedule_pump`), which also drops what the loop left."""
-        if not self._c_producer or not self._pump_use():
-            return
-        try:
+        with self._pump_use() as counted:
+            if not counted:
+                return
             with self._drain_lock:
                 _lib.Producer__execute_callbacks(self._c_producer)
-        finally:
-            self._end_use()
         loop = self._binding.loop
         if loop is not None and loop.is_closed():
             self._undelivered.free_closed()
@@ -559,13 +558,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # Counted like a pump run, not a _use(): a close() begun meanwhile
         # must not make the first async call raise here; it clears the fd
         # again in _destroy.
-        if not self._pump_use():
+        with self._pump_use() as counted:
+            if counted:
+                _lib.Producer__set_wake_fd(self._c_producer, writer.fileno())
+        if not counted:
             self._release_wake()
-            return
-        try:
-            _lib.Producer__set_wake_fd(self._c_producer, writer.fileno())
-        finally:
-            self._end_use()
 
     def _move_wake_off(self, closed: asyncio.AbstractEventLoop) -> None:
         """``close()`` moved the producer off ``closed``, its bound loop that
@@ -578,11 +575,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._wake_tried = False
         if reader is None or writer is None:
             return
-        if self._pump_use():
-            try:
+        with self._pump_use() as counted:
+            if counted:
                 _lib.Producer__set_wake_fd(self._c_producer, -1)
-            finally:
-                self._end_use()
         reader.close()
         writer.close()
 
@@ -604,11 +599,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if reader is None or writer is None:
             return
         self._wake_r = self._wake_w = None
-        if self._pump_use():
-            try:
+        with self._pump_use() as counted:
+            if counted:
                 _lib.Producer__set_wake_fd(self._c_producer, -1)
-            finally:
-                self._end_use()
         loop = self._binding.loop
 
         def unregister(bound: asyncio.AbstractEventLoop) -> None:
@@ -735,7 +728,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         lifecycle lock and only while the handle is alive: :meth:`_destroy` sets
         ``_destroyed`` under it before it frees the handle, which completes what
         is left unreported."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if self._destroyed or not self._c_producer:
                 return
             _lib.Producer__set_callback_result(self._c_producer, callback_id, failure)
@@ -769,28 +762,30 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.commit_transaction`: when it returns, the
         callbacks of the transaction's records have run, ``async def`` ones
         awaited, but for those of a record whose event loop has closed, which
-        are dropped (see :meth:`send`). From an ``async def`` callback, which
-        it would wait for, it raises ``TimeoutError`` after ``max.block.ms``,
-        as Java's does from a callback."""
+        are dropped (see :meth:`send`). On ``AsyncKafkaProducer``, from an
+        ``async def`` callback, which it would wait for, it raises
+        ``TimeoutError`` after ``max.block.ms``, as Java's does from a callback;
+        ``AsyncMockProducer`` returns, as Java's mock does."""
         self._check_not_closed()
         sent = list(self._futures)
         await self._run_async(_lib.Producer_commit_transaction_cb, reports="EndTxn(true)")
         await _await_all(asyncio.get_running_loop(), self._completable(sent))
 
     async def abort_transaction(self) -> None:
-        """See :meth:`Producer.abort_transaction`. From an ``async def``
-        callback, which it would wait for, it raises ``TimeoutError`` after
-        ``max.block.ms``, as Java's does from a callback."""
+        """See :meth:`Producer.abort_transaction`. On ``AsyncKafkaProducer``,
+        from an ``async def`` callback, which it would wait for, it raises
+        ``TimeoutError`` after ``max.block.ms``, as Java's does from a callback;
+        ``AsyncMockProducer`` returns, as Java's mock does."""
         self._check_not_closed()
         await self._run_async(_lib.Producer_abort_transaction_cb, reports="EndTxn(false)")
 
     @overload
     async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
     @overload
-    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+    async def send(self, *, record: ProducerRecord[K, V], callback: Callback | AsyncCallback | None
                    ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = MISSING
+                   callback: Callback | AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See :meth:`Producer.send`. Awaiting it waits for the record to reach
         the producer, without blocking the loop, and raises what
@@ -812,7 +807,8 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         the future's ``then_apply`` functions and ``when_complete`` actions run
         on the event loop, once the record's callback has returned. The
         ``callback`` runs on the event loop, before the future completes, and
-        must not block it. By rule 3 it may be an ``async def``: it is then
+        must not block it. By rule 3 it may be an :class:`AsyncCallback` (an
+        ``async def``): it is then
         awaited in a task on the loop before the future completes, the loop's
         later callbacks waiting for it, and ``flush()``,
         ``commit_transaction()``, ``abort_transaction()`` and ``close()`` wait
@@ -903,8 +899,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.flush`: when it returns, the callbacks of the
         records sent before it have run, ``async def`` ones awaited, but for
         those of a record whose event loop has closed, which are dropped (see
-        :meth:`send`). From an ``async def`` callback it raises ``KafkaError``,
-        as Java's does from a callback: it would wait for that callback."""
+        :meth:`send`). On ``AsyncKafkaProducer``, from an ``async def``
+        callback it raises ``KafkaError``, as Java's does from a callback: it
+        would wait for that callback; ``AsyncMockProducer`` returns, as Java's
+        mock does."""
         self._check_not_closed()
         if self._in_own_callback():
             _LOG.error(FLUSH_IN_CALLBACK_MESSAGE)

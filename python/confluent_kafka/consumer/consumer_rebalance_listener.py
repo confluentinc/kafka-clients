@@ -15,17 +15,20 @@
 """``ConsumerRebalanceListener``: Java's
 ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
 
-A multi-method interface the user implements, so a class to subclass: the
-abstract ``onPartitionsRevoked`` / ``onPartitionsAssigned`` become no-ops and the
-``default`` ``onPartitionsLost`` keeps its body (CLAUDE.md, Python Binding
-Conventions, Idiom translations). The methods are called positionally with the
+A multi-method interface the user implements, so a class to subclass
+(``abc.ABC``): Java's abstract ``onPartitionsRevoked`` / ``onPartitionsAssigned``
+stay abstract (``@abstractmethod``), so a subclass missing one fails at
+construction with ``TypeError``, as a Java implementation missing one fails to
+compile; the ``default`` ``onPartitionsLost`` keeps its body (CLAUDE.md, Python
+Binding Conventions, Idiom translations). The methods are called positionally with the
 partitions (a user-written callable, Signatures).
 
 The listener runs on the caller's thread, inside the call that delivers it
 (``poll()``, ``unsubscribe()``, ``close()``, ``MockConsumer.rebalance()``, …),
 and the rebalance does not advance until it returns; it may call back into its
-consumer (``commit()``, ``seek()``, ``position()``, …). On the async consumers a
-method may be ``async def``: it is awaited on the event loop (Threads and
+consumer (``commit()``, ``seek()``, ``position()``, …). Its asyncio form, whose
+methods are ``async def``, is ``AsyncConsumerRebalanceListener``; on the async
+consumers a method of this class may be ``async def`` too: it is awaited on the event loop (Threads and
 callbacks); its calls back into the consumer block the loop while they run (a call
 made from inside a listener goes through the ``ConsumerHandle`` and waits on its blocking
 form, because the listener runs inside the consumer's own waiting call, which cannot drain
@@ -34,12 +37,14 @@ a queued completion meanwhile).
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 from confluent_kafka.common.topic_partition import TopicPartition
 
 __all__ = ["ConsumerRebalanceListener"]
 
 
-class ConsumerRebalanceListener:
+class ConsumerRebalanceListener(ABC):
     """A callback interface that the user can implement to trigger custom
     actions when the set of partitions assigned to the consumer changes.
 
@@ -50,6 +55,7 @@ class ConsumerRebalanceListener:
     Java: ``org.apache.kafka.clients.consumer.ConsumerRebalanceListener``.
     """
 
+    @abstractmethod
     def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
         """A callback method the user can implement to provide handling of
         offset commits to a customized store. This method will be called during
@@ -67,6 +73,7 @@ class ConsumerRebalanceListener:
         consumer propagates to the call in which this callback is being executed.
         """
 
+    @abstractmethod
     def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
         """A callback method the user can implement to provide handling of
         customized offsets on completion of a successful partition

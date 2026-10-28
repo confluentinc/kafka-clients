@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import (
     _MemberIdentity,
@@ -58,7 +58,7 @@ __all__ = ["RemoveMembersFromConsumerGroupResult"]
 _MemberErrors = Mapping[_MemberIdentity, "BaseException | None"]
 
 
-class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
+class RemoveMembersFromConsumerGroupResult(_Result, Generic[KindT]):
     """The result of the ``Admin.remove_members_from_consumer_group()`` call.
 
     The API of this class is evolving, see ``Admin`` for details.
@@ -82,7 +82,7 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         memberInfos)``."""
         result = cls.__new__(cls)
         result._future = future
-        result._member_infos = set(member_infos)
+        result._member_infos = None if member_infos is None else set(member_infos)
         result._kind = kind
         result._client_member_result = None
         result._client_all = None
@@ -97,7 +97,7 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
         core's ``memberResult(member)`` and ``all()`` futures."""
         result = cls.__new__(cls)
         result._future = None
-        result._member_infos = set(member_infos)
+        result._member_infos = None if member_infos is None else set(member_infos)
         result._kind = kind
         result._client_member_result = member_result
         result._client_all = all
@@ -137,7 +137,9 @@ class RemoveMembersFromConsumerGroupResult(Generic[KindT]):
 
     def member_result(self, *, member: MemberToRemove) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Returns the selected member future."""
-        if self._client_member_result is not None:
+        # A ``None`` member cannot cross the FFI; it takes Java's own checks below,
+        # which ``null`` fails as it is never a requested member (exception 4).
+        if self._client_member_result is not None and member is not None:
             return self._client_member_result(member)  # type: ignore[no-any-return]
         if self._remove_all():
             raise IllegalArgumentError(

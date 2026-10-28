@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 __all__ = ["DeleteTopicsResult"]
 
 
-class DeleteTopicsResult(Generic[KindT]):
+class DeleteTopicsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_topics()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteTopicsResult``.

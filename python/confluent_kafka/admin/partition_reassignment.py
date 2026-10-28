@@ -38,8 +38,16 @@ class PartitionReassignment:
 
     def __init__(self, *, replicas: Sequence[int], adding_replicas: Sequence[int],
                  removing_replicas: Sequence[int]) -> None:
+        # Java's ``Collections.unmodifiableList`` dereferences each list, in
+        # this order (Types).
+        if replicas is None:
+            raise TypeError("replicas must not be None")
         self._replicas = tuple(replicas)
+        if adding_replicas is None:
+            raise TypeError("adding_replicas must not be None")
         self._adding_replicas = tuple(adding_replicas)
+        if removing_replicas is None:
+            raise TypeError("removing_replicas must not be None")
         self._removing_replicas = tuple(removing_replicas)
 
     def replicas(self) -> list[int]:
