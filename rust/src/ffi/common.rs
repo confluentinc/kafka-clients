@@ -82,11 +82,12 @@ use std::sync::OnceLock;
 use futures_util::FutureExt;
 
 use crate::common::Error;
+use crate::common::errors::GroupAuthorizationError;
 use crate::common::protocol::Errors;
 use crate::ffi::callback_queue::{CallbackJob, SendPtr};
 use crate::ffi::common::errors::local_callback_error::kafka_common_LocalCallbackError_release_fn_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, list_strings};
+use crate::ffi::util::{c_str_to_option, c_str_to_string, kafka_List_t, list_strings};
 // The 168 enumerators are spelled out in full (see
 // [`kafka_common_Error_e`]), so this glob keeps the match arms in
 // `error_code_of` readable without repeating the type name on each one.
@@ -644,13 +645,13 @@ pub(crate) mod panic_probe {
 // ---------------------------------------------------------------------------
 
 /// Internal wrapper that pairs [`Error`] with a [`CString`] for the
-/// error message, so that [`kafka_common_Error_message`] can return a valid
+/// error message, so that `kafka_common_Error_message` can return a valid
 /// `*const c_char` that lives as long as the handle.
 pub(crate) struct ErrorInner {
     pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
-    /// The handle [`kafka_common_Error_source`] borrows out, built on first
+    /// The handle `kafka_common_Error_source` borrows out, built on first
     /// request from [`Error::source`] and owned by this handle so the chain
     /// of causes lives exactly as long as the outermost error.
     source: OnceLock<Option<Box<ErrorInner>>>,
@@ -825,9 +826,9 @@ pub(crate) unsafe fn deliver_unit(result: Result<(), Error>, out_err: *mut *mut 
 ///
 /// The pointer must be non-null and point at a live `ErrorInner`: either an
 /// owned handle from [`box_error`], or a borrowed handle a live owner hands out
-/// ([`kafka_common_Error_source`], or a payload's or struct field's error
+/// (`kafka_common_Error_source`, or a payload's or struct field's error
 /// accessor). The handle, and for a borrowed one its owner, must stay alive
-/// (not passed to [`kafka_common_Error_destroy`] nor consumed by
+/// (not passed to `kafka_common_Error_destroy` nor consumed by
 /// [`take_error`]) for as long as the returned reference, or anything borrowed
 /// from it, is used: the `'static` lifetime is not real.
 pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
@@ -888,6 +889,14 @@ unsafe fn topic_set(topics: *const kafka_List_t) -> HashSet<String> {
 }
 
 /// `new KafkaException()`: the bare Kafka error with the default message.
+///
+/// # Returns
+///
+/// The new error.
+///
+/// # Safety
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
@@ -896,9 +905,19 @@ pub extern "C" fn kafka_common_Error_kafka() -> *mut kafka_common_Error_t {
 
 /// `new KafkaException(String message)`: the bare Kafka error with `message`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -911,9 +930,19 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message(message: *const c_char
 /// `new KafkaException(Throwable cause)`: the bare Kafka error caused by
 /// `source`, which is consumed.
 ///
+/// # Parameters
+///
+/// - `source` - The cause, an owned error handle this call takes over.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `source` must be an owned error handle not yet destroyed.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_source(
@@ -928,10 +957,21 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_source(
 /// `new KafkaException(String message, Throwable cause)`: the bare Kafka
 /// error with `message`, caused by `source`, which is consumed.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+/// - `source` - The cause, an owned error handle this call takes over.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string; `source` must
 /// be an owned error handle not yet destroyed.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
@@ -952,9 +992,19 @@ pub unsafe extern "C" fn kafka_common_Error_kafka_message_source(
 ///
 /// `topics` is a borrowed `kafka_List_t` of `const char *`.
 ///
+/// # Parameters
+///
+/// - `topics` - The topic names, a list of `const char *`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
@@ -970,10 +1020,21 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization(
 ///
 /// `topics` is a borrowed `kafka_List_t` of `const char *`.
 ///
+/// # Parameters
+///
+/// - `topics` - The topic names, a list of `const char *`.
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings; `message`
 /// must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
@@ -993,9 +1054,19 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_message(
 ///
 /// `topics` is a borrowed `kafka_List_t` of `const char *`.
 ///
+/// # Parameters
+///
+/// - `topics` - The topic names, a list of `const char *`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_List_t) -> *mut kafka_common_Error_t {
@@ -1009,10 +1080,21 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics(topics: *const kafka_
 ///
 /// `topics` is a borrowed `kafka_List_t` of `const char *`.
 ///
+/// # Parameters
+///
+/// - `topics` - The topic names, a list of `const char *`.
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of NUL-terminated strings; `message`
 /// must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
@@ -1028,49 +1110,91 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_topics_message(
     }))
 }
 
-/// `new GroupAuthorizationException(String groupId)`.
+/// `GroupAuthorizationException.forGroupId(String groupId)`: Java's default message for the
+/// group. A `NULL` group id gives an error without a group id, as Java's `forGroupId(null)`.
+///
+/// # Parameters
+///
+/// - `group_id` - The group id, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
 ///
 /// # Safety
 ///
 /// `group_id` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization(group_id: *const c_char) -> *mut kafka_common_Error_t {
     // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
-    // string, as `c_str_to_string` requires. `group_id` is only read here, into owned values,
+    // string, as `c_str_to_option` requires. `group_id` is only read here, into owned values,
     // so nothing borrows it after this call.
-    box_error(Error::group_authorization(unsafe { c_str_to_string(group_id) }))
+    match unsafe { c_str_to_option(group_id) } {
+        Some(group_id) => box_error(Error::group_authorization(group_id)),
+        // Java's `forGroupId(null)`: the string concatenation prints `null`, and the error
+        // carries no group ID.
+        None => box_error(Error::GroupAuthorization(GroupAuthorizationError::new(
+            "Not authorized to access group: null",
+        ))),
+    }
 }
 
-/// `new GroupAuthorizationException(String message, String groupId)`.
+/// `new GroupAuthorizationException(String message, String groupId)`. A `NULL` group id gives
+/// an error without a group id, as Java's `(String message)` constructor.
+///
+/// # Parameters
+///
+/// - `group_id` - The group id, or `NULL`.
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
 ///
 /// # Safety
 ///
 /// `group_id` and `message` must each be null or a valid NUL-terminated C
 /// string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization_with_message(
     group_id: *const c_char,
     message: *const c_char,
 ) -> *mut kafka_common_Error_t {
-    box_error(Error::group_authorization_with_message(
-        // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated
-        // C string, as `c_str_to_string` requires. `group_id` is only read here, into owned
-        // values, so nothing borrows it after this call.
-        unsafe { c_str_to_string(group_id) },
-        // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
-        // string, as `c_str_to_string` requires. `message` is only read here, into owned
-        // values, so nothing borrows it after this call.
-        unsafe { c_str_to_string(message) },
-    ))
+    // SAFETY: Per this function's `# Safety`, `message` is null or a valid NUL-terminated C
+    // string, as `c_str_to_string` requires. `message` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    let message = unsafe { c_str_to_string(message) };
+    // SAFETY: Per this function's `# Safety`, `group_id` is null or a valid NUL-terminated C
+    // string, as `c_str_to_option` requires. `group_id` is only read here, into owned values, so
+    // nothing borrows it after this call.
+    box_error(match unsafe { c_str_to_option(group_id) } {
+        Some(group_id) => Error::group_authorization_with_message(group_id, message),
+        // Java's `(message, null)`, which its `(message)` constructor passes.
+        None => Error::GroupAuthorization(GroupAuthorizationError::new(message)),
+    })
 }
 
 /// `new InvalidGroupIdException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1082,9 +1206,20 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_group_id(message: *const c_c
 
 /// `new ThrottlingQuotaExceededException(int throttleTimeMs, String message)`.
 ///
+/// # Parameters
+///
+/// - `throttle_time_ms` - The throttle time in milliseconds.
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
@@ -1101,9 +1236,19 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded(
 
 /// `new BufferExhaustedException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1115,9 +1260,19 @@ pub unsafe extern "C" fn kafka_common_Error_buffer_exhausted(message: *const c_c
 
 /// `new IllegalArgumentException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
@@ -1131,9 +1286,19 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_argument(
 
 /// `new ConfigException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1145,9 +1310,20 @@ pub unsafe extern "C" fn kafka_common_Error_config_message(message: *const c_cha
 
 /// `new ConfigException(String name, Object value)`: the value is its text.
 ///
+/// # Parameters
+///
+/// - `name` - The configuration name, or `NULL`.
+/// - `value` - Its value as text, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `name` and `value` must each be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_name_value(
@@ -1166,10 +1342,22 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value(
 /// `new ConfigException(String name, Object value, String message)`: the
 /// value is its text.
 ///
+/// # Parameters
+///
+/// - `name` - The configuration name, or `NULL`.
+/// - `value` - Its value as text, or `NULL`.
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `name`, `value` and `message` must each be null or a valid NUL-terminated
 /// C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
@@ -1195,9 +1383,19 @@ pub unsafe extern "C" fn kafka_common_Error_config_name_value_message(
 
 /// `new IllegalStateException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1211,9 +1409,19 @@ pub unsafe extern "C" fn kafka_common_Error_local_illegal_state(message: *const 
 /// `java.lang.UnsupportedOperationException`, not the wire-level
 /// `UnsupportedVersionException`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_unsupported_operation(
@@ -1228,9 +1436,19 @@ pub unsafe extern "C" fn kafka_common_Error_local_unsupported_operation(
 /// `new TimeoutException(String message)` — the retriable
 /// `org.apache.kafka.common.errors.TimeoutException`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1242,9 +1460,19 @@ pub unsafe extern "C" fn kafka_common_Error_timeout(message: *const c_char) -> *
 
 /// `new RecordTooLargeException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1256,9 +1484,21 @@ pub unsafe extern "C" fn kafka_common_Error_record_too_large(message: *const c_c
 
 /// `new CorrelationIdMismatchException(String message, int requestCorrelationId, int responseCorrelationId)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+/// - `request_correlation_id` - The correlation id of the request.
+/// - `response_correlation_id` - The correlation id of the response.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
@@ -1278,9 +1518,19 @@ pub unsafe extern "C" fn kafka_common_Error_correlation_id_mismatch(
 
 /// `new InvalidReceiveException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1292,9 +1542,19 @@ pub unsafe extern "C" fn kafka_common_Error_invalid_receive(message: *const c_ch
 
 /// `new SchemaException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1307,10 +1567,21 @@ pub unsafe extern "C" fn kafka_common_Error_schema(message: *const c_char) -> *m
 /// `new SchemaException(String message, Throwable cause)`: `source` is
 /// consumed.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+/// - `source` - The cause, an owned error handle this call takes over.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string; `source` must
 /// be an owned error handle not yet destroyed.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_schema_source(
@@ -1329,9 +1600,19 @@ pub unsafe extern "C" fn kafka_common_Error_schema_source(
 
 /// `new SerializationException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1343,9 +1624,19 @@ pub unsafe extern "C" fn kafka_common_Error_serialization(message: *const c_char
 
 /// `new UnsupportedVersionException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1357,9 +1648,19 @@ pub unsafe extern "C" fn kafka_common_Error_unsupported_version(message: *const 
 
 /// `new WakeupException()` carrying `message`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1371,9 +1672,19 @@ pub unsafe extern "C" fn kafka_common_Error_wakeup(message: *const c_char) -> *m
 
 /// `new ConcurrentModificationException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
@@ -1388,9 +1699,19 @@ pub unsafe extern "C" fn kafka_common_Error_local_concurrent_modification(
 /// `new java.util.concurrent.TimeoutException(String message)` — the one
 /// `Future.get(timeout, unit)` declares, not the retriable Kafka class.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char) -> *mut kafka_common_Error_t {
@@ -1417,11 +1738,23 @@ pub unsafe extern "C" fn kafka_common_Error_local_timeout(message: *const c_char
 /// happen on any thread, a Rust task included, and after this function and
 /// the call that reported the error have returned.
 ///
+/// # Parameters
+///
+/// - `message` - The foreign error's text, or `NULL`.
+/// - `opaque` - The binding's pointer to the foreign error.
+/// - `release` - Frees `opaque`, or `NULL` when the error does not own it.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string. `release`, when
 /// not `NULL`, must be safe to call once with `opaque` from any thread, at any
 /// time until the process exits.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 // a binding's foreign callback error, no Java class (DoD #7)
 #[doc(alias = "rust-only")]
 #[ffi_guard]
@@ -1445,6 +1778,14 @@ pub unsafe extern "C" fn kafka_common_Error_local_callback(
 }
 
 /// `new TransactionAbortedException()`.
+///
+/// # Returns
+///
+/// The new error.
+///
+/// # Safety
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_Error_t {
@@ -1453,9 +1794,19 @@ pub extern "C" fn kafka_common_Error_transaction_aborted() -> *mut kafka_common_
 
 /// `new TransactionAbortedException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
@@ -1469,9 +1820,19 @@ pub unsafe extern "C" fn kafka_common_Error_transaction_aborted_message(
 
 /// `new RecordBatchTooLargeException(String message)`.
 ///
+/// # Parameters
+///
+/// - `message` - The detail message, or `NULL`.
+///
+/// # Returns
+///
+/// The new error.
+///
 /// # Safety
 ///
 /// `message` must be null or a valid NUL-terminated C string.
+///
+/// The returned error is owned by the caller, freed with `kafka_common_Error_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_record_batch_too_large(
@@ -1490,7 +1851,7 @@ pub unsafe extern "C" fn kafka_common_Error_record_batch_too_large(
 /// This is the inbound counterpart of [`box_error`]: it is how a callback whose
 /// Rust signature returns `Result<(), Error>` (the rebalance-listener
 /// methods) reports failure across the boundary. The handle is consumed exactly
-/// as [`kafka_common_Error_destroy`] would consume it, so the C callback
+/// as `kafka_common_Error_destroy` would consume it, so the C callback
 /// must not free it itself.
 ///
 /// # Safety
@@ -1518,16 +1879,14 @@ pub(crate) unsafe fn take_error(error: *mut kafka_common_Error_t) -> Option<Erro
 
 /// The class of an error, as a named constant a C caller can switch on.
 ///
-/// # Why this exists (DoD #7)
+/// # Why this exists
 ///
 /// This type has **no Java counterpart**, and needs none: Java discriminates an
 /// error with `instanceof`, and a Rust caller discriminates it by matching the
 /// [`Error`] variant. C can do neither — it cannot see enum variants — so its
 /// whole budget for classifying an error is the numeric code, a free-text
-/// message, and the hierarchy predicates. This is the same reason CLAUDE.md §4
-/// gives for exporting the predicates at all, applied to the other half of the
-/// problem: the predicates place an error in a *family*, and this enum names
-/// the *class*.
+/// message, and the hierarchy predicates. The predicates place an error in a
+/// *family*; this enum names the *class*.
 ///
 /// It is needed because Java's `Errors` deliberately carries no code for a
 /// class that only the client raises — *"Do not add exceptions that occur only
@@ -1794,11 +2153,11 @@ pub enum kafka_common_Error_e {
     kafka_common_Error_LOCAL_UNSUPPORTED_OPERATION = -31,
 }
 
-/// The [`kafka_common_Error_e`] of the class that owns a protocol code.
+/// The `kafka_common_Error_e` of the class that owns a protocol code.
 ///
 /// This resolves the code through
 /// [`Errors::error`] — the very
-/// ownership relation [`kafka_common_Error_e`] is defined by — so the two
+/// ownership relation `kafka_common_Error_e` is defined by — so the two
 /// halves stay consistent by construction rather than by a second hand-written
 /// table.
 ///
@@ -1821,7 +2180,7 @@ fn code_owned_by(error: Errors) -> kafka_common_Error_e {
     }
 }
 
-/// The [`kafka_common_Error_e`] for an error, identifying its class.
+/// The `kafka_common_Error_e` for an error, identifying its class.
 ///
 /// This is **not** the same question as
 /// [`Error::error`](crate::common::Error::error), and the two deliberately
@@ -1832,7 +2191,7 @@ fn code_owned_by(error: Errors) -> kafka_common_Error_e {
 /// callers that cannot see enum variants, so its value is unique per class.
 ///
 /// They agree for every class that owns its code, and disagree for exactly the
-/// four inheritance cases named on [`kafka_common_Error_e`]:
+/// four inheritance cases named on `kafka_common_Error_e`:
 /// [`Error::ProducerBufferExhausted`] (Java: 7), [`Error::Authentication`],
 /// [`Error::Authorization`] and [`Error::SslAuthentication`] (Java: 40).
 ///
@@ -2017,12 +2376,12 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
     }
 }
 
-/// Returns the [`kafka_common_Error_e`] enumerator of a [`kafka_common_Error_t`]
-/// handle, as `__enum` does for every C enum (CLAUDE.md §4 "Enums").
+/// Returns the `kafka_common_Error_e` enumerator of a `kafka_common_Error_t`
+/// handle, as `__enum` does for every C enum.
 ///
 /// The value identifies the error's **class**, not merely its protocol code:
 /// the values are pairwise distinct, so a `switch` on this value is enough to
-/// tell any two errors apart. See [`kafka_common_Error_e`] for the
+/// tell any two errors apart. See `kafka_common_Error_e` for the
 /// assignment rule and for the four classes whose value deliberately differs
 /// from the code Java's `Errors.forException` would report.
 ///
@@ -2032,7 +2391,7 @@ pub(crate) fn error_code_of(error: &Error) -> kafka_common_Error_e {
 ///
 /// # Returns
 ///
-/// The error's [`kafka_common_Error_e`], or
+/// The error's `kafka_common_Error_e`, or
 /// `kafka_common_Error_NONE` (`0`) if the error handle is null. The
 /// enumerators have explicit values that fit an `int`, so a C caller that was
 /// comparing the previous `int32_t` return against integers keeps compiling
@@ -2057,11 +2416,6 @@ pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Err
 
 /// Returns the error message as a null-terminated C string.
 ///
-/// The returned pointer is valid as long as `error` is: until
-/// [`kafka_common_Error_destroy`] is called on it or, for a borrowed handle
-/// (from [`kafka_common_Error_source`] or a payload or struct-field accessor),
-/// until its owner is destroyed by that owner's own `_destroy`.
-///
 /// # Parameters
 ///
 /// - `error`: Non-null error handle.
@@ -2074,7 +2428,11 @@ pub unsafe extern "C" fn kafka_common_Error__enum(error: *const kafka_common_Err
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
-/// The returned pointer must not be used after the error is destroyed.
+///
+/// The returned pointer is borrowed, valid as long as `error` is: until
+/// `kafka_common_Error_destroy` is called on it or, for a borrowed handle (from
+/// `kafka_common_Error_source` or a payload or struct-field accessor), until its owner is
+/// destroyed by that owner's own `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_Error_t) -> *const c_char {
@@ -2094,14 +2452,19 @@ pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_E
 /// Returns the error's cause (`Throwable.getCause()`), or null when it has
 /// none.
 ///
-/// The returned handle is *borrowed*: it is owned by `error` and valid until
-/// [`kafka_common_Error_destroy`] is called on `error`. It must not be passed
-/// to `kafka_common_Error_destroy` itself. Calling this on the returned handle
-/// walks one more step down the chain of causes.
+/// Calling this on the returned handle walks one more step down the chain of causes.
+///
+/// # Parameters
+///
+/// - `error` - The error handle, or `NULL`.
 ///
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
+///
+/// The returned handle is borrowed: it is owned by `error` and valid until
+/// `kafka_common_Error_destroy` is called on `error`. It must not be passed to
+/// `kafka_common_Error_destroy` itself.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Error_t) -> *const kafka_common_Error_t {
@@ -2123,6 +2486,10 @@ pub unsafe extern "C" fn kafka_common_Error_source(error: *const kafka_common_Er
 /// A caught Rust panic returns -1, as for no throttle time: Java's
 /// `ThrottlingQuotaExceededException(int, String)` stores any `int`, and the C
 /// constructors pass it through, so no value is outside its domain.
+///
+/// # Parameters
+///
+/// - `error` - The error handle, or `NULL`.
 ///
 /// # Safety
 ///
@@ -2152,10 +2519,14 @@ pub unsafe extern "C" fn kafka_common_Error_throttle_time_ms(error: *const kafka
 ///
 /// Safe to call with a null pointer (no-op).
 ///
+/// # Parameters
+///
+/// - `error` - The owned error handle to free, or `NULL`.
+///
 /// # Safety
 ///
 /// - `error` must be null or a valid handle from a function that returned an error.
-///   It must be an owned handle: a borrowed one ([`kafka_common_Error_source`], a
+///   It must be an owned handle: a borrowed one (`kafka_common_Error_source`, a
 ///   payload's or struct field's error accessor) belongs to its owner and is
 ///   never passed here.
 /// - After this call, the pointer is invalid and must not be used.
@@ -2207,7 +2578,7 @@ mod tests {
     ///
     /// Both halves matter. The instance checks that `error_code_of`'s arm points
     /// at the right constant; the literal checks that the constant still has the
-    /// value it was published with. See [`kafka_common_Error_e`] — the
+    /// value it was published with. See `kafka_common_Error_e` — the
     /// negatives are ABI, so a renumbering must fail here rather than silently
     /// reach a C caller.
     fn client_side_classes() -> Vec<(Error, kafka_common_Error_e, i32)> {
@@ -2377,7 +2748,7 @@ mod tests {
     /// Every code whose `Errors::error()` names a class reports that class's own
     /// value, and the value equals `Errors::code()`.
     ///
-    /// This machine-checks the faithful half of [`kafka_common_Error_e`]
+    /// This machine-checks the faithful half of `kafka_common_Error_e`
     /// against `Errors` itself, so the two cannot drift: a code renamed, renumbered
     /// or re-pointed at a different class in `Errors` fails here.
     #[test]
@@ -2509,7 +2880,7 @@ mod tests {
     /// `true` for its own class only.
     const LEAF_SUBCLASSES: [(&str, &str); 1] = [
         // `CorrelationIdMismatchException extends IllegalStateException`
-        // (`CorrelationIdMismatchException.java:23`).
+        // (`org.apache.kafka.common.requests.CorrelationIdMismatchException`).
         ("is_local_illegal_state_error", "is_correlation_id_mismatch_error"),
     ];
 
@@ -2580,7 +2951,7 @@ mod tests {
     /// The 30 Rust-local negatives keep the values they were published with, and
     /// each client-side class maps to the enumerator named after it.
     ///
-    /// These values are ABI (see [`kafka_common_Error_e`]): a new class
+    /// These values are ABI (see `kafka_common_Error_e`): a new class
     /// appends at the most-negative end, so inserting one mid-list — which would
     /// renumber everything after it — must fail here.
     #[test]

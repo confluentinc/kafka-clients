@@ -28,7 +28,7 @@ pub struct kafka_common_ClusterResource_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_ClusterResource_t`] points at: the value plus the
+/// What a `kafka_common_ClusterResource_t` points at: the value plus the
 /// NUL-terminated cluster id the getter borrows out (`None` for Java's null).
 pub(crate) struct ClusterResourceInner {
     resource: ClusterResource,
@@ -61,13 +61,17 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_ClusterResource_t) -> &'a 
     unsafe { &*(resource as *const ClusterResourceInner) }
 }
 
-/// `new ClusterResource(String clusterId)`; a null `cluster_id` is Java's
-/// `null` (a broker too old to report one). Owned, freed with
-/// [`kafka_common_ClusterResource_destroy`].
+/// Create `ClusterResource` with a cluster id. Note that cluster id may be `NULL` if the
+/// metadata request was sent to a broker without support for cluster ids.
+///
+/// # Parameters
+///
+/// - `cluster_id` - The cluster id
 ///
 /// # Safety
 ///
-/// `cluster_id` must be null or a valid NUL-terminated string.
+/// `cluster_id` must be `NULL` or a valid NUL-terminated string. The returned handle is owned,
+/// freed with `kafka_common_ClusterResource_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_new(
@@ -80,12 +84,17 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_new(
     Box::into_raw(Box::new(inner)) as *mut kafka_common_ClusterResource_t
 }
 
-/// `clusterId()`: borrowed from the handle, or null when the cluster has no
-/// id.
+/// Return the cluster id. Note that it may be `NULL` if the metadata request was sent to a broker without
+/// support for cluster ids.
+///
+/// # Returns
+///
+/// The cluster id, or `NULL`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid cluster-resource handle.
+/// `self_` must be a valid cluster-resource handle. The string is borrowed from the handle,
+/// valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
@@ -100,11 +109,12 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
         .map_or(ptr::null(), |id| id.as_ptr())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `ClusterResource(clusterId=<id>)`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid cluster-resource handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(

@@ -17,30 +17,24 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// Raised if the protocol schema validation fails while parsing a request or
-    /// response.
+    /// Thrown if the protocol schema validation fails while parsing request or response.
     ///
-    /// Corresponds to Java's `SchemaException`. It has no entry in `Errors`, so
-    /// it carries no protocol code — Java's `Errors.forException` walk finds
-    /// none on `KafkaException` either and falls through to
-    /// `UNKNOWN_SERVER_ERROR`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `SchemaException` -> `KafkaException`
-    ///
-    /// Like `SerializationException` it bypasses `ApiException`, so
-    /// [`is_kafka_error`](crate::common::Error::is_kafka_error) is `true` while
-    /// [`is_api_error`](crate::common::Error::is_api_error) is `false`.
-    ///
-    /// `NetworkClient.parseResponse` (`NetworkClient.java:917-933`) is the only
-    /// site in the client that raises it: a buffer underflow while parsing a
-    /// response, and a correlation-id mismatch on a response that is unrelated
-    /// to a SASL request.
-    ///
-    /// Crate-private although `Error::Schema` is public: Java's class sits in
-    /// `common.protocol.types`, which is "not a supported API". Callers match
-    /// the variant and use `Display` / `source()`; the payload itself is not
-    /// reachable by name.
+    /// No protocol code.
+    // Java's `Errors.forException` walk finds no code on `KafkaException` either
+    // and falls through to `UNKNOWN_SERVER_ERROR`. Like `SerializationException`
+    // it bypasses `ApiException`: `is_kafka_error` is `true` while `is_api_error`
+    // is `false`.
+    //
+    // `org.apache.kafka.clients.NetworkClient#parseResponse` is the only site in
+    // the client that raises it: a buffer underflow while parsing a response, and
+    // a correlation-id mismatch on a response that is unrelated to a SASL request.
+    //
+    // Crate-private although `Error::Schema` is public: Java's class sits in
+    // `common.protocol.types`, which is "not a supported API". Callers match the
+    // variant and use `Display` / `source()`; the payload itself is not reachable
+    // by name.
     #[expect(unnameable_types)]
     #[doc(alias = "org.apache.kafka.common.protocol.types.SchemaException")]
     SchemaError,

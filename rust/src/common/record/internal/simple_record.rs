@@ -41,12 +41,12 @@ pub struct SimpleRecord {
 /// Parameters for [`SimpleRecord::with_options`].
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
-/// CLAUDE.md §2's cap on derived overload names: Java's nine `SimpleRecord`
-/// constructors (`SimpleRecord.java:36,44,48,52,56,60,64,68,72`) have an EMPTY
+/// CLAUDE.md §2's cap on derived overload names: Java's nine `SimpleRecord#SimpleRecord`
+/// constructors have an EMPTY
 /// parameter-name intersection and none of them is no-arg, so nobody keeps the
 /// plain translated name and every overload is suffixed with its full parameter
 /// list. For the widest one — `SimpleRecord(long, ByteBuffer, ByteBuffer,
-/// Header[])` (`:36`) — that list is four parameters long, past §2's cap of
+/// Header[])` — that list is four parameters long, past §2's cap of
 /// three, so this struct becomes the constructor's *only* parameter and carries
 /// every Java parameter.
 ///
@@ -58,18 +58,19 @@ pub struct SimpleRecord {
 #[non_exhaustive]
 pub(crate) struct SimpleRecordOptions {
     /// The record timestamp. Java's `timestamp`; starts at
-    /// [`RecordBatch::NO_TIMESTAMP`], the value `:60`/`:64` passes on the
-    /// caller's behalf.
+    /// [`RecordBatch::NO_TIMESTAMP`], the value `SimpleRecord(byte[])`/`SimpleRecord(ByteBuffer)`
+    /// passes on the caller's behalf.
     pub timestamp: i64,
-    /// The record key, or `None` for no key. Java's `key`, which `:56`, `:60`
-    /// and `:64` pass as `null`.
+    /// The record key, or `None` for no key. Java's `key`, which `SimpleRecord(long,byte[])`,
+    /// `SimpleRecord(byte[])` and `SimpleRecord(ByteBuffer)` pass as `null`.
     pub key: Option<Vec<u8>>,
     /// The record value, or `None` for no value. Java's `value` — the one
     /// parameter no constructor supplies for its caller, hence mandatory.
     pub value: Option<Vec<u8>>,
     /// The record headers. Java's `headers`; starts empty, the value
-    /// `Record.EMPTY_HEADERS` that `:48` passes on the caller's behalf. Java's
-    /// `:36` guards it with `Objects.requireNonNull`; in Rust a `Vec` cannot be
+    /// `Record.EMPTY_HEADERS` that `SimpleRecord(long,ByteBuffer,ByteBuffer)` passes on the
+    /// caller's behalf. Java's `SimpleRecord(long,ByteBuffer,ByteBuffer,Header[])` guards it
+    /// with `Objects.requireNonNull`; in Rust a `Vec` cannot be
     /// null, so the check has no translation.
     pub headers: Vec<RecordHeader>,
 }
@@ -133,8 +134,9 @@ impl SimpleRecordOptionsBuilder {
     /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
     /// being named in the constructor. Today there is one mandatory set:
     /// `value`. The other three are not in it because Java's narrower
-    /// constructors supply them themselves — `timestamp` at `:60`/`:64`, `key`
-    /// at `:56`/`:60`/`:64`, `headers` at `:48`.
+    /// constructors supply them themselves — `timestamp` in `SimpleRecord(byte[])` /
+    /// `SimpleRecord(ByteBuffer)`, `key` in `SimpleRecord(long,byte[])` / `SimpleRecord(byte[])` /
+    /// `SimpleRecord(ByteBuffer)`, `headers` in `SimpleRecord(long,ByteBuffer,ByteBuffer)`.
     ///
     /// # Errors
     ///
@@ -161,11 +163,13 @@ impl SimpleRecordOptionsBuilder {
 }
 
 impl SimpleRecord {
-    // Java's nine `SimpleRecord` constructors
-    // (`SimpleRecord.java:36,44,48,52,56,60,64,68,72`) have an EMPTY
+    // Java's nine `org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord`
+    // constructors have an EMPTY
     // parameter-name intersection and none of them is no-arg, so under
     // CLAUDE.md §2 nobody keeps the plain translated name and every overload
-    // carries its full parameter list as the suffix. `:36`/`:44` and `:48`/`:52`
+    // carries its full parameter list as the suffix.
+    // `SimpleRecord(long,ByteBuffer,ByteBuffer,Header[])` / `SimpleRecord(long,byte[],byte[],Header[])`
+    // and `SimpleRecord(long,ByteBuffer,ByteBuffer)` / `SimpleRecord(long,byte[],byte[])`
     // collapse pairwise, because Rust has no `ByteBuffer`/`byte[]` distinction
     // to discriminate on.
 
@@ -179,7 +183,7 @@ impl SimpleRecord {
     ///   parameters, past CLAUDE.md §2's cap of three.
     ///
     /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer,
-    /// Header[])` (`SimpleRecord.java:36`) and its `byte[]` twin (`:44`).
+    /// Header[])` and its `byte[]` twin.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub(crate) fn with_options(options: SimpleRecordOptions) -> Self {
         let SimpleRecordOptions { timestamp, key, value, headers } = options;
@@ -188,8 +192,8 @@ impl SimpleRecord {
 
     /// Create a new `SimpleRecord` with timestamp, key, and value (no headers).
     ///
-    /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer)`
-    /// (`SimpleRecord.java:48`), which passes `Record.EMPTY_HEADERS` itself.
+    /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer)`, which passes
+    /// `Record.EMPTY_HEADERS` itself.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_timestamp_key_value(timestamp: i64, key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
         Self::with_options(
@@ -204,7 +208,7 @@ impl SimpleRecord {
 
     /// Create a new `SimpleRecord` with timestamp and value only (no key, no headers).
     ///
-    /// Corresponds to Java's `SimpleRecord(long, byte[])` (`SimpleRecord.java:56`).
+    /// Corresponds to Java's `SimpleRecord(long, byte[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_timestamp_value(timestamp: i64, value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(timestamp, None, value)
@@ -214,8 +218,7 @@ impl SimpleRecord {
     ///
     /// Uses `RecordBatch::NO_TIMESTAMP` as the timestamp.
     ///
-    /// Corresponds to Java's `SimpleRecord(byte[])` (`SimpleRecord.java:60`) and
-    /// its `ByteBuffer` twin (`:64`).
+    /// Corresponds to Java's `SimpleRecord(byte[])` and its `ByteBuffer` twin.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_value(value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(RecordBatch::NO_TIMESTAMP, None, value)
@@ -225,7 +228,7 @@ impl SimpleRecord {
     ///
     /// Uses `RecordBatch::NO_TIMESTAMP` as the timestamp.
     ///
-    /// Corresponds to Java's `SimpleRecord(byte[], byte[])` (`SimpleRecord.java:68`).
+    /// Corresponds to Java's `SimpleRecord(byte[], byte[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_key_value(key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
         Self::with_timestamp_key_value(RecordBatch::NO_TIMESTAMP, key, value)
@@ -235,7 +238,7 @@ impl SimpleRecord {
     ///
     /// Copies the key, value, and headers from the record.
     ///
-    /// Corresponds to Java's `SimpleRecord(Record)` (`SimpleRecord.java:72`).
+    /// Corresponds to Java's `SimpleRecord(Record)`.
     #[doc(alias = "org.apache.kafka.common.record.internal.SimpleRecord#SimpleRecord")]
     pub fn with_record(record: &dyn super::Record) -> Self {
         Self::with_options(

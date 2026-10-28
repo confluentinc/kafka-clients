@@ -184,9 +184,9 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 ///
 /// The client is *correct* not to retry this itself — Java's describe-by-names
 /// `Call` completes the per-topic future exceptionally on any topic-level error
-/// (`KafkaAdminClient.java:2253-2254`, `if (error != Errors.NONE)` →
-/// `future.completeExceptionally(error.error())`), with no retry — so the
-/// wait belongs in the test.
+/// (`KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi`,
+/// `if (error != Errors.NONE)` → `future.completeExceptionally(error.error())`),
+/// with no retry — so the wait belongs in the test.
 ///
 /// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Every other outcome — a failed
 /// call, a missing key, any other per-topic error — panics on the first attempt,
@@ -554,13 +554,12 @@ async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory
 /// result.
 ///
 /// On a single-broker cluster the sole replica is always the preferred leader, so
-/// `ReplicationControlManager.electLeader`
-/// (`metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java:1575-1579`)
-/// returns `ELECTION_NOT_NEEDED` — deterministically, which is why this asserts
-/// the exact error rather than tolerating either outcome. `ELECTION_NOT_NEEDED`
-/// is the only state a healthy single-node PLAINTEXT cluster can reach here; a
-/// *successful* election needs a partition whose leader is not its preferred
-/// replica, which needs a broker to have gone down and come back.
+/// `org.apache.kafka.controller.ReplicationControlManager#electLeader` returns
+/// `ELECTION_NOT_NEEDED` — deterministically, which is why this asserts the exact
+/// error rather than tolerating either outcome. `ELECTION_NOT_NEEDED` is the only
+/// state a healthy single-node PLAINTEXT cluster can reach here; a *successful*
+/// election needs a partition whose leader is not its preferred replica, which
+/// needs a broker to have gone down and come back.
 async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
@@ -598,8 +597,7 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// An explicit partition set is not widened to a cluster-wide election.
 ///
 /// Added, not converted. Java's partition set is **nullable** and the two states
-/// are different requests: `ReplicationControlManager.electLeaders`
-/// (`ReplicationControlManager.java:1507-1533`) branches on
+/// are different requests: `ReplicationControlManager#electLeaders` branches on
 /// `topicPartitions() == null`, and in that branch **omits** every partition
 /// whose outcome is `ELECTION_NOT_NEEDED` ("we do not return partitions which
 /// already have the desired leader"), whereas the explicit branch always emits
@@ -624,7 +622,7 @@ async fn elect_preferred_leaders<F: AdminBackendFactory>(ctx: &mut TestContext, 
 /// Both election types are exercised. On a healthy partition they agree — Java
 /// returns `ELECTION_NOT_NEEDED` for `PREFERRED` when the preferred replica
 /// leads and for `UNCLEAN` when the partition merely has a leader
-/// (`ReplicationControlManager.java:1575-1579`) — so this proves the
+/// (`ReplicationControlManager#electLeader`) — so this proves the
 /// `election_type` value crosses and is accepted, **not** that the two values
 /// are distinguished. Telling them apart needs a leaderless partition, which
 /// needs a broker outage.
@@ -772,7 +770,7 @@ async fn alter_and_list_partition_reassignments<F: AdminBackendFactory>(ctx: &mu
 /// A `None` reassignment reaches the broker as a *cancellation*.
 ///
 /// Added, not converted. Java's map value is an `Optional`, and an empty one
-/// reverts an ongoing reassignment (`Admin.java:1142-1143`) — which is a
+/// reverts an ongoing reassignment (`Admin#alterPartitionReassignments(Map)`) — which is a
 /// different request from a `NewPartitionReassignment` with no replicas, a value
 /// Java rejects before the RPC is issued (and that
 /// `NewPartitionReassignment::new` therefore cannot construct).

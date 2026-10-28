@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_replica_log_dirs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
 
 use crate::common::requests::DescribeLogDirsResponse;
 use std::collections::HashMap;
@@ -23,8 +21,6 @@ use crate::common::KafkaFuture;
 use crate::common::TopicPartitionReplica;
 
 /// The result of the `Admin::describe_replica_log_dirs` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult")]
 pub struct DescribeReplicaLogDirsResult {
@@ -47,8 +43,6 @@ impl DescribeReplicaLogDirsResult {
 
     /// Returns a future which succeeds if log directory information of all
     /// replicas is available.
-    ///
-    /// Corresponds to `DescribeReplicaLogDirsResult.all`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartitionReplica, ReplicaLogDirInfo>> {
         let entries: Vec<(TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>)> =
@@ -58,8 +52,6 @@ impl DescribeReplicaLogDirsResult {
 }
 
 /// Log directory information for a replica of a partition on a given broker.
-///
-/// Corresponds to `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo")]
 pub struct ReplicaLogDirInfo {
@@ -86,7 +78,7 @@ impl ReplicaLogDirInfo {
         }
     }
 
-    /// The current log directory of the replica of this partition on the given
+    /// Returns the current log directory of the replica of this partition on the given
     /// broker. `None` if no replica is found for this partition on the broker.
     #[doc(
         alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaLogDir"
@@ -95,7 +87,8 @@ impl ReplicaLogDirInfo {
         self.current_replica_log_dir.as_deref()
     }
 
-    /// Defined as `max(HW of partition - LEO of the replica, 0)`.
+    /// Returns the lag of the current replica, defined as
+    /// `max(HW of partition - LEO of the replica, 0)`.
     #[doc(
         alias = "org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult$ReplicaLogDirInfo#getCurrentReplicaOffsetLag"
     )]
@@ -103,7 +96,7 @@ impl ReplicaLogDirInfo {
         self.current_replica_offset_lag
     }
 
-    /// The future log directory of the replica of this partition on the given
+    /// Returns the future log directory of the replica of this partition on the given
     /// broker. `None` if the replica of this partition is not being moved to
     /// another log directory on the given broker.
     #[doc(
@@ -113,7 +106,7 @@ impl ReplicaLogDirInfo {
         self.future_replica_log_dir.as_deref()
     }
 
-    /// The LEO of the replica minus the LEO of the future log of this replica in
+    /// Returns the LEO of the replica minus the LEO of the future log of this replica in
     /// the destination log directory. `-1` if either there is no replica for
     /// this partition or the replica is not being moved to another log
     /// directory on the given broker.

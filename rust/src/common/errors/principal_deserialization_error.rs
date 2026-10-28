@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Request principal deserialization failed during forwarding.
+    /// Error used to indicate a kafka principal deserialization failure during request forwarding.
     ///
-    /// Corresponds to Java's `PrincipalDeserializationException`, error code `Errors::PrincipalDeserializationFailure`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `PrincipalDeserializationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::PrincipalDeserializationFailure`.
     #[doc(alias = "org.apache.kafka.common.errors.PrincipalDeserializationException")]
     PrincipalDeserializationError,
     code: Errors::PrincipalDeserializationFailure,

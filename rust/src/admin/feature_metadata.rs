@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! Details about finalized as well as supported features.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.FeatureMetadata`.
 
 use std::collections::HashMap;
 
@@ -24,8 +22,6 @@ use super::{FinalizedVersionRange, SupportedVersionRange};
 ///
 /// This is particularly useful to hold the result returned by the
 /// [`describe_features_with_options`](crate::admin::Admin::describe_features_with_options) API.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FeatureMetadata`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata")]
 pub struct FeatureMetadata {
@@ -53,7 +49,7 @@ impl FeatureMetadata {
         &self.finalized_features
     }
 
-    /// The epoch for the finalized features. If empty, the finalized features
+    /// Returns the epoch for the finalized features. If empty, the finalized features
     /// are absent/unavailable.
     #[doc(alias = "org.apache.kafka.clients.admin.FeatureMetadata#finalizedFeaturesEpoch")]
     pub fn finalized_features_epoch(&self) -> Option<i64> {
@@ -70,8 +66,8 @@ impl FeatureMetadata {
 }
 
 impl std::hash::Hash for FeatureMetadata {
-    /// Java's `FeatureMetadata.hashCode()` is `Objects.hash` of the three
-    /// fields; the two maps hash independently of their order.
+    // Java's `FeatureMetadata.hashCode()` is `Objects.hash` of the three
+    // fields; the two maps hash independently of their order.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         crate::common::utils::Utils::hash_unordered(&self.finalized_features, state);
         self.finalized_features_epoch.hash(state);

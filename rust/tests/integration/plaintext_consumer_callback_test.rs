@@ -46,24 +46,24 @@
 //!
 //! Runs:
 //! - `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForAsyncConsumer`
-//!   (line 179) → `test_on_partitions_assigned_called_with_new_partitions_only`
-//! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned` (85)
+//!   → `test_on_partitions_assigned_called_with_new_partitions_only`
+//! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned`
 //!   → `test_rebalance_listener_assignment_on_partitions_assigned`
-//! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned` (103)
+//! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned`
 //!   → `test_rebalance_listener_beginning_offsets_on_partitions_assigned`
-//! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked` (142)
+//! - `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked`
 //!   → `test_rebalance_listener_assignment_on_partitions_revoked`
-//! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked` (154)
+//! - `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked`
 //!   → `test_rebalance_listener_beginning_offsets_on_partitions_revoked`
-//! - `testAsyncConsumerGetPositionOfNewlyAssignedPartitionOnPartitionsAssignedCallback` (246)
+//! - `testAsyncConsumerGetPositionOfNewlyAssignedPartitionOnPartitionsAssignedCallback`
 //!   → `test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback`
-//! - `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback` (264)
+//! - `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`
 //!   → `test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback`
 //!
 //! # SKIPped (no subject on the Rust side)
 //!
-//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned` (66)
-//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsRevoked` (123)
+//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned`
+//! - SKIP: `testAsyncConsumerRebalanceListenerAssignOnPartitionsRevoked`
 //!   Java asserts that `consumer.assign(...)` called from inside a rebalance
 //!   callback throws IllegalState "Subscription to topics, partitions and
 //!   pattern are mutually exclusive". In Rust a listener reaches its consumer
@@ -247,7 +247,7 @@ async fn poll_until_captured(
 
 /// Translates Java's
 /// `testOnPartitionsAssignedCalledWithNewPartitionsOnlyForAsyncConsumer`
-/// (line 179) via `testOnPartitionsAssignedCalledWithExpectedPartitions(
+/// via `testOnPartitionsAssignedCalledWithExpectedPartitions(
 /// consumer, /*expectNewPartitionsOnlyInCallback=*/ true)`.
 ///
 /// KIP-848 (CONSUMER protocol): when the subscription is expanded to add a
@@ -524,8 +524,8 @@ async fn poll_until_flag(
     panic!("Timed out before expected rebalance callback ran");
 }
 
-/// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned`
-/// (line 85): `assignment()` inside the callback contains tp.
+/// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsAssigned`:
+/// `assignment()` inside the callback contains tp.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_assignment_on_partitions_assigned() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -555,8 +555,8 @@ async fn test_rebalance_listener_assignment_on_partitions_assigned() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned`
-/// (line 103): `beginningOffsets([tp])` inside the callback → `get(tp) == 0`.
+/// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsAssigned`:
+/// `beginningOffsets([tp])` inside the callback → `get(tp) == 0`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_beginning_offsets_on_partitions_assigned() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -584,8 +584,8 @@ async fn test_rebalance_listener_beginning_offsets_on_partitions_assigned() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked`
-/// (line 142): `assignment()` inside revoked contains tp.
+/// Java `testAsyncConsumerRebalanceListenerAssignmentOnPartitionsRevoked`:
+/// `assignment()` inside revoked contains tp.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_assignment_on_partitions_revoked() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -615,8 +615,8 @@ async fn test_rebalance_listener_assignment_on_partitions_revoked() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked`
-/// (line 154): `beginningOffsets([tp])` inside revoked → `get(tp) == 0`.
+/// Java `testAsyncConsumerRebalanceListenerBeginningOffsetsOnPartitionsRevoked`:
+/// `beginningOffsets([tp])` inside revoked → `get(tp) == 0`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_beginning_offsets_on_partitions_revoked() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -644,8 +644,8 @@ async fn test_rebalance_listener_beginning_offsets_on_partitions_revoked() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java `testAsyncConsumerGetPositionOfNewlyAssignedPartitionOnPartitionsAssignedCallback`
-/// (line 246): `position(tp)` inside the assigned callback does not throw.
+/// Java `testAsyncConsumerGetPositionOfNewlyAssignedPartitionOnPartitionsAssignedCallback`:
+/// `position(tp)` inside the assigned callback does not throw.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_position_of_newly_assigned_partition_on_partitions_assigned_callback() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -675,8 +675,8 @@ async fn test_get_position_of_newly_assigned_partition_on_partitions_assigned_ca
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Java `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`
-/// (line 264): `seek(tp, 100)` + `pause([tp])` inside the assigned callback,
+/// Java `testAsyncConsumerSeekPositionAndPauseNewlyAssignedPartitionOnPartitionsAssignedCallback`:
+/// `seek(tp, 100)` + `pause([tp])` inside the assigned callback,
 /// then resume + consume the remaining records from offset 100.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_seek_position_and_pause_newly_assigned_partition_on_partitions_assigned_callback() {

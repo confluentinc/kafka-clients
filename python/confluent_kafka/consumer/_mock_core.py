@@ -116,7 +116,9 @@ def _require(name: str, value: object) -> None:
 
 def _mock_listener(callback: Any) -> ConsumerRebalanceListener | None:
     """``subscribe``'s listener in Java's mock: a ``None`` is refused first
-    (``MockConsumer.java:200,220``); left out (``MISSING``) is no listener."""
+    (``org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener)``,
+    ``#subscribe(Collection,ConsumerRebalanceListener)``); left out (``MISSING``) is no
+    listener."""
     if callback is None:
         raise IllegalArgumentError(message="RebalanceListener cannot be None")
     return None if callback is MISSING else callback
@@ -542,7 +544,8 @@ class MockConsumerCore(Generic[K, V]):
                              timeout: Duration = MISSING
                              ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
         # Java's mock throws UnsupportedOperationException("Not implemented
-        # yet.") (MockConsumer.java:611), inside its synchronized body.
+        # yet.") (org.apache.kafka.clients.consumer.MockConsumer#offsetsForTimes(Map)),
+        # inside its synchronized body.
         with self._lock:
             raise UnsupportedOperationError(message="Not implemented yet.")
 

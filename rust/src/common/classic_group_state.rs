@@ -18,9 +18,7 @@
 
 use std::fmt;
 
-/// The state of a classic group.
-///
-/// Corresponds to `org.apache.kafka.common.ClassicGroupState`.
+/// The classic group state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.ClassicGroupState")]
@@ -41,7 +39,7 @@ pub enum ClassicGroupState {
 }
 
 impl ClassicGroupState {
-    /// The name of this enum constant, exactly as declared in Java
+    /// Returns the name of this enum constant, exactly as declared in Java
     /// (`PREPARING_REBALANCE`).
     ///
     /// Java's `Enum.name()`, which `ClassicGroupState` inherits. The text Java's
@@ -61,8 +59,13 @@ impl ClassicGroupState {
 
     /// Case-insensitive classic group state lookup by string name.
     ///
-    /// Returns [`ClassicGroupState::Unknown`] if the name is unrecognized,
-    /// mirroring Java's `parse`.
+    /// # Arguments
+    ///
+    /// - `name` - the state name
+    ///
+    /// # Returns
+    ///
+    /// The state, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.ClassicGroupState#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_uppercase().as_str() {
@@ -79,7 +82,7 @@ impl ClassicGroupState {
 
 /// Java's `toString()`, which returns the private `name` field: the text
 /// (`PreparingRebalance`) the broker sends and [`ClassicGroupState::parse`] reads, not
-/// the constant name [`ClassicGroupState::name`] returns (`ClassicGroupState.java:32-61`).
+/// the constant name [`ClassicGroupState::name`] returns (the constants of `ClassicGroupState`).
 impl fmt::Display for ClassicGroupState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -112,7 +115,7 @@ mod tests {
 
     /// New test, no Java original (Java has no `ClassicGroupStateTest`): every
     /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
-    /// `toString()` (`ClassicGroupState.java:32-61`), and `parse` reads the `toString()` text back.
+    /// `toString()` (`ClassicGroupState#toString`), and `parse` reads the `toString()` text back.
     #[test]
     fn name_and_display_match_java_for_every_constant() {
         for (state, name, display) in [

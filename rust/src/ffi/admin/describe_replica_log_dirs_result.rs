@@ -124,12 +124,18 @@ pub(crate) unsafe fn destroy_replica_log_dir_info_element(element: *mut c_void) 
     }
 }
 
-/// `getCurrentReplicaLogDir()`: borrowed from the handle, valid until it is
-/// destroyed; `NULL` when the replica has no current log dir.
+/// The current log directory of the replica of this partition on the given broker. Null if no
+/// replica is not found for this partition on the given broker.
+///
+/// # Returns
+///
+/// The current log dir; `NULL` when the replica has no current log dir.
 ///
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+///
+/// The returned string is borrowed from `self_`, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_log_dir(
@@ -141,7 +147,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     optional_c_str(&unsafe { info_inner_ref(self_) }.current_replica_log_dir_c)
 }
 
-/// `getCurrentReplicaOffsetLag()`.
+/// Defined as max(HW of partition - LEO of the replica, 0).
+///
+/// # Returns
+///
+/// The offset lag of the current replica.
 ///
 /// # Safety
 ///
@@ -156,12 +166,18 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     unsafe { replica_log_dir_info_ref(self_) }.current_replica_offset_lag()
 }
 
-/// `getFutureReplicaLogDir()`: borrowed from the handle, valid until it is
-/// destroyed; `NULL` when the replica is not being moved.
+/// The future log directory of the replica of this partition on the given broker. Null if the
+/// replica of this partition is not being moved to another log directory on the given broker.
+///
+/// # Returns
+///
+/// The future log dir; `NULL` when the replica is not being moved.
 ///
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+///
+/// The returned string is borrowed from `self_`, valid until it is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_log_dir(
@@ -173,7 +189,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     optional_c_str(&unsafe { info_inner_ref(self_) }.future_replica_log_dir_c)
 }
 
-/// `getFutureReplicaOffsetLag()`.
+/// The LEO of the replica - LEO of the future log of this replica in the destination log
+/// directory. -1 if either there is not replica for this partition or the replica of this partition
+/// is not being moved to another log directory on the given broker.
+///
+/// # Returns
+///
+/// The offset lag of the future replica.
 ///
 /// # Safety
 ///
@@ -188,11 +210,13 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     unsafe { replica_log_dir_info_ref(self_) }.future_replica_offset_lag()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a live replica-log-dir-info handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_to_string(
@@ -204,11 +228,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirI
     into_c_string(&unsafe { replica_log_dir_info_ref(self_) }.to_string())
 }
 
-/// Frees an owned replica-log-dir-info handle; null is a no-op.
+/// Frees an owned replica-log-dir-info handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -264,7 +288,7 @@ unsafe fn destroy_topic_partition_replica_element(element: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `a` and `b` must each be null or a valid topic-partition-replica
+/// `a` and `b` must each be `NULL` or a valid topic-partition-replica
 /// handle, alive for this call.
 unsafe fn topic_partition_replica_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     if a.is_null() || b.is_null() {
@@ -341,16 +365,21 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `values()`: an owned `kafka_Map_t` (freed with `kafka_Map_destroy`, which
-/// frees its keys and values) of owned `kafka_common_TopicPartitionReplica_t *`
-/// keys, ordered by topic, partition, then broker id and compared by value
-/// in `kafka_Map_get`, to owned `kafka_common_KafkaFuture_t *` whose `get`
-/// delivers a `kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t *`
-/// owned by the future.
+/// Return a map from replica to future which can be used to check the log directory information of
+/// individual replicas
+///
+/// # Returns
+///
+/// A `kafka_Map_t` of owned `kafka_common_TopicPartitionReplica_t *` keys, ordered by topic, partition, then broker id
+/// and compared by value in `kafka_Map_get`, to owned `kafka_common_KafkaFuture_t *` whose `get`
+/// delivers a `kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees its keys
+/// and values.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_values(
@@ -383,15 +412,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_values(
     )
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of
-/// `kafka_common_TopicPartitionReplica_t *` keys, ordered by topic,
-/// partition, then broker id and compared by value in `kafka_Map_get`, to
+/// Return a future which succeeds if log directory information of all replicas are available
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartitionReplica_t *` keys, ordered by topic, partition, then broker id and
+/// compared by value in `kafka_Map_get`, to
 /// `kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t *` values.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
@@ -406,12 +440,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), infos_map, destroy_map_element) }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

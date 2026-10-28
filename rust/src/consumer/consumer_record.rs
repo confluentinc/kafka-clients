@@ -23,20 +23,19 @@ use std::sync::Arc;
 use crate::common::header::RecordHeaders;
 use crate::common::record::TimestampType;
 
-/// A key/value pair received from Kafka.
+/// A key/value pair to be received from Kafka. This also consists of a topic
+/// name and a partition number from which the record is being received, an
+/// offset that points to the record in a Kafka partition, and a timestamp as
+/// marked by the corresponding `ProducerRecord`.
 ///
-/// Corresponds to Java's `org.apache.kafka.clients.consumer.ConsumerRecord<K,V>`.
+/// # Translation notes
 ///
-/// Per `consumer-threading.md` §27, the `topic` is an [`Arc<str>`] that is
-/// shared cheaply across all records from the same topic-partition (via
-/// `SubscriptionState`), and the `headers` are owned for this milestone
-/// (matching Java's allocation behavior).
-///
-/// # Thread safety
-///
-/// Mirrors Java's behavior: this struct is not designed for concurrent
-/// mutation; `Headers` are mutable. Concurrent reads are safe by Rust's
-/// borrow rules.
+/// Java's record is not thread-safe because `headers()` hands out a mutable
+/// collection; here it hands out a shared reference, so the borrow rules make
+/// concurrent reads safe.
+// The `topic` is an `Arc<str>` shared cheaply across all records from the same
+// topic-partition (consumer-threading.md §27), and the headers are owned,
+// matching Java's allocation behavior.
 #[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct ConsumerRecord<K, V> {
@@ -54,68 +53,57 @@ pub struct ConsumerRecord<K, V> {
     delivery_count: Option<i16>,
 }
 
-/// Every parameter of Java's widest `ConsumerRecord` constructor
-/// (`ConsumerRecord.java:138`).
-///
-/// This struct has **no Java counterpart** (DoD #7). It exists solely to
-/// satisfy CLAUDE.md §2's cap on derived overload names: that constructor
-/// differs from the group's intersection
-/// `{topic, partition, offset, key, value}` by seven parameters, so the cap
-/// fires and this struct becomes the method's *only* parameter, carrying
-/// every Java parameter including the intersection's own.
-///
-/// It deliberately has **no** `Default`. `topic`, `partition`, `offset`,
-/// `key` and `value` are what even Java's narrowest constructor
-/// (`ConsumerRecord.java:83`) takes from its caller, so none of them has a
-/// Java-derived default — and a synthesised empty topic would name no
-/// partition at all. Construct it with [`ConsumerRecordOptionsBuilder::new`]
-/// and set them: [`ConsumerRecordOptionsBuilder::build`] returns an error if any of `topic`, `partition`, `offset`, `key`, `value` was not set.
+/// The parameters of [`ConsumerRecord::with_options`], built with
+/// [`ConsumerRecordOptionsBuilder`]: `topic`, `partition`, `offset`, `key` and
+/// `value` are mandatory.
+// Every parameter of Java's widest `ConsumerRecord` constructor. It differs from
+// the overload group's intersection `{topic, partition, offset, key, value}` by
+// seven parameters, so the naming rule makes this struct the method's only
+// parameter, carrying the intersection's own too (DoD #7). It deliberately has
+// no `Default`: the mandatory five are what even Java's narrowest constructor
+// `ConsumerRecord(String, int, long, K, V)` takes from its caller.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 // the options of ConsumerRecord's constructor overloads (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
 pub struct ConsumerRecordOptions<K, V> {
-    /// The topic this record is received from. Java's `topic`.
+    // The topic this record is received from. Java's `topic`.
     pub(crate) topic: Arc<str>,
-    /// The partition of the topic this record is received from. Java's
-    /// `partition`.
+    // The partition of the topic this record is received from. Java's
+    // `partition`.
     pub(crate) partition: i32,
-    /// The offset of this record in the corresponding Kafka partition.
-    /// Java's `offset`.
+    // The offset of this record in the corresponding Kafka partition.
+    // Java's `offset`.
     pub(crate) offset: i64,
-    /// The timestamp of the record. Java's `timestamp`; starts as
-    /// [`ConsumerRecord::NO_TIMESTAMP`], as in `:83`.
+    // The timestamp of the record. Java's `timestamp`; starts as
+    // [`ConsumerRecord::NO_TIMESTAMP`], as in `ConsumerRecord(String, int, long, K, V)`.
     pub(crate) timestamp: i64,
-    /// The timestamp type of the record. Java's `timestampType`; starts as
-    /// [`TimestampType::NoTimestampType`], as in `:83`.
+    // The timestamp type of the record. Java's `timestampType`; starts as
+    // [`TimestampType::NoTimestampType`], as in `ConsumerRecord(String, int, long, K, V)`.
     pub(crate) timestamp_type: TimestampType,
-    /// The length of the serialized key. Java's `serializedKeySize`; starts
-    /// as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
+    // The length of the serialized key. Java's `serializedKeySize`; starts
+    // as [`ConsumerRecord::NULL_SIZE`], as in `ConsumerRecord(String, int, long, K, V)`.
     pub(crate) serialized_key_size: i32,
-    /// The length of the serialized value. Java's `serializedValueSize`;
-    /// starts as [`ConsumerRecord::NULL_SIZE`], as in `:83`.
+    // The length of the serialized value. Java's `serializedValueSize`;
+    // starts as [`ConsumerRecord::NULL_SIZE`], as in `ConsumerRecord(String, int, long, K, V)`.
     pub(crate) serialized_value_size: i32,
-    /// The key of the record, if one exists. Java's `key`.
+    // The key of the record, if one exists. Java's `key`.
     pub(crate) key: Option<K>,
-    /// The record contents. Java's `value`.
+    // The record contents. Java's `value`.
     pub(crate) value: Option<V>,
-    /// The headers of the record. Java's `headers`; starts empty, as in
-    /// `:83` (`new RecordHeaders()`).
+    // The headers of the record. Java's `headers`; starts empty, as in the narrowest
+    // constructor (`new RecordHeaders()`).
     pub(crate) headers: RecordHeaders,
-    /// The leader epoch, if available. Java's `leaderEpoch`; starts as
-    /// `None`, as in `:83` (`Optional.empty()`).
+    // The leader epoch, if available. Java's `leaderEpoch`; starts as
+    // `None`, as in `ConsumerRecord(String, int, long, K, V)` (`Optional.empty()`).
     pub(crate) leader_epoch: Option<i32>,
-    /// The delivery count, if available. Java's `deliveryCount`; starts as
-    /// `None`, as in `:107`/`:83` (`Optional.empty()`).
+    // The delivery count, if available. Java's `deliveryCount`; starts as
+    // `None`, as in the narrower constructors (`Optional.empty()`).
     pub(crate) delivery_count: Option<i16>,
 }
 
-/// Fluent builder for [`ConsumerRecordOptions`].
-///
-/// Per CLAUDE.md §2 [`Self::new`] takes no parameters, every parameter has a
-/// fluent setter, and [`Self::build`] validates the mandatory ones — returning
-/// [`Error::LocalIllegalArgument`] if they were not set. Like [`ConsumerRecordOptions`] it has no Java counterpart and
-/// exists solely to satisfy that naming rule (DoD #7).
+/// Fluent builder for [`ConsumerRecordOptions`]: every parameter has a setter,
+/// and [`Self::build`] checks that the mandatory ones were set.
 #[derive(Debug)]
 // builds ConsumerRecordOptions (CLAUDE.md §2)
 #[doc(alias = "rust-only")]
@@ -143,6 +131,10 @@ impl<K, V> Default for ConsumerRecordOptionsBuilder<K, V> {
 impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
     /// Creates a builder with every mandatory parameter unset and every other
     /// parameter at the value Java passes on the caller's behalf.
+    ///
+    /// # Returns
+    ///
+    /// The new builder.
     pub fn new() -> Self {
         Self {
             topic: None,
@@ -161,66 +153,162 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
     }
 
     /// Sets `ConsumerRecordOptions::topic`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `topic` - The topic this record is received from
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_topic(mut self, topic: impl Into<Arc<str>>) -> Self {
         self.topic = Some(topic.into());
         self
     }
     /// Sets `ConsumerRecordOptions::partition`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `partition` - The partition of the topic this record is received from
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_partition(mut self, partition: i32) -> Self {
         self.partition = Some(partition);
         self
     }
     /// Sets `ConsumerRecordOptions::offset`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `offset` - The offset of this record in the corresponding Kafka partition
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_offset(mut self, offset: i64) -> Self {
         self.offset = Some(offset);
         self
     }
     /// Sets `ConsumerRecordOptions::timestamp`.
+    ///
+    /// # Arguments
+    ///
+    /// - `timestamp` - The timestamp of the record.
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_timestamp(mut self, timestamp: i64) -> Self {
         self.timestamp = timestamp;
         self
     }
     /// Sets `ConsumerRecordOptions::timestamp_type`.
+    ///
+    /// # Arguments
+    ///
+    /// - `timestamp_type` - The timestamp type
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_timestamp_type(mut self, timestamp_type: TimestampType) -> Self {
         self.timestamp_type = timestamp_type;
         self
     }
     /// Sets `ConsumerRecordOptions::serialized_key_size`.
+    ///
+    /// # Arguments
+    ///
+    /// - `serialized_key_size` - The length of the serialized key
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_serialized_key_size(mut self, serialized_key_size: i32) -> Self {
         self.serialized_key_size = serialized_key_size;
         self
     }
     /// Sets `ConsumerRecordOptions::serialized_value_size`.
+    ///
+    /// # Arguments
+    ///
+    /// - `serialized_value_size` - The length of the serialized value
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_serialized_value_size(mut self, serialized_value_size: i32) -> Self {
         self.serialized_value_size = serialized_value_size;
         self
     }
     /// Sets `ConsumerRecordOptions::key`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - The key of the record, if one exists (`None` is allowed)
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_key(mut self, key: Option<K>) -> Self {
         self.key = Some(key);
         self
     }
     /// Sets `ConsumerRecordOptions::value`, a mandatory parameter: [`Self::build`]
-    /// panics if it was not set.
+    /// returns an error if it was not set.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` - The record contents
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_value(mut self, value: Option<V>) -> Self {
         self.value = Some(value);
         self
     }
     /// Sets `ConsumerRecordOptions::headers`.
+    ///
+    /// # Arguments
+    ///
+    /// - `headers` - The headers of the record
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_headers(mut self, headers: RecordHeaders) -> Self {
         self.headers = headers;
         self
     }
     /// Sets `ConsumerRecordOptions::leader_epoch`.
+    ///
+    /// # Arguments
+    ///
+    /// - `leader_epoch` - Optional leader epoch of the record (may be empty for legacy record formats)
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_leader_epoch(mut self, leader_epoch: Option<i32>) -> Self {
         self.leader_epoch = leader_epoch;
         self
     }
     /// Sets `ConsumerRecordOptions::delivery_count`.
+    ///
+    /// # Arguments
+    ///
+    /// - `delivery_count` - Optional delivery count of the record (may be empty when deliveries not counted)
+    ///
+    /// # Returns
+    ///
+    /// This builder.
     pub fn set_delivery_count(mut self, delivery_count: Option<i16>) -> Self {
         self.delivery_count = delivery_count;
         self
@@ -228,17 +316,13 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
 
     /// Returns the built options.
     ///
-    /// Per CLAUDE.md §2 the mandatory parameters are validated here rather than
-    /// being named in the constructor, so a later Java version that makes one of
-    /// them optional changes the set this accepts instead of adding a second
-    /// constructor. Today there is one mandatory set: `topic`, `partition`, `offset`, `key`, `value`.
-    ///
     /// # Errors
     ///
-    /// Returns [`Error::LocalIllegalArgument`] naming the first parameter of that
-    /// set which was not given a setter call. Only presence is checked here;
-    /// semantic validation belongs to the method the options are passed to
-    /// (CLAUDE.md §2).
+    /// - `Error::is_local_illegal_argument_error` naming the first of `topic`,
+    ///   `partition`, `offset`, `key` and `value` that was not set.
+    // The mandatory parameters are validated here rather than being named in
+    // the constructor, so a later Java version that makes one of them optional
+    // changes the set this accepts instead of adding a second constructor.
     pub fn build(self) -> Result<ConsumerRecordOptions<K, V>, Error> {
         Ok(ConsumerRecordOptions {
             topic: self.topic.ok_or_else(|| Self::missing("topic"))?,
@@ -256,7 +340,7 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
         })
     }
 
-    /// Builds the [`Error::LocalIllegalArgument`] naming a mandatory parameter
+    /// Builds the error naming a mandatory parameter
     /// [`Self::build`] found unset.
     fn missing(parameter: &str) -> Error {
         Error::local_illegal_argument(format!(
@@ -267,28 +351,30 @@ impl<K, V> ConsumerRecordOptionsBuilder<K, V> {
 
 impl<K, V> ConsumerRecord<K, V> {
     /// Sentinel value indicating no timestamp is associated with a record.
-    ///
-    /// Corresponds to Java's `RecordBatch.NO_TIMESTAMP` referenced via
-    /// `ConsumerRecord.NO_TIMESTAMP`.
+    // Java's `RecordBatch.NO_TIMESTAMP`, referenced via `ConsumerRecord.NO_TIMESTAMP`.
     pub const NO_TIMESTAMP: i64 = -1;
 
     /// Sentinel value used for `serialized_key_size` / `serialized_value_size`
     /// when the key/value is `None`.
-    ///
-    /// Corresponds to Java's `ConsumerRecord.NULL_SIZE`.
     pub const NULL_SIZE: i32 = -1;
 
-    /// Creates a record from a specified topic and partition.
+    /// Creates a record to be received from a specified topic and partition
+    /// (provided for compatibility with Kafka 0.9 before the message format
+    /// supported timestamps and before serialized metadata were exposed).
     ///
-    /// Corresponds to Java's `ConsumerRecord(String, int, long, K, V)`
-    /// (`ConsumerRecord.java:83`), whose parameters
-    /// `{topic, partition, offset, key, value}` are the intersection across
-    /// the three constructors — so it owns the plain name (CLAUDE.md §2).
+    /// # Arguments
     ///
-    /// The timestamp is set to [`ConsumerRecord::NO_TIMESTAMP`], the timestamp type to
-    /// [`TimestampType::NoTimestampType`], the serialized sizes to
-    /// [`ConsumerRecord::NULL_SIZE`], headers to an empty [`RecordHeaders`], and both
-    /// `leader_epoch` and `delivery_count` to `None`.
+    /// - `topic` - The topic this record is received from
+    /// - `partition` - The partition of the topic this record is received from
+    /// - `offset` - The offset of this record in the corresponding Kafka partition
+    /// - `key` - The key of the record, if one exists (`None` is allowed)
+    /// - `value` - The record contents
+    ///
+    /// # Returns
+    ///
+    /// The new `ConsumerRecord`.
+    // `{topic, partition, offset, key, value}` is the intersection across the
+    // three constructors, so this one owns the plain name (CLAUDE.md §2).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord")]
     pub fn new(topic: impl Into<Arc<str>>, partition: i32, offset: i64, key: Option<K>, value: Option<V>) -> Self {
         Self::with_options(
@@ -303,23 +389,21 @@ impl<K, V> ConsumerRecord<K, V> {
         )
     }
 
-    /// Creates a record with full metadata.
+    /// Creates a record to be received from a specified topic and partition.
     ///
-    /// Corresponds to Java's widest constructor
-    /// (`ConsumerRecord.java:138`), which takes `deliveryCount` alongside
-    /// every other field. Its twelve parameters exceed CLAUDE.md §2's
-    /// three-parameter cap on derived overload names, so
-    /// [`ConsumerRecordOptions`] is this method's only parameter and carries
-    /// all of them.
+    /// # Arguments
     ///
-    /// Java's intermediate 11-arg constructor (`ConsumerRecord.java:107`) is
-    /// *not* a separate Rust method: its body is literally this one with
-    /// `deliveryCount = Optional.empty()`, and under CLAUDE.md §2 both derive
-    /// the same name `with_options` once the surplus parameters move into
-    /// [`ConsumerRecordOptions`]. Callers get the 11-arg form by leaving
-    /// `ConsumerRecordOptions::delivery_count` at `None`.
+    /// - `options` - The topic, partition, offset, timestamp, timestamp type,
+    ///   serialized key and value sizes, key, value, headers, leader epoch and
+    ///   delivery count of the record
     ///
-    /// * `options` - every parameter of Java's widest constructor
+    /// # Returns
+    ///
+    /// The new `ConsumerRecord`.
+    // Java's 11-arg constructor (without `deliveryCount`) is not a separate Rust
+    // method: its body is this one with `deliveryCount = Optional.empty()`, and
+    // both derive the same name `with_options`. Callers get it by leaving
+    // `delivery_count` unset.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#ConsumerRecord")]
     pub fn with_options(options: ConsumerRecordOptions<K, V>) -> Self {
         // Java validates `topic != null` and `headers != null`; both are
@@ -354,70 +438,74 @@ impl<K, V> ConsumerRecord<K, V> {
         }
     }
 
-    /// The topic this record is received from (never null).
+    /// Returns the topic this record is received from.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#topic")]
     pub fn topic(&self) -> &str {
         &self.topic
     }
 
-    /// The partition from which this record is received.
+    /// Returns the partition from which this record is received.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#partition")]
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
-    /// The position of this record in the corresponding Kafka partition.
+    /// Returns the position of this record in the corresponding Kafka partition.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#offset")]
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
-    /// The timestamp of this record, in milliseconds elapsed since unix
+    /// Returns the timestamp of this record, in milliseconds elapsed since unix
     /// epoch.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestamp")]
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// The timestamp type of this record.
+    /// Returns the timestamp type of this record.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#timestampType")]
     pub fn timestamp_type(&self) -> TimestampType {
         self.timestamp_type
     }
 
-    /// The size of the serialized, uncompressed key in bytes. Returns
-    /// [`ConsumerRecord::NULL_SIZE`] (`-1`) if the key is `None`.
+    /// Returns the size of the serialized, uncompressed key in bytes. If key is
+    /// `None`, the returned size is -1.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedKeySize")]
     pub fn serialized_key_size(&self) -> i32 {
         self.serialized_key_size
     }
 
-    /// The size of the serialized, uncompressed value in bytes. Returns
-    /// [`ConsumerRecord::NULL_SIZE`] (`-1`) if the value is `None`.
+    /// Returns the size of the serialized, uncompressed value in bytes. If value
+    /// is `None`, the returned size is -1.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#serializedValueSize")]
     pub fn serialized_value_size(&self) -> i32 {
         self.serialized_value_size
     }
 
-    /// The key (or `None` if no key was specified).
+    /// Returns the key (or `None` if no key is specified).
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#key")]
     pub fn key(&self) -> Option<&K> {
         self.key.as_ref()
     }
 
-    /// The value (or `None` if no value was specified).
+    /// Returns the value.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#value")]
     pub fn value(&self) -> Option<&V> {
         self.value.as_ref()
     }
 
-    /// The headers (never null).
+    /// Returns the headers.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#headers")]
     pub fn headers(&self) -> &RecordHeaders {
         &self.headers
     }
 
     /// Get the leader epoch for the record if available.
+    ///
+    /// # Returns
+    ///
+    /// the leader epoch or empty for legacy record formats
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#leaderEpoch")]
     pub fn leader_epoch(&self) -> Option<i32> {
         self.leader_epoch
@@ -426,6 +514,10 @@ impl<K, V> ConsumerRecord<K, V> {
     /// Get the delivery count for the record if available.
     ///
     /// Deliveries are counted for records delivered by share groups.
+    ///
+    /// # Returns
+    ///
+    /// the delivery count or empty when deliveries not counted
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord#deliveryCount")]
     pub fn delivery_count(&self) -> Option<i16> {
         self.delivery_count
@@ -460,13 +552,13 @@ where
     K: fmt::Debug,
     V: fmt::Debug,
 {
-    /// Matches Java's `toString()`:
-    ///
-    /// ```text
-    /// ConsumerRecord(topic = T, partition = P, leaderEpoch = E, offset = O, TS_TYPE = TS,
-    ///   deliveryCount = D, serialized key size = SKS, serialized value size = SVS,
-    ///   headers = H, key = K, value = V)
-    /// ```
+    // Matches Java's `toString()`:
+    //
+    // ```text
+    // ConsumerRecord(topic = T, partition = P, leaderEpoch = E, offset = O, TS_TYPE = TS,
+    //   deliveryCount = D, serialized key size = SKS, serialized value size = SVS,
+    //   headers = H, key = K, value = V)
+    // ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let leader_epoch_str = match self.leader_epoch {
             Some(e) => e.to_string(),

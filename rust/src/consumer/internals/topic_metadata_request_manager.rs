@@ -369,7 +369,7 @@ impl TopicMetadataRequestManager {
             }
             // Java: `throw new KafkaException("Unexpected error fetching
             // metadata for topic " + topic, error.exception());`
-            // (`TopicMetadataRequestManager.java:268-269`) — a BARE
+            // (`TopicMetadataRequestManager.TopicMetadataRequestState#handleTopicMetadataResponse`) — a BARE
             // `KafkaException` wrapping the typed error as its cause, not the
             // typed error re-messaged. `Error::with_message(error, ..)` would
             // resolve the code back to its own class, so the "wrapper" would
@@ -398,7 +398,7 @@ impl TopicMetadataRequestManager {
     /// / [`Self::on_failure_inner`].
     ///
     /// Translates Java's `whenComplete(...)` callback chain from
-    /// `TopicMetadataRequestManager.java:198-225`.
+    /// `TopicMetadataRequestManager.TopicMetadataRequestState#createUnsentRequest`.
     ///
     /// Two passes mirror Java's `requestStateIterator` walk:
     ///   1. Expire stale requests (`isExpired`) → complete with
@@ -1173,7 +1173,7 @@ mod tests {
 
         // Fire a transport-layer retriable failure through the handler.
         // The retriable + inside-deadline path calls
-        // `state.timed_state.on_failed_attempt(now)` (line 313), which
+        // `state.timed_state.on_failed_attempt(now)` (in `on_failure`), which
         // advances the entry into a non-zero backoff. Wait for that
         // observable side effect deterministically (replaces fragile
         // `yield_now` pairs — `yield_now` re-queues the current task
@@ -1217,7 +1217,8 @@ mod tests {
     /// Java's final `else` builds a BARE `KafkaException` wrapping the typed
     /// error as its cause:
     /// `throw new KafkaException("Unexpected error fetching metadata for topic "
-    /// + topic, error.exception())` (`TopicMetadataRequestManager.java:268-269`).
+    /// + topic, error.exception())`
+    /// (`TopicMetadataRequestManager.TopicMetadataRequestState#handleTopicMetadataResponse`).
     ///
     /// Re-messaging the code instead would resolve it back to its own class, so
     /// the "wrapper" would *be* the wrapped thing — flipping
@@ -1254,7 +1255,8 @@ mod tests {
     }
 
     /// The adjacent arm is NOT a bare `KafkaException`: Java does name
-    /// `InvalidTopicException` there (`TopicMetadataRequestManager.java:260`).
+    /// `InvalidTopicException` there
+    /// (`TopicMetadataRequestManager.TopicMetadataRequestState#handleTopicMetadataResponse`).
     /// Asserted so the fix above cannot be over-applied.
     #[tokio::test]
     async fn test_invalid_topic_keeps_its_own_class() {

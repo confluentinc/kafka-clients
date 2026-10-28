@@ -18,12 +18,13 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The server experienced an unexpected error when processing the request.
+    /// An error occurred on the server for which the client doesn't have a corresponding error
+    /// code. This is generally an unexpected error.
     ///
-    /// Corresponds to Java's `UnknownServerException`, error code `Errors::UnknownServerError`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnknownServerException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnknownServerError`. Java `extends` chain: `UnknownServerException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.UnknownServerException")]
     UnknownServerError,
     code: Errors::UnknownServerError,

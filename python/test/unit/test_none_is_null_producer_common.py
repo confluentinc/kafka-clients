@@ -143,7 +143,8 @@ def test_kafka_producer_serde_none_constructs() -> None:
 # ---- MockProducer / AsyncMockProducer ---------------------------------------------
 def test_mock_producer_null_cluster_fails_at_the_first_send() -> None:
     # Java stores the null cluster; its first send() dereferences it
-    # (MockProducer.java:312), as does partitionsFor (374).
+    # (org.apache.kafka.clients.producer.MockProducer#send(ProducerRecord,Callback)), as
+    # does #partitionsFor.
     p: MockProducer[bytes, bytes] = MockProducer(cluster=None, auto_complete=True,  # type: ignore[call-overload]
                                                  partitioner=None)
     with _raises(TypeError, "cluster must not be None"):
@@ -292,7 +293,9 @@ def test_topic_partition_is_untouched() -> None:
 def test_consumer_records_stores_a_null_records_map() -> None:
     from confluent_kafka.consumer import ConsumerRecords
 
-    # Java stores records as given (ConsumerRecords.java:77) and dereferences
+    # Java stores records as given
+    # (org.apache.kafka.clients.consumer.ConsumerRecords#ConsumerRecords(Map,Map,boolean))
+    # and dereferences
     # it at first use; next_offsets() does not read it.
     r: Any = ConsumerRecords(records=None, next_offsets={})  # type: ignore[arg-type]
     assert r.next_offsets() == {}
@@ -333,7 +336,8 @@ def test_token_information_stores_null_renewers() -> None:
 
 
 def test_kafka_future_all_of_null_futures() -> None:
-    # Arrays.stream(null) and a null element's toCompletionStage() (KafkaFuture.java:76, 80).
+    # Arrays.stream(null) and a null element's toCompletionStage()
+    # (org.apache.kafka.common.KafkaFuture#allOf).
     with _raises(TypeError, "futures must not be None"):
         KafkaFuture.all_of(futures=None)  # type: ignore[arg-type]
     with _raises(TypeError, "futures must not contain None"):
@@ -350,7 +354,9 @@ async def test_async_kafka_future_all_of_null_futures() -> None:
 
 
 def test_clients_null_configs() -> None:
-    # Java's new HashMap<>(configs) (ProducerConfig.java:717, ConsumerConfig.java:794,
+    # Java's new HashMap<>(configs)
+    # (org.apache.kafka.clients.producer.ProducerConfig#appendSerializerToConfig,
+    # org.apache.kafka.clients.consumer.ConsumerConfig#appendDeserializerToConfig,
     # Utils.castToStringObjectMap).
     from confluent_kafka.admin import Admin
     from confluent_kafka.consumer import KafkaConsumer

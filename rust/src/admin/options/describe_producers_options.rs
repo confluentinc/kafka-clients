@@ -13,15 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::describe_producers`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeProducersOptions`.
 
 /// Options for `Admin::describe_producers`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeProducersOptions`.
-/// When [`broker_id`](Self::broker_id) is set, the request is sent directly to
-/// that broker (via `StaticBrokerStrategy`) rather than looking up each
-/// partition's leader.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions")]
 pub struct DescribeProducersOptions {
@@ -36,8 +29,16 @@ impl DescribeProducersOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeProducersOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -45,15 +46,23 @@ impl DescribeProducersOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.AbstractOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
-    /// Set the broker id to query for the topic partitions. Mirrors
-    /// `DescribeProducersOptions.brokerId(int)`.
+    /// Sets the broker id to query for the topic partitions: the request is sent directly to that
+    /// broker rather than to each partition's leader.
+    ///
+    /// # Arguments
+    ///
+    /// - `broker_id` - the broker id.
+    ///
+    /// # Returns
+    ///
+    /// This `DescribeProducersOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId")]
     pub fn set_broker_id(mut self, broker_id: i32) -> Self {
@@ -61,7 +70,7 @@ impl DescribeProducersOptions {
         self
     }
 
-    /// The broker id to query, if set. Mirrors `DescribeProducersOptions.brokerId()`.
+    /// Returns the broker id to query, or `None` if not set.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersOptions#brokerId")]
     pub fn broker_id(&self) -> Option<i32> {
         self.broker_id

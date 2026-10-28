@@ -41,10 +41,10 @@
 //!   never takes a class (CLAUDE.md §2).
 //! - `ssl.keystore.password` and `ssl.truststore.password`: PEM is the only
 //!   store format here, and Java rejects a store password with PEM stores
-//!   (`DefaultSslEngineFactory.java:289,296,316,321`), so the keys stay
+//!   (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createKeystore`, `org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createTruststore`), so the keys stay
 //!   undefined until another store format is implemented.
 //! - `ssl.key.password`: encrypted PEM private keys are not decrypted (Java
-//!   decrypts them with it, `DefaultSslEngineFactory.java:505-520`), so the
+//!   decrypts them with it, `org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore#privateKey`), so the
 //!   key stays undefined until that is implemented.
 //!
 //! A value set for an undefined key is reported as unused.
@@ -83,7 +83,7 @@ impl SslConfigs {
     /// Default for `ssl.keystore.type`: `PEM`.
     ///
     /// This deviates from Java, whose `DEFAULT_SSL_KEYSTORE_TYPE` is `JKS`
-    /// (`SslConfigs.java:63`): the rustls-based SSL factory reads only PEM and
+    /// (`org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_KEYSTORE_TYPE`): the rustls-based SSL factory reads only PEM and
     /// rejects JKS and PKCS12, so Java's default would make every TLS client
     /// fail to construct.
     pub const DEFAULT_SSL_KEYSTORE_TYPE: &str = "PEM";
@@ -104,7 +104,7 @@ impl SslConfigs {
     pub const SSL_TRUSTSTORE_TYPE_CONFIG: &str = "ssl.truststore.type";
 
     /// Default for `ssl.truststore.type`: `PEM`, deviating from Java's `JKS`
-    /// (`SslConfigs.java:93`) for the reason given at
+    /// (`org.apache.kafka.common.config.SslConfigs#DEFAULT_SSL_TRUSTSTORE_TYPE`) for the reason given at
     /// [`DEFAULT_SSL_KEYSTORE_TYPE`](Self::DEFAULT_SSL_KEYSTORE_TYPE).
     pub const DEFAULT_SSL_TRUSTSTORE_TYPE: &str = "PEM";
 
@@ -133,7 +133,7 @@ impl SslConfigs {
 
 /// SSL/TLS configuration for Kafka connections.
 ///
-/// Translated from `org.apache.kafka.common.config.SslConfigs`. The Java class
+/// The Java class
 /// hosts only the `ssl.*` config keys and defaults; the values themselves
 /// travel in the `Map<String, ?>` handed to `SslFactory.configure`. The Rust
 /// struct keeps Java's name and constants, and additionally holds the
@@ -158,7 +158,7 @@ pub struct SslConfigs {
     /// Trusted certificates in PEM format (alternative to `truststore_location`).
     /// Corresponds to `ssl.truststore.certificates`. The certificates are
     /// public, but Java defines the key as `Type.PASSWORD`
-    /// (`SslConfigs.java:139`) and hides them, so this client does too.
+    /// (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`) and hides them, so this client does too.
     pub(crate) truststore_certificates: Option<Password>,
 
     /// Trust store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
@@ -171,13 +171,13 @@ pub struct SslConfigs {
 
     /// Private key in PEM format (alternative to `keystore_location`).
     /// Corresponds to `ssl.keystore.key`, which Java defines as
-    /// `Type.PASSWORD` (`SslConfigs.java:137`).
+    /// `Type.PASSWORD` (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`).
     pub(crate) keystore_key: Option<Password>,
 
     /// Certificate chain in PEM format (alternative to `keystore_location`).
     /// Corresponds to `ssl.keystore.certificate.chain`. The certificates are
     /// public, but Java defines the key as `Type.PASSWORD`
-    /// (`SslConfigs.java:138`) and hides them, so this client does too.
+    /// (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`) and hides them, so this client does too.
     pub(crate) keystore_certificate_chain: Option<Password>,
 
     /// Key store format: `"JKS"`, `"PKCS12"`, or `"PEM"`.
@@ -334,15 +334,15 @@ impl SslConfigs {
                 DefaultValue::Null,
                 Importance::High,
             )
-            // Java defines `ssl.keystore.password` here (`SslConfigs.java:82,135`);
+            // Java defines `ssl.keystore.password` here (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`);
             // it stays undefined because Java rejects a key store password with
-            // PEM stores (`DefaultSslEngineFactory.java:289,296`) and PEM is the
+            // PEM stores (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createKeystore`) and PEM is the
             // only format here, until another format is implemented, so a value
             // set for it is reported as unused.
             //
-            // Java defines `ssl.key.password` here (`SslConfigs.java:87,136`); it
+            // Java defines `ssl.key.password` here (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`); it
             // stays undefined because encrypted PEM private keys are not
-            // decrypted (`DefaultSslEngineFactory.java:505-520`), until that is
+            // decrypted (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore#privateKey`), until that is
             // implemented, so a value set for it is reported as unused.
             .define(
                 SslConfigs::SSL_KEYSTORE_KEY_CONFIG,
@@ -374,9 +374,9 @@ impl SslConfigs {
                 DefaultValue::Null,
                 Importance::High,
             )
-            // Java defines `ssl.truststore.password` here (`SslConfigs.java:98,142`);
+            // Java defines `ssl.truststore.password` here (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`);
             // it stays undefined because Java rejects a trust store password
-            // with PEM stores (`DefaultSslEngineFactory.java:316,321`) and PEM is
+            // with PEM stores (`org.apache.kafka.common.security.ssl.DefaultSslEngineFactory#createTruststore`) and PEM is
             // the only format here, until another format is implemented, so a
             // value set for it is reported as unused.
             .define(
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// Java's `ssl.keystore.password`, `ssl.key.password` and
-    /// `ssl.truststore.password` (`SslConfigs.java:82,87,98`) are not defined,
+    /// `ssl.truststore.password` (`org.apache.kafka.common.config.SslConfigs#SSL_KEYSTORE_PASSWORD_CONFIG`, `SSL_KEY_PASSWORD_CONFIG`, `SSL_TRUSTSTORE_PASSWORD_CONFIG`) are not defined,
     /// so a value set for one is reported as unused.
     #[test]
     fn test_password_keys_not_defined() {
@@ -569,7 +569,7 @@ mod tests {
     }
 
     /// `ssl.cipher.suites` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:131`):
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`):
     /// an empty suite is rejected with `ConfigDef`'s exact message, duplicates
     /// are removed, and an empty list is allowed.
     #[test]
@@ -615,7 +615,7 @@ mod tests {
     }
 
     /// `ssl.enabled.protocols` is validated with Java's
-    /// `ValidList.anyNonDuplicateValues(true, false)` (`SslConfigs.java:132`):
+    /// `ValidList.anyNonDuplicateValues(true, false)` (`org.apache.kafka.common.config.SslConfigs#addClientSslSupport`):
     /// an empty protocol is rejected with `ConfigDef`'s exact message,
     /// duplicates are removed, and an empty list is allowed.
     #[test]

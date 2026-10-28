@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_producers`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeProducersResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::admin::ProducerState;
 use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The producer state of a single partition.
-///
-/// Corresponds to `DescribeProducersResult.PartitionProducerState`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState")]
 pub struct PartitionProducerState {
@@ -32,6 +28,10 @@ pub struct PartitionProducerState {
 
 impl PartitionProducerState {
     /// Creates a new `PartitionProducerState` from the active producers.
+    ///
+    /// # Arguments
+    ///
+    /// - `active_producers` - the producers currently active on the partition.
     #[doc(
         alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#PartitionProducerState"
     )]
@@ -39,7 +39,7 @@ impl PartitionProducerState {
         Self { active_producers }
     }
 
-    /// The active producers for this partition.
+    /// Returns the active producers for this partition.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult$PartitionProducerState#activeProducers")]
     pub fn active_producers(&self) -> &[ProducerState] {
         &self.active_producers
@@ -53,8 +53,6 @@ impl std::fmt::Display for PartitionProducerState {
 }
 
 /// The result of `Admin::describe_producers`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeProducersResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult")]
 pub struct DescribeProducersResult {
@@ -70,13 +68,14 @@ impl DescribeProducersResult {
 
     /// Returns the future for a specific partition.
     ///
-    /// Mirrors `DescribeProducersResult.partitionResult`. Returns an error if
-    /// the partition was not included in the request, mirroring Java's
-    /// `IllegalArgumentException`.
+    /// # Arguments
+    ///
+    /// - `partition` - the partition to check.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] if `partition` was not requested.
+    /// Returns an error answering `Error::is_local_illegal_argument_error` if `partition` was not
+    /// requested.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult#partitionResult")]
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<PartitionProducerState>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
@@ -86,8 +85,6 @@ impl DescribeProducersResult {
 
     /// Returns a future yielding a map of every requested partition's producer
     /// state. Fails if any partition's request fails.
-    ///
-    /// Mirrors `DescribeProducersResult.all`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeProducersResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<TopicPartition, PartitionProducerState>> {
         KafkaFuture::join_map(self.futures.iter().map(|(tp, f)| (tp.clone(), f.clone())).collect())

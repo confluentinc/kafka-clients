@@ -567,8 +567,8 @@ struct ConservationState {
     /// reconciliation records them in the assignment before
     /// `on_partitions_assigned` runs, and close then revokes the whole
     /// assignment and skips the pending assigned callback
-    /// (`AbstractMembershipManager.java:576-579`,
-    /// `AsyncKafkaConsumer.java:1619-1649`). So a closing consumer may release
+    /// (`AbstractMembershipManager#leaveGroup(boolean)`,
+    /// `AsyncKafkaConsumer#runRebalanceCallbacksOnClose`). So a closing consumer may release
     /// partitions it was never told it owned. That is counted, not failed.
     closing: BTreeSet<String>,
     /// Release callbacks from a closing consumer for partitions it did not own.

@@ -1152,7 +1152,7 @@ async fn run_producer(
     // concurrent-producers design each of NUM_TRANSACTIONAL_PRODUCERS producers
     // emits its own value. Must run before close() — metrics are torn down with
     // the producer.
-    for (name, metric) in producer.metrics() {
+    for (name, metric) in producer.metrics().snapshot().iter() {
         if name.name() == "compression-rate-avg" {
             println!("[METRIC] compression-rate-avg = {:?}", metric.metric_value());
         }
@@ -1421,7 +1421,7 @@ async fn run_eos_producer(
 
     // Compression cross-check (parity with produce mode / base harness). Must
     // run before close() — metrics are torn down with the producer.
-    for (name, metric) in producer.metrics() {
+    for (name, metric) in producer.metrics().snapshot().iter() {
         if name.name() == "compression-rate-avg" {
             println!("[METRIC] compression-rate-avg = {:?}", metric.metric_value());
         }

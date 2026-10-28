@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_client_quotas`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeClientQuotasResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::common::KafkaFuture;
 use crate::common::quota::ClientQuotaEntity;
 
 /// The result of the `Admin::describe_client_quotas` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeClientQuotasResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult")]
 pub struct DescribeClientQuotasResult {
@@ -31,17 +27,19 @@ pub struct DescribeClientQuotasResult {
 }
 
 impl DescribeClientQuotasResult {
-    /// Creates a new result from the future for the matched entities.
+    /// Maps an entity to its configured quota value(s). Note if no value is defined for a quota
+    /// type for that entity's config, then it is not included in the resulting value map.
+    ///
+    /// # Arguments
+    ///
+    /// - `entities` - future for the collection of entities that matched the filter
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult#DescribeClientQuotasResult")]
     pub fn new(entities: KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>>) -> Self {
         Self { entities }
     }
 
-    /// Returns a future which maps each matched quota entity to its configured
-    /// quota value(s). If no value is defined for a quota type for that
-    /// entity's config, then it is not included in the resulting value map.
-    ///
-    /// Mirrors `DescribeClientQuotasResult.entities()`.
+    /// Returns a map from quota entity to a future which can be used to check the status of
+    /// the operation.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeClientQuotasResult#entities")]
     pub fn entities(&self) -> &KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>> {
         &self.entities

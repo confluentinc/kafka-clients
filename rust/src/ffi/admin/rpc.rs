@@ -213,12 +213,12 @@ use crate::ffi::util::{
 // Input readers
 // ---------------------------------------------------------------------------
 
-/// The elements of a borrowed list, each converted by `read`; null reads as
+/// The elements of a borrowed list, each converted by `read`; `NULL` reads as
 /// empty. `read` is called on the list's elements only, once each.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list handle, alive and not mutated during
+/// `list` must be `NULL` or a valid list handle, alive and not mutated during
 /// the call.
 unsafe fn list_refs<T>(list: *const kafka_List_t, read: impl Fn(*mut c_void) -> T) -> Vec<T> {
     if list.is_null() {
@@ -230,13 +230,13 @@ unsafe fn list_refs<T>(list: *const kafka_List_t, read: impl Fn(*mut c_void) -> 
     unsafe { list_elements(list) }.iter().map(|&p| read(p)).collect()
 }
 
-/// The entries of a borrowed map, keys and values converted; null reads as
+/// The entries of a borrowed map, keys and values converted; `NULL` reads as
 /// empty. `read_key` is called on the map's keys only and `read_value` on
 /// its values only, once each.
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map handle, alive and not mutated during
+/// `map` must be `NULL` or a valid map handle, alive and not mutated during
 /// the call.
 unsafe fn keyed<K, V>(
     map: *const kafka_Map_t,
@@ -263,7 +263,7 @@ where
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map handle whose keys are null or
+/// `map` must be `NULL` or a valid map handle whose keys are `NULL` or
 /// NUL-terminated strings, alive and not mutated during the call.
 unsafe fn string_keyed<V>(map: *const kafka_Map_t, read_value: impl Fn(*mut c_void) -> V) -> HashMap<String, V> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and
@@ -277,7 +277,7 @@ unsafe fn string_keyed<V>(map: *const kafka_Map_t, read_value: impl Fn(*mut c_vo
 ///
 /// # Safety
 ///
-/// `map` must be null or a valid map handle whose keys are valid
+/// `map` must be `NULL` or a valid map handle whose keys are valid
 /// topic-partition handles, all alive and not mutated during the call.
 unsafe fn tp_keyed<V>(map: *const kafka_Map_t, read_value: impl Fn(*mut c_void) -> V) -> HashMap<TopicPartition, V> {
     // SAFETY: Per this function's `# Safety`, `map` is null or a valid map handle, alive and
@@ -292,7 +292,7 @@ unsafe fn tp_keyed<V>(map: *const kafka_Map_t, read_value: impl Fn(*mut c_void) 
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements are topic-partition
+/// `list` must be `NULL` or a valid list whose elements are topic-partition
 /// handles, all alive and not mutated during the call.
 unsafe fn optional_tp_set(list: *const kafka_List_t) -> Option<HashSet<TopicPartition>> {
     if list.is_null() {
@@ -305,11 +305,11 @@ unsafe fn optional_tp_set(list: *const kafka_List_t) -> Option<HashSet<TopicPart
     }
 }
 
-/// The bytes behind a `kafka_Bytes_t`; a null `data` reads as empty.
+/// The bytes behind a `kafka_Bytes_t`; a `NULL` `data` reads as empty.
 ///
 /// # Safety
 ///
-/// `bytes.data` must be null or point at `bytes.len` readable bytes, not
+/// `bytes.data` must be `NULL` or point at `bytes.len` readable bytes, not
 /// mutated while `bytes` stays borrowed.
 unsafe fn bytes_of(bytes: &kafka_Bytes_t) -> &[u8] {
     if bytes.data.is_null() {
@@ -327,19 +327,32 @@ unsafe fn bytes_of(bytes: &kafka_Bytes_t) -> &[u8] {
 // Invokers
 // ---------------------------------------------------------------------------
 
-/// `Admin.create_topics`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Create a batch of new topics with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_create_topics_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `new_topics` - The new topics to create.
+///
+/// # Returns
+///
+/// The CreateTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; `NULL` reads
+///   as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_CreateTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
@@ -358,19 +371,38 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics(
     box_create_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_topics_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Create a batch of new topics.
+///
+/// This operation is not transactional so it may succeed for some topics while fail for others.
+///
+/// It may take several seconds after `CreateTopicsResult` returns success for all the brokers to
+/// become aware that the topics have been created. During this time,
+/// `kafka_admin_Admin_list_topics` and `kafka_admin_Admin_describe_topics_with_topic_names` may not
+/// return information about the new topics.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher. The validateOnly option
+/// is supported from version 0.10.2.0.
+///
+/// # Parameters
+///
+/// - `new_topics` - The new topics to create.
+/// - `options` - The options to use when creating the new topics.
+///
+/// # Returns
+///
+/// The CreateTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `new_topics` is a `kafka_List_t` of `const kafka_admin_NewTopic_t *`, each live; `NULL` reads
+///   as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_CreateTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
@@ -394,20 +426,25 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_topics_with_options(
     box_create_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics_with_string_slice`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
-/// `topics` is a `kafka_List_t` of `const char *` topic names.
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topic names to delete, a `kafka_List_t` of `const char *`.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
@@ -425,20 +462,26 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice(
     box_delete_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics_with_string_slice_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
-/// `topics` is a `kafka_List_t` of `const char *` topic names.
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.10.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topic names to delete, a `kafka_List_t` of `const char *`.
+/// - `options` - The options to use when deleting the topics.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_options(
@@ -461,19 +504,27 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_string_slice_optio
     box_delete_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics_with_topic_collection`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// This is a convenience method for `kafka_admin_Admin_delete_topics_with_topic_collection_options`
+/// with default options. See the overload for more details.
+///
+/// When using topic IDs, this operation is supported by brokers with inter-broker protocol 2.8 or
+/// higher. When using topic names, this operation is supported by brokers with version 0.10.1.0 or
+/// higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topics to delete.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection(
@@ -491,19 +542,37 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection(
     box_delete_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_topics_with_topic_collection_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete a batch of topics.
+///
+/// This operation is not transactional so it may succeed for some topics while fail for others.
+///
+/// It may take several seconds after the `DeleteTopicsResult` returns success for all the brokers
+/// to become aware that the topics are gone. During this time, `kafka_admin_Admin_list_topics` and
+/// `kafka_admin_Admin_describe_topics_with_topic_names` may continue to return information about
+/// the deleted topics.
+///
+/// If delete.topic.enable is set to false on the brokers, an error will be returned to the client
+/// indicating that topic deletion is disabled.
+///
+/// When using topic IDs, this operation is supported by brokers with inter-broker protocol 2.8 or
+/// higher. When using topic names, this operation is supported by brokers with version 0.10.1.0 or
+/// higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topics to delete.
+/// - `options` - The options to use when deleting the topics.
+///
+/// # Returns
+///
+/// The DeleteTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DeleteTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection_options(
@@ -526,19 +595,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_topics_with_topic_collection_o
     box_delete_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_topics`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the topics available in the cluster with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_list_topics_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Returns
+///
+/// The ListTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_ListTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_topics(
@@ -551,19 +620,22 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_topics(
     box_list_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_topics_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the topics available in the cluster.
+///
+/// # Parameters
+///
+/// - `options` - The options to use when listing the topics.
+///
+/// # Returns
+///
+/// The ListTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_ListTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_topics_with_options(
@@ -581,19 +653,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_topics_with_options(
     box_list_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_topics_with_topic_names`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some topics in the cluster, with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_topics_with_topic_names_options`
+/// with default options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `topic_names` - The names of the topics to describe.
+///
+/// # Returns
+///
+/// The DescribeTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
@@ -611,19 +694,28 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names(
     box_describe_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_topics_with_topic_names_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some topics in the cluster.
+///
+/// # Parameters
+///
+/// - `topic_names` - The names of the topics to describe.
+/// - `options` - The options to use when describing the topic.
+///
+/// # Returns
+///
+/// The DescribeTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `topic_names` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_options(
@@ -646,19 +738,25 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topic_names_opti
     box_describe_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_topics_with_topics`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// This is a convenience method for `kafka_admin_Admin_describe_topics_with_topics_options` with
+/// default options. See the overload for more details.
+///
+/// When using topic IDs, this operation is supported by brokers with version 3.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topics to describe.
+///
+/// # Returns
+///
+/// The DescribeTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics(
@@ -676,19 +774,24 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics(
     box_describe_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_topics_with_topics_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTopicsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some topics in the cluster. When using topic IDs, this operation is supported by
+/// brokers with version 3.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `topics` - The topics to describe.
+/// - `options` - The options to use when describing the topics.
+///
+/// # Returns
+///
+/// The DescribeTopicsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeTopicsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics_options(
@@ -711,19 +814,35 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_topics_with_topics_options(
     box_describe_topics_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_partitions`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreatePartitionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Increase the number of partitions of the topics given as the keys of `new_partitions` according
+/// to the corresponding values. **If partitions are increased for a topic that has a key, the
+/// partition logic or ordering of the messages will be affected.**
+///
+/// This is a convenience method for `kafka_admin_Admin_create_partitions_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `new_partitions` - The topics which should have new partitions created, and corresponding
+///   parameters for the created partitions.
+///
+/// # Returns
+///
+/// The CreatePartitionsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `new_partitions` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_NewPartitions_t *` values, each live; `NULL` reads as an empty map and a `NULL`
+///   key as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_CreatePartitionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
@@ -743,19 +862,60 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions(
     box_create_partitions_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_partitions_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreatePartitionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Increase the number of partitions of the topics given as the keys of `new_partitions` according
+/// to the corresponding values. **If partitions are increased for a topic that has a key, the
+/// partition logic or ordering of the messages will be affected.**
+///
+/// This operation is not transactional so it may succeed for some topics while fail for others.
+///
+/// It may take several seconds after this method returns success for all the brokers to become
+/// aware that the partitions have been created. During this time,
+/// `kafka_admin_Admin_describe_topics_with_topic_names` may not return information about the new
+/// partitions.
+///
+/// This operation is supported by brokers with version 1.0.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the values() method of the returned `CreatePartitionsResult`
+///
+/// - `kafka_common_Error_is_authorization_error` if the authenticated user is not authorized to
+///   alter the topic
+/// - `kafka_common_Error_is_timeout_error` if the request was not completed in within the given
+///   `kafka_admin_CreatePartitionsOptions_timeout_ms`.
+/// - `kafka_common_Error_is_reassignment_in_progress_error` if a partition reassignment is
+///   currently in progress
+/// - `kafka_common_Error_is_broker_not_available_error` if the requested
+///   `kafka_admin_NewPartitions_assignments` contain a broker that is currently unavailable.
+/// - `kafka_common_Error_is_invalid_replication_factor_error` if no
+///   `kafka_admin_NewPartitions_assignments` are given and it is impossible for the broker to
+///   assign replicas with the topics replication factor.
+/// - Subclasses of `kafka_common_Error_is_kafka_error` if the request is invalid in some way.
+/// - `kafka_common_Error_is_invalid_partitions_error` if the requested partition count is less than
+///   or equal to the current partition count.
+///
+/// # Parameters
+///
+/// - `new_partitions` - The topics which should have new partitions created, and corresponding
+///   parameters for the created partitions.
+/// - `options` - The options to use when creating the new partitions.
+///
+/// # Returns
+///
+/// The CreatePartitionsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `new_partitions` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_NewPartitions_t *` values, each live; `NULL` reads as an empty map and a `NULL`
+///   key as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_CreatePartitionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
@@ -780,19 +940,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_partitions_with_options(
     box_create_partitions_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_records`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteRecordsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete records whose offset is smaller than the given offset of the corresponding partition.
+///
+/// This is a convenience method for `kafka_admin_Admin_delete_records_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `records_to_delete` - The topic partitions and related offsets from which records deletion
+///   starts.
+///
+/// # Returns
+///
+/// The DeleteRecordsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `records_to_delete` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to
+///   `const kafka_admin_RecordsToDelete_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DeleteRecordsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
@@ -812,19 +986,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records(
     box_delete_records_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_records_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteRecordsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete records whose offset is smaller than the given offset of the corresponding partition.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `records_to_delete` - The topic partitions and related offsets from which records deletion
+///   starts.
+/// - `options` - The options to use when deleting records.
+///
+/// # Returns
+///
+/// The DeleteRecordsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `records_to_delete` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to
+///   `const kafka_admin_RecordsToDelete_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DeleteRecordsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
@@ -849,19 +1035,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_records_with_options(
     box_delete_records_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_producers`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeProducersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe producer state on a set of topic partitions. See
+/// `kafka_admin_Admin_describe_producers_with_options` for more details.
+///
+/// # Parameters
+///
+/// - `partitions` - The set of partitions to query
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeProducersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
@@ -879,19 +1075,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers(
     box_describe_producers_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_producers_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeProducersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe active producer state on a set of topic partitions. Unless a specific broker is
+/// requested through `kafka_admin_DescribeProducersOptions_broker_id`, this will query the
+/// partition leader to find the producer state.
+///
+/// # Parameters
+///
+/// - `partitions` - The set of partitions to query
+/// - `options` - Options to control the method behavior
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeProducersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_producers_with_options(
@@ -914,19 +1122,23 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_producers_with_options(
     box_describe_producers_result(result, &client.future_ctx())
 }
 
-/// `Admin.abort_transaction`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AbortTransactionResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Forcefully abort a transaction which is open on a topic partition. See
+/// `kafka_admin_Admin_abort_transaction_with_options` for more details.
+///
+/// # Parameters
+///
+/// - `spec` - The transaction specification including topic partition and producer details
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_AbortTransactionResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction(
@@ -944,19 +1156,25 @@ pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction(
     box_abort_transaction_result(result, &client.future_ctx())
 }
 
-/// `Admin.abort_transaction_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AbortTransactionResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Forcefully abort a transaction which is open on a topic partition. This will send a
+/// `WriteTxnMarkers` request to the partition leader in order to abort the transaction. This
+/// requires administrative privileges.
+///
+/// # Parameters
+///
+/// - `spec` - The transaction specification including topic partition and producer details
+/// - `options` - Options to control the method behavior (including filters)
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_AbortTransactionResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction_with_options(
@@ -979,12 +1197,24 @@ pub unsafe extern "C" fn kafka_admin_Admin_abort_transaction_with_options(
     box_abort_transaction_result(result, &client.future_ctx())
 }
 
-/// `Admin.unregister_controller`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_UnregisterControllerResult_destroy`.
+/// Unregister a controller. This is a convenience method for
+/// `kafka_admin_Admin_unregister_controller_with_options`
+///
+/// # Parameters
+///
+/// - `controller_id` - the controller id to unregister.
+///
+/// # Returns
+///
+/// the `UnregisterControllerResult` containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_UnregisterControllerResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller(
@@ -998,14 +1228,36 @@ pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller(
     box_unregister_controller_result(result, &client.future_ctx())
 }
 
-/// `Admin.unregister_controller_with_options`: a non-blocking call returning the owned result
-/// handle, freed with `kafka_admin_UnregisterControllerResult_destroy`; the options are borrowed
-/// and copied during the call.
+/// Unregister a controller. The following errors can be anticipated when calling
+/// `kafka_common_KafkaFuture_get` on the future from the returned `UnregisterControllerResult`:
+///
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the unregister operation
+///   could finish.
+/// - `kafka_common_Error_is_unsupported_version_error` If the software is too old to support the
+///   unregistration API.
+/// - `kafka_common_Error_is_controller_id_not_registered_error` If the requested controller id is
+///   not currently registered.
+/// - `kafka_common_Error_is_not_controller_error` If the request does not arrive at the active
+///   controller.
+/// - `kafka_common_Error_is_invalid_request_error` If the request tries to unregister the current
+///   active controller id.
+///
+/// # Parameters
+///
+/// - `controller_id` - the controller id to unregister.
+/// - `options` - the options to use.
+///
+/// # Returns
+///
+/// the `UnregisterControllerResult` containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view, and `options` a live handle not mutated by any other
-/// call for the duration of this one.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_UnregisterControllerResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller_with_options(
@@ -1025,19 +1277,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_unregister_controller_with_options(
     box_unregister_controller_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_transactions`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTransactionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe the state of a set of transactional IDs. See
+/// `kafka_admin_Admin_describe_transactions_with_options` for more details.
+///
+/// # Parameters
+///
+/// - `transactional_ids` - The set of transactional IDs to query
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
+///   empty list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeTransactionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
@@ -1055,19 +1317,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions(
     box_describe_transactions_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_transactions_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeTransactionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe the state of a set of transactional IDs from the respective transaction coordinators,
+/// which are dynamically discovered.
+///
+/// # Parameters
+///
+/// - `transactional_ids` - The set of transactional IDs to query
+/// - `options` - Options to control the method behavior
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
+///   empty list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeTransactionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
@@ -1091,19 +1364,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_transactions_with_options(
     box_describe_transactions_result(result, &client.future_ctx())
 }
 
-/// `Admin.fence_producers`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_FenceProducersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Fence out all active producers that use any of the provided transactional IDs, with the default
+/// options.
+///
+/// This is a convenience method for `kafka_admin_Admin_fence_producers_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `transactional_ids` - The IDs of the producers to fence.
+///
+/// # Returns
+///
+/// The FenceProducersResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
+///   empty list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_FenceProducersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
@@ -1121,19 +1406,28 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers(
     box_fence_producers_result(result, &client.future_ctx())
 }
 
-/// `Admin.fence_producers_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_FenceProducersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Fence out all active producers that use any of the provided transactional IDs.
+///
+/// # Parameters
+///
+/// - `transactional_ids` - The IDs of the producers to fence.
+/// - `options` - The options to use when fencing the producers.
+///
+/// # Returns
+///
+/// The FenceProducersResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `transactional_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an
+///   empty list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_FenceProducersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
@@ -1156,19 +1450,17 @@ pub unsafe extern "C" fn kafka_admin_Admin_fence_producers_with_options(
     box_fence_producers_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_transactions`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListTransactionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List active transactions in the cluster. See `kafka_admin_Admin_list_transactions_with_options`
+/// for more details.
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_ListTransactionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_transactions(
@@ -1181,19 +1473,27 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_transactions(
     box_list_transactions_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_transactions_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListTransactionsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List active transactions in the cluster. This will query all potential transaction coordinators
+/// in the cluster and collect the state of all transactions. Users should typically attempt to
+/// reduce the size of the result set using
+/// `kafka_admin_ListTransactionsOptions_filter_producer_ids` or
+/// `kafka_admin_ListTransactionsOptions_filter_states` or
+/// `kafka_admin_ListTransactionsOptions_filter_on_duration`.
+///
+/// # Parameters
+///
+/// - `options` - Options to control the method behavior (including filters)
+///
+/// # Returns
+///
+/// The result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_ListTransactionsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_transactions_with_options(
@@ -1211,19 +1511,26 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_transactions_with_options(
     box_list_transactions_result(result, &client.future_ctx())
 }
 
-/// `Admin.force_terminate_transaction`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_TerminateTransactionResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Force terminate a transaction for the given transactional ID with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_force_terminate_transaction_with_options`
+/// with default options.
+///
+/// # Parameters
+///
+/// - `transactional_id` - The ID of the transaction to terminate.
+///
+/// # Returns
+///
+/// The TerminateTransactionResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_TerminateTransactionResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction(
@@ -1240,19 +1547,26 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction(
     box_terminate_transaction_result(result, &client.future_ctx())
 }
 
-/// `Admin.force_terminate_transaction_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_TerminateTransactionResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Force terminate a transaction for the given transactional ID. This operation aborts any ongoing
+/// transaction associated with the transactional ID. It's similar to fenceProducers but only
+/// targets a single transactional ID to handle long-running transactions when 2PC is enabled.
+///
+/// # Parameters
+///
+/// - `transactional_id` - The ID of the transaction to terminate.
+/// - `options` - The options to use when terminating the transaction.
+///
+/// # Returns
+///
+/// The TerminateTransactionResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_TerminateTransactionResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction_with_options(
@@ -1275,19 +1589,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_force_terminate_transaction_with_opti
     box_terminate_transaction_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_cluster`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClusterResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Get information about the nodes in the cluster, using the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_cluster_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Returns
+///
+/// The DescribeClusterResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeClusterResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster(
@@ -1300,19 +1614,25 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster(
     box_describe_cluster_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_cluster_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClusterResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Get information about the nodes in the cluster.
+///
+/// To obtain broker cluster information, you must configure `bootstrap.servers`. To obtain
+/// controller cluster information, you must configure `bootstrap.controllers`.
+///
+/// # Parameters
+///
+/// - `options` - The options to use when getting information about the cluster.
+///
+/// # Returns
+///
+/// The DescribeClusterResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeClusterResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster_with_options(
@@ -1330,19 +1650,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_cluster_with_options(
     box_describe_cluster_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_configs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeConfigsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Get the configuration for the specified resources with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_configs_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `config_resources` - The resources (topic and broker resource types are currently supported)
+///
+/// # Returns
+///
+/// The DescribeConfigsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `config_resources` is a `kafka_List_t` of `const kafka_common_config_ConfigResource_t *`, each
+///   live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeConfigsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
@@ -1362,19 +1696,54 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs(
     box_describe_configs_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_configs_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeConfigsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Get the configuration for the specified resources.
+///
+/// The returned configuration includes default values and the `kafka_admin_ConfigEntry_is_default`
+/// method can be used to distinguish them from user supplied values.
+///
+/// The value of config entries where `kafka_admin_ConfigEntry_is_sensitive` is true is always
+/// `NULL` so that sensitive information is not disclosed.
+///
+/// Config entries where `kafka_admin_ConfigEntry_is_read_only` is true cannot be updated.
+///
+/// The different behavior of nonexistent resource:
+///
+/// - `kafka_common_config_ConfigResource_Type_BROKER`: fails with
+///   `kafka_common_Error_is_timeout_error`
+/// - `kafka_common_config_ConfigResource_Type_TOPIC`: fails with
+///   `kafka_common_Error_is_unknown_topic_or_partition_error`
+/// - `kafka_common_config_ConfigResource_Type_GROUP`: just return default configs even if the
+///   target group is nonexistent
+/// - `kafka_common_config_ConfigResource_Type_BROKER_LOGGER`: fails with
+///   `kafka_common_Error_is_timeout_error`
+/// - `kafka_common_config_ConfigResource_Type_CLIENT_METRICS`: will return empty configs
+///
+/// Note that you cannot describe broker configs or broker logger using `bootstrap.controllers`, and
+/// you cannot describe controller configs or controller logger using `bootstrap.servers`.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `config_resources` - The resources (topic and broker resource types are currently supported)
+/// - `options` - The options to use when describing configs
+///
+/// # Returns
+///
+/// The DescribeConfigsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `config_resources` is a `kafka_List_t` of `const kafka_common_config_ConfigResource_t *`, each
+///   live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeConfigsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
@@ -1399,19 +1768,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_configs_with_options(
     box_describe_configs_result(result, &client.future_ctx())
 }
 
-/// `Admin.incremental_alter_configs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterConfigsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Incrementally updates the configuration for the specified resources with default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_incremental_alter_configs_with_options` with
+/// default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 2.3.0 or higher.
+///
+/// # Parameters
+///
+/// - `configs` - The resources with their configs
+///
+/// # Returns
+///
+/// The AlterConfigsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `configs` is a `kafka_Map_t` of `const kafka_common_config_ConfigResource_t *` keys to `const
+///   kafka_List_t *` values, each a list of `const kafka_admin_AlterConfigOp_t *`; every handle is
+///   live, and a `NULL` map or list reads as empty.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_AlterConfigsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
@@ -1440,19 +1823,45 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs(
     box_alter_configs_result(result, &client.future_ctx())
 }
 
-/// `Admin.incremental_alter_configs_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterConfigsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Incrementally update the configuration for the specified resources.
+///
+/// Updates are not transactional so they may succeed for some resources while fail for others. The
+/// configs for a particular resource are updated atomically.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `AlterConfigsResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` if the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_topic_authorization_error` if the authenticated user didn't have alter
+///   access to the Topic.
+/// - `kafka_common_Error_is_unknown_topic_or_partition_error` if the Topic doesn't exist.
+/// - `kafka_common_Error_is_invalid_request_error` if the request details are invalid. e.g., a
+///   configuration key was specified more than once for a resource
+///
+/// This operation is supported by brokers with version 2.3.0 or higher.
+///
+/// # Parameters
+///
+/// - `configs` - The resources with their configs
+/// - `options` - The options to use when altering configs
+///
+/// # Returns
+///
+/// The AlterConfigsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `configs` is a `kafka_Map_t` of `const kafka_common_config_ConfigResource_t *` keys to `const
+///   kafka_List_t *` values, each a list of `const kafka_admin_AlterConfigOp_t *`; every handle is
+///   live, and a `NULL` map or list reads as empty.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_AlterConfigsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs_with_options(
@@ -1486,19 +1895,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_incremental_alter_configs_with_option
     box_alter_configs_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_config_resources`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConfigResourcesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List all configuration resources available in the cluster with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_list_config_resources_with_options` with
+/// default options. See the overload for more details.
+///
+/// # Returns
+///
+/// The ListConfigurationResourcesResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_ListConfigResourcesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources(
@@ -1511,19 +1920,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources(
     box_list_config_resources_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_config_resources_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConfigResourcesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the configuration resources available in the cluster which matches config resource type. If
+/// no config resource types are specified, all configuration resources will be listed.
+///
+/// # Parameters
+///
+/// - `config_resource_types` - The set of configuration resource types to list.
+/// - `options` - The options to use when listing the configuration resources.
+///
+/// # Returns
+///
+/// The ListConfigurationResourcesResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `config_resource_types` is a `kafka_List_t` of `const
+///   kafka_common_config_ConfigResource_Type_t *` singletons; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ListConfigResourcesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
@@ -1549,19 +1969,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_config_resources_with_options(
     box_list_config_resources_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_log_dirs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Query the information of all log directories on the given set of brokers
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_log_dirs_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 1.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `brokers` - A list of brokers
+///
+/// # Returns
+///
+/// The DescribeLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
@@ -1580,19 +2014,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs(
     box_describe_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_log_dirs_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Query the information of all log directories on the given set of brokers
+///
+/// This operation is supported by brokers with version 1.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `brokers` - A list of brokers
+/// - `options` - The options to use when querying log dir info
+///
+/// # Returns
+///
+/// The DescribeLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `brokers` is a `kafka_List_t` of `const int32_t *`, each pointing at a live value; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
@@ -1616,19 +2062,40 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_log_dirs_with_options(
     box_describe_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_replica_log_dirs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterReplicaLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Change the log directory for the specified replicas. If the replica does not exist on the
+/// broker, the result shows REPLICA_NOT_AVAILABLE for the given replica and the replica will be
+/// created in the given log directory on the broker when it is created later. If the replica
+/// already exists on the broker, the replica will be moved to the given log directory if it is not
+/// already there. For detailed result, inspect the returned `AlterReplicaLogDirsResult` instance.
+///
+/// This operation is not transactional so it may succeed for some replicas while fail for others.
+///
+/// This is a convenience method for `kafka_admin_Admin_alter_replica_log_dirs_with_options` with
+/// default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `replica_assignment` - The replicas with their log directory absolute path
+///
+/// # Returns
+///
+/// The AlterReplicaLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `replica_assignment` is a `kafka_Map_t` of `const kafka_common_TopicPartitionReplica_t *`
+///   keys, each live, to NUL-terminated `const char *` log directory values; `NULL` reads as an
+///   empty map and a `NULL` value as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterReplicaLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
@@ -1655,19 +2122,38 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs(
     box_alter_replica_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_replica_log_dirs_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterReplicaLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Change the log directory for the specified replicas. If the replica does not exist on the
+/// broker, the result shows REPLICA_NOT_AVAILABLE for the given replica and the replica will be
+/// created in the given log directory on the broker when it is created later. If the replica
+/// already exists on the broker, the replica will be moved to the given log directory if it is not
+/// already there. For detailed result, inspect the returned `AlterReplicaLogDirsResult` instance.
+///
+/// This operation is not transactional so it may succeed for some replicas while fail for others.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// # Parameters
+///
+/// - `replica_assignment` - The replicas with their log directory absolute path
+/// - `options` - The options to use when changing replica dir
+///
+/// # Returns
+///
+/// The AlterReplicaLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `replica_assignment` is a `kafka_Map_t` of `const kafka_common_TopicPartitionReplica_t *`
+///   keys, each live, to NUL-terminated `const char *` log directory values; `NULL` reads as an
+///   empty map and a `NULL` value as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterReplicaLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
@@ -1699,19 +2185,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_replica_log_dirs_with_options(
     box_alter_replica_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_replica_log_dirs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeReplicaLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Query the replica log directory information for the specified replicas.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_replica_log_dirs_with_options` with
+/// default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 1.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `replicas` - The replicas to query
+///
+/// # Returns
+///
+/// The DescribeReplicaLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `replicas` is a `kafka_List_t` of `const kafka_common_TopicPartitionReplica_t *`, each live;
+///   `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
@@ -1731,19 +2231,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs(
     box_describe_replica_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_replica_log_dirs_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeReplicaLogDirsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Query the replica log directory information for the specified replicas.
+///
+/// This operation is supported by brokers with version 1.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `replicas` - The replicas to query
+/// - `options` - The options to use when querying replica log dir info
+///
+/// # Returns
+///
+/// The DescribeReplicaLogDirsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `replicas` is a `kafka_List_t` of `const kafka_common_TopicPartitionReplica_t *`, each live;
+///   `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeReplicaLogDirsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs_with_options(
@@ -1769,19 +2281,32 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_replica_log_dirs_with_option
     box_describe_replica_log_dirs_result(result, &client.future_ctx())
 }
 
-/// `Admin.elect_leaders`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ElectLeadersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Elect a replica as leader for topic partitions.
+///
+/// This is a convenience method for `kafka_admin_Admin_elect_leaders_with_options` with default
+/// options.
+///
+/// # Parameters
+///
+/// - `election_type` - The type of election to conduct.
+/// - `partitions` - The topics and partitions for which to conduct elections.
+///
+/// # Returns
+///
+/// The ElectLeadersResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live, or
+///   `NULL` for Java's absent partition set (`null` / `Optional.empty()`), which is not the same as
+///   an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_ElectLeadersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders(
@@ -1803,19 +2328,56 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders(
     box_elect_leaders_result(result, &client.future_ctx())
 }
 
-/// `Admin.elect_leaders_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ElectLeadersResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Elect a replica as leader for the given `partitions`, or for all partitions if the argument to
+/// `partitions` is `NULL`.
+///
+/// This operation is not transactional so it may succeed for some partitions while fail for others.
+///
+/// It may take several seconds after this method returns success for all the brokers in the cluster
+/// to become aware that the partitions have new leaders. During this time,
+/// `kafka_admin_Admin_describe_topics_with_topic_names` may not return information about the
+/// partitions' new leaders.
+///
+/// This operation is supported by brokers with version 2.2.0 or later if preferred election is use;
+/// otherwise the brokers most be 2.4.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// future obtained from the returned `ElectLeadersResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` if the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_unknown_topic_or_partition_error` if the topic or partition did not
+///   exist within the cluster.
+/// - `kafka_common_Error_is_invalid_topic_error` if the topic was already queued for deletion.
+/// - `kafka_common_Error_is_not_controller_error` if the request was sent to a broker that was not
+///   the controller for the cluster.
+/// - `kafka_common_Error_is_timeout_error` if the request timed out before the election was
+///   complete.
+/// - `kafka_common_Error_is_leader_not_available_error` if the preferred leader was not alive or
+///   not in the ISR.
+///
+/// # Parameters
+///
+/// - `election_type` - The type of election to conduct.
+/// - `partitions` - The topics and partitions for which to conduct elections.
+/// - `options` - The options to use when electing the leaders.
+///
+/// # Returns
+///
+/// The ElectLeadersResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live, or
+///   `NULL` for Java's absent partition set (`null` / `Optional.empty()`), which is not the same as
+///   an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_ElectLeadersResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
@@ -1842,19 +2404,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_elect_leaders_with_options(
     box_elect_leaders_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_partition_reassignments`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Change the reassignments for one or more partitions. Providing `NULL` will revert the
+/// reassignment for the associated partition. This is a convenience method for
+/// `kafka_admin_Admin_alter_partition_reassignments_with_options` with default options. See the
+/// overload for more details.
+///
+/// # Parameters
+///
+/// - `reassignments` - The reassignments to add, modify, or remove. See `NewPartitionReassignment`.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `reassignments` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
+///   kafka_admin_NewPartitionReassignment_t *` values, each key live; a `NULL` value is Java's
+///   `Optional.empty()`, which cancels that partition's reassignment, and a `NULL` map reads as an
+///   empty map.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
@@ -1879,19 +2455,54 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments(
     box_alter_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_partition_reassignments_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Change the reassignments for one or more partitions. Providing `NULL` will revert the
+/// reassignment for the associated partition.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `AlterPartitionReassignmentsResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_unknown_topic_or_partition_error` If the topic or partition does not
+///   exist within the cluster.
+/// - `kafka_common_Error_is_timeout_error` if the request timed out before the controller could
+///   record the new assignments.
+/// - `kafka_common_Error_is_invalid_replica_assignment_error` If the specified assignment was not
+///   valid.
+/// - `kafka_common_Error_is_invalid_replication_factor_error` If the replication factor was changed
+///   in an invalid way. Only thrown when
+///   `kafka_admin_AlterPartitionReassignmentsOptions_allow_replication_factor_change` is set to
+///   false and the request is attempting to alter reassignments (not cancel)
+/// - `kafka_common_Error_is_unsupported_version_error` If
+///   `kafka_admin_AlterPartitionReassignmentsOptions_allow_replication_factor_change` was changed
+///   outside the default and the server does not support the option (e.g due to an old Kafka
+///   version).
+/// - `kafka_common_Error_is_no_reassignment_in_progress_error` If there was an attempt to cancel a
+///   reassignment for a partition which was not being reassigned.
+///
+/// # Parameters
+///
+/// - `reassignments` - The reassignments to add, modify, or remove. See `NewPartitionReassignment`.
+/// - `options` - The options to use.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `reassignments` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
+///   kafka_admin_NewPartitionReassignment_t *` values, each key live; a `NULL` value is Java's
+///   `Optional.empty()`, which cancels that partition's reassignment, and a `NULL` map reads as an
+///   empty map.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments_with_options(
@@ -1922,19 +2533,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_partition_reassignments_with_op
     box_alter_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_partition_reassignments`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List all of the current partition reassignments.
+///
+/// This is a convenience method for `kafka_admin_Admin_list_partition_reassignments_with_options`
+/// with default options. See the overload for more details.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_ListPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments(
@@ -1947,19 +2558,32 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments(
     box_list_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_partition_reassignments_with_partitions`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the current reassignments for the given partitions.
+///
+/// This is a convenience method for
+/// `kafka_admin_Admin_list_partition_reassignments_with_partitions_options` with default options.
+/// See the overload for more details.
+///
+/// # Parameters
+///
+/// - `partitions` - The topic partitions to list reassignments for.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ListPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_partitions(
@@ -1977,19 +2601,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
     box_list_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_partition_reassignments_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List all of the current partition reassignments.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `ListPartitionReassignmentsResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user doesn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_unknown_topic_or_partition_error` If a given topic or partition does
+///   not exist.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the controller could
+///   list the current reassignments.
+///
+/// # Parameters
+///
+/// - `options` - The options to use.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_ListPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_options(
@@ -2008,19 +2646,41 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_opt
     box_list_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_partition_reassignments_with_partitions_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListPartitionReassignmentsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the current reassignments for the given partitions.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `ListPartitionReassignmentsResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user doesn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_unknown_topic_or_partition_error` If a given topic or partition does
+///   not exist.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the controller could
+///   list the current reassignments.
+///
+/// # Parameters
+///
+/// - `partitions` - the partitions we want to get reassignment for, or `NULL` if we want to get the
+///   reassignments for all partitions in the cluster
+/// - `options` - The options to use.
+///
+/// # Returns
+///
+/// The result.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live, or
+///   `NULL` for Java's absent partition set (`null` / `Optional.empty()`), which is not the same as
+///   an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ListPartitionReassignmentsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_partitions_options(
@@ -2044,19 +2704,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_partition_reassignments_with_par
     box_list_partition_reassignments_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_offsets`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List offset for the specified partitions and OffsetSpec. This operation enables to find the
+/// beginning offset, end offset as well as the offset matching a timestamp in partitions.
+///
+/// This is a convenience method for `kafka_admin_Admin_list_offsets_with_options`
+///
+/// # Parameters
+///
+/// - `topic_partition_offsets` - The mapping from partition to the OffsetSpec to look up.
+///
+/// # Returns
+///
+/// The ListOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `topic_partition_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys
+///   to `const kafka_admin_OffsetSpec_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_ListOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
@@ -2078,19 +2749,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets(
     box_list_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_offsets_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List offset for the specified partitions. This operation enables to find the beginning offset,
+/// end offset as well as the offset matching a timestamp in partitions.
+///
+/// # Parameters
+///
+/// - `topic_partition_offsets` - The mapping from partition to the OffsetSpec to look up.
+/// - `options` - The options to use when retrieving the offsets
+///
+/// # Returns
+///
+/// The ListOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `topic_partition_offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys
+///   to `const kafka_admin_OffsetSpec_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_ListOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
@@ -2117,19 +2798,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_offsets_with_options(
     box_list_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_groups`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the groups available in the cluster with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_list_groups_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Returns
+///
+/// The ListGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_ListGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_groups(
@@ -2142,19 +2823,22 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_groups(
     box_list_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_groups_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the groups available in the cluster.
+///
+/// # Parameters
+///
+/// - `options` - The options to use when listing the groups.
+///
+/// # Returns
+///
+/// The ListGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_ListGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_groups_with_options(
@@ -2172,19 +2856,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_groups_with_options(
     box_list_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_consumer_groups`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeConsumerGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some consumer groups in the cluster, with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_consumer_groups_with_options` with
+/// default options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `group_ids` - The IDs of the groups to describe.
+///
+/// # Returns
+///
+/// The DescribeConsumerGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeConsumerGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
@@ -2202,19 +2898,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups(
     box_describe_consumer_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_consumer_groups_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeConsumerGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some consumer groups in the cluster.
+///
+/// # Parameters
+///
+/// - `group_ids` - The IDs of the groups to describe.
+/// - `options` - The options to use when describing the groups.
+///
+/// # Returns
+///
+/// The DescribeConsumerGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeConsumerGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options(
@@ -2238,19 +2944,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_consumer_groups_with_options
     box_describe_consumer_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_classic_groups`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClassicGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some classic groups in the cluster, with the default options.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_classic_groups_with_options` with
+/// default options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `group_ids` - The IDs of the groups to describe.
+///
+/// # Returns
+///
+/// The DescribeClassicGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeClassicGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
@@ -2268,19 +2986,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups(
     box_describe_classic_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_classic_groups_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClassicGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe some classic groups in the cluster.
+///
+/// # Parameters
+///
+/// - `group_ids` - The IDs of the groups to describe.
+/// - `options` - The options to use when describing the groups.
+///
+/// # Returns
+///
+/// The DescribeClassicGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeClassicGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
@@ -2304,19 +3032,27 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_classic_groups_with_options(
     box_describe_classic_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_consumer_group_offsets_with_group_id`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the consumer group offsets available in the cluster with the default options.
+///
+/// This is a convenience method for
+/// `kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options` to list offsets of all
+/// partitions of one group with default options.
+///
+/// # Parameters
+///
+/// - `group_id` - The group to list the offsets of.
+///
+/// # Returns
+///
+/// The ListConsumerGroupOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_id(
@@ -2333,19 +3069,24 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     box_list_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_consumer_group_offsets_with_group_id_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the consumer group offsets available in the cluster.
+///
+/// # Parameters
+///
+/// - `group_id` - The group to list the offsets of.
+/// - `options` - The options to use when listing the consumer group offsets.
+///
+/// # Returns
+///
+/// The ListConsumerGroupOffsetsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options(
@@ -2368,19 +3109,34 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     box_list_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_consumer_group_offsets_with_group_specs`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the consumer group offsets available in the cluster for the specified groups with the
+/// default options.
+///
+/// This is a convenience method for
+/// `kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options` with default options.
+///
+/// # Parameters
+///
+/// - `group_specs` - Map of consumer group ids to a spec that specifies the topic partitions of the
+///   group to list offsets for.
+///
+/// # Returns
+///
+/// The ListConsumerGroupOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_specs` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; `NULL` reads as an empty map
+///   and a `NULL` key as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_specs(
@@ -2402,19 +3158,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     box_list_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.list_consumer_group_offsets_with_group_specs_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ListConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// List the consumer group offsets available in the cluster for the specified consumer groups.
+///
+/// # Parameters
+///
+/// - `group_specs` - Map of consumer group ids to a spec that specifies the topic partitions of the
+///   group to list offsets for.
+/// - `options` - The options to use when listing the consumer group offsets.
+///
+/// # Returns
+///
+/// The ListConsumerGroupOffsetsResult
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_specs` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_ListConsumerGroupOffsetsSpec_t *` values, each live; `NULL` reads as an empty map
+///   and a `NULL` key as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ListConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options(
@@ -2443,19 +3211,32 @@ pub unsafe extern "C" fn kafka_admin_Admin_list_consumer_group_offsets_with_grou
     box_list_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_consumer_group_offsets`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alters offsets for the specified group. In order to succeed, the group must be empty.
+///
+/// This is a convenience method for `kafka_admin_Admin_alter_consumer_group_offsets_with_options`
+/// with default options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `group_id` - The group for which to alter offsets.
+/// - `offsets` - A map of offsets by partition with associated metadata.
+///
+/// # Returns
+///
+/// The AlterOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
+///   kafka_consumer_OffsetAndMetadata_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
@@ -2478,19 +3259,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets(
     box_alter_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_consumer_group_offsets_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alters offsets for the specified group. In order to succeed, the group must be empty.
+///
+/// This operation is not transactional so it may succeed for some partitions while fail for others.
+///
+/// # Parameters
+///
+/// - `group_id` - The group for which to alter offsets.
+/// - `offsets` - A map of offsets by partition with associated metadata. Partitions not specified
+///   in the map are ignored.
+/// - `options` - The options to use when altering the offsets.
+///
+/// # Returns
+///
+/// The AlterOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `offsets` is a `kafka_Map_t` of `const kafka_common_TopicPartition_t *` keys to `const
+///   kafka_consumer_OffsetAndMetadata_t *` values, each live; `NULL` reads as an empty map.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_options(
@@ -2519,19 +3314,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_consumer_group_offsets_with_opt
     box_alter_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_consumer_group_offsets`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete committed offsets for a set of partitions in a consumer group with the default options.
+/// This will succeed at the partition level only if the group is not actively subscribed to the
+/// corresponding topic.
+///
+/// # Parameters
+///
+/// - `group_id` - The group to delete the offsets of.
+/// - `partitions` - The partitions whose committed offsets to delete.
+///
+/// # Returns
+///
+/// The DeleteConsumerGroupOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
@@ -2553,19 +3360,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets(
     box_delete_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_consumer_group_offsets_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete committed offsets for a set of partitions in a consumer group. This will succeed at the
+/// partition level only if the group is not actively subscribed to the corresponding topic.
+///
+/// # Parameters
+///
+/// - `group_id` - The group to delete the offsets of.
+/// - `partitions` - The partitions whose committed offsets to delete.
+/// - `options` - The options to use when deleting offsets in a consumer group.
+///
+/// # Returns
+///
+/// The DeleteConsumerGroupOffsetsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `partitions` is a `kafka_List_t` of `const kafka_common_TopicPartition_t *`, each live; `NULL`
+///   reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_options(
@@ -2594,19 +3413,28 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_group_offsets_with_op
     box_delete_consumer_group_offsets_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_consumer_groups`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteConsumerGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete consumer groups from the cluster with the default options.
+///
+/// # Parameters
+///
+/// - `group_ids` - The ids of the groups to delete.
+///
+/// # Returns
+///
+/// The DeleteConsumerGroupResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DeleteConsumerGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
@@ -2624,19 +3452,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups(
     box_delete_consumer_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_consumer_groups_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteConsumerGroupsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Delete consumer groups from the cluster.
+///
+/// # Parameters
+///
+/// - `group_ids` - The ids of the groups to delete.
+/// - `options` - The options to use when deleting a consumer group.
+///
+/// # Returns
+///
+/// The DeleteConsumerGroupsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `group_ids` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty
+///   list and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DeleteConsumerGroupsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
@@ -2660,19 +3498,26 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_consumer_groups_with_options(
     box_delete_consumer_groups_result(result, &client.future_ctx())
 }
 
-/// `Admin.remove_members_from_consumer_group_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Remove members from the consumer group by given member identities.
+///
+/// For possible error codes, refer to `LeaveGroupResponse`.
+///
+/// # Parameters
+///
+/// - `group_id` - The ID of the group to remove member from.
+/// - `options` - The options to carry removing members' information.
+///
+/// # Returns
+///
+/// The MembershipChangeResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_with_options(
@@ -2695,19 +3540,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_remove_members_from_consumer_group_wi
     box_remove_members_from_consumer_group_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_acls`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// This is a convenience method for `kafka_admin_Admin_create_acls_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `acls` - The ACLs to create
+///
+/// # Returns
+///
+/// The CreateAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; `NULL` reads
+///   as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_CreateAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
@@ -2726,19 +3582,35 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls(
     box_create_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_acls_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Creates access control lists (ACLs) which are bound to specific resources.
+///
+/// This operation is not transactional so it may succeed for some ACLs while fail for others.
+///
+/// If you attempt to add an ACL that duplicates an existing ACL, no error will be raised, but no
+/// changes will be made.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `acls` - The ACLs to create
+/// - `options` - The options to use when creating the ACLs.
+///
+/// # Returns
+///
+/// The CreateAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `acls` is a `kafka_List_t` of `const kafka_common_acl_AclBinding_t *`, each live; `NULL` reads
+///   as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_CreateAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_acls_with_options(
@@ -2762,19 +3634,25 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_acls_with_options(
     box_create_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_acls`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// This is a convenience method for `kafka_admin_Admin_describe_acls_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `filter` - The filter to use.
+///
+/// # Returns
+///
+/// The DescribeAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_acls(
@@ -2792,19 +3670,28 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_acls(
     box_describe_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_acls_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Lists access control lists (ACLs) according to the supplied filter.
+///
+/// Note: it may take some time for changes made by `createAcls` or `deleteAcls` to be reflected in
+/// the output of `describeAcls`.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `filter` - The filter to use.
+/// - `options` - The options to use when listing the ACLs.
+///
+/// # Returns
+///
+/// The DescribeAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_acls_with_options(
@@ -2827,19 +3714,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_acls_with_options(
     box_describe_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_acls`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// This is a convenience method for `kafka_admin_Admin_delete_acls_with_options` with default
+/// options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `filters` - The filters to use.
+///
+/// # Returns
+///
+/// The DeleteAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `filters` is a `kafka_List_t` of `const kafka_common_acl_AclBindingFilter_t *`, each live;
+///   `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DeleteAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
@@ -2859,19 +3757,32 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls(
     box_delete_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.delete_acls_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DeleteAclsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Deletes access control lists (ACLs) according to the supplied filters.
+///
+/// This operation is not transactional so it may succeed for some ACLs while fail for others.
+///
+/// This operation is supported by brokers with version 0.11.0.0 or higher.
+///
+/// # Parameters
+///
+/// - `filters` - The filters to use.
+/// - `options` - The options to use when deleting the ACLs.
+///
+/// # Returns
+///
+/// The DeleteAclsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `filters` is a `kafka_List_t` of `const kafka_common_acl_AclBindingFilter_t *`, each live;
+///   `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_DeleteAclsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_delete_acls_with_options(
@@ -2896,19 +3807,29 @@ pub unsafe extern "C" fn kafka_admin_Admin_delete_acls_with_options(
     box_delete_acls_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_client_quotas`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClientQuotasResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describes all entities matching the provided filter that have at least one client quota
+/// configuration value defined.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_client_quotas_with_options` with
+/// default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 2.6.0 or higher.
+///
+/// # Parameters
+///
+/// - `filter` - the filter to apply to match entities
+///
+/// # Returns
+///
+/// the DescribeClientQuotasResult containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas(
@@ -2926,19 +3847,37 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas(
     box_describe_client_quotas_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_client_quotas_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeClientQuotasResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describes all entities matching the provided filter that have at least one client quota
+/// configuration value defined.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// future from the returned `DescribeClientQuotasResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   describe access to the cluster.
+/// - `kafka_common_Error_is_invalid_request_error` If the request details are invalid. e.g., an
+///   invalid entity type was specified.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the describe could
+///   finish.
+///
+/// This operation is supported by brokers with version 2.6.0 or higher.
+///
+/// # Parameters
+///
+/// - `filter` - the filter to apply to match entities
+/// - `options` - the options to use
+///
+/// # Returns
+///
+/// the DescribeClientQuotasResult containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas_with_options(
@@ -2962,19 +3901,33 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_client_quotas_with_options(
     box_describe_client_quotas_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_client_quotas`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterClientQuotasResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alters client quota configurations with the specified alterations.
+///
+/// This is a convenience method for `kafka_admin_Admin_alter_client_quotas_with_options` with
+/// default options. See the overload for more details.
+///
+/// This operation is supported by brokers with version 2.6.0 or higher.
+///
+/// # Parameters
+///
+/// - `entries` - the alterations to perform
+///
+/// # Returns
+///
+/// the AlterClientQuotasResult containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `entries` is a `kafka_List_t` of `const kafka_common_quota_ClientQuotaAlteration_t *`, each
+///   live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
@@ -2994,19 +3947,44 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas(
     box_alter_client_quotas_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_client_quotas_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterClientQuotasResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alters client quota configurations with the specified alterations.
+///
+/// Alterations for a single entity are atomic, but across entities is not guaranteed. The resulting
+/// per-entity error code should be evaluated to resolve the success or failure of all updates.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `AlterClientQuotasResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_invalid_request_error` If the request details are invalid. e.g., a
+///   configuration key was specified more than once for an entity.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the alterations could
+///   finish. It cannot be guaranteed whether the update succeed or not.
+///
+/// This operation is supported by brokers with version 2.6.0 or higher.
+///
+/// # Parameters
+///
+/// - `entries` - the alterations to perform
+/// - `options` - The options to use when altering the quotas.
+///
+/// # Returns
+///
+/// the AlterClientQuotasResult containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `entries` is a `kafka_List_t` of `const kafka_common_quota_ClientQuotaAlteration_t *`, each
+///   live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterClientQuotasResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas_with_options(
@@ -3031,19 +4009,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_client_quotas_with_options(
     box_alter_client_quotas_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_user_scram_credentials`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeUserScramCredentialsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe all SASL/SCRAM credentials.
+///
+/// This is a convenience method for
+/// `kafka_admin_Admin_describe_user_scram_credentials_with_users_options`
+///
+/// # Returns
+///
+/// The DescribeUserScramCredentialsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials(
@@ -3056,19 +4034,32 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials(
     box_describe_user_scram_credentials_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_user_scram_credentials_with_users`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeUserScramCredentialsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe SASL/SCRAM credentials for the given users.
+///
+/// This is a convenience method for
+/// `kafka_admin_Admin_describe_user_scram_credentials_with_users_options`
+///
+/// # Parameters
+///
+/// - `users` - the users for which credentials are to be described; all users' credentials are
+///   described if empty.
+///
+/// # Returns
+///
+/// The DescribeUserScramCredentialsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty list
+///   and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_users(
@@ -3086,19 +4077,44 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     box_describe_user_scram_credentials_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_user_scram_credentials_with_users_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeUserScramCredentialsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe SASL/SCRAM credentials.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures from the returned `DescribeUserScramCredentialsResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   describe access to the cluster.
+/// - `kafka_common_Error_is_resource_not_found_error` If the user did not exist/had no SCRAM
+///   credentials.
+/// - `kafka_common_Error_is_duplicate_resource_error` If the user was requested to be described
+///   more than once in the original request.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the describe operation
+///   could finish.
+///
+/// This operation is supported by brokers with version 2.7.0 or higher.
+///
+/// # Parameters
+///
+/// - `users` - the users for which credentials are to be described; all users' credentials are
+///   described if empty.
+/// - `options` - The options to use when describing the credentials
+///
+/// # Returns
+///
+/// The DescribeUserScramCredentialsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `users` is a `kafka_List_t` of NUL-terminated `const char *`; `NULL` reads as an empty list
+///   and a `NULL` element as an empty string.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeUserScramCredentialsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_users_options(
@@ -3122,19 +4138,30 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_user_scram_credentials_with_
     box_describe_user_scram_credentials_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_user_scram_credentials`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterUserScramCredentialsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alter SASL/SCRAM credentials for the given users.
+///
+/// This is a convenience method for `kafka_admin_Admin_alter_user_scram_credentials_with_options`
+///
+/// # Parameters
+///
+/// - `alterations` - the alterations to be applied
+///
+/// # Returns
+///
+/// The AlterUserScramCredentialsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `alterations` is a `kafka_List_t` of `const kafka_admin_UserScramCredentialAlteration_t *`,
+///   each live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterUserScramCredentialsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
@@ -3155,19 +4182,47 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials(
     box_alter_user_scram_credentials_result(result, &client.future_ctx())
 }
 
-/// `Admin.alter_user_scram_credentials_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_AlterUserScramCredentialsResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Alter SASL/SCRAM credentials.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` any of the
+/// futures from the returned `AlterUserScramCredentialsResult`:
+///
+/// - `kafka_common_Error_is_not_controller_error` If the request is not sent to the Controller
+///   broker.
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_unsupported_by_authentication_error` If the user authenticated with a
+///   delegation token.
+/// - `kafka_common_Error_is_unsupported_sasl_mechanism_error` If the requested SCRAM mechanism is
+///   unrecognized or otherwise unsupported.
+/// - `kafka_common_Error_is_unacceptable_credential_error` If the username is empty or the
+///   requested number of iterations is too small or too large.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the describe could
+///   finish.
+///
+/// This operation is supported by brokers with version 2.7.0 or higher.
+///
+/// # Parameters
+///
+/// - `alterations` - the alterations to be applied
+/// - `options` - The options to use when altering the credentials
+///
+/// # Returns
+///
+/// The AlterUserScramCredentialsResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `alterations` is a `kafka_List_t` of `const kafka_admin_UserScramCredentialAlteration_t *`,
+///   each live; `NULL` reads as an empty list.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_AlterUserScramCredentialsResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials_with_options(
@@ -3194,19 +4249,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_alter_user_scram_credentials_with_opt
     box_alter_user_scram_credentials_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_delegation_token`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Create a Delegation Token.
+///
+/// This is a convenience method for `kafka_admin_Admin_create_delegation_token_with_options` with
+/// default options. See the overload for more details.
+///
+/// # Returns
+///
+/// The CreateDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_CreateDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token(
@@ -3219,19 +4274,37 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token(
     box_create_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.create_delegation_token_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_CreateDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Create a Delegation Token.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the delegationToken() method of the returned `CreateDelegationTokenResult`
+///
+/// - `kafka_common_Error_is_unsupported_by_authentication_error` If the request sent on
+///   PLAINTEXT/1-way SSL channels or delegation token authenticated channels.
+/// - `kafka_common_Error_is_invalid_principal_type_error` if the renewers principal type is not
+///   supported.
+/// - `kafka_common_Error_is_delegation_token_disabled_error` if the delegation token feature is
+///   disabled.
+/// - `kafka_common_Error_is_timeout_error` if the request was not completed in within the given
+///   `kafka_admin_CreateDelegationTokenOptions_timeout_ms`.
+///
+/// # Parameters
+///
+/// - `options` - The options to use when creating delegation token.
+///
+/// # Returns
+///
+/// The CreateDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_CreateDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token_with_options(
@@ -3250,21 +4323,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_create_delegation_token_with_options(
     box_create_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.renew_delegation_token`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_RenewDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Renew a Delegation Token.
+///
+/// This is a convenience method for `kafka_admin_Admin_renew_delegation_token_with_options` with
+/// default options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `hmac` - HMAC of the Delegation token
+///
+/// # Returns
+///
+/// The RenewDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `hmac.data` must be null or point at `hmac.len` readable bytes, not
-/// mutated during the call.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `hmac` is a `kafka_Bytes_t` whose `data` points at `len` readable bytes; a `NULL` `data` reads
+///   as empty.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_RenewDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token(
@@ -3282,21 +4365,46 @@ pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token(
     box_renew_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.renew_delegation_token_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_RenewDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Renew a Delegation Token.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the expiryTimestamp() method of the returned `RenewDelegationTokenResult`
+///
+/// - `kafka_common_Error_is_unsupported_by_authentication_error` If the request sent on
+///   PLAINTEXT/1-way SSL channels or delegation token authenticated channels.
+/// - `kafka_common_Error_is_delegation_token_disabled_error` if the delegation token feature is
+///   disabled.
+/// - `kafka_common_Error_is_delegation_token_not_found_error` if the delegation token is not found
+///   on server.
+/// - `kafka_common_Error_is_delegation_token_owner_mismatch_error` if the authenticated user is not
+///   owner/renewer of the token.
+/// - `kafka_common_Error_is_delegation_token_expired_error` if the delegation token is expired.
+/// - `kafka_common_Error_is_timeout_error` if the request was not completed in within the given
+///   `kafka_admin_RenewDelegationTokenOptions_timeout_ms`.
+///
+/// # Parameters
+///
+/// - `hmac` - HMAC of the Delegation token
+/// - `options` - The options to use when renewing delegation token.
+///
+/// # Returns
+///
+/// The RenewDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `hmac.data` must be null or point at `hmac.len` readable bytes, not
-/// mutated during the call.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `hmac` is a `kafka_Bytes_t` whose `data` points at `len` readable bytes; a `NULL` `data` reads
+///   as empty.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_RenewDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token_with_options(
@@ -3320,21 +4428,31 @@ pub unsafe extern "C" fn kafka_admin_Admin_renew_delegation_token_with_options(
     box_renew_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.expire_delegation_token`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ExpireDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Expire a Delegation Token.
+///
+/// This is a convenience method for `kafka_admin_Admin_expire_delegation_token_with_options` with
+/// default options. This will expire the token immediately. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `hmac` - HMAC of the Delegation token
+///
+/// # Returns
+///
+/// The ExpireDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `hmac.data` must be null or point at `hmac.len` readable bytes, not
-/// mutated during the call.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `hmac` is a `kafka_Bytes_t` whose `data` points at `len` readable bytes; a `NULL` `data` reads
+///   as empty.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ExpireDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token(
@@ -3352,21 +4470,46 @@ pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token(
     box_expire_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.expire_delegation_token_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_ExpireDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Expire a Delegation Token.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the expiryTimestamp() method of the returned `ExpireDelegationTokenResult`
+///
+/// - `kafka_common_Error_is_unsupported_by_authentication_error` If the request sent on
+///   PLAINTEXT/1-way SSL channels or delegation token authenticated channels.
+/// - `kafka_common_Error_is_delegation_token_disabled_error` if the delegation token feature is
+///   disabled.
+/// - `kafka_common_Error_is_delegation_token_not_found_error` if the delegation token is not found
+///   on server.
+/// - `kafka_common_Error_is_delegation_token_owner_mismatch_error` if the authenticated user is not
+///   owner/renewer of the requested token.
+/// - `kafka_common_Error_is_delegation_token_expired_error` if the delegation token is expired.
+/// - `kafka_common_Error_is_timeout_error` if the request was not completed in within the given
+///   `kafka_admin_ExpireDelegationTokenOptions_timeout_ms`.
+///
+/// # Parameters
+///
+/// - `hmac` - HMAC of the Delegation token
+/// - `options` - The options to use when expiring delegation token.
+///
+/// # Returns
+///
+/// The ExpireDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
-/// `hmac.data` must be null or point at `hmac.len` readable bytes, not
-/// mutated during the call.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. The inputs are
+/// borrowed and copied during the call:
+///
+/// - `hmac` is a `kafka_Bytes_t` whose `data` points at `len` readable bytes; a `NULL` `data` reads
+///   as empty.
+///
+/// The result handle is owned by the caller, freed with
+/// `kafka_admin_ExpireDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token_with_options(
@@ -3390,19 +4533,20 @@ pub unsafe extern "C" fn kafka_admin_Admin_expire_delegation_token_with_options(
     box_expire_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_delegation_token`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe the Delegation Tokens.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_delegation_token_with_options` with
+/// default options. This will return all the user owned tokens and tokens where user have Describe
+/// permission. See the overload for more details.
+///
+/// # Returns
+///
+/// The DescribeDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token(
@@ -3415,19 +4559,36 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token(
     box_describe_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_delegation_token_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeDelegationTokenResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describe the Delegation Tokens.
+///
+/// This operation is supported by brokers with version 1.1.0 or higher.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the delegationTokens() method of the returned
+/// `DescribeDelegationTokenResult`
+///
+/// - `kafka_common_Error_is_unsupported_by_authentication_error` If the request sent on
+///   PLAINTEXT/1-way SSL channels or delegation token authenticated channels.
+/// - `kafka_common_Error_is_delegation_token_disabled_error` if the delegation token feature is
+///   disabled.
+/// - `kafka_common_Error_is_timeout_error` if the request was not completed in within the given
+///   `kafka_admin_DescribeDelegationTokenOptions_timeout_ms`.
+///
+/// # Parameters
+///
+/// - `options` - The options to use when describing delegation tokens.
+///
+/// # Returns
+///
+/// The DescribeDelegationTokenResult.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeDelegationTokenResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token_with_options(
@@ -3446,19 +4607,19 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_delegation_token_with_option
     box_describe_delegation_token_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_features`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeFeaturesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describes finalized as well as supported features.
+///
+/// This is a convenience method for `kafka_admin_Admin_describe_features_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Returns
+///
+/// the `DescribeFeaturesResult` containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. The result handle is owned by the caller, freed with
+/// `kafka_admin_DescribeFeaturesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_features(
@@ -3471,19 +4632,28 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features(
     box_describe_features_result(result, &client.future_ctx())
 }
 
-/// `Admin.describe_features_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_DescribeFeaturesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Describes finalized as well as supported features. The request is issued to any random broker.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// future from the returned `DescribeFeaturesResult`:
+///
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the describe operation
+///   could finish.
+///
+/// # Parameters
+///
+/// - `options` - the options to use
+///
+/// # Returns
+///
+/// the `DescribeFeaturesResult` containing the result
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any
-/// other call for the duration of this one, and of its parameter's type: a
-/// string NUL-terminated, an enum one of its singletons, and a list or map
-/// holding elements of the types the module docs give, each element
-/// meeting these same conditions.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, and of its parameter's type: a string NUL-terminated
+/// and an enum one of its singletons. The inputs are borrowed and copied during the call. The
+/// result handle is owned by the caller, freed with `kafka_admin_DescribeFeaturesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
@@ -3501,19 +4671,36 @@ pub unsafe extern "C" fn kafka_admin_Admin_describe_features_with_options(
     box_describe_features_result(result, &client.future_ctx())
 }
 
-/// `Admin.update_features`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_UpdateFeaturesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Applies specified updates to finalized features.
+///
+/// This is a convenience method for `kafka_admin_Admin_update_features_with_options` with default
+/// options. See the overload for more details.
+///
+/// # Parameters
+///
+/// - `feature_updates` - the map of finalized feature name to `FeatureUpdate`
+///
+/// # Returns
+///
+/// the `UpdateFeaturesResult` containing the result
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `feature_updates` is empty or any
+///   feature name is blank.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any other
-/// call for the duration of this one, and of its parameter's type: a string
-/// NUL-terminated, an enum one of its singletons, and a list or map holding
-/// elements of the types the module docs give, each element meeting these same
-/// conditions. `out_err` must be a valid slot pointing at null.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. `out_err` must be a
+/// valid slot pointing at `NULL`. The inputs are borrowed and copied during the call:
+///
+/// - `feature_updates` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_FeatureUpdate_t *` values, each live; `NULL` reads as an empty map and a `NULL`
+///   key as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_UpdateFeaturesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features(
@@ -3535,19 +4722,80 @@ pub unsafe extern "C" fn kafka_admin_Admin_update_features(
     unsafe { deliver_value(result, out_err, |r| box_update_features_result(r, &client.future_ctx())) }
 }
 
-/// `Admin.update_features_with_options`: a non-blocking call returning the owned result handle,
-/// freed with `kafka_admin_UpdateFeaturesResult_destroy`; the inputs are borrowed and
-/// copied during the call (see the module docs for the container element
-/// types).
+/// Applies specified updates to finalized features. This operation is not transactional so some
+/// updates may succeed while the rest may fail.
+///
+/// The API takes in a map of finalized feature names to `FeatureUpdate` that needs to be applied.
+/// Each entry in the map specifies the finalized feature to be added or updated or deleted, along
+/// with the new max feature version level value. This request is issued only to the controller
+/// since the API is only served by the controller. The return value contains an error code for each
+/// supplied `FeatureUpdate`, and the code indicates if the update succeeded or failed in the
+/// controller.
+///
+/// - Downgrading a feature version level is not a common operation and should only be performed
+///   when necessary. It is permitted only if the `FeatureUpdate` specifies the `upgradeType` as
+///   either `kafka_admin_FeatureUpdate_UpgradeType_SAFE_DOWNGRADE` or
+///   `kafka_admin_FeatureUpdate_UpgradeType_UNSAFE_DOWNGRADE`.
+/// - `SAFE_DOWNGRADE`: Allows downgrades that do not lead to metadata loss.
+/// - `UNSAFE_DOWNGRADE`: Permits downgrades that might result in metadata loss.
+///
+/// Note that even with these settings, certain downgrades may still be rejected by the controller
+/// if they are considered unsafe or impossible.
+///
+/// - Deleting a finalized feature version is also not a common operation. To delete a feature, set
+///   the `maxVersionLevel` to zero and specify the `upgradeType` as either
+///   `kafka_admin_FeatureUpdate_UpgradeType_SAFE_DOWNGRADE` or
+///   `kafka_admin_FeatureUpdate_UpgradeType_UNSAFE_DOWNGRADE`.
+/// - The `kafka_admin_FeatureUpdate_UpgradeType_UPGRADE` type cannot be used when the
+///   `maxVersionLevel` is zero. Attempting to do so will result in an
+///   `kafka_common_Error_is_local_illegal_argument_error`.
+///
+/// The following errors can be anticipated when calling `kafka_common_KafkaFuture_get` on the
+/// futures obtained from the returned `UpdateFeaturesResult`:
+///
+/// - `kafka_common_Error_is_cluster_authorization_error` If the authenticated user didn't have
+///   alter access to the cluster.
+/// - `kafka_common_Error_is_invalid_request_error` If the request details are invalid. e.g., a
+///   non-existing finalized feature is attempted to be deleted or downgraded.
+/// - `kafka_common_Error_is_timeout_error` If the request timed out before the updates could
+///   finish. It cannot be guaranteed whether the updates succeeded or not.
+/// - `kafka_common_Error_is_feature_update_failed_error` This means there was an unexpected error
+///   encountered when the update was applied on the controller. There is no guarantee on whether
+///   the update succeeded or failed. The best way to find out is to issue a
+///   `kafka_admin_Admin_describe_features` request.
+///
+/// This operation is supported by brokers with version 2.7.0 or higher.
+///
+/// # Parameters
+///
+/// - `feature_updates` - the map of finalized feature name to `FeatureUpdate`
+/// - `options` - the options to use
+///
+/// # Returns
+///
+/// the `UpdateFeaturesResult` containing the result
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `feature_updates` is empty or any
+///   feature name is blank.
+///
+/// # Translation notes
+///
+/// Java throws that `IllegalArgumentException` from the call; here it is stored in `*out_err`.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle or view. Every other pointer must be null
-/// where the module docs allow it, or else live and not mutated by any other
-/// call for the duration of this one, and of its parameter's type: a string
-/// NUL-terminated, an enum one of its singletons, and a list or map holding
-/// elements of the types the module docs give, each element meeting these same
-/// conditions. `out_err` must be a valid slot pointing at null.
+/// `self_` must be a live handle or view. Every other pointer must be live and not mutated by any
+/// other call for the duration of this one, unless its entry below allows `NULL`, and of its
+/// parameter's type: a string NUL-terminated and an enum one of its singletons. `out_err` must be a
+/// valid slot pointing at `NULL`. The inputs are borrowed and copied during the call:
+///
+/// - `feature_updates` is a `kafka_Map_t` of NUL-terminated `const char *` keys to `const
+///   kafka_admin_FeatureUpdate_t *` values, each live; `NULL` reads as an empty map and a `NULL`
+///   key as an empty string.
+///
+/// The result handle is owned by the caller, freed with `kafka_admin_UpdateFeaturesResult_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_Admin_update_features_with_options(

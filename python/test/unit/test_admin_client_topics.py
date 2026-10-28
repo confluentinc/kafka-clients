@@ -210,7 +210,8 @@ _CALLS: list[tuple[str, str, Callable[[Any], Any], Callable[[Any], Any]]] = [
 @pytest.mark.xfail(strict=True, reason=(
     "core gap: the Rust core's by-name describeTopics times out as 'listNodes' "
     "(its first step); Java's KafkaAdminClient sends it as "
-    "'describeTopicPartitions' (KafkaAdminClient.java:2231)"))
+    "'describeTopicPartitions' "
+    "(KafkaAdminClient#generateDescribeTopicsCallWithDescribeTopicPartitionsApi)"))
 def test_describe_topics_by_name_times_out_with_java_call_name() -> None:
     with _admin() as admin:
         result = admin.describe_topics(topic_names=["t"],
@@ -539,7 +540,7 @@ def test_config_from_core_data() -> None:
 
 
 def test_config_from_core_data_keeps_a_null_type() -> None:
-    """A ``createTopics`` entry has Java's null type (``KafkaAdminClient.java:1992-2002``):
+    """A ``createTopics`` entry has Java's null type (``configEntry`` in ``KafkaAdminClient#getCreateTopicsCall``):
     the extension hands it over as ``None`` and the entry keeps it, printing ``type=None``."""
     config = _conversions.config_from_rows([
         ("cleanup.policy", "compact", 0, 0, 1, "DYNAMIC_TOPIC_CONFIG", None, None, [])])

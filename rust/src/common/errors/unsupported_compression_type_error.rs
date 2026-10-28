@@ -18,14 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The requesting client does not support the compression type of given
-    /// partition.
+    /// The requesting client does not support the compression type of given partition.
     ///
-    /// Corresponds to Java's `UnsupportedCompressionTypeException`, error code `Errors::UnsupportedCompressionType`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnsupportedCompressionTypeException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::UnsupportedCompressionType`.
     #[doc(alias = "org.apache.kafka.common.errors.UnsupportedCompressionTypeException")]
     UnsupportedCompressionTypeError,
     code: Errors::UnsupportedCompressionType,

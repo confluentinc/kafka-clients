@@ -54,7 +54,7 @@ pub struct kafka_consumer_ConsumerRebalanceListener_t {
 /// `onPartitionsRevoked(Collection<TopicPartition>)` of a C implementation:
 /// `partitions` is a list of `kafka_common_TopicPartition_t *`, sorted by
 /// topic and partition and borrowed for the call. The method is `async` in
-/// Rust (CLAUDE.md §4 rule 3): it reports its result with
+/// Rust: it reports its result with
 /// `kafka_consumer_Consumer__set_callback_result(consumer, callback_id, NULL, error)`,
 /// `error` `NULL` for success or an owned `kafka_common_Error_t *` for
 /// failure; the method is `void` in Java, so `result` is `NULL`.
@@ -75,7 +75,7 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_fn_t =
 /// What a listener handle points at: the C implementation's `self` and
 /// method pointers. `Copy` so a consumer takes its own registration and the
 /// handle may be destroyed afterwards; `self` itself stays the caller's
-/// (CLAUDE.md §4 rule 3) until the consumer releases it.
+/// until the consumer releases it.
 #[derive(Clone, Copy)]
 pub(crate) struct ListenerRegistration {
     self_: SendPtr,
@@ -201,11 +201,24 @@ pub(crate) unsafe fn listener_adapter(
     Arc::new(CRebalanceListener { registration: unsafe { listener_registration(listener) }, delivery })
 }
 
-/// Registers a C implementation of `ConsumerRebalanceListener`;
-/// `on_partitions_lost` may be `NULL` for the Java default. The caller owns
-/// `self_` and keeps it alive until the handle is destroyed and, once passed
-/// to a `subscribe_*`, until the next `subscribe_*`, `unsubscribe` or the
-/// consumer's destruction releases it.
+/// Registers a C implementation of `ConsumerRebalanceListener`.
+///
+/// # Parameters
+///
+/// - `on_partitions_revoked` - `onPartitionsRevoked`
+/// - `on_partitions_assigned` - `onPartitionsAssigned`
+/// - `on_partitions_lost` - `onPartitionsLost`, `NULL` for the Java default
+///
+/// # Returns
+///
+/// The listener handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_ConsumerRebalanceListener_destroy`. The caller owns `self_` and keeps it alive
+/// until the handle is destroyed and, once passed to a `subscribe_*`, until the next `subscribe_*`,
+/// `unsubscribe` or the consumer's destruction releases it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_consumer_ConsumerRebalanceListener_new(
@@ -293,6 +306,18 @@ unsafe fn invoke_cb(
 /// its `__set_callback_result` report; stores the reported error in
 /// `*out_err`.
 ///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions that were assigned to the consumer and now need to be
+///   revoked. This will include the full assignment under the Classic/Eager protocol, given that it
+///   revokes all partitions. It will only include the subset to revoke under the
+///   Classic/Cooperative and Consumer protocols.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
+///
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
@@ -323,6 +348,20 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb_t =
 /// thread, `cb` fires when its result is reported (a standalone listener
 /// has no callbacks vector to queue on, so `cb` runs on the reporting
 /// thread).
+///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions that were assigned to the consumer and now need to be
+///   revoked. This will include the full assignment under the Classic/Eager protocol, given that it
+///   revokes all partitions. It will only include the subset to revoke under the
+///   Classic/Cooperative and Consumer protocols.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
 ///
 /// # Safety
 ///
@@ -355,6 +394,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// Invokes the implementation's `onPartitionsAssigned`; see
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked`].
 ///
+/// # Parameters
+///
+/// - `partitions` - Partitions that have been added to the assignment as a result of the rebalance.
+///   Note that partitions that were already owned by this consumer and remain assigned are not
+///   included in this list under the Classic/Cooperative or Consumer protocols. THe full assignment
+///   will be received under the Classic/Eager protocol.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
+///
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
@@ -382,6 +433,20 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb_t =
 
 /// Non-blocking `on_partitions_assigned`; see
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb`].
+///
+/// # Parameters
+///
+/// - `partitions` - Partitions that have been added to the assignment as a result of the rebalance.
+///   Note that partitions that were already owned by this consumer and remain assigned are not
+///   included in this list under the Classic/Cooperative or Consumer protocols. THe full assignment
+///   will be received under the Classic/Eager protocol.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
 ///
 /// # Safety
 ///
@@ -415,6 +480,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRebalanceListener_on_partitions_
 /// when registered as `NULL`); see
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked`].
 ///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions that were assigned to the consumer and now have been
+///   reassigned to other consumers. With both, the Classic and Consumer protocols, this will always
+///   include all partitions that were previously assigned to the consumer.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
+///
 /// # Safety
 ///
 /// `self_` must be a live listener handle and `partitions` a valid list of
@@ -442,6 +518,19 @@ pub type kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb_t =
 
 /// Non-blocking `on_partitions_lost`; see
 /// [`kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb`].
+///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions that were assigned to the consumer and now have been
+///   reassigned to other consumers. With both, the Classic and Consumer protocols, this will always
+///   include all partitions that were previously assigned to the consumer.
+/// - `cb` - the completion, receiving the error, `NULL` on success
+/// - `opaque` - passed to `cb`
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_wakeup_error` If raised from a nested call to `KafkaConsumer`
+/// - `kafka_common_Error_is_interrupt_error` If raised from a nested call to `KafkaConsumer`
 ///
 /// # Safety
 ///

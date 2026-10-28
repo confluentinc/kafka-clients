@@ -112,8 +112,13 @@ pub struct LocalCallbackError {
 }
 
 impl LocalCallbackError {
-    /// Create the error with the foreign error's text and the binding's
+    /// Creates the error with the foreign error's text and the binding's
     /// opaque pointer to it, which the error does not own.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the foreign error's text, for the client's logs
+    /// - `opaque` - the binding's pointer to the foreign error, never dereferenced by Rust
     pub fn new(message: impl Into<String>, opaque: *mut c_void) -> Self {
         Self { message: message.into(), opaque: Opaque::Borrowed(opaque) }
     }
@@ -133,12 +138,12 @@ impl LocalCallbackError {
         }
     }
 
-    /// The foreign error's text, as the binding reported it.
+    /// Returns the foreign error's text, as the binding reported it.
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// The binding's opaque pointer to the foreign error, exactly as given.
+    /// Returns the binding's opaque pointer to the foreign error, exactly as given.
     /// An owned pointer stays valid while any copy of the error lives.
     pub fn opaque(&self) -> *mut c_void {
         self.opaque.ptr()

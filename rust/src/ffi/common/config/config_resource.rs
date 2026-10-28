@@ -56,7 +56,7 @@ pub enum kafka_common_config_ConfigResource_Type_e {
 }
 
 /// One static instance per value, indexed by
-/// [`kafka_common_config_ConfigResource_Type_e`].
+/// `kafka_common_config_ConfigResource_Type_e`.
 static TYPES: [Type; 6] = [
     Type::Group,
     Type::ClientMetrics,
@@ -100,14 +100,14 @@ pub(crate) unsafe fn type_of(value: *const kafka_common_config_ConfigResource_Ty
     unsafe { *(value as *const Type) }
 }
 
-/// `ConfigResource.Type.GROUP`.
+/// Returns `ConfigResource.Type.GROUP`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_group() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Group)
 }
 
-/// `ConfigResource.Type.CLIENT_METRICS`.
+/// Returns `ConfigResource.Type.CLIENT_METRICS`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_client_metrics()
@@ -115,7 +115,7 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_client_metrics()
     type_singleton(Type::ClientMetrics)
 }
 
-/// `ConfigResource.Type.BROKER_LOGGER`.
+/// Returns `ConfigResource.Type.BROKER_LOGGER`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_broker_logger()
@@ -123,21 +123,21 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_broker_logger()
     type_singleton(Type::BrokerLogger)
 }
 
-/// `ConfigResource.Type.BROKER`.
+/// Returns `ConfigResource.Type.BROKER`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_broker() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Broker)
 }
 
-/// `ConfigResource.Type.TOPIC`.
+/// Returns `ConfigResource.Type.TOPIC`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_topic() -> *const kafka_common_config_ConfigResource_Type_t {
     type_singleton(Type::Topic)
 }
 
-/// `ConfigResource.Type.UNKNOWN`.
+/// Returns `ConfigResource.Type.UNKNOWN`, a static singleton never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const kafka_common_config_ConfigResource_Type_t
@@ -145,7 +145,7 @@ pub extern "C" fn kafka_common_config_ConfigResource_Type_unknown() -> *const ka
     type_singleton(Type::Unknown)
 }
 
-/// The C enumerator of a singleton, for a `switch`.
+/// Returns the C enumerator of a singleton, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_common_config_ConfigResource_Type_UNKNOWN`.
 ///
@@ -162,12 +162,12 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type__enum(
     type_enum_of(unsafe { type_of(self_) })
 }
 
-/// `toString()`, Java's inherited `Enum.toString()`: the constant's name, as an owned string freed
-/// with `kafka_string_destroy`.
+/// Returns the constant's name, as Java's inherited `Enum.toString()`.
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module.
+/// `self_` must be a singleton returned by this module. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_to_string(
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_to_string(
     into_c_string(&unsafe { type_of(self_) }.to_string())
 }
 
-/// `id()`: the wire-protocol byte.
+/// Returns the type's wire-protocol byte.
 ///
 /// A caught Rust panic returns -1, which is no code of this Java `byte`
 /// enum: its 0 is the valid `UNKNOWN`.
@@ -196,8 +196,15 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_Type_id(
     unsafe { type_of(self_) }.id()
 }
 
-/// `forId(byte id)`: the singleton for a wire-protocol byte, `UNKNOWN` for
-/// one this client does not know.
+/// Returns the type for a wire-protocol byte.
+///
+/// # Parameters
+///
+/// - `id` - the wire-protocol byte
+///
+/// # Returns
+///
+/// A static singleton never freed, `UNKNOWN` for a byte this client does not know.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_config_ConfigResource_Type_for_id(
@@ -216,7 +223,7 @@ pub struct kafka_common_config_ConfigResource_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_config_ConfigResource_t`] points at: the resource
+/// What a `kafka_common_config_ConfigResource_t` points at: the resource
 /// plus the NUL-terminated name its getter borrows out.
 pub(crate) struct ConfigResourceInner {
     resource: ConfigResource,
@@ -284,18 +291,22 @@ pub(crate) unsafe fn config_resource_key_eq(a: *mut c_void, b: *mut c_void) -> b
 }
 
 /// Hands `resource` to C as an owned handle, freed with
-/// [`kafka_common_config_ConfigResource_destroy`].
+/// `kafka_common_config_ConfigResource_destroy`.
 pub(crate) fn box_config_resource(resource: ConfigResource) -> *mut kafka_common_config_ConfigResource_t {
     Box::into_raw(Box::new(ConfigResourceInner::new(resource))) as *mut kafka_common_config_ConfigResource_t
 }
 
-/// `new ConfigResource(Type type, String name)`: the name is copied. Owned,
-/// freed with [`kafka_common_config_ConfigResource_destroy`].
+/// Create an instance of this class with the provided parameters.
+///
+/// # Parameters
+///
+/// - `resource_type` - a non-`NULL` resource type
+/// - `name` - a non-`NULL` resource name
 ///
 /// # Safety
 ///
-/// `resource_type` must be a type singleton and `name` a valid
-/// NUL-terminated string.
+/// `resource_type` must be a type singleton and `name` a valid NUL-terminated string, copied. The
+/// returned handle is owned, freed with `kafka_common_config_ConfigResource_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
@@ -311,11 +322,15 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_new(
     }))
 }
 
-/// `type()`: the borrowed `Type` singleton.
+/// Return the resource type.
+///
+/// # Returns
+///
+/// The resource type.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-resource handle.
+/// `self_` must be a valid config-resource handle. The returned singleton is static, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
@@ -327,11 +342,16 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_type(
     type_singleton(unsafe { config_resource_ref(self_) }.r#type())
 }
 
-/// `name()`: borrowed from the handle; empty for the default resource.
+/// Return the resource name.
+///
+/// # Returns
+///
+/// The resource name, empty for the default resource.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-resource handle.
+/// `self_` must be a valid config-resource handle. The returned string is borrowed, valid as long
+/// as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
@@ -343,8 +363,8 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_name(
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `isDefault()`: whether the name is empty, naming the default resource of
-/// the type.
+/// Returns 1 if this is the default resource of a resource type, else 0.
+/// Resource name is empty for the default resource.
 ///
 /// # Safety
 ///
@@ -359,11 +379,12 @@ pub unsafe extern "C" fn kafka_common_config_ConfigResource_is_default(
     i8::from(unsafe { config_resource_ref(self_) }.is_default())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the resource.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid config-resource handle.
+/// `self_` must be a valid config-resource handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_config_ConfigResource_to_string(

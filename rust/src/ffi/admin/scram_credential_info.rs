@@ -75,13 +75,17 @@ pub(crate) unsafe fn destroy_scram_credential_info_element(element: *mut c_void)
     unsafe { kafka_admin_ScramCredentialInfo_destroy(element as *mut kafka_admin_ScramCredentialInfo_t) }
 }
 
-/// `new ScramCredentialInfo(ScramMechanism mechanism, int iterations)`;
-/// `mechanism` is a `kafka_admin_ScramMechanism_t` singleton. Owned, freed
-/// with [`kafka_admin_ScramCredentialInfo_destroy`].
+/// Creates the credential info.
+///
+/// # Parameters
+///
+/// - `mechanism` - the required mechanism
+/// - `iterations` - the number of iterations used when creating the credential
 ///
 /// # Safety
 ///
-/// `mechanism` must be a `kafka_admin_ScramMechanism_t` singleton.
+/// `mechanism` must be a `kafka_admin_ScramMechanism_t` singleton. The returned handle is owned,
+/// freed with [`kafka_admin_ScramCredentialInfo_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
@@ -97,11 +101,12 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
     ))
 }
 
-/// `mechanism()`: the `kafka_admin_ScramMechanism_t` singleton, never freed.
+/// Returns the mechanism.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid SCRAM-credential-info handle.
+/// `self_` must be a valid SCRAM-credential-info handle. The returned
+/// `kafka_admin_ScramMechanism_t` singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_mechanism(
@@ -112,8 +117,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_mechanism(
     scram_mechanism_singleton(unsafe { scram_credential_info_ref(self_) }.mechanism())
 }
 
-/// `iterations()`: the number of iterations used when creating the
-/// credential.
+/// Returns the number of iterations used when creating the credential.
 ///
 /// # Safety
 ///
@@ -128,11 +132,12 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_iterations(
     unsafe { scram_credential_info_ref(self_) }.iterations()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the credential info.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid SCRAM-credential-info handle.
+/// `self_` must be a valid SCRAM-credential-info handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_to_string(
@@ -149,7 +154,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_to_string(
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

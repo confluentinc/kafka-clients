@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! The package-less C helpers standing for `java.util` types (CLAUDE.md §4,
-//! "Generic types"): [`kafka_List_t`], [`kafka_Map_t`], [`kafka_Bytes_t`] and
-//! [`kafka_string_destroy`].
+//! "Generic types"): [`kafka_List_t`], [`kafka_Map_t`], [`kafka_Iterator_t`],
+//! [`kafka_Map_Entry_t`], [`kafka_Bytes_t`] and [`kafka_string_destroy`].
 //!
 //! They carry no package segment because they translate no Kafka class: a
 //! Java `List<T>` / `Map<K, V>` / `byte[]` / `String` crossing the boundary
@@ -51,12 +51,16 @@ use crate::ffi::ffi_guard;
 /// here, never with `free()`: it was allocated by Rust. Passing null is a
 /// no-op, as with `free(NULL)`.
 ///
+/// # Parameters
+///
+/// - `s` - The owned string to free, or `NULL`.
+///
 /// # Safety
 ///
 /// `s` must be null or an owned string returned by this API and not yet freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-// an owned-string destructor standing for `java.lang.String` (CLAUDE.md §4 rule 6)
+// an owned-string destructor standing for `java.lang.String` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub unsafe extern "C" fn kafka_string_destroy(s: *mut c_char) {
     if !s.is_null() {
@@ -68,7 +72,7 @@ pub unsafe extern "C" fn kafka_string_destroy(s: *mut c_char) {
     }
 }
 
-/// Hands `s` to C as an owned string, freed with [`kafka_string_destroy`].
+/// Hands `s` to C as an owned string, freed with `kafka_string_destroy`.
 ///
 /// An interior NUL — impossible for the identifiers and messages this crate
 /// produces — truncates the string at the NUL rather than failing.
@@ -125,8 +129,7 @@ pub(crate) unsafe fn c_str_to_option(s: *const c_char) -> Option<String> {
 // Byte buffers
 // ---------------------------------------------------------------------------
 
-/// A borrowed byte buffer: how a Java `byte[]` crosses the boundary
-/// (CLAUDE.md §4, "Primitive types").
+/// A borrowed byte buffer: how a Java `byte[]` crosses the boundary.
 ///
 /// `data == NULL` stands for a Java `null` array; an empty array has a
 /// non-null `data` and `len == 0`. The buffer is never owned by this struct:
@@ -135,7 +138,7 @@ pub(crate) unsafe fn c_str_to_option(s: *const c_char) -> Option<String> {
 /// C API — every other integer is a signed fixed-width type.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-// a borrowed `byte[]` view standing for the JDK array type (CLAUDE.md §4 rule 6)
+// a borrowed `byte[]` view standing for the JDK array type (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Bytes_t {
     /// The first byte, or null for a Java `null` array.
@@ -178,7 +181,7 @@ impl kafka_Bytes_t {
 
 /// An owned byte array behind a `kafka_Bytes_t *`: what a built-in
 /// deserializer hands out as its `void *` (CLAUDE.md §4, "Generic types"),
-/// freed with [`kafka_Bytes_destroy`]. The view is the first field, so the
+/// freed with `kafka_Bytes_destroy`. The view is the first field, so the
 /// pointer to the box is the pointer to the view; `bytes` keeps the buffer
 /// the view points into alive.
 #[repr(C)]
@@ -187,7 +190,7 @@ struct OwnedBytes {
     bytes: bytes::Bytes,
 }
 
-/// Hands `bytes` to C as an owned array, freed with [`kafka_Bytes_destroy`].
+/// Hands `bytes` to C as an owned array, freed with `kafka_Bytes_destroy`.
 pub(crate) fn box_bytes(bytes: bytes::Bytes) -> *mut kafka_Bytes_t {
     // `Bytes` is a pointer into a shared buffer: moving it into the box
     // leaves the bytes where they are, so the view taken first stays valid.
@@ -199,12 +202,16 @@ pub(crate) fn box_bytes(bytes: bytes::Bytes) -> *mut kafka_Bytes_t {
 /// deserializer returns. Null is a no-op; a `kafka_Bytes_t` borrowed from a
 /// record or a header is never passed here.
 ///
+/// # Parameters
+///
+/// - `bytes` - The owned byte array to free, or `NULL`.
+///
 /// # Safety
 ///
 /// `bytes` must be null or an owned array not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-// an owned-array destructor standing for `byte[]` (CLAUDE.md §4 rule 6)
+// an owned-array destructor standing for `byte[]` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub unsafe extern "C" fn kafka_Bytes_destroy(bytes: *mut kafka_Bytes_t) {
     if !bytes.is_null() {
@@ -264,7 +271,7 @@ pub(crate) type ElementDestroy = unsafe fn(*mut c_void);
 /// Compares two keys of a map for `kafka_Map_get`.
 pub(crate) type KeyEq = unsafe fn(*mut c_void, *mut c_void) -> bool;
 
-/// What a [`kafka_List_t`] handle points at.
+/// What a `kafka_List_t` handle points at.
 pub(crate) struct ListInner {
     elements: Vec<*mut c_void>,
     /// Set when Rust built the list and owns the elements.
@@ -296,12 +303,15 @@ impl Drop for ListInner {
     }
 }
 
-/// A `java.util.List` of `void *` elements (CLAUDE.md §4, "Generic types").
+/// A `java.util.List` of `void *` elements.
 ///
-/// The function taking or returning a list documents the element type and
-/// whether the list owns its elements (see the module docs).
+/// The function taking or returning a list documents the element type. A list
+/// built by C (`kafka_List_new`) holds borrowed elements: a function taking it
+/// copies what it needs during the call, and the caller frees the elements and
+/// the list afterwards. A list returned by Rust owns its elements and frees
+/// them in `kafka_List_destroy`, so the caller destroys only the list.
 #[repr(C)]
-// a `void *` list standing for `java.util.List` (CLAUDE.md §4 rule 6)
+// a `void *` list standing for `java.util.List` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_List_t {
     _private: [u8; 0],
@@ -420,11 +430,13 @@ where
     box_string_list(strings)
 }
 
-/// Creates an empty list whose elements the caller owns.
+/// Returns a new empty list.
 ///
-/// The caller frees the elements it added and then the list, with
-/// [`kafka_List_destroy`]; functions taking the list copy what they need
-/// during the call.
+/// # Safety
+///
+/// The list and the elements the caller adds to it are owned by the caller, which frees the
+/// elements it added and then the list, with `kafka_List_destroy`; functions taking the list copy
+/// what they need during the call.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_List_new() -> *mut kafka_List_t {
@@ -432,6 +444,10 @@ pub extern "C" fn kafka_List_new() -> *mut kafka_List_t {
 }
 
 /// Appends `element` to the list.
+///
+/// # Parameters
+///
+/// - `element` - The element to append.
 ///
 /// # Safety
 ///
@@ -456,7 +472,7 @@ pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut 
     unsafe { &mut *(self_ as *mut ListInner) }.elements.push(element);
 }
 
-/// The number of elements.
+/// Returns the number of elements.
 ///
 /// # Safety
 ///
@@ -470,13 +486,18 @@ pub unsafe extern "C" fn kafka_List_size(self_: *const kafka_List_t) -> i32 {
     i32::try_from(unsafe { list_ref(self_) }.elements.len()).unwrap_or(i32::MAX)
 }
 
-/// The element at `index`, or null when `index` is out of range.
+/// Returns the element at `index`, or `NULL` when `index` is out of range.
 ///
-/// The element stays owned by whoever owns it (see the module docs).
+/// # Parameters
+///
+/// - `index` - The zero-based index.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid list handle.
+///
+/// The element stays owned by whoever owns it: the list, when Rust returned
+/// it, else the C caller that added it.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_List_get(self_: *const kafka_List_t, index: i32) -> *mut c_void {
@@ -511,7 +532,7 @@ pub unsafe extern "C" fn kafka_List_destroy(self_: *mut kafka_List_t) {
 // Maps
 // ---------------------------------------------------------------------------
 
-/// What a [`kafka_Map_t`] handle points at.
+/// What a `kafka_Map_t` handle points at.
 pub(crate) struct MapInner {
     entries: Vec<(*mut c_void, *mut c_void)>,
     /// Set when Rust built the map and owns the keys.
@@ -579,15 +600,18 @@ impl Drop for MapInner {
     }
 }
 
-/// A `java.util.Map` of `void *` keys and values (CLAUDE.md §4, "Generic
-/// types").
+/// A `java.util.Map` of `void *` keys and values.
 ///
 /// Entries keep insertion order and are reachable by index
-/// ([`kafka_Map_key`] / [`kafka_Map_value`]) or by key ([`kafka_Map_get`]).
-/// The function taking or returning a map documents the key and value types
-/// and whether the map owns them (see the module docs).
+/// (`kafka_Map_key` / `kafka_Map_value`) or by key (`kafka_Map_get`).
+/// The function taking or returning a map documents the key and value types.
+/// A map built by C (`kafka_Map_new`) holds borrowed keys and values: a
+/// function taking it copies what it needs during the call, and the caller
+/// frees them and the map afterwards. A map returned by Rust owns its keys and
+/// values and frees them in `kafka_Map_destroy`, so the caller destroys only
+/// the map.
 #[repr(C)]
-// a `void *` map standing for `java.util.Map` (CLAUDE.md §4 rule 6)
+// a `void *` map standing for `java.util.Map` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Map_t {
     _private: [u8; 0],
@@ -701,13 +725,17 @@ pub(crate) unsafe fn map_entries<'a>(map: *const kafka_Map_t) -> &'a [(*mut c_vo
     }
 }
 
-/// Creates an empty map whose keys and values the caller owns.
+/// Returns a new empty map.
 ///
-/// Keys are compared by pointer identity in [`kafka_Map_put`] and
-/// [`kafka_Map_get`]; a function taking the map reads the keys by the type it
+/// Keys are compared by pointer identity in `kafka_Map_put` and
+/// `kafka_Map_get`; a function taking the map reads the keys by the type it
 /// documents (two distinct `char *` with the same text are the same key to
-/// it). The caller frees what it put in and then the map, with
-/// [`kafka_Map_destroy`].
+/// it).
+///
+/// # Safety
+///
+/// The map and the keys and values the caller puts in it are owned by the caller, which frees what
+/// it put in and then the map, with `kafka_Map_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
@@ -716,6 +744,11 @@ pub extern "C" fn kafka_Map_new() -> *mut kafka_Map_t {
 
 /// Associates `value` with `key`, replacing the value of an existing key as
 /// `java.util.Map.put` does.
+///
+/// # Parameters
+///
+/// - `key` - The key.
+/// - `value` - The value to associate with `key`.
 ///
 /// # Safety
 ///
@@ -761,7 +794,7 @@ pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void
     }
 }
 
-/// The number of entries.
+/// Returns the number of entries.
 ///
 /// # Safety
 ///
@@ -775,7 +808,11 @@ pub unsafe extern "C" fn kafka_Map_size(self_: *const kafka_Map_t) -> i32 {
     i32::try_from(unsafe { map_ref(self_) }.entries.len()).unwrap_or(i32::MAX)
 }
 
-/// The key of the entry at `index`, or null when `index` is out of range.
+/// Returns the key of the entry at `index`, or `NULL` when `index` is out of range.
+///
+/// # Parameters
+///
+/// - `index` - The zero-based index.
 ///
 /// # Safety
 ///
@@ -793,7 +830,11 @@ pub unsafe extern "C" fn kafka_Map_key(self_: *const kafka_Map_t, index: i32) ->
         .map_or(ptr::null_mut(), |e| e.0)
 }
 
-/// The value of the entry at `index`, or null when `index` is out of range.
+/// Returns the value of the entry at `index`, or `NULL` when `index` is out of range.
+///
+/// # Parameters
+///
+/// - `index` - The zero-based index.
 ///
 /// # Safety
 ///
@@ -811,10 +852,14 @@ pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) 
         .map_or(ptr::null_mut(), |e| e.1)
 }
 
-/// The value associated with `key`, or null when there is none.
+/// Returns the value associated with `key`, or `NULL` when there is none.
 ///
 /// A map built by Rust compares keys by the documented key type (string keys
 /// by content); one built by C compares by pointer identity.
+///
+/// # Parameters
+///
+/// - `key` - The key to look up.
 ///
 /// # Safety
 ///
@@ -847,6 +892,274 @@ pub unsafe extern "C" fn kafka_Map_destroy(self_: *mut kafka_Map_t) {
         // `from_raw` reclaims that allocation, once.
         drop(unsafe { Box::from_raw(self_ as *mut MapInner) });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Iterators and map entries
+// ---------------------------------------------------------------------------
+
+/// What a `kafka_Iterator_t` handle points at: the elements still to come,
+/// built one at a time, and the element `kafka_Iterator_next` returned last,
+/// which the iterator owns until the next call.
+pub(crate) struct IteratorInner {
+    elements: Box<dyn Iterator<Item = *mut c_void> + Send>,
+    /// The element `kafka_Iterator_has_next` built ahead, not yet returned.
+    peeked: Option<*mut c_void>,
+    /// The element `kafka_Iterator_next` returned last.
+    current: *mut c_void,
+    /// Frees one element; `None` when the elements are borrowed.
+    destroy: Option<ElementDestroy>,
+}
+
+impl IteratorInner {
+    /// Frees `element` when the iterator owns its elements.
+    fn free(&self, element: *mut c_void) {
+        if let Some(destroy) = self.destroy
+            && !element.is_null()
+        {
+            // SAFETY: `destroy` is set only by `box_iterator`'s callers, each of which pairs it
+            // with the elements its iterator yields. `element` is non-null (checked above), one
+            // of them, and each yielded element reaches `free` once: as `current` when replaced
+            // or dropped, or as `peeked` when dropped unreturned.
+            unsafe { destroy(element) };
+        }
+    }
+
+    fn has_next(&mut self) -> bool {
+        if self.peeked.is_none() {
+            self.peeked = self.elements.next();
+        }
+        self.peeked.is_some()
+    }
+
+    fn next(&mut self) -> Option<*mut c_void> {
+        let next = self.peeked.take().or_else(|| self.elements.next())?;
+        self.free(self.current);
+        self.current = next;
+        Some(next)
+    }
+}
+
+impl Drop for IteratorInner {
+    fn drop(&mut self) {
+        self.free(self.current);
+        if let Some(peeked) = self.peeked.take() {
+            self.free(peeked);
+        }
+    }
+}
+
+/// A `java.util.Iterator` of `void *` elements.
+///
+/// The function returning an iterator documents the element type. An element
+/// stays valid until the next `kafka_Iterator_next` or `kafka_Iterator_destroy`,
+/// which frees it when the iterator owns its elements. An iterator is used by
+/// one thread at a time, as Java's.
+#[repr(C)]
+// a `void *` iterator standing for `java.util.Iterator` (CLAUDE.md §4, generic types)
+#[doc(alias = "rust-only")]
+pub struct kafka_Iterator_t {
+    _private: [u8; 0],
+}
+
+/// Hands `elements` to C as an iterator; `destroy`, when set, frees each
+/// element once the caller moved past it.
+///
+/// When `destroy` is set, every non-null element must be one it frees: the
+/// iterator owns it from the moment it is built.
+pub(crate) fn box_iterator(
+    elements: Box<dyn Iterator<Item = *mut c_void> + Send>,
+    destroy: Option<ElementDestroy>,
+) -> *mut kafka_Iterator_t {
+    Box::into_raw(Box::new(IteratorInner {
+        elements,
+        peeked: None,
+        current: ptr::null_mut(),
+        destroy,
+    })) as *mut kafka_Iterator_t
+}
+
+/// The iterator behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, alive for `'a` and used by no
+/// other call meanwhile.
+unsafe fn iterator_mut<'a>(self_: *mut kafka_Iterator_t) -> &'a mut IteratorInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle, the
+    // `Box::into_raw` of `box_iterator`, alive for `'a` and used by no other call, so the `&mut`
+    // is unique.
+    unsafe { &mut *(self_ as *mut IteratorInner) }
+}
+
+/// Returns `1` if the iteration has more elements, else `0`.
+///
+/// # Returns
+///
+/// `1` if the iteration has more elements
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, used by no other call meanwhile.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_has_next(self_: *mut kafka_Iterator_t) -> i8 {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
+    // call, as `iterator_mut` requires; the borrow ends with this call.
+    i8::from(unsafe { iterator_mut(self_) }.has_next())
+}
+
+/// Returns the next element in the iteration.
+///
+/// # Returns
+///
+/// the next element in the iteration
+///
+/// # Panics
+///
+/// - if the iteration has no more elements (Java's `NoSuchElementException`);
+///   the `_err` twin reports it as an `IllegalStateError`
+///
+/// # Safety
+///
+/// `self_` must be a valid iterator handle, used by no other call meanwhile.
+///
+/// The element stays valid until the next `kafka_Iterator_next` or
+/// `kafka_Iterator_destroy` on `self_`; the iterator frees it when it owns its
+/// elements.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_next(self_: *mut kafka_Iterator_t) -> *mut c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
+    // call, as `iterator_mut` requires; the borrow ends with this call.
+    match unsafe { iterator_mut(self_) }.next() {
+        Some(element) => element,
+        // Java's `NoSuchElementException`: a precondition the caller checks with
+        // `kafka_Iterator_has_next` (CLAUDE.md §12.5).
+        None => panic!("the iteration has no more elements"),
+    }
+}
+
+/// Frees the iterator, and the element it returned last when it owns its
+/// elements.
+///
+/// # Safety
+///
+/// `self_` must be null or a valid iterator handle not yet destroyed.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Iterator_destroy(self_: *mut kafka_Iterator_t) {
+    if !self_.is_null() {
+        // SAFETY: `self_` is non-null (checked above) and, per this function's `# Safety`, an
+        // iterator handle not yet destroyed, that is the `Box::into_raw` of `box_iterator`, so
+        // `from_raw` reclaims that allocation, once.
+        drop(unsafe { Box::from_raw(self_ as *mut IteratorInner) });
+    }
+}
+
+/// What a `kafka_Map_Entry_t` handle points at: an owned key and value and
+/// their destructors.
+pub(crate) struct MapEntryInner {
+    key: *mut c_void,
+    value: *mut c_void,
+    key_destroy: Option<ElementDestroy>,
+    value_destroy: Option<ElementDestroy>,
+}
+
+impl Drop for MapEntryInner {
+    fn drop(&mut self) {
+        if let Some(destroy) = self.key_destroy
+            && !self.key.is_null()
+        {
+            // SAFETY: `key_destroy` is set only by `box_map_entry`'s callers, paired with the key
+            // it frees; the key is non-null (checked above) and the entry is dropped once.
+            unsafe { destroy(self.key) };
+        }
+        if let Some(destroy) = self.value_destroy
+            && !self.value.is_null()
+        {
+            // SAFETY: as for the key, with `value_destroy` and the value.
+            unsafe { destroy(self.value) };
+        }
+    }
+}
+
+/// A `java.util.Map.Entry` of a `void *` key and value, as an iterator over a
+/// map hands them out.
+///
+/// The function returning the iterator documents the key and value types.
+#[repr(C)]
+// a `void *` entry standing for `java.util.Map.Entry` (CLAUDE.md §4, generic types)
+#[doc(alias = "rust-only")]
+pub struct kafka_Map_Entry_t {
+    _private: [u8; 0],
+}
+
+/// Builds an entry owning `key` and `value`, freed with the destructors when
+/// set; [`destroy_map_entry_element`] frees it.
+pub(crate) fn box_map_entry(
+    key: *mut c_void,
+    value: *mut c_void,
+    key_destroy: Option<ElementDestroy>,
+    value_destroy: Option<ElementDestroy>,
+) -> *mut c_void {
+    Box::into_raw(Box::new(MapEntryInner { key, value, key_destroy, value_destroy })) as *mut c_void
+}
+
+/// [`ElementDestroy`] for an entry built by [`box_map_entry`].
+///
+/// # Safety
+///
+/// `element` must be an entry built by [`box_map_entry`] and not yet freed.
+pub(crate) unsafe fn destroy_map_entry_element(element: *mut c_void) {
+    // SAFETY: Per this function's `# Safety`, `element` is the `Box::into_raw` of
+    // `box_map_entry`, not yet freed, so `from_raw` reclaims it once.
+    drop(unsafe { Box::from_raw(element as *mut MapEntryInner) });
+}
+
+/// The entry behind a handle.
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle, alive for `'a`.
+unsafe fn map_entry_ref<'a>(self_: *const kafka_Map_Entry_t) -> &'a MapEntryInner {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle alive for `'a`, the
+    // `Box::into_raw` of `box_map_entry`; nothing mutates an entry, so the shared borrow is sound.
+    unsafe { &*(self_ as *const MapEntryInner) }
+}
+
+/// Returns the key corresponding to this entry.
+///
+/// # Returns
+///
+/// the key corresponding to this entry
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle. The key is borrowed from the entry
+/// and valid as long as it.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Map_Entry_key(self_: *const kafka_Map_Entry_t) -> *const c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
+    unsafe { map_entry_ref(self_) }.key
+}
+
+/// Returns the value corresponding to this entry.
+///
+/// # Returns
+///
+/// the value corresponding to this entry
+///
+/// # Safety
+///
+/// `self_` must be a valid entry handle. The value is borrowed from the entry
+/// and valid as long as it.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_Map_Entry_value(self_: *const kafka_Map_Entry_t) -> *const c_void {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
+    unsafe { map_entry_ref(self_) }.value
 }
 
 #[cfg(test)]
@@ -1082,5 +1395,76 @@ mod tests {
             2,
             "the remaining value is freed"
         );
+    }
+
+    /// An iterator hands out its elements in order, frees each one when the
+    /// caller moves past it, and frees the last one and the not-yet-returned
+    /// ones on destroy. `next` past the end panics, which the guard turns into
+    /// NULL here and the `_err` twin into an `IllegalStateError`.
+    #[test]
+    fn an_iterator_frees_each_element_once_passed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Counted(u32);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let elements: Vec<usize> = (1..=3).map(|i| Box::into_raw(Box::new(Counted(i))) as usize).collect();
+        let iterator = box_iterator(
+            Box::new(elements.into_iter().map(|e| e as *mut c_void)),
+            Some(destroy_boxed::<Counted>),
+        );
+        // SAFETY: Test code: `iterator` is the fresh handle above, used by this thread only and
+        // destroyed once at the end; each element read is the `Counted` it currently owns.
+        unsafe {
+            for expected in 1..=3 {
+                assert_eq!(kafka_Iterator_has_next(iterator), 1);
+                // `has_next` alone frees nothing.
+                assert_eq!(DROPS.load(Ordering::SeqCst), (expected as usize).saturating_sub(2));
+                let element = kafka_Iterator_next(iterator) as *const Counted;
+                assert_eq!((*element).0, expected);
+                assert_eq!(DROPS.load(Ordering::SeqCst), expected as usize - 1, "the previous one is freed");
+            }
+            assert_eq!(kafka_Iterator_has_next(iterator), 0);
+            assert!(kafka_Iterator_next(iterator).is_null(), "a panic past the end returns NULL");
+            kafka_Iterator_destroy(iterator);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 3, "destroy frees the last element");
+
+        // Elements built lazily, as the views' iterators build them: one never reached is never
+        // allocated.
+        DROPS.store(0, Ordering::SeqCst);
+        let iterator = box_iterator(
+            Box::new((1..=3).map(|i| Box::into_raw(Box::new(Counted(i))) as *mut c_void)),
+            Some(destroy_boxed::<Counted>),
+        );
+        // SAFETY: Test code: as above; the iterator is destroyed with a returned and a peeked
+        // element.
+        unsafe {
+            assert_eq!(kafka_Iterator_has_next(iterator), 1);
+            kafka_Iterator_next(iterator);
+            assert_eq!(kafka_Iterator_has_next(iterator), 1);
+            kafka_Iterator_destroy(iterator);
+            kafka_Iterator_destroy(ptr::null_mut());
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 2, "every element built is freed once");
+    }
+
+    #[test]
+    fn a_map_entry_frees_its_key_and_value() {
+        let entry = box_map_entry(
+            Box::into_raw(Box::new(7_u32)) as *mut c_void,
+            Box::into_raw(Box::new(8_u64)) as *mut c_void,
+            Some(destroy_boxed::<u32>),
+            Some(destroy_boxed::<u64>),
+        );
+        // SAFETY: Test code: `entry` is the fresh entry above, read while alive and freed once.
+        unsafe {
+            assert_eq!(*(kafka_Map_Entry_key(entry as *const kafka_Map_Entry_t) as *const u32), 7);
+            assert_eq!(*(kafka_Map_Entry_value(entry as *const kafka_Map_Entry_t) as *const u64), 8);
+            destroy_map_entry_element(entry);
+        }
     }
 }

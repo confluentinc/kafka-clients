@@ -165,7 +165,8 @@ def partition_info(partition: int, leader: Node | None, replicas: list[Node],
                               elr=(), last_known_elr=())
 
 
-# ---- Builder broker count (MockAdminClient.java:152, :210) --------------------
+# ---- Builder broker count -----------------------------------------------------
+# org.apache.kafka.clients.admin.MockAdminClient.Builder#numBrokers, Builder#build.
 
 def test_create_rejects_zero_brokers_rather_than_fabricating_a_controller() -> None:
     # Java's build() reads brokers.get(0) on an empty list (the Rust mock reports
@@ -427,7 +428,8 @@ def test_alter_then_list_partition_reassignments_reports_adding_and_removing() -
     assert reassignment.replicas() == [0, 1, 2]
     assert reassignment.adding_replicas() == []
     assert reassignment.removing_replicas() == [0]
-    # None (Java's empty Optional) cancels (MockAdminClient.java:1160-1162).
+    # None (Java's empty Optional) cancels
+    # (org.apache.kafka.clients.admin.MockAdminClient#alterPartitionReassignments).
     value_of(client.alter_partition_reassignments(reassignments={tp: None}).all())
     assert value_of(client.list_partition_reassignments().reassignments()) == {}
 
@@ -461,7 +463,8 @@ def test_list_partition_reassignments_after_topic_shrink_fails_the_future() -> N
     assert str(e.value) == "Index 1 out of bounds for length 1"
 
 
-# ---- add_topic broker validation (MockAdminClient.java:296-309) ---------------
+# ---- add_topic broker validation ----------------------------------------------
+# org.apache.kafka.clients.admin.MockAdminClient#addTopic(boolean,String,List,Map,boolean).
 
 def test_mock_add_topic_accepts_partitions_whose_brokers_are_all_known() -> None:
     mock = admin()
@@ -742,8 +745,8 @@ def test_describe_configs_other_resources() -> None:
 
 def test_describe_configs_overlays_a_group_config_set_to_null_with_its_default() -> None:
     """Java's ``incrementalAlterConfigs`` stores a ``SET`` value as given, ``null``
-    included (``MockAdminClient.java:1015``), and ``describeConfigs`` overlays the
-    default group configs with ``putIfAbsent`` (``:883``), which also replaces a
+    included (``MockAdminClient#handleIncrementalResourceAlteration``), and ``describeConfigs`` overlays the
+    default group configs with ``putIfAbsent`` (``MockAdminClient#getResourceDescription``), which also replaces a
     ``null`` value: a group config set to ``None`` that has a default reads back
     as the default, and one without a default reads back as ``None``."""
     client = MockAdminClient.Builder(default_group_configs={"g.k": "d"}).build()
@@ -767,7 +770,8 @@ def test_incremental_alter_configs_unsupported_op_and_type() -> None:
         configs={broker: [append], logger: [set_op("k", "v")]}).values()
     error = error_of(values[broker])
     assert isinstance(error, InvalidRequestError) and str(error) == "Unsupported op type APPEND"
-    # Java's no-message `new UnsupportedOperationException()` (MockAdminClient.java:1029).
+    # Java's no-message `new UnsupportedOperationException()`
+    # (org.apache.kafka.clients.admin.MockAdminClient#handleIncrementalResourceAlteration).
     error = error_of(values[logger])
     assert type(error) is UnsupportedOperationError and str(error) == ""
 
@@ -856,7 +860,7 @@ def test_list_config_resources_forms() -> None:
 
 
 def test_unregister_controller_without_a_raft_controller_is_unsupported() -> None:
-    """``MockAdminClient.unregisterController`` (``MockAdminClient.java:1372-1380``):
+    """``org.apache.kafka.clients.admin.MockAdminClient#unregisterController``:
     without ``usingRaftController`` the future fails with
     ``new UnsupportedVersionException("")``."""
     result = admin().unregister_controller(controller_id=1)
@@ -1097,7 +1101,8 @@ def test_create_delegation_token_rejects_non_user_renewer() -> None:
 
 
 def test_create_delegation_token_without_a_renewer_reports_an_error() -> None:
-    # Java's options.renewers().get(0) (MockAdminClient.java:652) throws
+    # Java's options.renewers().get(0)
+    # (org.apache.kafka.clients.admin.MockAdminClient#createDelegationToken) throws
     # IndexOutOfBoundsException out of the call on the options' default LinkedList;
     # the Rust core fails the future instead, as it cannot panic across the FFI.
     client = admin()

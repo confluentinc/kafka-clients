@@ -47,14 +47,13 @@ fn sasl_jaas() -> String {
     )
 }
 
-/// Translated from `SaslPlainPlaintextConsumerTest.testAsyncConsumerSimpleConsumption`
-/// (`SaslPlainPlaintextConsumerTest.java:81-91`), which runs
-/// `BaseConsumerTestcase.testSimpleConsumption` with
+/// Translated from `SaslPlainPlaintextConsumerTest#testAsyncConsumerSimpleConsumption`,
+/// which runs `BaseConsumerTestcase#testSimpleConsumption` with
 /// `security.protocol=SASL_PLAINTEXT`, `sasl.mechanism=PLAIN`, the PLAIN JAAS
 /// config and `group.protocol=consumer`. Java's `ClusterInstance` applies the
 /// same SASL client config to its producer and admin (`setClientSaslConfig`)
 /// and defaults the consumer to `auto.offset.reset=earliest` and a random
-/// `group_*` group id (`ClusterInstance.java:164-169`).
+/// `group_*` group id (`ClusterInstance#consumer(Map)`).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_simple_consumption() {
     let mut ctx = TestContext::new(base_consumer_test::cluster_config()).await;

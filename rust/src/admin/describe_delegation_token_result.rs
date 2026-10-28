@@ -13,17 +13,11 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_delegation_token`.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.DescribeDelegationTokenResult`.
 
 use crate::common::KafkaFuture;
 use crate::common::security::token::delegation::DelegationToken;
 
 /// The result of the `Admin::describe_delegation_token` call.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.DescribeDelegationTokenResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult")]
 pub struct DescribeDelegationTokenResult {
@@ -38,8 +32,6 @@ impl DescribeDelegationTokenResult {
     }
 
     /// Returns a future which yields the list of delegation tokens.
-    ///
-    /// Mirrors `DescribeDelegationTokenResult.delegationTokens()`.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeDelegationTokenResult#delegationTokens")]
     pub fn delegation_tokens(&self) -> &KafkaFuture<Vec<DelegationToken>> {
         &self.delegation_tokens

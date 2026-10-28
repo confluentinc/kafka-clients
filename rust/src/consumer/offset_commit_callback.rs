@@ -24,25 +24,19 @@ use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 
 /// A callback interface that the user can implement to trigger custom actions
-/// when a commit request completes.
+/// when a commit request completes. The callback may be executed in any thread
+/// calling poll().
 ///
-/// Corresponds to Java's
-/// `org.apache.kafka.clients.consumer.OffsetCommitCallback`.
+/// # Translation notes
 ///
-/// # Invocation model
-///
-/// Per `consumer-threading.md` §31, the callback executes on the **caller's
-/// task** that is currently inside `poll()` / `commit_*()` / `close()` —
-/// never on the background task. Matches Java's contract: "the callback may
-/// be executed in any thread calling poll()".
-///
-/// # Bounds: `Send + Sync + 'static`
-///
-/// The callback travels through events on the background task and is
-/// invoked on the app task after the background task has already moved on.
-/// `Arc<dyn>` storage is required for the symmetric "send through channel,
-/// invoke later on app side" pipeline used by `process_background_events`.
-/// `Box<dyn>` would forbid the clone and the design collapses.
+/// It runs on the task inside `poll()`, `commit_*()` or `close()`.
+// Per `consumer-threading.md` §31, the callback executes on the caller's task
+// that is currently inside `poll()` / `commit_*()` / `close()`, never on the
+// background task.
+//
+// Bounds `Send + Sync + 'static`: the callback travels through events on the
+// background task and is invoked on the app task after the background task has
+// already moved on, so it is stored as `Arc<dyn>`.
 #[async_trait]
 #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback")]
 pub trait OffsetCommitCallback: Send + Sync + 'static {
@@ -50,30 +44,43 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     /// handling of commit request completion. This method will be called
     /// when the commit request sent to the server has been acknowledged.
     ///
-    /// Corresponds to Java's
-    /// `void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets,
-    ///                  Exception exception)`.
+    /// # Arguments
     ///
-    /// The `error` parameter matches Java's pattern of "exception == null
-    /// means success".
+    /// - `offsets` - A map of the offsets and associated metadata that this
+    ///   callback applies to
+    /// - `error` - The error raised during processing of the request, or
+    ///   `None` if the commit completed successfully
     ///
     /// # Errors
     ///
-    /// Java's `onComplete` is `void` but may throw: an exception it throws
-    /// is not caught (`OffsetCommitCallbackInvoker.executeCallbacks`) and
-    /// propagates out of the call that ran the callback (`poll`,
-    /// `commit_sync`, `commit_async`, `close`; `poll` wraps it as
-    /// `ConsumerUtils.maybeWrapAsKafkaException` does). An `Err` returned
-    /// here is that exception: it propagates the same way, and callbacks
-    /// queued behind this one stay queued for the next call that runs them.
-    /// The commit itself has already completed.
+    /// - `Error::is_consumer_commit_failed_error` if the commit failed and cannot be retried. This
+    ///   can only occur if you are using automatic group management with
+    ///   `KafkaConsumer::subscribe`, or if there is an active group with the same groupId which is
+    ///   using group management.
+    /// - `Error::is_rebalance_in_progress_error` if the commit failed because it is in the middle
+    ///   of a rebalance. In such cases commit could be retried after the rebalance is completed
+    ///   with the `KafkaConsumer::poll` call.
+    /// - `Error::is_wakeup_error` if `KafkaConsumer::wakeup` is called before or while this
+    ///   function is called
+    /// - `Error::is_interrupt_error` if the calling thread is interrupted before or while this
+    ///   function is called
+    /// - `Error::is_authorization_error` if not authorized to the topic or to the configured
+    ///   groupId. See the error for more details
+    /// - `Error::is_kafka_error` for any other unrecoverable errors (e.g. if offset metadata is too
+    ///   large or if the committed offset is invalid).
     ///
-    /// # Arguments
+    /// # Translation notes
     ///
-    /// * `offsets` - the offsets and associated metadata that this callback
-    ///   applies to
-    /// * `error` - `Some(&error)` if the commit failed, `None` if it
-    ///   completed successfully
+    /// The errors above are those `error` may carry. An `Err` returned here
+    /// propagates out of the call that ran the callback, as Java's thrown
+    /// exception does.
+    // Java's `onComplete` is `void` but may throw: an exception it throws is
+    // not caught (`OffsetCommitCallbackInvoker.executeCallbacks`) and
+    // propagates out of the call that ran the callback (`poll`, `commit_sync`,
+    // `commit_async`, `close`; `poll` wraps it as
+    // `ConsumerUtils.maybeWrapAsKafkaException` does). Callbacks queued behind
+    // this one stay queued for the next call that runs them. The commit itself
+    // has already completed.
     #[doc(alias = "org.apache.kafka.clients.consumer.OffsetCommitCallback#onComplete")]
     async fn on_complete(
         &self,
@@ -82,8 +89,8 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     ) -> Result<(), Error>;
 }
 
-/// An [`OffsetCommitCallback`] that calls `function`, standing in for a Java
-/// lambda implementing `OffsetCommitCallback`: `function` is
+/// Returns an [`OffsetCommitCallback`] that calls `function`, standing in for
+/// a Java lambda implementing `OffsetCommitCallback`: `function` is
 /// [`on_complete`](OffsetCommitCallback::on_complete), run synchronously as
 /// Java's `onComplete` is. A method Java adds later as an overload of
 /// `onComplete` gets its own factory, `with_<parameter>`.
@@ -101,6 +108,11 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
 ///     Ok(())
 /// }));
 /// ```
+///
+/// # Arguments
+///
+/// - `function` - the body of [`on_complete`](OffsetCommitCallback::on_complete),
+///   called with the committed offsets and the commit's error.
 // stands in for a Java lambda implementing `OffsetCommitCallback` (CLAUDE.md §3)
 #[doc(alias = "rust-only")]
 pub fn new<F>(function: F) -> impl OffsetCommitCallback

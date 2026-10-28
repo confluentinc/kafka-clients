@@ -435,15 +435,14 @@ impl MemoryRecordsBuilder {
 
     /// Close this builder and return the resulting `MemoryRecords`.
     ///
-    /// Corresponds to Java's `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:246-252`), and shares its **idempotence**: Java
-    /// memoises the result in `builtRecords`, `close()` returns early once that field
-    /// is set (`:373-374`), and nothing but `reopenAndRewriteProducerState` ever clears
+    /// Corresponds to Java's `MemoryRecordsBuilder#build`, and shares its **idempotence**: Java
+    /// memoises the result in `builtRecords`, `MemoryRecordsBuilder#close` returns early once
+    /// that field is set, and nothing but `reopenAndRewriteProducerState` ever clears
     /// it. So Java's `build()` may be called any number of times and hands back the
     /// same `MemoryRecords` view every time. Callers depend on that —
-    /// `ProducerBatch.records()` (`ProducerBatch.java:502-504`) is `build()`, and it is
+    /// `ProducerBatch#records` is `build()`, and it is
     /// called once to serialise the produce request and again by
-    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:353`) when the broker
+    /// `ProducerBatch.split` → `ProducerBatch#validateAndGetRecordBatch` when the broker
     /// answers `MESSAGE_TOO_LARGE`.
     ///
     /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
@@ -466,13 +465,15 @@ impl MemoryRecordsBuilder {
         //
         // That invariant is worth stating because it is what aligns Rust's
         // [`is_closed`](Self::is_closed) with Java's. Java has no `closed` field: its
-        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:914-916`).
+        // `org.apache.kafka.common.record.internal.MemoryRecordsBuilder#isClosed` *is*
+        // `builtRecords != null`.
         // The deleted `take_built_records` broke the correspondence — it left
         // `closed == true` with `built_records == None` — and the `built_size` shadow
         // field existed precisely to paper over the gap in
         // [`estimated_size_in_bytes`](Self::estimated_size_in_bytes). With the
         // correspondence restored, that accessor collapses back to Java's two-arm form
-        // (`:928-930`) as a consequence rather than a coincidence. Raised by Critic 50.
+        // (`MemoryRecordsBuilder#estimatedSizeInBytes`) as a consequence rather than a
+        // coincidence. Raised by Critic 50.
         self.built_records.clone().expect("build() called but no records built")
     }
 
@@ -1771,9 +1772,9 @@ mod tests {
         }
     }
 
-    /// `build()` is **idempotent**, matching Java: `MemoryRecordsBuilder.build()`
-    /// (`MemoryRecordsBuilder.java:246-252`) memoises into `builtRecords`, `close()`
-    /// returns early once that field is set (`:373-374`), and nothing but
+    /// `build()` is **idempotent**, matching Java: `MemoryRecordsBuilder#build`
+    /// memoises into `builtRecords`, `MemoryRecordsBuilder#close`
+    /// returns early once that field is set, and nothing but
     /// `reopenAndRewriteProducerState` clears it. Every call therefore yields the same
     /// bytes.
     ///

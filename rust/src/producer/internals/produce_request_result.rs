@@ -88,7 +88,16 @@ pub struct ProduceRequestResult {
     /// The original batch's ProduceRequestResult tracks all the split batches here
     /// so that flush() can wait for all splits to complete via `await_all_dependents()`.
     dependent_results: Mutex<Vec<Arc<ProduceRequestResult>>>,
+    /// Actions [`on_done`](Self::on_done) registered, run once by
+    /// [`done`](Self::done) after the waiters are released. They complete the
+    /// dependants of the records' futures (`KafkaFuture::then_apply`), as
+    /// Java's `CompletableFuture` completes its dependants from `complete`.
+    /// Empty, and so allocation-free, unless a dependant was registered.
+    done_actions: Mutex<Vec<DoneAction>>,
 }
+
+/// An action [`ProduceRequestResult::on_done`] registers.
+type DoneAction = Box<dyn FnOnce() + Send>;
 
 impl ProduceRequestResult {
     /// Create an instance of this class.
@@ -105,6 +114,7 @@ impl ProduceRequestResult {
             result: Mutex::new(None),
             topic_partition,
             dependent_results: Mutex::new(Vec::new()),
+            done_actions: Mutex::new(Vec::new()),
         }
     }
 
@@ -147,8 +157,31 @@ impl ProduceRequestResult {
             let guard = self.result.lock().unwrap();
             assert!(guard.is_some(), "The method `set` must be invoked before `done`.");
         }
-        // Now notify all waiters via the watch channel.
-        let _ = self.tx.send(true);
+        // Now notify all waiters via the watch channel. The flag flips under
+        // `done_actions`' lock, so an `on_done` either sees it set or has its
+        // action taken here.
+        let actions = {
+            let mut actions = self.done_actions.lock().unwrap();
+            let _ = self.tx.send(true);
+            std::mem::take(&mut *actions)
+        };
+        for action in actions {
+            action();
+        }
+    }
+
+    /// Runs `action` once this request is [done](Self::done): from `done`,
+    /// after the waiters are released, or at once on the calling task when it
+    /// already is.
+    pub(crate) fn on_done(&self, action: DoneAction) {
+        {
+            let mut actions = self.done_actions.lock().unwrap();
+            if !*self.rx.borrow() {
+                actions.push(action);
+                return;
+            }
+        }
+        action();
     }
 
     /// Add a dependent ProduceRequestResult.

@@ -40,7 +40,7 @@ pub struct kafka_common_quota_ClientQuotaMatch_t {
     _private: [u8; 0],
 }
 
-/// The variant behind a [`kafka_common_quota_ClientQuotaMatch_t`], for a
+/// The variant behind a `kafka_common_quota_ClientQuotaMatch_t`, for a
 /// `switch`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -81,7 +81,7 @@ pub(crate) unsafe fn client_quota_match_ref<'a>(
     unsafe { &*(value as *const ClientQuotaMatch) }
 }
 
-/// The C enumerator of the match behind `self_`.
+/// Returns the C enumerator of the match behind `self_`.
 ///
 /// A caught Rust panic returns `kafka_common_quota_ClientQuotaMatch_DEFAULT`, the first enumerator:
 /// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
@@ -104,29 +104,38 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch__enum(
     }
 }
 
-/// `ClientQuotaMatch::Default`: matches the built-in default entity name
-/// (Java's `Optional.empty()`). A borrowed singleton, never freed.
+/// Returns the match of the built-in default entity name (Java's `Optional.empty()`).
+///
+/// # Safety
+///
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaMatch_default() -> *const kafka_common_quota_ClientQuotaMatch_t {
     client_quota_match_ptr(&DEFAULT)
 }
 
-/// `ClientQuotaMatch::Any`: matches any specified name for the entity type
-/// (Java's `null`). A borrowed singleton, never freed.
+/// Returns the match of any specified name for the entity type (Java's `null`).
+///
+/// # Safety
+///
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaMatch_any() -> *const kafka_common_quota_ClientQuotaMatch_t {
     client_quota_match_ptr(&ANY)
 }
 
-/// `ClientQuotaMatch::Exact(value)`: matches `value` exactly (Java's
-/// `Optional.of(name)`). Owned, freed with
-/// [`kafka_common_quota_ClientQuotaMatch_destroy`]; `value` is copied.
+/// Returns a match of `value` exactly (Java's `Optional.of(value)`).
+///
+/// # Parameters
+///
+/// - `value` - the entity name to match exactly
 ///
 /// # Safety
 ///
-/// `value` must be a valid NUL-terminated string.
+/// `value` must be a valid NUL-terminated string; it is copied.
+/// The returned match is owned, freed with `kafka_common_quota_ClientQuotaMatch_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
@@ -139,7 +148,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaMatch_exact(
         as *mut kafka_common_quota_ClientQuotaMatch_t
 }
 
-/// Frees a match built by [`kafka_common_quota_ClientQuotaMatch_exact`]. Null
+/// Frees a match built by `kafka_common_quota_ClientQuotaMatch_exact`. Null
 /// is a no-op; the singletons and a match borrowed from a component are never
 /// passed here.
 ///

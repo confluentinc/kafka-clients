@@ -21,8 +21,6 @@ use crate::common::resource::ResourcePattern;
 use super::{AccessControlEntry, AclBindingFilter};
 
 /// Represents a binding between a resource pattern and an access control entry.
-///
-/// Corresponds to `org.apache.kafka.common.acl.AclBinding`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.acl.AclBinding")]
 pub struct AclBinding {
@@ -41,25 +39,25 @@ impl AclBinding {
         AclBinding { pattern, entry }
     }
 
-    /// Return true if this binding has any UNKNOWN components.
+    /// Returns true if this binding has any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.acl.AclBinding#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.pattern.is_unknown() || self.entry.is_unknown()
     }
 
-    /// Return the resource pattern for this binding.
+    /// Returns the resource pattern for this binding.
     #[doc(alias = "org.apache.kafka.common.acl.AclBinding#pattern")]
     pub fn pattern(&self) -> &ResourcePattern {
         &self.pattern
     }
 
-    /// Return the access control entry for this binding.
+    /// Returns the access control entry for this binding.
     #[doc(alias = "org.apache.kafka.common.acl.AclBinding#entry")]
     pub fn entry(&self) -> &AccessControlEntry {
         &self.entry
     }
 
-    /// Create a filter which matches only this `AclBinding`.
+    /// Returns a filter which matches only this `AclBinding`.
     #[doc(alias = "org.apache.kafka.common.acl.AclBinding#toFilter")]
     pub fn to_filter(&self) -> AclBindingFilter {
         AclBindingFilter::new(self.pattern.to_filter(), self.entry.to_filter())

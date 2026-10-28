@@ -116,7 +116,7 @@ type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<
 /// which runs on the thread that completes the future. A `oneshot::Receiver`
 /// cannot have a continuation attached, so the action travels with the request
 /// state instead and runs at the same point: right after the waiters are
-/// completed (`OffsetsRequestManager.java:262-263`).
+/// completed (`OffsetsRequestManager#currentLag`).
 type WhenComplete = Box<dyn FnOnce() + Send>;
 
 /// Per-`fetch_offsets` request state. Mirrors Java's
@@ -230,7 +230,7 @@ struct PendingFollowupReset {
 /// whole struct would close a reference cycle — this struct owns
 /// [`Self::metadata`], whose `Metadata` owns the boxed listener — that
 /// `Arc` reference counting never frees, so every closed consumer would stay
-/// allocated. Java builds the same cycle (`OffsetsRequestManager.java:148`,
+/// allocated. Java builds the same cycle (`OffsetsRequestManager#OffsetsRequestManager`,
 /// `metadata.addClusterUpdateListener(this)`) and its garbage collector frees
 /// it. The replay itself ([`Self::replay_retries_after_metadata_update`]) runs
 /// from [`OffsetsRequestManager::poll`].
@@ -298,8 +298,10 @@ pub(crate) struct OffsetsManagerShared {
     ///   spawned task, has queued requests or connection attempts.
     ///
     /// Java completes the request's future inside `client.poll`
-    /// (`NetworkClientDelegate.java:454-464` → `OffsetsRequestManager.java:686`,
-    /// `:208`, `:851`), so the application's `addAndGet` returns as soon as the
+    /// (`NetworkClientDelegate.FutureCompletionHandler#onComplete` → the `whenComplete`
+    /// continuations of `OffsetsRequestManager#buildListOffsetRequestToNode`,
+    /// `#fetchOffsets` and `#buildOffsetsForLeaderEpochRequestToNode`), so the
+    /// application's `addAndGet` returns as soon as the
     /// response is read (and an `AsyncPollEvent`'s requests are queued before
     /// the same `runOnce` polls the request managers). Here the work lands
     /// after the bg loop has polled this manager, and only
@@ -405,8 +407,8 @@ impl OffsetsManagerShared {
             Err(StaleMetadata) => {
                 // The state's `remaining_to_search` is already populated
                 // with every input partition (since none had a leader).
-                // Java (`OffsetsRequestManager.java:579-583`): a one-shot
-                // request completes with what it has (nothing) instead of
+                // Java (`org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#buildListOffsetsRequests`):
+                // a one-shot request completes with what it has (nothing) instead of
                 // waiting for a metadata update.
                 let one_shot = state.lock().expect("ListOffsetsRequestState mutex poisoned").one_shot;
                 if one_shot {
@@ -527,9 +529,9 @@ impl OffsetsManagerShared {
         {
             hook();
         }
-        // Java (KAFKA-20312, `OffsetsRequestManager.java:914-923`): a partition
-        // whose leader vanished between the lookup above and the regroup is
-        // searched again after a metadata update.
+        // Java (KAFKA-20312,
+        // `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#groupListOffsetRequests`): a partition
+        // whose leader vanished between the lookup above and the regroup is searched again after a metadata update.
         let mut partitions_skipped_in_regroup: HashSet<TopicPartition> = HashSet::new();
         let result = OffsetFetcherUtils::regroup_partition_map_by_node(
             &self_arc.metadata,
@@ -611,9 +613,9 @@ impl OffsetsManagerShared {
             return;
         }
 
-        // Last response — finalise. Java (`OffsetsRequestManager.java:633-638`):
-        // a one-shot request completes even with partitions left to search,
-        // reporting them as partitions to retry (KAFKA-20187).
+        // Last response — finalise. Java
+        // (`org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#buildListOffsetsRequests`): a one-shot
+        // request completes even with partitions left to search, reporting them as partitions to retry (KAFKA-20187).
         if guard.remaining_to_search.is_empty() || guard.one_shot {
             drop(guard);
             Self::complete_with_result_so_far(self_arc, state);
@@ -653,7 +655,8 @@ impl OffsetsManagerShared {
         for waiter in waiters {
             let _ = waiter.send(Err(err.clone()));
         }
-        // Java parity (`OffsetsRequestManager.java:208-217` —
+        // Java parity
+        // (`org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#fetchOffsets(Map,boolean,boolean)` —
         // `whenComplete` fires on success AND failure).
         self_arc.metadata.clear_transient_topics();
         for action in when_complete {
@@ -695,7 +698,8 @@ impl OffsetsManagerShared {
         }
         // Java: `listOffsetsRequestState.globalResult.whenComplete(...
         // metadata.clearTransientTopics(); ...)`. The hook fires on BOTH
-        // success and failure paths (`OffsetsRequestManager.java:208-217`);
+        // success and failure paths
+        // (`org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#fetchOffsets(Map,boolean,boolean)`);
         // `fail_request_state` handles the failure branch.
         self_arc.metadata.clear_transient_topics();
         for action in when_complete {
@@ -750,7 +754,7 @@ pub(crate) struct OffsetsRequestManager {
     /// Java: `defaultApiTimeoutMs`. Used by
     /// [`Self::init_with_committed_offsets_if_needed`] to compute the
     /// internal `fetchCommittedDeadlineMs` (Java
-    /// `OffsetsRequestManager.java:433`).
+    /// `OffsetsRequestManager#initWithCommittedOffsetsIfNeeded`).
     default_api_timeout_ms: i64,
     api_versions: Arc<ApiVersions>,
     /// Optional handle to the commit manager — `None` when the consumer
@@ -1196,7 +1200,7 @@ impl OffsetsRequestManager {
         let now_ms = current_time_ms;
         // Build per-partition `ListOffsetsPartition` carrying the strategy's
         // wire timestamp and the current leader epoch. Mirrors Java's
-        // `groupListOffsetRequests` (OffsetsRequestManager.java:966-997):
+        // `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#groupListOffsetRequests`:
         // for each partition look up the current leader — if it is unknown,
         // request a metadata update and skip the partition; otherwise stamp
         // the request with the partition's `currentLeaderEpoch`.
@@ -1563,7 +1567,7 @@ impl OffsetsRequestManager {
             Err(boxed) => {
                 let (tx, err) = *boxed;
                 // Java's outer `catch (Exception e)` in
-                // `updateFetchPositions` (`OffsetsRequestManager.java:314-316`)
+                // `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#updateFetchPositions`
                 // calls `result.completeExceptionally(maybeWrapAsKafkaException(e))`
                 // ONLY — it does NOT register a `whenComplete` cache hook.
                 // The `cacheExceptionIfEventExpired` hook is registered
@@ -1815,9 +1819,9 @@ impl OffsetsRequestManager {
 
     // Note: there is no shared `maybe_cache_update_positions_error`
     // helper. Java's `cacheExceptionIfEventExpired` hook (registered as a
-    // `whenComplete` inside `updatePositionsWithOffsets` —
-    // `OffsetsRequestManager.java:337`) is inlined into the
-    // committed-offset spawned followup (see
+    // `whenComplete` inside
+    // `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#updatePositionsWithOffsets`) is inlined into
+    // the committed-offset spawned followup (see
     // [`Self::spawn_committed_offsets_followup`]). Synchronous errors
     // from the outer `updateFetchPositions` body are NOT cached
     // (Java's outer `catch` block does not register the hook), so
@@ -1861,9 +1865,10 @@ impl OffsetsRequestManager {
                                         // The fetched offsets are EARLIEST/LATEST per the reset
                                         // strategy, NOT HW/LSO — using them to update HW/LSO
                                         // would corrupt the lag metric. Java's reset path
-                                        // (OffsetsRequestManager.java:613-650) does not call
+                                        // (`OffsetsRequestManager#buildListOffsetRequestToNode`) does not call
                                         // updateSubscriptionState either; that's only for the
-                                        // multi-node fetchOffsets flow (Java:570-573), which
+                                        // multi-node fetchOffsets flow (Java's
+                                        // `OffsetsRequestManager#buildListOffsetsRequests`), which
                                         // is currently deferred.
                                         self.shared
                                             .offset_fetcher_utils
@@ -1958,7 +1963,7 @@ impl OffsetsRequestManager {
         // completion paths (`OffsetsManagerShared::apply_partial_result`
         // final-response branch + `fail_request_state`), mirroring Java's
         // `listOffsetsRequestState.globalResult.whenComplete(...)` hook at
-        // `OffsetsRequestManager.java:200-209`.
+        // `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager#fetchOffsets(Map,boolean,boolean)`.
         Ok(())
     }
 
@@ -2337,7 +2342,7 @@ mod tests {
 
     /// A dropped manager frees its shared state. The cluster listener boxed
     /// into `shared.metadata` must not hold `shared`, or the two keep each
-    /// other alive (Java's `OffsetsRequestManager.java:148` builds the same
+    /// other alive (Java's `OffsetsRequestManager#OffsetsRequestManager` builds the same
     /// cycle and relies on its garbage collector).
     #[tokio::test(flavor = "current_thread")]
     async fn dropped_manager_frees_shared_state() {
@@ -3367,7 +3372,7 @@ mod tests {
     /// Regression for COMMENTS R2-3: `update_fetch_positions` MUST NOT
     /// cache synchronous errors thrown from `validate_positions_if_needed`.
     /// Java's outer `catch (Exception e)` in `updateFetchPositions`
-    /// (`OffsetsRequestManager.java:314-316`) only calls
+    /// (`OffsetsRequestManager#updateFetchPositions`) only calls
     /// `result.completeExceptionally(...)`; the
     /// `cacheExceptionIfEventExpired` hook is registered ONLY inside the
     /// committed-offset path's `whenComplete`. Caching here would
@@ -3550,7 +3555,7 @@ mod tests {
             false,
             None,
             // Java: `new AuthenticationException("Authentication failed")`
-            // (`OffsetsRequestManagerTest.java:498`) — the object, so the class the
+            // (`OffsetsRequestManagerTest#testRequestFails_AuthenticationException`) — the object, so the class the
             // future fails with is the one Java's `assertEquals(
             // AuthenticationException.class, ...)` pins.
             Some(Error::Authentication(crate::common::errors::AuthenticationError::new(
@@ -3801,7 +3806,7 @@ mod tests {
     /// path — Java does the same via
     /// `listOffsetsRequestState.globalResult.whenComplete(...
     ///   metadata.clearTransientTopics(); ...)` at
-    /// `OffsetsRequestManager.java:200-209`. Success branch.
+    /// `OffsetsRequestManager#fetchOffsets(Map,boolean,boolean)`. Success branch.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_offsets_clears_transient_topics_on_success() {
         let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
@@ -4208,7 +4213,7 @@ mod tests {
     /// `group_list_offset_requests` and triggers `request_update(true)`.
     ///
     /// `build_list_offsets_requests` returns `Ok(unsent_requests)` for the
-    /// resolvable subset (Java `OffsetsRequestManager.java:575-583`), so the
+    /// resolvable subset (Java `OffsetsRequestManager#prepareFetchOffsetsRequests`), so the
     /// known partitions' requests fly immediately. When their responses
     /// arrive, `apply_partial_result` sees `remaining_to_search` non-empty,
     /// re-parks the state, and requests a metadata update (`requestUpdate(false)`).
@@ -4351,8 +4356,7 @@ mod tests {
     /// `globalResult` un-completed, so Java's `future.get(5ms)` throws
     /// `TimeoutException` (the test's assertion).
     ///
-    /// The Rust `add_partitions_to_retry`
-    /// (offsets_request_manager.rs:172-178) faithfully mirrors the *intent*
+    /// The Rust `add_partitions_to_retry` faithfully mirrors the *intent*
     /// — re-add only originally-requested partitions — by filtering on
     /// `timestamps_to_search.get(tp)` instead of replicating the NPE. So
     /// the unrequested partition is silently skipped, `remaining_to_search`
@@ -5131,7 +5135,7 @@ mod tests {
     /// `OffsetsRequestManager` fetch path does NOT re-park on a transport
     /// disconnect: `handle_fetch_offsets_response` routes a network error to
     /// `fail_request_state`, completing the global result exceptionally for
-    /// ALL waiters (Java `OffsetsRequestManager.java:641`/`:600`
+    /// ALL waiters (Java `OffsetsRequestManager#buildListOffsetsRequests`'s
     /// `globalResult.completeExceptionally(error)`). So the in-scope ORM
     /// behavior is: a per-node disconnect FAILS the whole `fetch_offsets`
     /// future with `NetworkException`, leaving nothing parked for retry. This
@@ -6620,7 +6624,7 @@ mod tests {
     }
 
     /// The one-shot request's other completion point
-    /// (`OffsetsRequestManager.java:579-583`, Java has no dedicated test): with
+    /// (`OffsetsRequestManager#buildListOffsetsRequests`, Java has no dedicated test): with
     /// the leader unknown no request can be built, and instead of being parked
     /// for a metadata update the request completes at once, clearing the flag.
     #[tokio::test(flavor = "current_thread")]

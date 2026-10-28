@@ -57,33 +57,49 @@ impl MetricConfig {
         Self::default()
     }
 
-    /// The configured quota, if any.
+    /// Returns the configured quota, `None` when there is none.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#quota")]
     pub fn quota(&self) -> Option<&Quota> {
         self.quota.as_ref()
     }
 
-    /// Set the quota.
+    /// Sets the quota.
+    ///
+    /// # Arguments
+    ///
+    /// - `quota` - the quota a sensor using this config enforces
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#quota")]
     pub fn set_quota(mut self, quota: Quota) -> Self {
         self.quota = Some(quota);
         self
     }
 
-    /// The number of events in an event window.
+    /// Returns the number of events in an event window.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#eventWindow")]
     pub fn event_window(&self) -> i64 {
         self.event_window
     }
 
-    /// Set the event window.
+    /// Sets the event window.
+    ///
+    /// # Arguments
+    ///
+    /// - `window` - the number of events in a sample window
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#eventWindow")]
     pub fn set_event_window(mut self, window: i64) -> Self {
         self.event_window = window;
         self
     }
 
-    /// The time window in milliseconds.
+    /// Returns the time window in milliseconds.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#timeWindowMs")]
     pub fn time_window_ms(&self) -> i64 {
         self.time_window_ms
@@ -95,41 +111,64 @@ impl MetricConfig {
         self
     }
 
-    /// Set the time window expressed in the given unit, mirroring Java's
-    /// `MetricConfig.timeWindow(long window, TimeUnit unit)`.
+    /// Sets the time window, expressed in the given unit.
+    ///
+    /// # Arguments
+    ///
+    /// - `window` - the length of a sample window, in `unit`
+    /// - `unit` - the unit of `window`
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#timeWindow")]
     pub fn set_time_window(mut self, window: i64, unit: TimeUnit) -> Self {
         self.time_window_ms = unit.to_millis(window);
         self
     }
 
-    /// The default tags for metrics using this config.
+    /// Returns the default tags for metrics using this config.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#tags")]
     pub fn tags(&self) -> &BTreeMap<String, String> {
         &self.tags
     }
 
-    /// Set the default tags.
+    /// Sets the default tags.
+    ///
+    /// # Arguments
+    ///
+    /// - `tags` - the default tags for metrics using this config
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#tags")]
     pub fn set_tags(mut self, tags: BTreeMap<String, String>) -> Self {
         self.tags = tags;
         self
     }
 
-    /// The number of samples for windowed stats.
+    /// Returns the number of samples for windowed stats.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
     pub fn samples(&self) -> i32 {
         self.samples
     }
 
-    /// Set the number of samples.
+    /// Sets the number of samples.
+    ///
+    /// # Arguments
+    ///
+    /// - `samples` - the number of samples for windowed stats, at least 1
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     ///
     /// # Panics
     ///
-    /// If `samples < 1`, mirroring Java's `IllegalArgumentException` — a
-    /// broken argument precondition rather than a recoverable runtime
-    /// condition. The client configs reject `metrics.num.samples` below 1
-    /// before it reaches here, as Java's `atLeast(1)` does.
+    /// If `samples < 1`, with the message of Java's
+    /// `IllegalArgumentException`: a broken argument precondition. The client configs reject `metrics.num.samples`
+    /// below 1 before it reaches here.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#samples")]
     pub fn set_samples(mut self, samples: i32) -> Self {
         assert!(samples >= 1, "The number of samples must be at least 1.");
@@ -137,13 +176,21 @@ impl MetricConfig {
         self
     }
 
-    /// The recording level.
+    /// Returns the recording level.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#recordLevel")]
     pub fn record_level(&self) -> RecordingLevel {
         self.recording_level
     }
 
-    /// Set the recording level.
+    /// Sets the recording level.
+    ///
+    /// # Arguments
+    ///
+    /// - `recording_level` - the level at which sensors using this config record
+    ///
+    /// # Returns
+    ///
+    /// This config, for chaining.
     #[doc(alias = "org.apache.kafka.common.metrics.MetricConfig#recordLevel")]
     pub fn set_record_level(mut self, recording_level: RecordingLevel) -> Self {
         self.recording_level = recording_level;

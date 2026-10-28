@@ -19,8 +19,6 @@
 use std::fmt;
 
 /// The type of a group.
-///
-/// Corresponds to `org.apache.kafka.common.GroupType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.GroupType")]
@@ -38,7 +36,7 @@ pub enum GroupType {
 }
 
 impl GroupType {
-    /// The name of this enum constant, exactly as declared in Java
+    /// Returns the name of this enum constant, exactly as declared in Java
     /// (`CONSUMER`).
     ///
     /// Java's `Enum.name()`, which `GroupType` inherits. The text Java's
@@ -55,10 +53,15 @@ impl GroupType {
         }
     }
 
-    /// Parse a string into a group type, in a case-insensitive manner.
+    /// Parse a string into a consumer group type, in a case-insensitive manner.
     ///
-    /// Returns [`GroupType::Unknown`] if the name is unrecognized (mirrors
-    /// Java's `parse`, including the `null` handling that maps to `Unknown`).
+    /// # Arguments
+    ///
+    /// - `name` - the type name
+    ///
+    /// # Returns
+    ///
+    /// The group type, `Unknown` if unrecognized.
     #[doc(alias = "org.apache.kafka.common.GroupType#parse")]
     pub fn parse(name: &str) -> Self {
         match name.to_lowercase().as_str() {
@@ -74,7 +77,7 @@ impl GroupType {
 
 /// Java's `toString()`, which returns the private `name` field: the text
 /// (`Consumer`) the broker sends and [`GroupType::parse`] reads, not
-/// the constant name [`GroupType::name`] returns (`GroupType.java:29-60`).
+/// the constant name [`GroupType::name`] returns (the constants of `GroupType`).
 impl fmt::Display for GroupType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -108,7 +111,7 @@ mod tests {
 
     /// New test, no Java original (Java has no `GroupTypeTest`): every
     /// constant's `name()` is Java's `Enum.name()` and its `Display` is Java's
-    /// `toString()` (`GroupType.java:29-60`), and `parse` reads the `toString()` text back.
+    /// `toString()` (`GroupType#toString`), and `parse` reads the `toString()` text back.
     #[test]
     fn name_and_display_match_java_for_every_constant() {
         for (group_type, name, display) in [

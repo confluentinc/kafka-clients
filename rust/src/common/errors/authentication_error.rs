@@ -18,28 +18,22 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Authentication failed.
+    /// This error indicates that SASL authentication has failed. On authentication failure,
+    /// clients abort the operation requested and raise one of the subclasses of this error:
     ///
-    /// This is also the payload
-    /// `auth_io_error` puts inside an
-    /// `io::Error` to carry "this was a genuine authentication failure" across the
-    /// handshake boundary, recovered by
-    /// `is_authentication_error`.
+    /// - `SaslAuthenticationError` if SASL handshake fails with invalid credentials or any other
+    ///   failure specific to the SASL mechanism used for authentication
+    /// - `UnsupportedSaslMechanismError` if the SASL mechanism requested by the client is not
+    ///   supported on the broker.
+    /// - `IllegalSaslStateError` if an unexpected request is received on during SASL handshake.
+    ///   This could be due to misconfigured security protocol.
+    /// - `SslAuthenticationError` if SSL handshake failed due to any `SSLException`.
     ///
-    /// Corresponds to Java's `AuthenticationException`, which reports error code
-    /// `Errors::InvalidConfig` by inheritance.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `AuthenticationException` -> `InvalidConfigurationException` ->
-    ///   `ApiException` -> `KafkaException`
-    ///
-    /// `Errors.forException` walks the superclass chain
-    /// (`protocol/Errors.java:520-531`), and `InvalidConfigurationException` **is**
-    /// in the map — `INVALID_CONFIG(40, ..., InvalidConfigurationException::new)`
-    /// (`Errors.java:264`). So Java answers **40** for this class even though the
-    /// class itself has no entry of its own. `InvalidConfigurationError` remains
-    /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
-    /// one.
+    /// Error code `Errors::InvalidConfig`, inherited from `InvalidConfigurationException`
+    /// (`org.apache.kafka.common.protocol.Errors#forException` walks the superclass chain); that
+    /// code's own class stays `InvalidConfigurationError`.
     #[doc(alias = "org.apache.kafka.common.errors.AuthenticationException")]
     AuthenticationError,
     code: Errors::InvalidConfig,

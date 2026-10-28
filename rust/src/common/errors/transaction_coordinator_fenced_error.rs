@@ -21,11 +21,8 @@ kafka_error_type! {
     /// Indicates that the transaction coordinator sending a WriteTxnMarker is no
     /// longer the current coordinator for a given producer.
     ///
-    /// Corresponds to Java's `TransactionCoordinatorFencedException`, error code `Errors::TransactionCoordinatorFenced`.
-    ///
-    /// Java `extends` chain:
-    ///    `TransactionCoordinatorFencedException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::TransactionCoordinatorFenced`. Java `extends` chain:
+    /// `TransactionCoordinatorFencedException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.TransactionCoordinatorFencedException")]
     TransactionCoordinatorFencedError,
     code: Errors::TransactionCoordinatorFenced,

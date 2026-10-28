@@ -109,57 +109,102 @@ pub(crate) unsafe fn offset_spec_value_of<'a>(spec: *const kafka_admin_OffsetSpe
     unsafe { &*(spec as *const OffsetSpec) }
 }
 
-/// `OffsetSpec.earliest()`: a borrowed singleton.
+/// Used to retrieve the earliest offset of a partition
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST)
 }
 
-/// `OffsetSpec.latest()`: a borrowed singleton.
+/// Used to retrieve the latest offset of a partition
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST)
 }
 
-/// `OffsetSpec.maxTimestamp()`: a borrowed singleton.
+/// Used to retrieve the offset with the largest timestamp of a partition as message timestamps
+/// can be specified client side this may not match the log end offset returned by LatestSpec
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_max_timestamp() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_MAX_TIMESTAMP)
 }
 
-/// `OffsetSpec.earliestLocal()`: a borrowed singleton.
+/// Used to retrieve the local log start offset. Local log start offset is the offset of a log
+/// above which reads are guaranteed to be served from the disk of the leader broker.
+///
+/// Note: When tiered Storage is not enabled, it behaves the same as retrieving the earliest
+/// timestamp offset.
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_local() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_LOCAL)
 }
 
-/// `OffsetSpec.latestTiered()`: a borrowed singleton.
+/// Used to retrieve the highest offset of data stored in remote storage.
+///
+/// Note: When tiered storage is not enabled, we will return unknown offset.
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_latest_tiered() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_LATEST_TIERED)
 }
 
-/// `OffsetSpec.earliestPendingUpload()`: a borrowed singleton.
+/// Used to retrieve the earliest offset of records that are pending upload to remote storage.
+///
+/// Note: When tiered storage is not enabled, we will return unknown offset.
+///
+/// # Returns
+///
+/// A static singleton, never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_earliest_pending_upload() -> *const kafka_admin_OffsetSpec_t {
     singleton(kafka_admin_OffsetSpec_e::kafka_admin_OffsetSpec_EARLIEST_PENDING_UPLOAD)
 }
 
-/// `OffsetSpec.forTimestamp(long timestamp)`: an owned `TimestampSpec`
-/// handle, freed with [`kafka_admin_OffsetSpec_destroy`].
+/// Used to retrieve the earliest offset whose timestamp is greater than or equal to the given
+/// timestamp in the corresponding partition
+///
+/// # Parameters
+///
+/// - `timestamp` - in milliseconds
+///
+/// # Returns
+///
+/// A `TimestampSpec` handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_OffsetSpec_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_OffsetSpec_for_timestamp(timestamp: i64) -> *mut kafka_admin_OffsetSpec_t {
     box_offset_spec(OffsetSpec::for_timestamp(timestamp))
 }
 
-/// The C enumerator of a handle, for a `switch`.
+/// Returns the C enumerator of a handle, for a `switch`.
 ///
 /// A caught Rust panic returns `kafka_admin_OffsetSpec_EARLIEST`, the first enumerator: the enum
 /// has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
@@ -179,11 +224,11 @@ pub unsafe extern "C" fn kafka_admin_OffsetSpec__enum(
     enum_of(unsafe { offset_spec_value_of(self_) })
 }
 
-/// Frees an owned timestamp spec; a singleton or null is a no-op.
+/// Frees an owned timestamp spec; a singleton or `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null, a singleton, or an owned handle not yet destroyed,
+/// `self_` must be `NULL`, a singleton, or an owned handle not yet destroyed,
 /// that no other call uses at the same time; an owned handle is not used
 /// afterwards.
 #[ffi_guard]

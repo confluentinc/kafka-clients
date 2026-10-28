@@ -19,13 +19,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::common::metrics::{Measurable, MetricConfig, Stat};
 
 /// An instantaneous value.
-///
-/// `record` stores the last value (Java `this.value = value`); `measure` returns
-/// it. The `f64` is held as its bit pattern in an [`AtomicU64`] so recording is
-/// lock-free — the minimal Rust equivalent of Java guarding the field with the
-/// sensor's `synchronized`. The stored value is bit-for-bit identical to Java's.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.Value")]
+// `record` stores the last value; `measure` returns it. The `f64` is held as
+// its bit pattern in an `AtomicU64` so recording is lock-free, the minimal Rust
+// equivalent of Java guarding the field with the sensor's `synchronized`.
 pub struct Value {
     value: AtomicU64,
 }

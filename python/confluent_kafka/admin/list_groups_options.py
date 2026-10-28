@@ -40,7 +40,7 @@ __all__ = ["ListGroupsOptions"]
 
 _E = TypeVar("_E")
 
-# ``ConsumerProtocol.PROTOCOL_TYPE`` (consumer/internals/ConsumerProtocol.java:45).
+# ``org.apache.kafka.clients.consumer.internals.ConsumerProtocol#PROTOCOL_TYPE``.
 _CONSUMER_PROTOCOL_TYPE = "consumer"
 
 

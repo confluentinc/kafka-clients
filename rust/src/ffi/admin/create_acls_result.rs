@@ -76,15 +76,21 @@ unsafe fn acl_binding_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     }
 }
 
-/// `CreateAclsResult.values()`: an owned map, sorted by the binding's
-/// `toString()`, of owned `kafka_common_acl_AclBinding_t *` keys (compared
-/// by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
-/// (`KafkaFuture<Void>`: `get` delivers `NULL`). Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from ACL bindings to futures which can be used to check the status of the creation
+/// of each ACL binding.
+///
+/// # Returns
+///
+/// A map, sorted by the binding's `toString()`, of owned `kafka_common_acl_AclBinding_t *` keys
+/// (compared by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *`
+/// (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
@@ -104,13 +110,17 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_values(
     )
 }
 
-/// `CreateAclsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every ACL was created, freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the ACL creations succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every ACL was created.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
@@ -122,12 +132,12 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

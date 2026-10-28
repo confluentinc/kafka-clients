@@ -18,13 +18,16 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// This is not the correct coordinator.
+    /// In the context of the group coordinator, the broker returns this error code if it receives
+    /// an offset fetch or commit request for a group it's not the coordinator of.
     ///
-    /// Corresponds to Java's `NotCoordinatorException`, error code `Errors::NotCoordinator`.
+    /// In the context of the transactional coordinator, it returns this error when it receives a
+    /// transactional request with a transactionalId the coordinator doesn't own.
     ///
-    /// Java `extends` chain:
-    ///    `NotCoordinatorException` -> `RefreshRetriableException` ->
-    ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    /// # Translation notes
+    ///
+    /// Error code `Errors::NotCoordinator`. Java `extends` chain: `NotCoordinatorException` ->
+    /// `RefreshRetriableException` -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NotCoordinatorException")]
     NotCoordinatorError,
     code: Errors::NotCoordinator,

@@ -13,14 +13,10 @@
 // limitations under the License.
 
 //! A listing of a topic in the cluster.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.TopicListing`.
 
 use crate::common::Uuid;
 
 /// A listing of a topic in the cluster.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.TopicListing`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.TopicListing")]
 pub struct TopicListing {
@@ -32,27 +28,29 @@ pub struct TopicListing {
 impl TopicListing {
     /// Create an instance with the specified parameters.
     ///
-    /// * `name` - the topic name
-    /// * `topic_id` - the topic id
-    /// * `internal` - whether the topic is internal to Kafka
+    /// # Arguments
+    ///
+    /// - `name` - The topic name
+    /// - `topic_id` - The topic id.
+    /// - `internal` - Whether the topic is internal to Kafka
     #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#TopicListing")]
     pub fn new(name: impl Into<String>, topic_id: Uuid, internal: bool) -> Self {
         Self { name: name.into(), topic_id, internal }
     }
 
-    /// The id of the topic.
+    /// Returns the id of the topic.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#topicId")]
     pub fn topic_id(&self) -> Uuid {
         self.topic_id
     }
 
-    /// The name of the topic.
+    /// Returns the name of the topic.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#name")]
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Whether the topic is internal to Kafka. An example of an internal topic
+    /// Returns whether the topic is internal to Kafka. An example of an internal topic
     /// is the offsets and group management topic: `__consumer_offsets`.
     #[doc(alias = "org.apache.kafka.clients.admin.TopicListing#isInternal")]
     pub fn is_internal(&self) -> bool {

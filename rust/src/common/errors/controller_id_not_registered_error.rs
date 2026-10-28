@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The given controller ID was not registered.
     ///
-    /// Corresponds to Java's `ControllerIdNotRegisteredException`, error code
-    /// `Errors::ControllerIdNotRegistered`.
-    ///
-    /// Java `extends` chain:
-    ///    `ControllerIdNotRegisteredException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::ControllerIdNotRegistered`. Java `extends` chain:
+    /// `ControllerIdNotRegisteredException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.ControllerIdNotRegisteredException")]
     ControllerIdNotRegisteredError,
     code: Errors::ControllerIdNotRegistered,

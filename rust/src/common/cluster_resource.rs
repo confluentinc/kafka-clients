@@ -26,12 +26,16 @@ pub struct ClusterResource {
 impl ClusterResource {
     /// Create a `ClusterResource` with a cluster id. Note that cluster id may be `None` if the
     /// metadata request was sent to a broker without support for cluster ids.
+    ///
+    /// # Arguments
+    ///
+    /// - `cluster_id` - The cluster id
     #[doc(alias = "org.apache.kafka.common.ClusterResource#ClusterResource")]
     pub fn new(cluster_id: Option<String>) -> Self {
         Self { cluster_id }
     }
 
-    /// Return the cluster id. Note that it may be `None` if the metadata request was sent to a
+    /// Returns the cluster id. Note that it may be `None` if the metadata request was sent to a
     /// broker without support for cluster ids.
     #[doc(alias = "org.apache.kafka.common.ClusterResource#clusterId")]
     pub fn cluster_id(&self) -> Option<&str> {

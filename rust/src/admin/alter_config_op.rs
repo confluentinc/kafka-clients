@@ -13,14 +13,10 @@
 // limitations under the License.
 
 //! An alter configuration operation.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterConfigOp`.
 
 use super::ConfigEntry;
 
 /// The operation type of an [`AlterConfigOp`].
-///
-/// Corresponds to `AlterConfigOp.OpType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType")]
@@ -43,8 +39,6 @@ pub enum OpType {
 
 impl OpType {
     /// Returns the wire id for this operation type.
-    ///
-    /// Corresponds to `AlterConfigOp.OpType.id()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType#id")]
     pub fn id(&self) -> i8 {
         match self {
@@ -58,8 +52,9 @@ impl OpType {
     /// Returns the operation type for the given wire id, or `None` if the id is
     /// unrecognized.
     ///
-    /// Corresponds to `AlterConfigOp.OpType.forId(byte)` (which returns `null`
-    /// for an unknown id).
+    /// # Arguments
+    ///
+    /// - `id` - the wire id
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp$OpType#forId")]
     pub fn for_id(id: i8) -> Option<OpType> {
         match id {
@@ -71,8 +66,8 @@ impl OpType {
         }
     }
 
-    /// The name of this constant in Java's `AlterConfigOp.OpType`
-    /// (`AlterConfigOp.java:46-67`). The Java enum does not override
+    /// The name of this constant in Java's
+    /// `org.apache.kafka.clients.admin.AlterConfigOp$OpType`. The Java enum does not override
     /// `toString()`, so `Enum.toString()` returns this name.
     fn name(&self) -> &'static str {
         match self {
@@ -95,7 +90,7 @@ impl std::fmt::Display for OpType {
 /// A class representing an alter configuration entry containing name, value and
 /// operation type.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterConfigOp`.
+/// # Translation notes
 ///
 /// The derived `Debug` renders the entry through [`ConfigEntry`]'s `Debug`,
 /// which redacts a sensitive value as Java's `ConfigEntry.toString()` does.
@@ -108,6 +103,11 @@ pub struct AlterConfigOp {
 
 impl AlterConfigOp {
     /// Creates a new alter config operation.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_entry` - the config entry to alter
+    /// - `operation_type` - how to alter it
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigOp#AlterConfigOp")]
     pub fn new(config_entry: ConfigEntry, operation_type: OpType) -> Self {
         Self { config_entry, op_type: operation_type }
@@ -127,7 +127,7 @@ impl AlterConfigOp {
 }
 
 impl std::fmt::Display for AlterConfigOp {
-    /// Mirrors Java's `toString()` (`AlterConfigOp.java:119-124`), which renders
+    /// Java's `toString()`, which renders
     /// the operation type as its Java constant name and the entry through
     /// `ConfigEntry.toString()`, the redacting rendering.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -198,7 +198,7 @@ mod tests {
 
     /// New test, no Java original (Java has no `AlterConfigOpTest`): every
     /// `OpType` renders its Java constant name, as Java's `Enum.toString()` does
-    /// (`AlterConfigOp.java:46-67`).
+    /// (`org.apache.kafka.clients.admin.AlterConfigOp$OpType`).
     #[test]
     fn op_type_display_matches_java_constant_names() {
         for (op_type, java) in [
@@ -212,7 +212,7 @@ mod tests {
     }
 
     /// New test, no Java original: `Display` is the string Java's `toString()`
-    /// builds (`AlterConfigOp.java:119-124`), which renders the entry through
+    /// builds, which renders the entry through
     /// `ConfigEntry.toString()`, the redacting rendering.
     #[test]
     fn display_redacts_sensitive_value() {

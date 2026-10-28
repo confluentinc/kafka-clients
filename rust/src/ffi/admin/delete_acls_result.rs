@@ -97,13 +97,18 @@ pub(crate) unsafe fn destroy_filter_result_element(element: *mut c_void) {
     }
 }
 
-/// `FilterResult.binding()`: the deleted ACL binding, borrowed from the
-/// handle (never passed to `kafka_common_acl_AclBinding_destroy`), or
-/// `NULL` when the deletion failed.
+/// Return the deleted ACL binding or `NULL` if there was an error.
+///
+/// # Returns
+///
+/// The deleted ACL binding, or `NULL` when the deletion failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-result handle.
+///
+/// The returned binding is borrowed from `self_` and is never passed to
+/// `kafka_common_acl_AclBinding_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
@@ -120,14 +125,17 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_binding(
         })
 }
 
-/// `FilterResult.exception()`: the error the deletion failed with, borrowed
-/// from the handle (never passed to `kafka_common_Error_destroy`), or `NULL`
-/// when it succeeded. Named after the Rust accessor since the word Java
-/// uses never appears in the C API.
+/// Return an error if the ACL delete was not successful or `NULL` if it was.
+///
+/// # Returns
+///
+/// The error the deletion failed with, or `NULL` when it succeeded.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-result handle.
+///
+/// The returned error is borrowed from `self_` and is never passed to `kafka_common_Error_destroy`.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
@@ -142,11 +150,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResult_error(
         .map_or(ptr::null(), |error| error as *const ErrorInner as *const kafka_common_Error_t)
 }
 
-/// Frees a handle; null is a no-op.
+/// Frees a handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -212,13 +220,18 @@ pub(crate) unsafe fn destroy_filter_results_element(element: *mut c_void) {
     }
 }
 
-/// `FilterResults.values()`: an owned list, in response order, of owned
-/// `kafka_admin_DeleteAclsResult_FilterResult_t *` copies, freed with
-/// `kafka_List_destroy` (which frees the elements).
+/// Return a list of delete ACLs results for a given filter.
+///
+/// # Returns
+///
+/// A list, in response order, of owned `kafka_admin_DeleteAclsResult_FilterResult_t *` copies.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid filter-results handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy` (which frees the
+/// elements).
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_values(
@@ -234,11 +247,11 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_FilterResults_values(
     box_list(elements, Some(destroy_filter_result_element))
 }
 
-/// Frees a handle; null is a no-op.
+/// Frees a handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -330,16 +343,21 @@ fn acl_binding_list(bindings: Vec<AclBinding>) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_acl_binding_element))
 }
 
-/// `DeleteAclsResult.values()`: an owned map, sorted by the filter's
-/// `toString()`, of owned `kafka_common_acl_AclBindingFilter_t *` keys
-/// (compared by value in `kafka_Map_get`) to owned
-/// `kafka_common_KafkaFuture_t *` whose `get` delivers a
-/// `kafka_admin_DeleteAclsResult_FilterResults_t *` owned by the future.
-/// Freed with `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from acl filters to futures which can be used to check the status of the deletions
+/// by each filter.
+///
+/// # Returns
+///
+/// A map, sorted by the filter's `toString()`, of owned `kafka_common_acl_AclBindingFilter_t *`
+/// keys (compared by value in `kafka_Map_get`) to owned `kafka_common_KafkaFuture_t *` whose `get`
+/// delivers a `kafka_admin_DeleteAclsResult_FilterResults_t *` owned by the future.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
@@ -371,14 +389,21 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_values(
     )
 }
 
-/// `DeleteAclsResult.all()`: an owned future whose `get` delivers a
-/// `kafka_List_t *` owned by the future, of `kafka_common_acl_AclBinding_t *`
-/// (every ACL binding deleted, across all filters); the future fails when
-/// any filter failed. Freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds only if all the ACLs deletions succeed, and which contains all
+/// the deleted ACLs. Note that it if the filters don't match any ACLs, this is not considered an
+/// error.
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_List_t *` owned by the future, of
+/// `kafka_common_acl_AclBinding_t *` (every ACL binding deleted, across all filters); the future
+/// fails when any filter failed.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
@@ -399,12 +424,12 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_all(
     }
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

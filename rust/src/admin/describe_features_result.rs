@@ -13,16 +13,12 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_features`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesResult`.
 
 use super::FeatureMetadata;
 use crate::common::KafkaFuture;
 
 /// The result of the [`describe_features_with_options`](crate::admin::Admin::describe_features_with_options)
 /// call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeFeaturesResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult")]
 pub struct DescribeFeaturesResult {
@@ -40,9 +36,7 @@ impl DescribeFeaturesResult {
         Self { future }
     }
 
-    /// The future which completes with the cluster's feature metadata.
-    ///
-    /// Mirrors `featureMetadata()`.
+    /// Returns the future which completes with the cluster's feature metadata.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeFeaturesResult#featureMetadata")]
     pub fn feature_metadata(&self) -> KafkaFuture<FeatureMetadata> {
         self.future.clone()

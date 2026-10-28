@@ -49,20 +49,27 @@ pub(crate) unsafe fn client_quota_filter_ref<'a>(
 }
 
 /// Hands `filter` to C as an owned handle, freed with
-/// [`kafka_common_quota_ClientQuotaFilter_destroy`].
+/// `kafka_common_quota_ClientQuotaFilter_destroy`.
 pub(crate) fn box_client_quota_filter(filter: ClientQuotaFilter) -> *mut kafka_common_quota_ClientQuotaFilter_t {
     Box::into_raw(Box::new(filter)) as *mut kafka_common_quota_ClientQuotaFilter_t
 }
 
-/// `contains(Collection<ClientQuotaFilterComponent> components)`: a filter
-/// matching every entity that contains the given components, and possibly
-/// others. `components` is a list of borrowed
-/// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during
-/// the call. Owned, freed with [`kafka_common_quota_ClientQuotaFilter_destroy`].
+/// Constructs and returns a quota filter that matches all provided components. Matching entities
+/// with entity types that are not specified by a component will also be included in the result.
+///
+/// # Parameters
+///
+/// - `components` - the components for the filter
+///
+/// # Returns
+///
+/// the new filter
 ///
 /// # Safety
 ///
-/// `components` must be null or a valid list of filter-component handles.
+/// `components` must be null or a valid list of borrowed
+/// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
+/// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
@@ -76,14 +83,22 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains(
     }))
 }
 
-/// `containsOnly(Collection<ClientQuotaFilterComponent> components)`: a
-/// filter matching every entity that contains exactly the given components.
-/// Same element type and ownership as
-/// [`kafka_common_quota_ClientQuotaFilter_contains`].
+/// Constructs and returns a quota filter that matches all provided components. Matching entities
+/// with entity types that are not specified by a component will *not* be included in the result.
+///
+/// # Parameters
+///
+/// - `components` - the components for the filter
+///
+/// # Returns
+///
+/// the new filter
 ///
 /// # Safety
 ///
-/// `components` must be null or a valid list of filter-component handles.
+/// `components` must be null or a valid list of borrowed
+/// `kafka_common_quota_ClientQuotaFilterComponent_t` handles, copied during the call.
+/// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
@@ -97,20 +112,32 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_contains_only(
     }))
 }
 
-/// `all()`: a filter matching every configured entity. Owned.
+/// Constructs and returns a quota filter that matches all configured entities.
+///
+/// # Returns
+///
+/// the new filter
+///
+/// # Safety
+///
+/// The returned filter is owned, freed with `kafka_common_quota_ClientQuotaFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_quota_ClientQuotaFilter_all() -> *mut kafka_common_quota_ClientQuotaFilter_t {
     box_client_quota_filter(ClientQuotaFilter::all())
 }
 
-/// `components()`: an owned list of owned
-/// `kafka_common_quota_ClientQuotaFilterComponent_t` copies, in the filter's
-/// order. Freed with `kafka_List_destroy`, which also frees the components.
+/// `components()`.
+///
+/// # Returns
+///
+/// the filter's components
 ///
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-filter handle.
+/// The returned list is owned and holds owned `kafka_common_quota_ClientQuotaFilterComponent_t`
+/// copies, in the filter's order; `kafka_List_destroy` frees it and the components.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
@@ -127,7 +154,11 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_components(
     box_list(elements, Some(destroy_boxed::<ClientQuotaFilterComponentInner>))
 }
 
-/// `strict()`: whether only entities with exactly the given components match.
+/// `strict()`.
+///
+/// # Returns
+///
+/// 1 if the filter is strict, i.e. only includes specified components, else 0
 ///
 /// # Safety
 ///
@@ -142,11 +173,14 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_strict(
     i8::from(unsafe { client_quota_filter_ref(self_) }.strict())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// # Returns
+///
+/// the string form of this client-quota-filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid client-quota-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_quota_ClientQuotaFilter_to_string(

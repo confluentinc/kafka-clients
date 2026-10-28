@@ -41,13 +41,17 @@ impl PayloadClass for TopicAuthorizationError {
     }
 }
 
-/// The payload of a `TopicAuthorizationException` error, borrowed from the
-/// error handle, or null when the error is another class. The suffix stays
-/// because `kafka_common_Error_topic_authorization` is the `Error` factory.
+/// Returns the payload of a `TopicAuthorizationException` error, or `NULL` when the error is
+/// another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_topic_authorization_error(
@@ -66,14 +70,18 @@ pub unsafe extern "C" fn kafka_common_Error_topic_authorization_error(
     }
 }
 
-/// `new TopicAuthorizationException(Set<String> unauthorizedTopics)`;
-/// `unauthorized_topics` holds `const char *`, copied. Owned, freed with
-/// [`kafka_common_TopicAuthorizationError_destroy`].
+/// `new TopicAuthorizationException(Set<String> unauthorizedTopics)`.
+///
+/// # Parameters
+///
+/// - `unauthorized_topics` - The topics not authorized, as `const char *` elements; `NULL` reads
+///   as empty.
 ///
 /// # Safety
 ///
-/// `unauthorized_topics` must be null or a valid list of NUL-terminated
-/// strings.
+/// `unauthorized_topics` must be `NULL` or a valid list of NUL-terminated
+/// strings; it is copied. The returned handle is owned, freed with
+/// `kafka_common_TopicAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_new(
@@ -87,6 +95,10 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_new(
 
 /// `new TopicAuthorizationException(String message)` with Java's default
 /// message and no topics.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_TopicAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_TopicAuthorizationError_with_default_message()
@@ -97,10 +109,17 @@ pub extern "C" fn kafka_common_TopicAuthorizationError_with_default_message()
 /// `new TopicAuthorizationException(String message, Set<String>
 /// unauthorizedTopics)`.
 ///
+/// # Parameters
+///
+/// - `unauthorized_topics` - The topics not authorized, as `const char *` elements; `NULL` reads
+///   as empty.
+/// - `message` - The detail message.
+///
 /// # Safety
 ///
-/// `unauthorized_topics` must be null or a valid list of NUL-terminated
-/// strings and `message` a valid NUL-terminated string.
+/// `unauthorized_topics` must be `NULL` or a valid list of NUL-terminated
+/// strings and `message` a valid NUL-terminated string; both are copied. The returned handle is
+/// owned, freed with `kafka_common_TopicAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_with_message(
@@ -119,12 +138,16 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_with_message(
     ))
 }
 
-/// `unauthorizedTopics()`: an owned, sorted list of `char *`, freed with
-/// `kafka_List_destroy`.
+/// `unauthorizedTopics()`, as a sorted list of `char *`.
+///
+/// # Returns
+///
+/// possibly empty set of unauthorized topics
 ///
 /// # Safety
 ///
-/// `self_` must be a valid topic-authorization handle.
+/// `self_` must be a valid topic-authorization handle. The returned list is owned, freed with
+/// `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
@@ -141,11 +164,12 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topic
     )
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-authorization handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_source(
@@ -159,11 +183,12 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_source(
     unsafe { Payload::<TopicAuthorizationError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-authorization handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_to_string(
@@ -176,12 +201,12 @@ pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_to_string(
     unsafe { Payload::<TopicAuthorizationError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_destroy(
