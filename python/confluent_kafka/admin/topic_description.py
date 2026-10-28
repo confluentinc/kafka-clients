@@ -34,7 +34,8 @@ from confluent_kafka._java import java_str
 from confluent_kafka.common import Uuid
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclOperation, TopicPartitionInfo
+    from confluent_kafka.common.acl import AclOperation
+    from confluent_kafka.common import TopicPartitionInfo
 
 __all__ = ["TopicDescription"]
 

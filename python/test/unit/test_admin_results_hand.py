@@ -59,22 +59,26 @@ from confluent_kafka.admin._internals import (
     _ProducerIdAndEpoch,
     _to_member_identity,
 )
-from confluent_kafka.common import (
+from confluent_kafka.common.acl import (
     AccessControlEntry,
     AccessControlEntryFilter,
     AclBinding,
     AclBindingFilter,
     AclOperation,
     AclPermissionType,
+)
+from confluent_kafka.common import (
     GroupState,
     GroupType,
+    TopicPartition,
+    TopicPartitionReplica,
+    Uuid,
+)
+from confluent_kafka.common.resource import (
     PatternType,
     ResourcePattern,
     ResourcePatternFilter,
     ResourceType,
-    TopicPartition,
-    TopicPartitionReplica,
-    Uuid,
 )
 from confluent_kafka.common.errors import (
     DuplicateResourceError,
@@ -213,10 +217,7 @@ class TestConstruction:
     @pytest.mark.parametrize("cls, method", [
         (AlterConsumerGroupOffsetsResult, "alter_consumer_group_offsets()"),
         (DeleteAclsResult, "delete_acls()"),
-        (DeleteAclsResult.FilterResult, "delete_acls()"),
-        (DeleteAclsResult.FilterResults, "delete_acls()"),
         (DescribeReplicaLogDirsResult, "describe_replica_log_dirs()"),
-        (DescribeReplicaLogDirsResult.ReplicaLogDirInfo, "describe_replica_log_dirs()"),
         (DescribeTopicsResult, "describe_topics()"),
         (DescribeUserScramCredentialsResult, "describe_user_scram_credentials()"),
         (FenceProducersResult, "fence_producers()"),
@@ -229,6 +230,20 @@ class TestConstruction:
             cls()
         assert str(info.value) == (f"{cls.__name__} cannot be constructed directly; use the "
                                    f"admin client's {method}")
+
+    @pytest.mark.parametrize("cls, use", [
+        (DeleteAclsResult.FilterResult, "DeleteAclsResult.FilterResults.values()"),
+        (DeleteAclsResult.FilterResults, "the futures of DeleteAclsResult.values()"),
+        (DescribeReplicaLogDirsResult.ReplicaLogDirInfo,
+         "the futures of DescribeReplicaLogDirsResult.values()"),
+    ])
+    def test_a_nested_class_init_names_the_method_that_returns_it(self, cls: type,
+                                                                   use: str) -> None:
+        """A nested class is named with its outer class and points at the method
+        that returns it, not at the outer class's RPC (Class family)."""
+        with pytest.raises(TypeError) as info:
+            cls()
+        assert str(info.value) == f"{cls.__qualname__} cannot be constructed directly; use {use}"
 
     def test_positional_calls_raise_type_error(self) -> None:
         result = FenceProducersResult._new(futures={}, kind=Sync)

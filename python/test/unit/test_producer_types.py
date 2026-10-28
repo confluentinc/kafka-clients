@@ -26,7 +26,8 @@ import threading
 import pytest
 
 from confluent_kafka import ExecutionError, IllegalArgumentError, TimeoutError
-from confluent_kafka.common import Headers, TopicPartition
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.common.errors import CorruptRecordError
 from confluent_kafka.producer import AsyncMockProducer, MockProducer, ProducerRecord, RecordMetadata
 

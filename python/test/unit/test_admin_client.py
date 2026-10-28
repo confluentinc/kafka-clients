@@ -437,8 +437,15 @@ def test_options_reach_the_extension_as_the_setters_that_ran() -> None:
         with pytest.raises(RuntimeError) as info:
             admin._call(_lib.Admin_list_topics, [("bogus", 1)])
         assert str(info.value) == "ListTopicsOptions has no setter bogus in the extension"
-        with pytest.raises(OverflowError):
+        # Outside Java's Integer at either end; inside it a negative value is
+        # sent as 0 (Java's calcDeadlineMs).
+        with pytest.raises(OverflowError, match=r"^timeout of 2147483648 ms does not fit a "
+                                                r"32-bit signed int \(max 2147483647 ms\)$"):
             admin.list_topics(options=ListTopicsOptions(timeout_ms=1 << 31))
+        with pytest.raises(OverflowError, match=r"^timeout of -2147483649 ms does not fit a "
+                                                r"32-bit signed int \(min -2147483648 ms\)$"):
+            admin.list_topics(options=ListTopicsOptions(timeout_ms=-(1 << 31) - 1))
+        admin.list_topics(options=ListTopicsOptions(timeout_ms=-(1 << 31)))
 
 
 def test_result_accessors_of_the_extension() -> None:

@@ -36,7 +36,9 @@ from typing import Any
 import pytest
 
 from confluent_kafka import IllegalArgumentError
-from confluent_kafka.common import Headers, TimestampType, TopicPartition
+from confluent_kafka.common.header import Headers
+from confluent_kafka.common.record import TimestampType
+from confluent_kafka.common import TopicPartition
 from confluent_kafka.consumer import (
     CloseOptions,
     ConsumerGroupMetadata,
@@ -165,14 +167,18 @@ def test_group_metadata_value_semantics() -> None:
     assert str(a) == "GroupMetadata(groupId = g, generationId = 1, memberId = m, groupInstanceId = )"
 
 
-def test_kafka_consumer_group_metadata_deep_copies_to_itself() -> None:
-    # A KafkaConsumer's metadata holds the core's handle, which cannot be
-    # copied; the value is immutable, so a deep copy is the object itself.
+def test_kafka_consumer_group_metadata_refuses_copy_and_pickle() -> None:
+    # Java's ConsumerGroupMetadata is neither Cloneable nor Serializable, and a
+    # KafkaConsumer's instance holds the core's handle.
     with KafkaConsumer(configs={"bootstrap.servers": "localhost:1",
                                 "group.protocol": "consumer", "group.id": "g"}) as consumer:
         metadata = consumer.group_metadata()
-    assert copy.deepcopy(metadata) is metadata
-    assert copy.copy(metadata) == metadata
+    message = ("ConsumerGroupMetadata cannot be copied or pickled; use the consumer's "
+               "group_metadata()")
+    for attempt in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError) as e:
+            attempt(metadata)
+        assert str(e.value) == message
 
 
 # --------------------------------------------------------------------------- #

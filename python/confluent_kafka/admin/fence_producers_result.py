@@ -28,8 +28,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.admin._internals import _CoordinatorKey, _ProducerIdAndEpoch
+from confluent_kafka._java import java_str
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ __all__ = ["FenceProducersResult"]
 _T = TypeVar("_T")
 
 
-class FenceProducersResult(Generic[KindT]):
+class FenceProducersResult(_Result, Generic[KindT]):
     """The result of the ``Admin.fence_producers()`` call.
 
     Java: ``org.apache.kafka.clients.admin.FenceProducersResult``.
@@ -58,7 +59,7 @@ class FenceProducersResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> FenceProducersResult[Any]:
         """Java's package-private ``FenceProducersResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 
@@ -93,6 +94,6 @@ class FenceProducersResult(Generic[KindT]):
         future = self._futures.get(key)
         if future is None:
             raise IllegalArgumentError(
-                message="TransactionalId " + "`" + transactional_id
+                message="TransactionalId " + "`" + java_str(transactional_id)
                 + "` was not included in the request")
         return future.then_apply(function=followup)

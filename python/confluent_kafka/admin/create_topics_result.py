@@ -16,9 +16,10 @@
 
 Java's constructor is protected: ``__init__`` raises ``TypeError`` and ``_new`` builds
 it (CLAUDE.md, Python Binding Conventions, Class family). Its futures carry Java's
-public nested ``TopicMetadataAndConfig``, which no public signature reaches, so it is
-the private helper ``_TopicMetadataAndConfig`` (decision log, entry 6); the public
-methods are ``then_apply`` views of those futures (Futures). The package-private
+public nested ``TopicMetadataAndConfig``, the nested class
+``CreateTopicsResult.TopicMetadataAndConfig`` with Java's two constructors and four
+getters (Scope; Idiom translations); the public methods are ``then_apply`` views of
+those futures (Futures). The package-private
 constant ``UNKNOWN`` is ``_UNKNOWN``. On a result the client builds
 (``_of_client``), the futures are the core's per-topic ``values()`` futures and
 ``config`` / ``topic_id`` / ``num_partitions`` / ``replication_factor`` return the
@@ -36,7 +37,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import MISSING, Form, java_forms
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -51,63 +52,64 @@ __all__ = ["CreateTopicsResult"]
 _UNKNOWN = -1
 
 
-class _TopicMetadataAndConfig:
-    """Java's ``CreateTopicsResult.TopicMetadataAndConfig``: a topic's metadata and
-    configs, or the error that replaced them (private: no public signature reaches
-    it)."""
-
-    __slots__ = ("_exception", "_topic_id", "_num_partitions", "_replication_factor",
-                 "_config")
-
-    @java_forms(
-        Form("topic_id", "num_partitions", "replication_factor", "config"),
-        Form("exception"),
-        name="TopicMetadataAndConfig",
-    )
-    def __init__(self, *, topic_id: Uuid | None = MISSING, num_partitions: int | None = MISSING,
-                 replication_factor: int | None = MISSING, config: Config | None = MISSING,
-                 exception: ApiError | None = MISSING) -> None:
-        if exception is MISSING:
-            self._exception: ApiError | None = None
-            self._topic_id = topic_id
-            self._num_partitions = num_partitions
-            self._replication_factor = replication_factor
-            self._config = config
-            return
-        from confluent_kafka.common import Uuid
-
-        self._exception = exception
-        self._topic_id = Uuid.ZERO_UUID
-        self._num_partitions = _UNKNOWN
-        self._replication_factor = _UNKNOWN
-        self._config = None
-
-    def topic_id(self) -> Uuid | None:
-        self._ensure_success()
-        return self._topic_id
-
-    def num_partitions(self) -> int | None:
-        self._ensure_success()
-        return self._num_partitions
-
-    def replication_factor(self) -> int | None:
-        self._ensure_success()
-        return self._replication_factor
-
-    def config(self) -> Config | None:
-        self._ensure_success()
-        return self._config
-
-    def _ensure_success(self) -> None:
-        if self._exception is not None:
-            raise self._exception
-
-
-class CreateTopicsResult(Generic[KindT]):
+class CreateTopicsResult(_Result, Generic[KindT]):
     """The result of ``Admin.create_topics()``.
 
     Java: ``org.apache.kafka.clients.admin.CreateTopicsResult``.
     """
+
+    class TopicMetadataAndConfig:
+        """A topic's metadata and configs, or the error that replaced them.
+
+        Java: ``org.apache.kafka.clients.admin.CreateTopicsResult.TopicMetadataAndConfig``.
+        """
+
+        __slots__ = ("_exception", "_topic_id", "_num_partitions", "_replication_factor",
+                     "_config")
+
+        @java_forms(
+            Form("topic_id", "num_partitions", "replication_factor", "config"),
+            Form("exception"),
+            name="TopicMetadataAndConfig",
+        )
+        def __init__(self, *, topic_id: Uuid | None = MISSING,
+                     num_partitions: int | None = MISSING,
+                     replication_factor: int | None = MISSING, config: Config | None = MISSING,
+                     exception: ApiError | None = MISSING) -> None:
+            if exception is MISSING:
+                self._exception: ApiError | None = None
+                self._topic_id = topic_id
+                self._num_partitions = num_partitions
+                self._replication_factor = replication_factor
+                self._config = config
+                return
+            from confluent_kafka.common import Uuid
+
+            self._exception = exception
+            self._topic_id = Uuid.ZERO_UUID
+            self._num_partitions = _UNKNOWN
+            self._replication_factor = _UNKNOWN
+            self._config = None
+
+        def topic_id(self) -> Uuid | None:
+            self._ensure_success()
+            return self._topic_id
+
+        def num_partitions(self) -> int | None:
+            self._ensure_success()
+            return self._num_partitions
+
+        def replication_factor(self) -> int | None:
+            self._ensure_success()
+            return self._replication_factor
+
+        def config(self) -> Config | None:
+            self._ensure_success()
+            return self._config
+
+        def _ensure_success(self) -> None:
+            if self._exception is not None:
+                raise self._exception
 
     __slots__ = ("_futures", "_kind", "_refine")
 
@@ -119,11 +121,11 @@ class CreateTopicsResult(Generic[KindT]):
     @classmethod
     def _new(
             cls, *,
-            futures: Mapping[str, KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]],
+            futures: Mapping[str, KafkaFuture[CreateTopicsResult.TopicMetadataAndConfig] | AsyncKafkaFuture[CreateTopicsResult.TopicMetadataAndConfig]],
             kind: type[Sync] | type[Async]) -> CreateTopicsResult[Any]:
         """Java's protected ``CreateTopicsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         result._refine = None
         return result
@@ -164,30 +166,30 @@ class CreateTopicsResult(Generic[KindT]):
         """
         if self._refine is not None:
             return self._refine(topic, "config")
-        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.config)
+        return self._future_of(topic).then_apply(function=CreateTopicsResult.TopicMetadataAndConfig.config)
 
     def topic_id(self, *, topic: str) -> KafkaFuture[Uuid] | AsyncKafkaFuture[Uuid]:
         """Returns a future that provides topic ID for the topic when the request
         completes; it fails as ``config(topic=…)`` does."""
         if self._refine is not None:
             return self._refine(topic, "topic_id")
-        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.topic_id)
+        return self._future_of(topic).then_apply(function=CreateTopicsResult.TopicMetadataAndConfig.topic_id)
 
     def num_partitions(self, *, topic: str) -> KafkaFuture[int] | AsyncKafkaFuture[int]:
         """Returns a future that provides number of partitions in the topic when the
         request completes; it fails as ``config(topic=…)`` does."""
         if self._refine is not None:
             return self._refine(topic, "num_partitions")
-        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.num_partitions)
+        return self._future_of(topic).then_apply(function=CreateTopicsResult.TopicMetadataAndConfig.num_partitions)
 
     def replication_factor(self, *, topic: str) -> KafkaFuture[int] | AsyncKafkaFuture[int]:
         """Returns a future that provides replication factor for the topic when the
         request completes; it fails as ``config(topic=…)`` does."""
         if self._refine is not None:
             return self._refine(topic, "replication_factor")
-        return self._future_of(topic).then_apply(function=_TopicMetadataAndConfig.replication_factor)
+        return self._future_of(topic).then_apply(function=CreateTopicsResult.TopicMetadataAndConfig.replication_factor)
 
-    def _future_of(self, topic: str) -> KafkaFuture[_TopicMetadataAndConfig] | AsyncKafkaFuture[_TopicMetadataAndConfig]:
+    def _future_of(self, topic: str) -> KafkaFuture[CreateTopicsResult.TopicMetadataAndConfig] | AsyncKafkaFuture[CreateTopicsResult.TopicMetadataAndConfig]:
         future = self._futures.get(topic)
         if future is None:
             # ``futures.get(topic).thenApply(...)`` on a topic not in the call: Java's

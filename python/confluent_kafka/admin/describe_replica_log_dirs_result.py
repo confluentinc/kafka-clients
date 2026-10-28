@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._args import MISSING, Form, java_forms
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartitionReplica
@@ -44,7 +44,7 @@ __all__ = ["DescribeReplicaLogDirsResult"]
 _INVALID_OFFSET_LAG = -1
 
 
-class DescribeReplicaLogDirsResult(Generic[KindT]):
+class DescribeReplicaLogDirsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_replica_log_dirs()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult``.
@@ -61,8 +61,8 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "ReplicaLogDirInfo cannot be constructed directly; use the admin client's "
-                "describe_replica_log_dirs()")
+                "DescribeReplicaLogDirsResult.ReplicaLogDirInfo cannot be constructed "
+                "directly; use the futures of DescribeReplicaLogDirsResult.values()")
 
         @classmethod
         @java_forms(
@@ -136,7 +136,7 @@ class DescribeReplicaLogDirsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> DescribeReplicaLogDirsResult[Any]:
         """Java's package-private ``DescribeReplicaLogDirsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

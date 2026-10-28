@@ -26,16 +26,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import ClientQuotaEntity
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.common.quota import ClientQuotaEntity
 
 __all__ = ["DescribeClientQuotasResult"]
 
 
-class DescribeClientQuotasResult(Generic[KindT]):
+class DescribeClientQuotasResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_client_quotas()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeClientQuotasResult``.
@@ -52,6 +52,8 @@ class DescribeClientQuotasResult(Generic[KindT]):
 
         :param entities: future for the collection of entities that matched the filter
         """
+        if entities is None:
+            raise TypeError("entities must not be None")
         self._entities = entities
         self._kind: type[Sync] | type[Async] = _kind_of((self._entities,))
 

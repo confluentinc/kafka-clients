@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.partition_reassignment import PartitionReassignment
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 __all__ = ["ListPartitionReassignmentsResult"]
 
 
-class ListPartitionReassignmentsResult(Generic[KindT]):
+class ListPartitionReassignmentsResult(_Result, Generic[KindT]):
     """The result of ``Admin.list_partition_reassignments()``.
 
     Java: ``org.apache.kafka.clients.admin.ListPartitionReassignmentsResult``.

@@ -34,15 +34,9 @@ if sys.version_info >= (3, 11):
 else:
     from typing_extensions import assert_type
 
-from confluent_kafka.common import (
-    Header,
-    Headers,
-    Node,
-    TimestampType,
-    TopicIdPartition,
-    TopicPartition,
-    Uuid,
-)
+from confluent_kafka.common.header import Header, Headers
+from confluent_kafka.common import Node, TopicIdPartition, TopicPartition, Uuid
+from confluent_kafka.common.record import TimestampType
 from confluent_kafka.common.serialization import (
     Deserializer,
     Serializer,
@@ -368,6 +362,30 @@ def _consumer_family_types(c: object = None) -> None:
         assert_type(await abase.commit_nowait(callback=async_callback), None)
         await am.lose_partitions(partitions_lost=[tp])
         assert_type(await am.poll(timeout=0), "ConsumerRecords[int, int]")
+        # The asyncio forms of the callback interfaces (rule 3).
+        from confluent_kafka.consumer import (
+            AsyncConsumerRebalanceListener, AsyncOffsetCommitCallback,
+        )
+
+        typed_callback: AsyncOffsetCommitCallback = async_callback
+        assert_type(await ac.commit_nowait(callback=typed_callback), None)
+
+        class Listener(AsyncConsumerRebalanceListener):
+            async def on_partitions_revoked(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+            async def on_partitions_assigned(self, partitions: set[TopicPartition]) -> None:
+                pass
+
+        await ac.subscribe(topics=["t"], callback=Listener())
+        await am.subscribe(topics=["t"], callback=Listener())
+        kc.subscribe(topics=["t"], callback=Listener())  # type: ignore[call-overload]
+
+        async def async_task() -> None:
+            pass
+
+        am.schedule_poll_task(task=async_task)
+        mc.schedule_poll_task(task=async_task)  # type: ignore[arg-type]
 
     del _async
 
@@ -485,6 +503,10 @@ def _producer_family_types(p: object = None) -> None:
                                    callback=async_callback), AsyncKafkaFuture[RecordMetadata])
         kp.send(record=ProducerRecord(topic="t", value="v"),  # type: ignore[call-overload]
                 callback=async_callback)
+        from confluent_kafka.producer import AsyncCallback
+
+        typed_send_callback: AsyncCallback = async_callback
+        await ap.send(record=ProducerRecord(topic="t", value="v"), callback=typed_send_callback)
 
     del _async
 
@@ -623,8 +645,8 @@ def _admin_topic_rpc_types(c: object = None) -> None:
         RecordsToDelete,
         TopicDescription,
     )
+    from confluent_kafka.common.acl import AclOperation
     from confluent_kafka.common import (
-        AclOperation,
         AsyncKafkaFuture,
         ElectionType,
         KafkaFuture,
@@ -880,16 +902,14 @@ def _admin_security_rpc_types(c: object = None) -> None:
         UserScramCredentialDeletion,
         UserScramCredentialsDescription,
     )
-    from confluent_kafka.common import (
-        AclBinding,
-        AclBindingFilter,
-        AsyncKafkaFuture,
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
+    from confluent_kafka.common import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.common.quota import (
         ClientQuotaAlteration,
         ClientQuotaEntity,
         ClientQuotaFilter,
-        DelegationToken,
-        KafkaFuture,
     )
+    from confluent_kafka.common.security.token.delegation import DelegationToken
 
     admin = Admin.create(configs={"bootstrap.servers": "b:9092"})
     tp = TopicPartition(topic="t", partition=0)
@@ -1084,8 +1104,9 @@ def _one_stub_per_java_overload(c: object = None) -> None:
         return
     from typing import Any
 
-    from confluent_kafka.common import KafkaPrincipal, PartitionInfo
-    from confluent_kafka.common.token_information import TokenInformation
+    from confluent_kafka.common.security.auth import KafkaPrincipal
+    from confluent_kafka.common import PartitionInfo
+    from confluent_kafka.common.security.token.delegation.token_information import TokenInformation
     from confluent_kafka.consumer import (
         AsyncKafkaConsumer, CloseOptions, KafkaConsumer, OffsetAndTimestamp,
     )

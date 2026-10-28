@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 __all__ = ["ListOffsetsResult"]
 
 
-class ListOffsetsResult(Generic[KindT]):
+class ListOffsetsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.list_offsets()`` call.
 
     Java: ``org.apache.kafka.clients.admin.ListOffsetsResult``.
@@ -82,6 +82,8 @@ class ListOffsetsResult(Generic[KindT]):
     def __init__(
             self, *,
             futures: Mapping[TopicPartition, KafkaFuture[ListOffsetsResult.ListOffsetsResultInfo] | AsyncKafkaFuture[ListOffsetsResult.ListOffsetsResultInfo]]) -> None:
+        if futures is None:
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -93,7 +95,7 @@ class ListOffsetsResult(Generic[KindT]):
         """The clients' builder: Java's public ``ListOffsetsResult(futures)`` with the
         client kind set by the caller."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

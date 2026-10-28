@@ -17,7 +17,9 @@
 The records and offset types, ``CloseOptions``, ``SubscriptionPattern``, the
 client family (``Consumer``, ``KafkaConsumer``, ``MockConsumer`` and their
 ``Async`` peers), ``ConsumerRebalanceListener``, the
-``OffsetCommitCallback`` protocol, and the errors Java declares in this package
+``OffsetCommitCallback`` protocol, their asyncio forms
+``AsyncConsumerRebalanceListener`` and ``AsyncOffsetCommitCallback``,
+``GroupProtocol``, the constants of ``ConsumerConfig``, and the errors Java declares in this package
 (``CommitFailedException``, ``OffsetOutOfRangeException``, …) (CLAUDE.md,
 Python Binding Conventions, Modules).
 """
@@ -25,14 +27,20 @@ Python Binding Conventions, Modules).
 from __future__ import annotations
 
 from .async_consumer import AsyncConsumer as AsyncConsumer
+from .async_consumer_rebalance_listener import (
+    AsyncConsumerRebalanceListener as AsyncConsumerRebalanceListener,
+)
 from .async_kafka_consumer import AsyncKafkaConsumer as AsyncKafkaConsumer
 from .async_mock_consumer import AsyncMockConsumer as AsyncMockConsumer
+from .async_offset_commit_callback import AsyncOffsetCommitCallback as AsyncOffsetCommitCallback
 from .close_options import CloseOptions as CloseOptions
 from .consumer import Consumer as Consumer
+from .consumer_config import ConsumerConfig as ConsumerConfig
 from .consumer_group_metadata import ConsumerGroupMetadata as ConsumerGroupMetadata
 from .consumer_rebalance_listener import ConsumerRebalanceListener as ConsumerRebalanceListener
 from .consumer_record import ConsumerRecord as ConsumerRecord
 from .consumer_records import ConsumerRecords as ConsumerRecords
+from .group_protocol import GroupProtocol as GroupProtocol
 from .kafka_consumer import KafkaConsumer as KafkaConsumer
 from .mock_consumer import MockConsumer as MockConsumer
 from .offset_and_metadata import OffsetAndMetadata as OffsetAndMetadata
@@ -42,14 +50,18 @@ from .subscription_pattern import SubscriptionPattern as SubscriptionPattern
 
 __all__ = [
     "AsyncConsumer",
+    "AsyncConsumerRebalanceListener",
     "AsyncKafkaConsumer",
     "AsyncMockConsumer",
+    "AsyncOffsetCommitCallback",
     "CloseOptions",
     "Consumer",
+    "ConsumerConfig",
     "ConsumerGroupMetadata",
     "ConsumerRebalanceListener",
     "ConsumerRecord",
     "ConsumerRecords",
+    "GroupProtocol",
     "KafkaConsumer",
     "MockConsumer",
     "OffsetAndMetadata",

@@ -44,7 +44,8 @@ from its error and raises it, as Java surfaces the callback's own ``Throwable``
 (``_raise_error``).
 
 ``KafkaConsumer`` is not thread-safe: a call while another thread is inside the
-consumer raises ``ConcurrentModificationError``, ``wakeup()`` excepted — refused by
+consumer raises ``ConcurrentModificationError``, ``wakeup()`` and ``metrics()``
+excepted, as Java leaves both outside ``acquire()`` — refused by
 the per-thread use count, as Java's ``acquire()``, before it reaches the FFI's
 single-owner guard (which still rejects a call from another task of the same
 thread). Every native call runs inside a counted use of the handle,
@@ -64,7 +65,7 @@ import threading
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sized
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TypeVar, cast
 
 import _confluentkafka as _lib  # type: ignore[import-not-found]
 
@@ -442,61 +443,34 @@ def close_args(option: CloseOptions) -> tuple[int, int]:
 
 
 
-class _Use:
-    """One use of the native consumer handle: while it runs, ``close()`` does not
-    free the handle (see ``_ConsumerState``). It counts per thread, as Java's
-    ``acquire()``: a use while another thread holds one raises
-    ``ConcurrentModificationError`` (the same thread may nest), so a call is
-    refused before it reaches the FFI's single-owner guard."""
+def _closed_error() -> IllegalStateError:
+    """The error of a call on a closed consumer (``_Use``)."""
+    return IllegalStateError(message=CLOSED_MESSAGE)
 
-    __slots__ = ("_state", "_thread")
 
-    def __init__(self, state: _ConsumerState) -> None:
-        self._state = state
-        self._thread = 0
+def _concurrent_error() -> ConcurrentModificationError:
+    """The error of a call while another thread is inside the consumer: Java's
+    ``acquire()`` (``_Use``)."""
+    return ConcurrentModificationError(message=CONCURRENT_MESSAGE)
 
-    def __enter__(self) -> int:
-        state = self._state
-        thread = threading.get_ident()
-        with state._lifecycle:
-            if state._state == _CLOSED or state._h == 0:
-                raise IllegalStateError(message=CLOSED_MESSAGE)
-            if state._state == _CLOSING and state._closing_thread != thread:
-                # Java's close() holds the consumer's lock (acquire()).
-                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
-            if any(user != thread for user in state._use_threads):
-                # An awaiting call left on a closed event loop can never end
-                # its use: end it first, so it does not hold the consumer.
-                state._release_abandoned()
-            if any(user != thread for user in state._use_threads):
-                # Java's acquire(): another thread is inside the consumer.
-                raise ConcurrentModificationError(message=CONCURRENT_MESSAGE)
-            state._uses += 1
-            state._use_threads[thread] = state._use_threads.get(thread, 0) + 1
-            self._thread = thread
-        return state._h
 
-    def __exit__(self, *exc: object) -> None:
-        self.release()
+class _Use(Protocol):
+    """One use of the native consumer handle (the extension's ``Use``): while
+    it runs, ``close()`` does not free the handle (see ``_ConsumerState``).
+    ``_use()`` counts it per thread, as Java's ``acquire()``: a use while
+    another thread holds one raises ``ConcurrentModificationError`` (the same
+    thread may nest), so a call is refused before it reaches the FFI's
+    single-owner guard. It is taken and ended in the C extension, under the C
+    lock, so a ``KeyboardInterrupt`` can neither leave it counted nor the lock
+    held (CLAUDE.md, Python Binding Conventions, Implementation over the FFI)."""
+
+    def __enter__(self) -> int: ...
+
+    def __exit__(self, *exc: object) -> None: ...
 
     def release(self) -> None:
         """End this use; once ended, a second call does nothing (see
         ``_ConsumerState._release_abandoned``)."""
-        state = self._state
-        with state._lifecycle:
-            if not self._thread:
-                return
-            state._uses -= 1
-            remaining = state._use_threads[self._thread] - 1
-            if remaining:
-                state._use_threads[self._thread] = remaining
-            else:
-                del state._use_threads[self._thread]
-            self._thread = 0
-            if state._uses == 0:
-                state._lifecycle.notify_all()
-
-
 
 
 class _ConsumerState:
@@ -504,7 +478,7 @@ class _ConsumerState:
     lifecycle.
 
     The handle lives until ``close()`` frees it. Every native call runs inside
-    ``_use()``, which counts it per thread under ``_lifecycle`` and refuses to
+    ``_use()``, which counts it per thread under ``_lifecycle_lock`` and refuses to
     start once the consumer is closed (``IllegalStateError``), while another
     thread holds a use, or, on another thread, while it is closing
     (``ConcurrentModificationError``, as Java's ``acquire()``). ``close()`` sets the closing state under the same lock, so exactly
@@ -524,7 +498,11 @@ class _ConsumerState:
         self._h: int = 0
         self._state = _OPEN
         self._closing_thread: int | None = None
-        self._lifecycle = threading.Condition()
+        # The lifecycle lock is the C RLock, taken directly (never through the
+        # Condition's Python-level __enter__ / __exit__, where a Ctrl+C could
+        # leave it held); the Condition over it only waits and wakes.
+        self._lifecycle_lock = threading.RLock()
+        self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
         # The threads holding a use, with their counts (close() refuses while
         # another thread holds one, as Java's acquire()).
@@ -654,18 +632,28 @@ class _ConsumerState:
     # ---- lifecycle ------------------------------------------------------
     def _use(self) -> _Use:
         """A use of the native handle: ``with self._use() as h:``."""
-        return _Use(self)
+        return _lib.Use(self, _lib.USE_CONSUMER, "_h", error=_closed_error,  # type: ignore[no-any-return]
+                        concurrent=_concurrent_error, closed=_CLOSED, closing=_CLOSING)
 
     def _call(self, fn: Callable[..., _T], *args: Any) -> _T:
         """``fn(handle, *args)`` as one use of the handle."""
         with self._use() as h:
             return fn(h, *args)
 
+    def _hold(self) -> _Use:
+        """A use of the handle without Java's ``acquire()``, for the methods Java
+        leaves outside its lock (``metrics()``; ``wakeup()`` has its own form, a
+        no-op once closed): it is not refused while another thread is inside the
+        consumer. ``close()`` still waits for it before freeing the handle; a
+        closed consumer raises (Behaviour with no other home)."""
+        return _lib.Use(self, _lib.USE_HOLD, "_h", error=_closed_error,  # type: ignore[no-any-return]
+                        closed=_CLOSED)
+
     def _is_closed(self) -> bool:
         """Whether ``close()`` has run: a second ``close()`` returns before its
         own argument checks (CLAUDE.md, Python Binding Conventions,
         Implementation over the FFI, Order)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             return self._state == _CLOSED or self._h == 0
 
     def _check_open(self) -> None:
@@ -681,7 +669,7 @@ class _ConsumerState:
         thread is inside the consumer it raises ``ConcurrentModificationError``
         and changes nothing: Java's ``close()`` calls ``acquire()`` first."""
         thread = threading.get_ident()
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if self._state == _CLOSED or self._h == 0:
                 return False
             if self._state == _CLOSING:
@@ -700,7 +688,7 @@ class _ConsumerState:
     def _abort_close(self) -> None:
         """Back to open: the FFI close was refused (another thread is inside the
         consumer), so the consumer is still usable, as in Java."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             self._state = _OPEN
             self._closing_thread = None
 
@@ -708,7 +696,7 @@ class _ConsumerState:
         """Closed: wait until no use is left (none can start), then free the
         native handle, release every callback the consumer holds, and close the
         deserializers (Java closes them last, ``AsyncKafkaConsumer.close``)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             self._state = _CLOSED
             self._release_abandoned()
             while self._uses:
@@ -756,7 +744,7 @@ class _ConsumerState:
         reported = False
         for callback_id, loop in list(self._unacked.items()):
             if loop.is_closed() and self._unacked.pop(callback_id, None) is loop:
-                with self._lifecycle:
+                with self._lifecycle_lock:
                     if self._h:
                         _lib.Consumer__set_callback_result(
                             self._h, callback_id,
@@ -779,7 +767,7 @@ class _ConsumerState:
 
     def _handle(self) -> int:
         """The core's guard-free ``ConsumerHandle`` (created lazily)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if not self._reentrant_handle:
                 self._reentrant_handle = _lib.Consumer_handle(self._h)
             return self._reentrant_handle
@@ -791,12 +779,12 @@ class _ConsumerState:
         commit callbacks queued behind the running one on this thread while it
         waits (``_handle_commit_running`` tells them so)."""
         thread = threading.get_ident()
-        with self._lifecycle:
+        with self._lifecycle_lock:
             self._handle_commit_threads[thread] = self._handle_commit_threads.get(thread, 0) + 1
         try:
             yield
         finally:
-            with self._lifecycle:
+            with self._lifecycle_lock:
                 count = self._handle_commit_threads.pop(thread) - 1
                 if count:
                     self._handle_commit_threads[thread] = count
@@ -804,7 +792,7 @@ class _ConsumerState:
     def _handle_commit_running(self) -> bool:
         """Whether this thread is inside a blocking ConsumerHandle commit
         (``_handle_commit``), so it cannot run its event loop meanwhile."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             return threading.get_ident() in self._handle_commit_threads
 
 
@@ -846,9 +834,9 @@ class _ConsumerState:
         token = self._enter_callback()
         try:
             if method == _REVOKED:
-                result: object = listener.on_partitions_revoked(partitions)  # type: ignore[func-returns-value]
+                result: object = listener.on_partitions_revoked(partitions)
             elif method == _ASSIGNED:
-                result = listener.on_partitions_assigned(partitions)  # type: ignore[func-returns-value]
+                result = listener.on_partitions_assigned(partitions)
             else:
                 result = listener.on_partitions_lost(partitions)  # type: ignore[func-returns-value]
             if inspect.isawaitable(result):
@@ -1360,10 +1348,10 @@ class _ConsumerState:
             return False
         error = payload[-1] if payload else 0
         woken = bool(error) and _lib.KafkaError_code(error) == WakeupError._ffi_id
-        # Under _lifecycle, as _c_wakeup counts the user's wakeup and clears
+        # Under _lifecycle_lock, as _c_wakeup counts the user's wakeup and clears
         # the record: a user wakeup() can never fall between the compare and
         # the store.
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if woken:
                 left, self._own_wake_left = self._own_wake_left, False
                 return left and not ending
@@ -1577,9 +1565,11 @@ class _ConsumerState:
         return {TopicPartition(topic=t, partition=p) for (t, p) in raw}
 
     def _c_metrics(self) -> dict[MetricName, Metric]:
-        # Java's metrics() takes no acquire(): the core answers while a call is
-        # in flight.
-        raw = self._call(_lib.Consumer_metrics)
+        # Java's metrics() takes no acquire() (AsyncKafkaConsumer.metrics()): it
+        # answers from any thread while a call is in flight, so it holds the
+        # handle without the use guard (Threads and callbacks).
+        with self._hold() as h:
+            raw = _lib.Consumer_metrics(h)
         return to_metrics_map(raw)
 
     def _assign_partitions(self, partitions: Iterable[TopicPartition]) -> list[TopicPartition]:
@@ -1802,22 +1792,12 @@ class _ConsumerState:
         self._run_sync(*self._commit_nowait_spec(spec, adapter))
 
     def _c_wakeup(self) -> None:
-        """Java's ``wakeup()``: callable from any thread; a no-op once closed."""
-        with self._lifecycle:
-            if not self._h:
-                return
-            self._uses += 1
-            h = self._h
-            # The wakeup armed from now on is the user's (see _own_wake_left).
-            self._user_wakeups += 1
-            self._own_wake_left = False
-        try:
-            _lib.Consumer_wakeup(h)
-        finally:
-            with self._lifecycle:
-                self._uses -= 1
-                if self._uses == 0:
-                    self._lifecycle.notify_all()
+        """Java's ``wakeup()``: callable from any thread; a no-op once closed.
+        Its use counts the user's wakeup under the lifecycle lock (see
+        ``_own_wake_left``)."""
+        with _lib.Use(self, _lib.USE_WAKEUP, "_h") as h:
+            if h:
+                _lib.Consumer_wakeup(h)
 
     # ---- a consumer operation from inside a callback (the ConsumerHandle) -----
     def _reentrant(self, op: str, *args: Any) -> Any:
