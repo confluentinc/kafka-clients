@@ -23,6 +23,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
+
 use log::{debug, error, trace};
 
 use crate::common::Error;
@@ -881,12 +883,12 @@ impl ProducerBatch {
         self.records_builder.buffer()
     }
 
-    /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
+    /// Takes ownership of the underlying buffer, leaving an empty one in its place.
     ///
     /// Used by [`deallocate_buffer`](Self::deallocate_buffer) to return the actual batch buffer
     /// to the pool rather than allocating a new one. Single-buffer batches only: a chunked
     /// batch's memory is its chunks, which `deallocate_buffer` returns through the stream.
-    fn take_buffer(&mut self) -> Vec<u8> {
+    fn take_buffer(&mut self) -> BytesMut {
         debug_assert!(!self.is_chunked(), "a chunked batch's memory is returned through its stream");
         self.records_builder.take_buffer()
     }
@@ -923,7 +925,7 @@ impl ProducerBatch {
             stream.deallocate_with_pool(Some(pool));
             return;
         }
-        pool.deallocate(vec![0u8; self.initial_capacity()]);
+        pool.deallocate(BytesMut::zeroed(self.initial_capacity()));
     }
 
     /// Returns the initial capacity of the buffer.
@@ -1247,7 +1249,7 @@ mod tests {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ProducerBatchTest#testSplitPreservesHeaders")]
     fn test_split_preserves_headers() {
         let builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 1024],
+            BytesMut::zeroed(1024),
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -1461,7 +1463,7 @@ mod tests {
         // We only support magic V2 and NONE compression for record-level iteration.
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
         let builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 1024],
+            BytesMut::zeroed(1024),
             magic,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -1510,7 +1512,7 @@ mod tests {
     fn test_records_readable_after_send_then_split() {
         let magic = RecordBatch::CURRENT_MAGIC_VALUE;
         let builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 1024],
+            BytesMut::zeroed(1024),
             magic,
             Compression::none().build(),
             TimestampType::CreateTime,
@@ -1559,18 +1561,19 @@ mod tests {
     ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
     ///      (CLAUDE.md §14) now that it re-reads the batch instead of panicking.
     ///
-    /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
-    /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a
-    /// single 3-word `Shared` — and every later call costs 0. Before the §9.18 fix the
-    /// first call cost 0 (it moved the value out) and the second cost 1, but that one
-    /// was a **full re-copy of the batch** through `take_batch_data`, so the fix trades
-    /// a per-batch 24-byte allocation for removing a whole-batch `memcpy` from the
-    /// split path. Neither is per record.
+    /// Absolute counts on this build: every call, the first included, costs 0. `close()`
+    /// freezes the builder's buffer in place and `MemoryRecords` is a slice of it, so a
+    /// read is a refcount bump; the one per-batch allocation left (`bytes` boxes a 3-word
+    /// `Shared` header when it freezes a buffer whose length is below its capacity)
+    /// happens inside `close()`, before the measurement. Before the §9.18 fix the second
+    /// call was a **full re-copy of the batch** through `take_batch_data`, and until the
+    /// buffer was frozen in place `close()` itself copied the batch once. Nothing here is
+    /// per record. A deliberate allocation proves the tracker is measuring.
     #[test]
     fn test_records_allocations_do_not_scale_with_the_record_count() {
         fn records_allocations(record_count: usize) -> usize {
             let builder = MemoryRecords::builder_with_buffer_magic(
-                vec![0u8; 4096],
+                BytesMut::zeroed(4096),
                 RecordBatch::CURRENT_MAGIC_VALUE,
                 Compression::none().build(),
                 TimestampType::CreateTime,
@@ -1597,6 +1600,10 @@ mod tests {
             let third = batch.records();
             let third_count = crate::AllocTrackingGuard::count();
 
+            assert_eq!(
+                first_count, 0,
+                "reading a closed batch must not allocate: it is a view of its buffer"
+            );
             assert_eq!(second_count, 0, "re-reading a batch must not allocate");
             assert_eq!(third_count, 0, "re-reading a batch must not allocate");
             assert_eq!(
@@ -1605,7 +1612,11 @@ mod tests {
                 "re-reading a batch must not copy it"
             );
             assert_eq!(first.buffer().as_ptr(), third.buffer().as_ptr());
-            assert!(first_count > 0, "the tracker must actually be measuring");
+
+            crate::AllocTrackingGuard::reset();
+            let probe = std::hint::black_box(vec![0u8; 1]);
+            assert!(crate::AllocTrackingGuard::count() > 0, "the tracker must actually be measuring");
+            drop(probe);
             first_count
         }
 
