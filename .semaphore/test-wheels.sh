@@ -46,7 +46,7 @@
 set -eu
 
 UV_VERSION=0.13.6
-PY_VERSIONS="3.10 3.11 3.12 3.13 3.14"
+PY_VERSIONS="3.10 3.11 3.12 3.13 3.14 3.15"
 
 retry() {
     _n=1
