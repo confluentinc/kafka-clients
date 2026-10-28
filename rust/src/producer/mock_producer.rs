@@ -305,41 +305,16 @@ impl<K, V> MockProducerInner<K, V> {
         Ok(())
     }
 
-    /// Corresponds to Java's `flush()`.
-    ///
-    /// Java's `flush()` is `synchronized` and is called from within the equally
-    /// `synchronized` `commitTransaction` / `abortTransaction`; a Java monitor is
-    /// reentrant, `std::sync::Mutex` is not. So the body lives here, with the lock
-    /// already held by the caller, and [`Producer::flush`] is the entry point that
-    /// acquires it. Note Java's `flush()` deliberately does *not*
-    /// `verifyNotFenced()` — see `shouldNotThrowOnFlushProducerIfProducerIsFenced`.
-    fn flush(&mut self) -> Result<(), Error> {
+    /// The checks of Java's `flush()`, before it completes the pending sends
+    /// ([`MockProducer::flush_pending`]). Note Java's `flush()` deliberately does
+    /// *not* `verifyNotFenced()` — see `shouldNotThrowOnFlushProducerIfProducerIsFenced`.
+    fn verify_can_flush(&self) -> Result<(), Error> {
         self.verify_not_closed()?;
 
         if let Some(err) = self.flush_error.as_ref() {
             return Err(err.clone());
         }
-
-        while self.complete_next() {}
-
         Ok(())
-    }
-
-    /// Corresponds to Java's `completeNext()`.
-    fn complete_next(&mut self) -> bool {
-        self.error_next(None)
-    }
-
-    /// Corresponds to Java's `errorNext(RuntimeException)`
-    /// (`MockProducer#errorNext`).
-    fn error_next(&mut self, error: Option<Error>) -> bool {
-        match self.completions.pop_front() {
-            Some(completion) => {
-                completion.complete(error);
-                true
-            },
-            None => false,
-        }
     }
 
     /// The explicit-partition branch of Java's `partition(ProducerRecord,
@@ -847,8 +822,7 @@ impl<K, V> MockProducer<K, V> {
     /// true if there was an uncompleted call to complete
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#completeNext")]
     pub fn complete_next(&self) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        inner.complete_next()
+        self.complete_one(None)
     }
 
     /// Complete the earliest uncompleted call with the given error.
@@ -862,8 +836,33 @@ impl<K, V> MockProducer<K, V> {
     /// true if there was an uncompleted call to complete
     #[doc(alias = "org.apache.kafka.clients.producer.MockProducer#errorNext")]
     pub fn error_next(&self, error: Error) -> bool {
-        let mut inner = self.inner.lock().unwrap();
-        inner.error_next(Some(error))
+        self.complete_one(Some(error))
+    }
+
+    // Java's `errorNext(RuntimeException)`, `completeNext()` passing `null`.
+    // Java completes under the producer's monitor, which is reentrant; `inner`'s
+    // `std::sync::Mutex` is not, and completing runs the record's callback and the
+    // future's `then_apply` functions, which may call back into this producer
+    // (`history()`, `send`, `flush`). So the completion is popped under the lock
+    // and completed after the guard is dropped (CLAUDE.md §11.6).
+    fn complete_one(&self, error: Option<Error>) -> bool {
+        let completion = self.inner.lock().unwrap().completions.pop_front();
+        match completion {
+            Some(completion) => {
+                completion.complete(error);
+                true
+            },
+            None => false,
+        }
+    }
+
+    // Java's `flush()`: its checks, then `while (completeNext())`. Each
+    // completion takes the lock on its own (`complete_one`), so a send a callback
+    // makes meanwhile is completed by the same loop, as in Java.
+    fn flush_pending(&self) -> Result<(), Error> {
+        self.inner.lock().unwrap().verify_can_flush()?;
+        while self.complete_one(None) {}
+        Ok(())
     }
 
     /// Fences this mock producer, causing it to return a producer-fenced error
@@ -1224,7 +1223,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     // [`set_commit_transaction_error`](MockProducer::set_commit_transaction_error),
     // or the `flush()` this performs fails.
     async fn commit_transaction(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
         inner.verify_transactions_initialized()?;
@@ -1234,7 +1233,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             return Err(err.clone());
         }
 
-        inner.flush()?;
+        // The completions `flush()` runs are made without the lock (`complete_one`).
+        drop(inner);
+        self.flush_pending()?;
+        let mut inner = self.inner.lock().unwrap();
 
         // `MockProducer#commitTransaction`: `sent.addAll(uncommittedSends)` then
         // `uncommittedSends.clear()`.
@@ -1269,7 +1271,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     // [`set_abort_transaction_error`](MockProducer::set_abort_transaction_error),
     // or the `flush()` this performs fails.
     async fn abort_transaction(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
         inner.verify_transactions_initialized()?;
@@ -1279,7 +1281,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             return Err(err.clone());
         }
 
-        inner.flush()?;
+        // The completions `flush()` runs are made without the lock (`complete_one`).
+        drop(inner);
+        self.flush_pending()?;
+        let mut inner = self.inner.lock().unwrap();
         // `MockProducer#abortTransaction`: `clear()` on both — unlike the commit path, neither
         // collection has been handed to the history, so there is nothing to detach.
         inner.uncommitted_sends.clear();
@@ -1403,6 +1408,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         let completion = Completion { offset, metadata, result: Arc::clone(&result), callback, topic_partition: tp };
 
         if inner.auto_complete {
+            // Completed without the lock, as `complete_one` does.
+            drop(inner);
             completion.complete(None);
         } else {
             inner.completions.push_back(completion);
@@ -1412,8 +1419,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
     }
 
     async fn flush(&self) -> Result<(), Error> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.flush()
+        self.flush_pending()
     }
 
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
@@ -1969,6 +1975,71 @@ mod tests {
         let result = future.get().await;
         let error = result.expect_err("Something went wrong, expected an error");
         assert_eq!("dummy error", error.message());
+    }
+
+    /// A callback and a `then_apply` function that call back into the mock,
+    /// as Java's reentrant monitor allows, complete instead of deadlocking:
+    /// from `complete_next`, `flush`, `commit_transaction` and an
+    /// auto-completing `send`. Rust-only: Java's mock cannot deadlock there.
+    #[tokio::test]
+    async fn test_completion_calls_back_into_producer() {
+        /// A callback that reads `history()` and sends a record of its own.
+        fn reentrant_callback(
+            producer: &Arc<MockProducer<String, String>>,
+            seen: &Arc<Mutex<Vec<usize>>>,
+        ) -> Box<dyn Callback> {
+            let producer = Arc::clone(producer);
+            let seen = Arc::clone(seen);
+            Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&Error>| {
+                seen.lock().unwrap().push(producer.history().len());
+                // Without serializers the mock's `send` never waits, so one poll completes it.
+                let send = futures_util::FutureExt::now_or_never(producer.send(record2()));
+                drop(
+                    send.expect("the mock's send completes at once")
+                        .expect("a send from the callback"),
+                );
+            })
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let producer = Arc::new(build_mock_producer(false));
+        let future = producer
+            .send_with_callback(record1(), Some(reentrant_callback(&producer, &seen)))
+            .await
+            .unwrap();
+        let reader = Arc::clone(&producer);
+        let derived = future.then_apply(move |_metadata: RecordMetadata| Ok(reader.history().len()));
+        assert!(producer.complete_next());
+        // The function runs after the callback, which sent a second record.
+        assert_eq!(2, derived.get().await.unwrap());
+        // The callback's own send is pending; `flush` completes it.
+        producer.flush().await.unwrap();
+        assert!(producer.flushed());
+
+        let transactional = Arc::new(build_mock_producer(false));
+        transactional.init_transactions().await.unwrap();
+        transactional.begin_transaction().unwrap();
+        drop(
+            transactional
+                .send_with_callback(record1(), Some(reentrant_callback(&transactional, &seen)))
+                .await
+                .unwrap(),
+        );
+        transactional.commit_transaction().await.unwrap();
+        // The callback ran inside the commit's flush, before the records were committed, as in
+        // Java, and the record it sent was completed by the same flush.
+        assert!(transactional.flushed());
+        assert_eq!(2, transactional.history().len());
+
+        let auto = Arc::new(build_mock_producer(true));
+        drop(
+            auto.send_with_callback(record1(), Some(reentrant_callback(&auto, &seen)))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(2, auto.history().len());
+
+        assert_eq!(vec![1, 0, 1], *seen.lock().unwrap());
     }
 
     // -----------------------------------------------------------------------
