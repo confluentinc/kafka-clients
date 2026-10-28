@@ -65,14 +65,20 @@ pub(crate) unsafe fn topic_metadata_and_config_ref<'a>(
     unsafe { &*(value as *const TopicMetadataAndConfig) }
 }
 
-/// `new TopicMetadataAndConfig(Uuid topicId, int numPartitions, int replicationFactor, Config config)`:
-/// `topic_id` and `config` are borrowed and copied during the call. Owned,
-/// freed with [`kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy`].
+/// Creates a successful metadata-and-config holder.
+///
+/// # Parameters
+///
+/// - `topic_id` - the topic id, copied during the call
+/// - `num_partitions` - the number of partitions of the topic
+/// - `replication_factor` - the replication factor of the topic
+/// - `config` - the topic config, copied during the call
 ///
 /// # Safety
 ///
 /// `topic_id` must be a valid uuid handle and `config` a valid config
-/// handle.
+/// handle; the caller keeps ownership of both. The returned handle is owned
+/// and freed with `kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_new(
@@ -93,15 +99,18 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     ))
 }
 
-/// `new TopicMetadataAndConfig(ApiException exception)`: a holder whose
-/// every accessor returns `error`. `error` is consumed: the caller must not
-/// destroy it. A null `error` (which Java's constructor does not accept)
-/// stands for the translation of `IllegalArgumentException`. Owned, freed
-/// with [`kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy`].
+/// Creates a holder representing a failure; every accessor returns the error.
+///
+/// # Parameters
+///
+/// - `error` - the error every accessor returns; `NULL` stands for an error matching
+///   `kafka_common_Error_is_local_illegal_argument_error`
 ///
 /// # Safety
 ///
-/// `error` must be null or an owned error handle not yet destroyed.
+/// `error` must be `NULL` or an owned error handle not yet destroyed; it is
+/// consumed, and the caller must not destroy it. The returned handle is owned
+/// and freed with `kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_with_error(
@@ -115,13 +124,17 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_w
     box_topic_metadata_and_config(TopicMetadataAndConfig::with_error(error))
 }
 
-/// `topicId()`: returns an owned `kafka_common_Uuid_t *` (freed with
-/// `kafka_common_Uuid_destroy`), or stores the owned error this holder stands
-/// for in `*out_err` and returns `NULL`.
+/// Returns the topic id, or `NULL` with the stored error in `*out_err`.
+///
+/// # Errors
+///
+/// - the error the holder was created with: the one the topic creation failed with
+///   (`kafka_common_Error_is_api_error`)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at `NULL`. The
+/// returned uuid is owned and freed with `kafka_common_Uuid_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_topic_id(
@@ -134,12 +147,16 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_t
     unsafe { deliver_value(topic_metadata_and_config_ref(self_).topic_id(), out_err, box_uuid) }
 }
 
-/// `numPartitions()`: returns the partition count, or stores the owned error
-/// this holder stands for in `*out_err` and returns -1.
+/// Returns the number of partitions, or -1 with the stored error in `*out_err`.
+///
+/// # Errors
+///
+/// - the error the holder was created with: the one the topic creation failed with
+///   (`kafka_common_Error_is_api_error`)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_num_partitions(
@@ -152,12 +169,16 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_n
     unsafe { deliver_value(topic_metadata_and_config_ref(self_).num_partitions(), out_err, |n| n) }
 }
 
-/// `replicationFactor()`: returns the replication factor, or stores the owned
-/// error this holder stands for in `*out_err` and returns -1.
+/// Returns the replication factor, or -1 with the stored error in `*out_err`.
+///
+/// # Errors
+///
+/// - the error the holder was created with: the one the topic creation failed with
+///   (`kafka_common_Error_is_api_error`)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at `NULL`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_replication_factor(
@@ -170,13 +191,17 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_r
     unsafe { deliver_value(topic_metadata_and_config_ref(self_).replication_factor(), out_err, |n| n) }
 }
 
-/// `config()`: returns an owned `kafka_admin_Config_t *` (freed with
-/// `kafka_admin_Config_destroy`), or stores the owned error this holder stands
-/// for in `*out_err` and returns `NULL`.
+/// Returns the topic config, or `NULL` with the stored error in `*out_err`.
+///
+/// # Errors
+///
+/// - the error the holder was created with: the one the topic creation failed with
+///   (`kafka_common_Error_is_api_error`)
 ///
 /// # Safety
 ///
-/// `self_` must be a valid handle and `out_err` a valid slot pointing at null.
+/// `self_` must be a valid handle and `out_err` a valid slot pointing at `NULL`. The
+/// returned config is owned and freed with `kafka_admin_Config_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_config(
@@ -189,11 +214,11 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_TopicMetadataAndConfig_c
     unsafe { deliver_value(topic_metadata_and_config_ref(self_).config(), out_err, box_config) }
 }
 
-/// Frees a handle; null is a no-op.
+/// Frees a handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -280,14 +305,20 @@ where
     }
 }
 
-/// `CreateTopicsResult.values()`: an owned map, sorted by topic name, of
-/// owned `char *` topic names to owned `kafka_common_KafkaFuture_t *`
-/// (`KafkaFuture<Void>`: `get` delivers `NULL`). Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from topic names to futures, which can be used to check the status of individual
+/// topic creations.
+///
+/// # Returns
+///
+/// A map, sorted by topic name, of owned `char *` topic names to owned
+/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
@@ -300,13 +331,17 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_values(
     h.ctx.string_keyed_future_map(values.iter(), FutureCtx::void_future)
 }
 
-/// `CreateTopicsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every topic was created, freed with
-/// `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds if all the topic creations succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every topic was created.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
@@ -318,16 +353,30 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// `CreateTopicsResult.config(String topic)`: an owned future whose `get`
-/// delivers a `kafka_admin_Config_t *` owned by the future, freed with
-/// `kafka_common_KafkaFuture_destroy`. The future fails with the
-/// translation of `IllegalArgumentException` when `topic` was not part of
-/// the request.
+/// Returns a future that provides topic configs for the topic when the request completes.
+///
+/// If broker version doesn't support replication factor in the response, the future fails with
+/// `UnsupportedVersionError`. If broker returned an error for topic configs, it fails with the
+/// appropriate error. For example, `TopicAuthorizationError` is returned if user does not have
+/// permission to describe topic configs. Note that the values for the type and documentation
+/// fields will be `NULL`.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_admin_Config_t *` owned by the future. The future fails
+/// with `kafka_common_Error_is_local_illegal_argument_error` when `topic` was not part of the
+/// request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
@@ -349,16 +398,29 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_config(
     }
 }
 
-/// `CreateTopicsResult.topicId(String topic)`: an owned future whose `get`
-/// delivers a `kafka_common_Uuid_t *` owned by the future, freed with
-/// `kafka_common_KafkaFuture_destroy`. The future fails with the
-/// translation of `IllegalArgumentException` when `topic` was not part of
-/// the request.
+/// Returns a future that provides topic ID for the topic when the request completes.
+///
+/// If broker version doesn't support replication factor in the response, the future fails with
+/// `UnsupportedVersionError`. If broker returned an error for topic configs, it fails with the
+/// appropriate error. For example, `TopicAuthorizationError` is returned if user does not have
+/// permission to describe topic configs.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+///
+/// # Returns
+///
+/// A future whose `get` delivers a `kafka_common_Uuid_t *` owned by the future. The future fails
+/// with `kafka_common_Error_is_local_illegal_argument_error` when `topic` was not part of the
+/// request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
@@ -380,16 +442,28 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_topic_id(
     }
 }
 
-/// `CreateTopicsResult.numPartitions(String topic)`: an owned future whose
-/// `get` delivers an `int32_t *` owned by the future, freed with
-/// `kafka_common_KafkaFuture_destroy`. The future fails with the
-/// translation of `IllegalArgumentException` when `topic` was not part of
-/// the request.
+/// Returns a future that provides number of partitions in the topic when the request completes.
+///
+/// If broker version doesn't support replication factor in the response, the future fails with
+/// `UnsupportedVersionError`. If broker returned an error for topic configs, it fails with the
+/// appropriate error. For example, `TopicAuthorizationError` is returned if user does not have
+/// permission to describe topic configs.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+///
+/// # Returns
+///
+/// A future whose `get` delivers an `int32_t *` owned by the future. The future fails with
+/// `kafka_common_Error_is_local_illegal_argument_error` when `topic` was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
@@ -405,16 +479,28 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_num_partitions(
         .value_future(&unsafe { topic_future(h, topic, CreateTopicsResult::num_partitions) })
 }
 
-/// `CreateTopicsResult.replicationFactor(String topic)`: an owned future
-/// whose `get` delivers an `int32_t *` owned by the future, freed with
-/// `kafka_common_KafkaFuture_destroy`. The future fails with the
-/// translation of `IllegalArgumentException` when `topic` was not part of
-/// the request.
+/// Returns a future that provides replication factor for the topic when the request completes.
+///
+/// If broker version doesn't support replication factor in the response, the future fails with
+/// `UnsupportedVersionError`. If broker returned an error for topic configs, it fails with the
+/// appropriate error. For example, `TopicAuthorizationError` is returned if user does not have
+/// permission to describe topic configs.
+///
+/// # Parameters
+///
+/// - `topic` - the topic name
+///
+/// # Returns
+///
+/// A future whose `get` delivers an `int32_t *` owned by the future. The future fails with
+/// `kafka_common_Error_is_local_illegal_argument_error` when `topic` was not part of the request.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `topic` a valid NUL-terminated
 /// string.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
@@ -430,12 +516,12 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_replication_factor(
         .value_future(&unsafe { topic_future(h, topic, CreateTopicsResult::replication_factor) })
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

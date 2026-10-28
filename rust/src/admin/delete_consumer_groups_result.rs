@@ -14,8 +14,6 @@
 
 //! The result of the `Admin::delete_consumer_groups` call for a
 //! `Collection<String>` (group id) input.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsResult`.
 
 use std::collections::HashMap;
 
@@ -23,8 +21,6 @@ use crate::common::KafkaFuture;
 
 /// The result of the `Admin::delete_consumer_groups` call for a
 /// `Collection<String>` (group id) input.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult")]
 pub struct DeleteConsumerGroupsResult {
@@ -40,8 +36,6 @@ impl DeleteConsumerGroupsResult {
 
     /// Returns a map from group id to futures which can be used to check the
     /// status of individual deletions.
-    ///
-    /// Mirrors `deletedGroups()`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#deletedGroups")]
     pub fn deleted_groups(&self) -> HashMap<String, KafkaFuture<()>> {
         self.futures.clone()
@@ -49,8 +43,6 @@ impl DeleteConsumerGroupsResult {
 
     /// Returns a future which succeeds only if all the consumer group deletions
     /// succeed.
-    ///
-    /// Mirrors `all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteConsumerGroupsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

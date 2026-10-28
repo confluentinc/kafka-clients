@@ -73,15 +73,21 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *`
-/// user names, sorted, to `kafka_admin_UserScramCredentialsDescription_t *`,
-/// or fails with the first user-level error other than
-/// `RESOURCE_NOT_FOUND`.
+/// # Returns
+///
+/// A future for the results of all described users with map keys (one per user) being consistent
+/// with the contents of the list returned by
+/// `kafka_admin_DescribeUserScramCredentialsResult_users`. The future will complete successfully
+/// only if all such user descriptions complete successfully.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned and freed with `kafka_common_KafkaFuture_destroy`; its `get`
+/// delivers a `kafka_Map_t *` (owned by the future) of `char *` user names, sorted, to
+/// `kafka_admin_UserScramCredentialsDescription_t *`, or fails with the first user-level error
+/// other than `RESOURCE_NOT_FOUND`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
@@ -96,14 +102,25 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element) }
 }
 
-/// `users()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_List_t *` (owned by the future) of `char *`
-/// user names, in the order the broker returned them, skipping the users
-/// that were not found.
+/// `users()`: a future; its `get` delivers a `kafka_List_t *` (owned by the future) of `char *`
+/// user names, in the order the broker returned them, skipping the users that were not found.
+///
+/// # Returns
+///
+/// A future indicating the distinct users that meet the request criteria and that have at least one
+/// credential. The future will not complete successfully if the user is not authorized to perform
+/// the describe operation; otherwise, it will complete successfully as long as the list of users
+/// with credentials can be successfully determined within some hard-coded timeout period. Note that
+/// the returned list will not include users that do not exist/have no credentials: a request to
+/// describe an explicit list of users, none of which existed/had a credential, will result in a
+/// future that returns an empty list being returned here. A returned list will include users that
+/// have a credential but that could not be described.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
@@ -124,16 +141,27 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_users(
     }
 }
 
-/// `description(String userName)`: an owned future freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a
-/// `kafka_admin_UserScramCredentialsDescription_t *` owned by the future, or
-/// fails with `RESOURCE_NOT_FOUND` when the user was not part of the
-/// request or has no credentials, or with the user's own error.
+/// # Parameters
+///
+/// - `user_name` - the name of the user description being requested
+///
+/// # Returns
+///
+/// A future indicating the description results for the given user. The future will complete with an
+/// error if the future returned by `kafka_admin_DescribeUserScramCredentialsResult_users` completes
+/// with an error. Note that if the given user does not exist in the list of described users then
+/// the returned future will complete with an error answering
+/// `kafka_common_Error_is_resource_not_found_error`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle and `user_name` a valid
 /// NUL-terminated string.
+///
+/// The returned future is owned and freed with `kafka_common_KafkaFuture_destroy`; its `get`
+/// delivers a `kafka_admin_UserScramCredentialsDescription_t *` owned by the future, or fails with
+/// `RESOURCE_NOT_FOUND` when the user was not part of the request or has no credentials, or with
+/// the user's own error.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_description(
@@ -159,12 +187,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_descript
     }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

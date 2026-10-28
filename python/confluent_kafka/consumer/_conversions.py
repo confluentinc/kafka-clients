@@ -134,10 +134,8 @@ def to_offset_and_timestamp_map(
     OffsetAndTimestamp | None]``.
 
     Java's ``offsetsForTimes`` maps a partition with no offset for the requested
-    timestamp to ``null``; the FFI signals that with a ``None`` value or by
-    omitting the entry, so a partition the caller asked about but that is absent
-    here yields ``None`` at the call site (handled by the caller, which knows the
-    requested set).
+    timestamp to ``null``; the FFI signals that with a ``None`` value, which
+    stays ``None`` here.
     """
     out: dict[TopicPartition, OffsetAndTimestamp | None] = {}
     for (topic, partition), value in raw.items():

@@ -26,10 +26,7 @@ use crate::common::serialization::Serializer;
 /// Serializes byte arrays by passing them through unchanged.
 ///
 /// The serialized bytes borrow the input ([`Cow::Borrowed`]): Java returns the
-/// input `byte[]` itself, and this neither allocates nor copies (CLAUDE.md
-/// §14).
-///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
+/// input `byte[]` itself, and this neither allocates nor copies.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.common.serialization.ByteArraySerializer")]

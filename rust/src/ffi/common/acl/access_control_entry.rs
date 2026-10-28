@@ -38,7 +38,7 @@ pub struct kafka_common_acl_AccessControlEntry_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_acl_AccessControlEntry_t`] points at: the entry plus
+/// What a `kafka_common_acl_AccessControlEntry_t` points at: the entry plus
 /// the NUL-terminated strings its getters borrow out.
 pub(crate) struct AccessControlEntryInner {
     entry: AccessControlEntry,
@@ -87,21 +87,32 @@ pub(crate) unsafe fn access_control_entry_ref<'a>(
 }
 
 /// Hands `entry` to C as an owned handle, freed with
-/// [`kafka_common_acl_AccessControlEntry_destroy`].
+/// `kafka_common_acl_AccessControlEntry_destroy`.
 pub(crate) fn box_access_control_entry(entry: AccessControlEntry) -> *mut kafka_common_acl_AccessControlEntry_t {
     Box::into_raw(Box::new(AccessControlEntryInner::new(entry))) as *mut kafka_common_acl_AccessControlEntry_t
 }
 
-/// `new AccessControlEntry(String principal, String host, AclOperation
-/// operation, AclPermissionType permissionType)`: returns the owned entry, or
-/// stores the owned `IllegalArgumentException` translation in `*out_err` and
-/// returns `NULL` when `operation` or `permission_type` is `ANY`.
+/// Create an instance of an access control entry with the provided parameters.
+///
+/// # Parameters
+///
+/// - `principal` - non-`NULL` principal
+/// - `host` - non-`NULL` host
+/// - `operation` - non-`NULL` operation, ANY is not an allowed operation
+/// - `permission_type` - non-`NULL` permission type, ANY is not an allowed type
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if `operation` or `permission_type` is
+///   `ANY` (`operation must not be ANY`, `permissionType must not be ANY`).
+/// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the FFI boundary.
 ///
 /// # Safety
 ///
 /// `principal` and `host` must be valid NUL-terminated strings, `operation` and
 /// `permission_type` singletons of their enums and `out_err` a valid slot
-/// pointing at null.
+/// pointing at `NULL`. The returned entry is owned, freed with
+/// `kafka_common_acl_AccessControlEntry_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
@@ -136,11 +147,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_new(
     }
 }
 
-/// `principal()`: borrowed from the handle.
+/// Returns the principal for this entry.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_principal(
@@ -152,11 +164,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_principal(
     unsafe { inner_ref(self_) }.principal_c.as_ptr()
 }
 
-/// `host()`: borrowed from the handle; `*` means any host.
+/// Returns the host or `*` for all hosts.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned string is borrowed, valid as long as the handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_host(
@@ -168,11 +181,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_host(
     unsafe { inner_ref(self_) }.host_c.as_ptr()
 }
 
-/// `operation()`: the borrowed `AclOperation` singleton.
+/// Returns the AclOperation. This method will never return `ANY`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_operation(
@@ -184,11 +198,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_operation(
     operation_singleton(unsafe { access_control_entry_ref(self_) }.operation())
 }
 
-/// `permissionType()`: the borrowed `AclPermissionType` singleton.
+/// Returns the AclPermissionType. This method will never return `ANY`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned singleton is never freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_permission_type(
@@ -200,12 +215,17 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_permission_type(
     permission_type_singleton(unsafe { access_control_entry_ref(self_) }.permission_type())
 }
 
-/// `toFilter()`: an owned filter matching exactly this entry, freed with
-/// `kafka_common_acl_AccessControlEntryFilter_destroy`.
+/// Create a filter which matches only this AccessControlEntry.
+///
+/// # Returns
+///
+/// The filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned filter is owned, freed with
+/// `kafka_common_acl_AccessControlEntryFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_filter(
@@ -217,7 +237,7 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_filter(
     box_access_control_entry_filter(unsafe { access_control_entry_ref(self_) }.to_filter())
 }
 
-/// `isUnknown()`: whether the operation or the permission type is `UNKNOWN`.
+/// Returns 1 if this AclResource has any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -232,11 +252,12 @@ pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_is_unknown(
     i8::from(unsafe { access_control_entry_ref(self_) }.is_unknown())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the entry.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid access-control-entry handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AccessControlEntry_to_string(

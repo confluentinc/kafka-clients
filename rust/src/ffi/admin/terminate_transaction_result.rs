@@ -50,13 +50,17 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `result()`: an owned `KafkaFuture<Void>` freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers `NULL` once the
-/// transaction has been terminated.
+/// Return a future which indicates whether the transaction was successfully terminated.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>`; its `get` delivers `NULL` once the transaction has been terminated.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
@@ -68,12 +72,12 @@ pub unsafe extern "C" fn kafka_admin_TerminateTransactionResult_result(
     h.ctx.void_future(&h.result.result())
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

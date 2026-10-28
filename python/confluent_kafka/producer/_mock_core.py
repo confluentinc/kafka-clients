@@ -27,8 +27,9 @@ the interface methods, which each class wraps with its own ``def`` /
 A completion's callback runs in the call that completes the record (``send()``
 with ``auto_complete``, ``complete_next()``, ``error_next()``, ``flush()`` and
 the transaction-end calls that flush) and an exception it raises propagates out
-of that call, as Java's ``Completion.complete`` calls ``onCompletion`` with no
-try/catch (``MockProducer.java:640-650``). Then, as in Java, the record's future
+of that call, as Java's
+``org.apache.kafka.clients.producer.MockProducer.Completion#complete`` calls
+``onCompletion`` with no try/catch. Then, as in Java, the record's future
 never completes, since ``result.done()`` follows the callback, and the
 completions queued behind it stay queued.
 
@@ -163,7 +164,8 @@ class MockProducerCore(Generic[K, V]):
         self._producer_fenced = False
         self._sent_offsets = False
         self._commit_count = 0
-        # Java's public mutable exception fields (MockProducer.java:81-98).
+        # The public mutable exception fields of Java's
+        # org.apache.kafka.clients.producer.MockProducer.
         self._init_transaction_exception: RuntimeError | None = None
         self._begin_transaction_exception: RuntimeError | None = None
         self._send_offsets_to_transaction_exception: RuntimeError | None = None
@@ -437,7 +439,8 @@ class MockProducerCore(Generic[K, V]):
             else:
                 # just to raise the serializer's error if the serializers are not
                 # the proper ones to serialize the key / value
-                # (each with `new RecordHeaders()`, MockProducer.java:316-317).
+                # (each with `new RecordHeaders()`,
+                # org.apache.kafka.clients.producer.MockProducer#send(ProducerRecord,Callback)).
                 self._key_serializer(topic=record.topic(), data=record.key(), headers=Headers())
                 self._value_serializer(topic=record.topic(), data=record.value(),
                                        headers=Headers())

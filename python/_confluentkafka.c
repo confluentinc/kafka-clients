@@ -1415,8 +1415,8 @@ static PyObject* error_handle_to_py(const kafka_common_Error_t* e) {
 // (released when it resolves). A send that resolved with an error may still
 // fire the callback, once, later: Java's doSend appends the record, whose
 // appendCallbacks carry the Callback, before maybeAddPartition throws
-// (KafkaProducer.java:1110-1120), so a record that had reached the accumulator
-// completes with its batch; one rejected before the append never fires. Which
+// (`org.apache.kafka.clients.producer.KafkaProducer#doSend`), so a record that had
+// reached the accumulator completes with its batch; one rejected before the append never fires. Which
 // one it was cannot be told from here, so the context is then parked on the
 // producer's orphan list and freed at destroy, after `_destroy` ran every
 // still-pending callback: a late `on_completion` still finds it alive, and
@@ -2889,23 +2889,31 @@ static PyObject* py_Producer_partitions_for_cb(PyObject* self, PyObject* args) {
 // kafka_common_MetricValue__enum_err; `value` is read with the matching typed
 // accessor (float / str / int / int). `as_string` is borrowed until the
 // MetricValue handle is destroyed, so it is copied into a str first.
-// Converts an OWNED metrics map (kafka_common_MetricName_t* ->
-// kafka_common_metrics_KafkaMetric_t*, both owned by the map) into the
-// list[dict] shape above and frees it. Shared with the consumer's metrics().
-static PyObject* metrics_map_to_py(kafka_Map_t* map) {
+// Converts an OWNED metrics view (kafka_common_MetricName_t* ->
+// kafka_common_metrics_KafkaMetric_t*) into the list[dict] shape above, by
+// iterating a snapshot of it (kafka_Map_Entry_t elements, owned by the
+// iterator), and frees the iterator and the view. Shared with the consumer's
+// metrics().
+static PyObject* metrics_map_to_py(kafka_common_metrics_MetricsView_t* view) {
     kafka_common_Error_t *ffi_err = NULL;
-    if (map == NULL) return PyList_New(0);
-    int32_t n = 0;
-    if (ffi_raise((n = kafka_Map_size_err(map, &ffi_err), ffi_take(&ffi_err)))) {
-        ffi_unraisable((kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err)));
+    if (view == NULL) return PyList_New(0);
+    kafka_Iterator_t* it = NULL;  // owned, owns its entries
+    if (ffi_raise((it = kafka_common_metrics_MetricsView_iterator_err(view, &ffi_err), ffi_take(&ffi_err)))) {
+        ffi_unraisable((kafka_common_metrics_MetricsView_destroy_err(view, &ffi_err), ffi_take(&ffi_err)));
         return NULL;
     }
-    PyObject* out = PyList_New(n < 0 ? 0 : n);
-    if (out == NULL) { ffi_unraisable((kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err))); return NULL; }
-    for (int32_t i = 0; i < n; i++) {
-        void* key = NULL;
-        void* val = NULL;
-        if (ffi_raise((key = kafka_Map_key_err(map, i, &ffi_err), ffi_take(&ffi_err))) || ffi_raise((val = kafka_Map_value_err(map, i, &ffi_err), ffi_take(&ffi_err)))) goto fail;
+    PyObject* out = PyList_New(0);
+    if (out == NULL) goto fail_no_list;
+    for (;;) {
+        int8_t has_next = 0;
+        if (ffi_raise((has_next = kafka_Iterator_has_next_err(it, &ffi_err), ffi_take(&ffi_err)))) goto fail;
+        if (!has_next) break;
+        const kafka_Map_Entry_t* map_entry = NULL;  // borrowed until the next kafka_Iterator_next
+        void const* key = NULL;
+        void const* val = NULL;
+        if (ffi_raise((map_entry = kafka_Iterator_next_err(it, &ffi_err), ffi_take(&ffi_err)))
+            || ffi_raise((key = kafka_Map_Entry_key_err(map_entry, &ffi_err), ffi_take(&ffi_err)))
+            || ffi_raise((val = kafka_Map_Entry_value_err(map_entry, &ffi_err), ffi_take(&ffi_err)))) goto fail;
         const kafka_common_MetricName_t* name = (const kafka_common_MetricName_t*)key;
         const kafka_common_metrics_KafkaMetric_t* metric = (const kafka_common_metrics_KafkaMetric_t*)val;
 
@@ -2997,13 +3005,18 @@ static PyObject* metrics_map_to_py(kafka_Map_t* map) {
             "value", value,
             "kind", kind);
         if (entry == NULL) goto fail;
-        PyList_SET_ITEM(out, i, entry);
+        int appended = PyList_Append(out, entry);
+        Py_DECREF(entry);
+        if (appended != 0) goto fail;
     }
-    ffi_unraisable((kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err)));
+    ffi_unraisable((kafka_Iterator_destroy_err(it, &ffi_err), ffi_take(&ffi_err)));
+    ffi_unraisable((kafka_common_metrics_MetricsView_destroy_err(view, &ffi_err), ffi_take(&ffi_err)));
     return out;
 fail:
     Py_DECREF(out);
-    ffi_unraisable((kafka_Map_destroy_err(map, &ffi_err), ffi_take(&ffi_err)));
+fail_no_list:
+    ffi_unraisable((kafka_Iterator_destroy_err(it, &ffi_err), ffi_take(&ffi_err)));
+    ffi_unraisable((kafka_common_metrics_MetricsView_destroy_err(view, &ffi_err), ffi_take(&ffi_err)));
     return NULL;
 }
 
@@ -3012,7 +3025,7 @@ static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     Producer* p = producer_from_handle(ptr);
-    kafka_Map_t* metrics = NULL;  // owned, owns its entries
+    kafka_common_metrics_MetricsView_t* metrics = NULL;  // owned
     if (ffi_raise((metrics = kafka_producer_Producer_metrics_err(p->producer, &ffi_err), ffi_take(&ffi_err)))) return NULL;
     return metrics_map_to_py(metrics);
 }
@@ -5256,7 +5269,7 @@ static PyObject* py_Consumer_metrics(PyObject* self, PyObject* args) {
     kafka_common_Error_t *ffi_err = NULL;
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
-    kafka_Map_t* metrics = NULL;
+    kafka_common_metrics_MetricsView_t* metrics = NULL;  // owned
     if (ffi_raise((metrics = kafka_consumer_Consumer_metrics_err(consumer_self(h), &ffi_err), ffi_take(&ffi_err)))) return NULL;
     return metrics_map_to_py(metrics);
 }
@@ -9242,12 +9255,12 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
         if (configs != Py_None) {
             PyObject* cfast = PySequence_Fast(configs, "configs must be a sequence of (key, value)");
             if (cfast == NULL) goto fail;
-            kafka_Map_t* cmap = NULL;   // borrowed char* -> char* | NULL (owned by cfast's str objects)
+            kafka_Map_t* cmap = NULL;   // borrowed char* -> char* (owned by cfast's str objects)
             if (ffi_raise((cmap = kafka_Map_new_err(&ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(cfast); goto fail; }
             int ok = 1;
             for (Py_ssize_t j = 0; j < PySequence_Fast_GET_SIZE(cfast); j++) {
-                const char *k, *v;  // "z": a None value is Java's null config value, sent as NULL
-                if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(cfast, j), "sz", &k, &v)
+                const char *k, *v;
+                if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(cfast, j), "ss", &k, &v)
                     || ffi_raise((kafka_Map_put_err(cmap, (void*)k, (void*)v, &ffi_err), ffi_take(&ffi_err)))) { ok = 0; break; }
             }
             if (ok) ok = !ffi_raise((kafka_admin_NewTopic_set_configs_err(t, cmap, &ffi_err), ffi_take(&ffi_err)));

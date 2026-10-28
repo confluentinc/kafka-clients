@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::describe_configs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsResult`.
 
 use std::collections::HashMap;
 
@@ -24,8 +22,6 @@ use crate::common::config::ConfigResource;
 use super::Config;
 
 /// The result of the `Admin::describe_configs` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DescribeConfigsResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult")]
 pub struct DescribeConfigsResult {
@@ -46,10 +42,7 @@ impl DescribeConfigsResult {
         &self.futures
     }
 
-    /// Returns a future which succeeds only if all the config descriptions
-    /// succeed, yielding a map from each resource to its config.
-    ///
-    /// Corresponds to `DescribeConfigsResult.all`.
+    /// Returns a future which succeeds only if all the config descriptions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DescribeConfigsResult#all")]
     pub fn all(&self) -> KafkaFuture<HashMap<ConfigResource, Config>> {
         let entries: Vec<(ConfigResource, KafkaFuture<Config>)> =

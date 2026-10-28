@@ -65,7 +65,7 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
     fn deserialize_with_headers<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a [u8],
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
         self.0.deserialize_with_headers(topic, headers, data).map(string_value)
@@ -74,18 +74,18 @@ impl Deserializer<GenericValue> for GenericStringDeserializer {
     fn deserialize_with_headers_bytes<'a>(
         &'a self,
         topic: &'a str,
-        headers: &'a RecordHeaders,
+        headers: &'a mut RecordHeaders,
         data: &'a Bytes,
     ) -> impl Future<Output = Result<GenericValue, Error>> + Send + 'a {
         self.0.deserialize_with_headers_bytes(topic, headers, data).map(string_value)
     }
 
-    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) {
-        self.0.configure(configs, is_key).await;
+    async fn configure(&mut self, configs: &HashMap<String, String>, is_key: bool) -> Result<(), Error> {
+        self.0.configure(configs, is_key).await
     }
 
-    async fn close(&mut self) {
-        self.0.close().await;
+    async fn close(&mut self) -> Result<(), Error> {
+        self.0.close().await
     }
 }
 
@@ -102,8 +102,16 @@ unsafe fn handle<'a>(self_: *const kafka_common_serialization_StringDeserializer
     unsafe { DeserializerHandle::from_ptr(self_ as *const DeserializerHandle) }
 }
 
-/// `new StringDeserializer()`. Owned, freed with
-/// [`kafka_common_serialization_StringDeserializer_destroy`].
+/// `new StringDeserializer()`.
+///
+/// WARNING: the encoding is always UTF-8; the `key.deserializer.encoding`,
+/// `value.deserializer.encoding` and `deserializer.encoding` properties are
+/// ignored.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_serialization_StringDeserializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_serialization_StringDeserializer_new()
@@ -112,14 +120,15 @@ pub extern "C" fn kafka_common_serialization_StringDeserializer_new()
         as *mut kafka_common_serialization_StringDeserializer_t
 }
 
-/// The deserializer as a `Deserializer`: a borrowed view valid as long as
-/// the handle, never passed to `Deserializer_destroy`; `*mut` because the
-/// interface mutates. The `void *` it produces is an owned `char *` freed
+/// Returns the deserializer as a `Deserializer`; `*mut` because the interface mutates. The `void *` it produces is an owned `char *` freed
 /// with `kafka_string_destroy`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid string-deserializer handle.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to
+/// `kafka_common_serialization_Deserializer_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_serialization_StringDeserializer__as_Deserializer(
@@ -234,8 +243,10 @@ mod tests {
             assert_eq!(take_string(out), "a\u{FFFD}b");
 
             // The Java defaults: nothing to observe, nothing crashes.
-            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1);
-            kafka_common_serialization_Deserializer_close(view);
+            kafka_common_serialization_Deserializer_configure(view, ptr::null(), 1, &raw mut err);
+            assert!(err.is_null());
+            kafka_common_serialization_Deserializer_close(view, &raw mut err);
+            assert!(err.is_null());
 
             kafka_common_header_internals_RecordHeaders_destroy(headers);
             kafka_common_serialization_StringDeserializer_destroy(handle);

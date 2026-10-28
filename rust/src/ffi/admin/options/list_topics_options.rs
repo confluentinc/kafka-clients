@@ -67,15 +67,23 @@ fn boxed(options: ListTopicsOptions) -> *mut kafka_admin_ListTopicsOptions_t {
 }
 
 /// `new ListTopicsOptions()`: the defaults, with the client's default API timeout.
-/// Owned, freed with [`kafka_admin_ListTopicsOptions_destroy`].
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_ListTopicsOptions_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_ListTopicsOptions_new() -> *mut kafka_admin_ListTopicsOptions_t {
     boxed(ListTopicsOptions::new())
 }
 
-/// `AbstractOptions.timeoutMs(Integer timeoutMs)`: `-1` (any negative value)
-/// stands for Java's `null`, the client's default API timeout.
+/// Set the timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Parameters
+///
+/// - `timeout_ms` - the timeout in milliseconds; any negative value stands for Java's `null`, the
+///   default API timeout.
 ///
 /// # Safety
 ///
@@ -93,8 +101,12 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_timeout_ms(
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
-/// `AbstractOptions.timeoutMs()`: the timeout in milliseconds, `-1` when the
-/// client's default API timeout applies.
+/// The timeout in milliseconds for this operation or `-1` if the default API timeout for the
+/// AdminClient should be used.
+///
+/// # Returns
+///
+/// The timeout in milliseconds, or `-1` for the default API timeout.
 ///
 /// # Safety
 ///
@@ -112,6 +124,10 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_timeout_ms(
 
 /// `ListTopicsOptions.listInternal(boolean listInternal)`: whether internal topics are listed.
 ///
+/// # Parameters
+///
+/// - `list_internal` - Whether we should list internal topics. `NULL` means to use the default.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle that no other call uses at the same time.
@@ -128,7 +144,11 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_set_list_internal(
     *options = std::mem::take(options).set_list_internal(list_internal != 0);
 }
 
-/// `ListTopicsOptions.shouldListInternal()`: whether internal topics are listed.
+/// `ListTopicsOptions.shouldListInternal()`.
+///
+/// # Returns
+///
+/// Whether internal topics are listed.
 ///
 /// # Safety
 ///
@@ -144,11 +164,12 @@ pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_should_list_internal(
     i8::from(unsafe { list_topics_options_ref(self_) }.should_list_internal())
 }
 
-/// `ListTopicsOptions.toString()`: owned, freed with `kafka_string_destroy`.
+/// Returns the options' `toString()` form.
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be a live handle. The string is owned by the caller, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListTopicsOptions_to_string(

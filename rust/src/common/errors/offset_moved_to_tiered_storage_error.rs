@@ -20,11 +20,8 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The requested offset is moved to tiered storage.
     ///
-    /// Corresponds to Java's `OffsetMovedToTieredStorageException`, error code `Errors::OffsetMovedToTieredStorage`.
-    ///
-    /// Java `extends` chain:
-    ///    `OffsetMovedToTieredStorageException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::OffsetMovedToTieredStorage`. Java `extends` chain:
+    /// `OffsetMovedToTieredStorageException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.OffsetMovedToTieredStorageException")]
     OffsetMovedToTieredStorageError,
     code: Errors::OffsetMovedToTieredStorage,

@@ -119,8 +119,11 @@ class _Listener(ConsumerRebalanceListener):
 # ---- subscribe ---------------------------------------------------------------
 @pytest.mark.parametrize("kind", KINDS)
 def test_subscribe_null_listener(kind: str) -> None:
-    # Java: "RebalanceListener cannot be null" (AsyncKafkaConsumer.java:2152,
-    # 2175; MockConsumer.java:200,220).
+    # Java: "RebalanceListener cannot be null"
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#subscribe(Collection,ConsumerRebalanceListener),
+    # #subscribe(SubscriptionPattern,ConsumerRebalanceListener);
+    # org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern,ConsumerRebalanceListener),
+    # #subscribe(Collection,ConsumerRebalanceListener)).
     async def body(c: Any, call: Callable[..., Any]) -> None:
         await raises(IllegalArgumentError, "RebalanceListener cannot be None",
                lambda: call("subscribe", topics=["t"], callback=None))
@@ -134,7 +137,8 @@ def test_subscribe_null_listener(kind: str) -> None:
 @pytest.mark.parametrize("kind", KINDS)
 def test_subscribe_null_topics(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
-        if kind in FFI:  # subscribeInternal's check (AsyncKafkaConsumer.java:2289)
+        # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#subscribeInternal(Collection,Optional)'s check
+        if kind in FFI:
             await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be None",
                    lambda: call("subscribe", topics=None))
             await raises(IllegalArgumentError, "Topic collection to subscribe to cannot be None",
@@ -148,7 +152,8 @@ def test_subscribe_null_topics(kind: str) -> None:
 def test_subscribe_null_pattern(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         message = ("Topic pattern to subscribe to cannot be None" if kind in FFI
-                   else "Topic pattern cannot be None")  # MockConsumer.java:208
+                   # org.apache.kafka.clients.consumer.MockConsumer#subscribe(SubscriptionPattern)
+                   else "Topic pattern cannot be None")
         await raises(IllegalArgumentError, message, lambda: call("subscribe", pattern=None))
         await raises(IllegalArgumentError, message,
                lambda: call("subscribe", pattern=None, callback=_Listener()))
@@ -201,8 +206,8 @@ def test_subscribe_forms(kind: str) -> None:
 # ---- commit / commit_nowait ------------------------------------------------------
 @pytest.mark.parametrize("kind", KINDS)
 def test_commit_null_offsets(kind: str) -> None:
-    # Java: new HashMap<>(null) (AsyncKafkaConsumer.java:1801); the mock's
-    # committed.putAll(null) (MockConsumer.java:401).
+    # Java: new HashMap<>(null) (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#commitSync(Map)); the
+    # mock's committed.putAll(null) (org.apache.kafka.clients.consumer.MockConsumer#commitAsync(Map,OffsetCommitCallback)).
     async def body(c: Any, call: Callable[..., Any]) -> None:
         await raises(TypeError, "offsets must not be None", lambda: call("commit", offsets=None))
         await raises(TypeError, "offsets must not be None",
@@ -243,8 +248,9 @@ def test_commit_with_missing_is_left_out(kind: str) -> None:
 def test_seek_null_arguments(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         await call("assign", partitions=[TP])
-        # Java's offsetAndMetadata.offset() (AsyncKafkaConsumer.java:1177;
-        # MockConsumer.java:447).
+        # Java's offsetAndMetadata.offset()
+        # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#seek(TopicPartition,OffsetAndMetadata);
+        # org.apache.kafka.clients.consumer.MockConsumer#seek(TopicPartition,OffsetAndMetadata)).
         await raises(TypeError, "offset_and_metadata must not be None",
                lambda: call("seek", partition=TP, offset_and_metadata=None))
         # A long cannot be null: Python's TypeError.
@@ -281,8 +287,8 @@ def test_seek_null_partition_checks_the_offset_first(kind: str) -> None:
 @pytest.mark.parametrize("kind", KINDS)
 def test_position_null_partition(kind: str) -> None:
     # Java's subscriptions.isAssigned(null) is false: IllegalStateException
-    # (AsyncKafkaConsumer.java:1237); Java's mock throws IllegalArgumentException
-    # with the same text (MockConsumer.java:469).
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#position(TopicPartition,Duration)); Java's mock
+    # throws IllegalArgumentException with the same text (org.apache.kafka.clients.consumer.MockConsumer#position(TopicPartition)).
     error = IllegalStateError if kind in FFI else IllegalArgumentError
 
     async def body(c: Any, call: Callable[..., Any]) -> None:
@@ -336,7 +342,8 @@ def test_partitions_for_null_arguments(kind: str) -> None:
     async def body(c: Any, call: Callable[..., Any]) -> None:
         if kind in FFI:
             # TopicMetadataEvent's Objects.requireNonNull(topic); a zero timeout
-            # throws new TimeoutException() first (point n, AsyncKafkaConsumer.java:1318).
+            # throws new TimeoutException() first (point n,
+            # org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#partitionsFor(String,Duration)).
             await raises(TypeError, "topic must not be None", lambda: call("partitions_for", topic=None))
             await raises(TypeError, "topic must not be None",
                    lambda: call("partitions_for", topic=None, timeout=1.0))
@@ -460,8 +467,8 @@ def test_the_closed_check_comes_first(kind: str) -> None:
 
 
 def test_mock_listener_check_precedes_the_closed_check() -> None:
-    # MockConsumer.subscribe(topics, null) checks the listener before
-    # ensureNotClosed() (MockConsumer.java:220).
+    # org.apache.kafka.clients.consumer.MockConsumer#subscribe(Collection,ConsumerRebalanceListener) with a null
+    # listener checks it before ensureNotClosed().
     c: MockConsumer[bytes, bytes] = MockConsumer(offset_reset_strategy="earliest")
     c.close()
 
@@ -509,8 +516,9 @@ def test_signatures_show_missing(cls: type) -> None:
 @pytest.mark.parametrize("kind", ["kafka", "async_kafka"])
 def test_an_empty_input_returns_before_the_null_timeout(kind: str) -> None:
     # committed / beginningOffsets / endOffsets / offsetsForTimes return the empty
-    # map before they read the Duration (AsyncKafkaConsumer.java:1270-1272, 1419,
-    # 1476), so a None timeout is never dereferenced there.
+    # map before they read the Duration (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer#committed(Set,Duration),
+    # #offsetsForTimes(Map,Duration), #beginningOrEndOffset), so a None timeout is never
+    # dereferenced there.
     async def body(c: Any, call: Callable[..., Any]) -> None:
         assert await call("committed", partitions=[], timeout=None) == {}
         assert await call("beginning_offsets", partitions=[], timeout=None) == {}
@@ -544,7 +552,7 @@ def test_seek_null_partition_with_an_epoch_is_a_wrapped_npe(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", ["mock", "async_mock"])
 def test_mock_update_partitions_stores_a_null_list(kind: str) -> None:
-    # MockConsumer.updatePartitions stores the list as given (MockConsumer.java:590).
+    # org.apache.kafka.clients.consumer.MockConsumer#updatePartitions stores the list as given.
     async def body(c: Any, call: Callable[..., Any]) -> None:
         c.update_partitions(topic="t", partitions=None)
         assert await call("partitions_for", topic="t") is None

@@ -71,15 +71,22 @@ pub(crate) unsafe fn destroy_supported_version_range_element(element: *mut c_voi
     unsafe { kafka_admin_SupportedVersionRange_destroy(element as *mut kafka_admin_SupportedVersionRange_t) };
 }
 
-/// `new SupportedVersionRange(short minVersion, short maxVersion)`: returns the
-/// owned handle (freed with [`kafka_admin_SupportedVersionRange_destroy`]), or
-/// stores the owned `IllegalArgumentException` translation in `*out_err` and
-/// returns `NULL` when a version is negative or the maximum is below the
-/// minimum.
+/// Raises an error unless the following conditions are met: `0 <= min_version <= max_version`.
+///
+/// # Parameters
+///
+/// - `min_version` - The minimum version value.
+/// - `max_version` - The maximum version value.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` Raised when the condition described above
+///   is not met.
 ///
 /// # Safety
 ///
-/// `out_err` must be a valid slot pointing at null.
+/// `out_err` must be a valid slot pointing at `NULL`. The returned handle is owned, freed with
+/// [`kafka_admin_SupportedVersionRange_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
@@ -97,7 +104,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_new(
     }
 }
 
-/// `minVersion()`.
+/// Returns the minimum version value.
 ///
 /// # Safety
 ///
@@ -112,7 +119,7 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_min_version(
     unsafe { supported_version_range_ref(self_) }.min_version()
 }
 
-/// `maxVersion()`.
+/// Returns the maximum version value.
 ///
 /// # Safety
 ///
@@ -127,11 +134,12 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_max_version(
     unsafe { supported_version_range_ref(self_) }.max_version()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the range.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid supported-version-range handle.
+/// `self_` must be a valid supported-version-range handle. The returned string is owned, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
@@ -142,11 +150,11 @@ pub unsafe extern "C" fn kafka_admin_SupportedVersionRange_to_string(
     into_c_string(&unsafe { supported_version_range_ref(self_) }.to_string())
 }
 
-/// Frees an owned range handle; null is a no-op.
+/// Frees an owned range handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned range handle not yet destroyed, that no
+/// `self_` must be `NULL` or an owned range handle not yet destroyed, that no
 /// other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

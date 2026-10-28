@@ -75,11 +75,11 @@ fn broker_id_list(ids: &[i32]) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_boxed::<i32>))
 }
 
-/// Reads a list of `const int32_t *`; null reads as empty.
+/// Reads a list of `const int32_t *`; `NULL` reads as empty.
 ///
 /// # Safety
 ///
-/// `list` must be null or a valid list whose elements point at `int32_t`s,
+/// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
 unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
@@ -93,14 +93,20 @@ unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
         .collect()
 }
 
-/// `new PartitionReassignment(List<Integer> replicas, List<Integer>
-/// addingReplicas, List<Integer> removingReplicas)`: three borrowed lists of
-/// `const int32_t *`, copied (null reads as empty). Owned, freed with
-/// [`kafka_admin_PartitionReassignment_destroy`].
+/// Creates the description of a partition's ongoing reassignment.
+///
+/// # Parameters
+///
+/// - `replicas` - the brokers which this partition currently resides on.
+/// - `adding_replicas` - the brokers this partition is being added to, a subset of `replicas`.
+/// - `removing_replicas` - the brokers this partition is being removed from, a subset of
+///   `replicas`.
 ///
 /// # Safety
 ///
-/// Each list must be null or a valid list whose elements point at `int32_t`s.
+/// Each list must be `NULL`, read as empty, or a valid borrowed list whose elements point at
+/// `int32_t`s; it is copied. The returned handle is owned, freed with
+/// [`kafka_admin_PartitionReassignment_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
@@ -124,12 +130,16 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
     ))
 }
 
-/// `replicas()`: an owned list of owned `int32_t *` broker ids, in Java's
-/// order, freed with `kafka_List_destroy`.
+/// The brokers which this partition currently resides on.
+///
+/// # Returns
+///
+/// A list of `int32_t *` broker ids, in Java's order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid partition-reassignment handle.
+/// `self_` must be a valid partition-reassignment handle. The returned list is owned, freed
+/// together with its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replicas(
@@ -140,12 +150,17 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replicas(
     broker_id_list(unsafe { partition_reassignment_ref(self_) }.replicas())
 }
 
-/// `addingReplicas()`: an owned list of owned `int32_t *` broker ids, in
-/// Java's order, freed with `kafka_List_destroy`.
+/// The brokers that we are adding this partition to as part of a reassignment. A subset of
+/// replicas.
+///
+/// # Returns
+///
+/// A list of `int32_t *` broker ids, in Java's order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid partition-reassignment handle.
+/// `self_` must be a valid partition-reassignment handle. The returned list is owned, freed
+/// together with its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replicas(
@@ -156,12 +171,17 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replicas(
     broker_id_list(unsafe { partition_reassignment_ref(self_) }.adding_replicas())
 }
 
-/// `removingReplicas()`: an owned list of owned `int32_t *` broker ids, in
-/// Java's order, freed with `kafka_List_destroy`.
+/// The brokers that we are removing this partition from as part of a reassignment. A subset of
+/// replicas.
+///
+/// # Returns
+///
+/// A list of `int32_t *` broker ids, in Java's order.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid partition-reassignment handle.
+/// `self_` must be a valid partition-reassignment handle. The returned list is owned, freed
+/// together with its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replicas(
@@ -172,11 +192,12 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replicas(
     broker_id_list(unsafe { partition_reassignment_ref(self_) }.removing_replicas())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the reassignment.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid partition-reassignment handle.
+/// `self_` must be a valid partition-reassignment handle. The returned string is owned, freed
+/// with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_PartitionReassignment_to_string(
@@ -187,11 +208,11 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_to_string(
     into_c_string(&unsafe { partition_reassignment_ref(self_) }.to_string())
 }
 
-/// Frees an owned partition-reassignment handle; null is a no-op.
+/// Frees an owned partition-reassignment handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

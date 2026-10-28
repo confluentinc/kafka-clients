@@ -73,11 +73,12 @@ impl MetricValue {
 /// A metric tracked for monitoring purposes.
 #[doc(alias = "org.apache.kafka.common.Metric")]
 pub trait Metric {
-    /// A name for this metric.
+    /// Returns a name for this metric.
     #[doc(alias = "org.apache.kafka.common.Metric#metricName")]
     fn metric_name(&self) -> &MetricName;
 
-    /// The value of the metric, which may be measurable or a non-measurable gauge.
+    /// Returns the value of the metric, which may be measurable or a
+    /// non-measurable gauge.
     #[doc(alias = "org.apache.kafka.common.Metric#metricValue")]
     fn metric_value(&self) -> MetricValue;
 }

@@ -20,11 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The fetch session epoch is invalid.
     ///
-    /// Corresponds to Java's `InvalidFetchSessionEpochException`, error code `Errors::InvalidFetchSessionEpoch`.
-    ///
-    /// Java `extends` chain:
-    ///    `InvalidFetchSessionEpochException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidFetchSessionEpoch`. Java `extends` chain:
+    /// `InvalidFetchSessionEpochException` -> `RetriableException` -> `ApiException` ->
+    /// `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidFetchSessionEpochException")]
     InvalidFetchSessionEpochError,
     code: Errors::InvalidFetchSessionEpoch,

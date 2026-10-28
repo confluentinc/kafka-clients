@@ -26,145 +26,106 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// components to hook into the consumer applications for custom monitoring,
 /// logging, etc.
 ///
-/// Corresponds to Java's
-/// `org.apache.kafka.clients.consumer.ConsumerInterceptor<K, V>`.
+/// This trait will get consumer config properties via
+/// [`configure`](Self::configure), including the client id assigned by
+/// `KafkaConsumer` if not specified in the consumer config. The interceptor
+/// implementation needs to be aware that it will be sharing consumer config
+/// namespace with other interceptors and serializers, and ensure that there are
+/// no conflicts.
 ///
-/// # Sync, not async
+/// Errors raised by `ConsumerInterceptor` methods will be caught, logged, but
+/// not propagated further. As a result, if the user configures the interceptor
+/// with the wrong key and value type parameters, the consumer will not return
+/// an error, just log the errors.
 ///
-/// Java's `onConsume` and `onCommit` are synchronous; this trait mirrors
-/// that exactly. Per CLAUDE.md §13, the interceptor chain runs per-batch
-/// inside `poll()` — not on a hot per-record path — so per-call boxed-dyn
-/// dispatch is acceptable, but `#[async_trait]` is forbidden because
-/// Java's API does not allow asynchrony here and adding it would change
-/// the contract.
+/// `ConsumerInterceptor` callbacks are called from the same task that invokes
+/// [`Consumer::poll`](crate::consumer::Consumer::poll).
 ///
-/// # Bounds: `Send + 'static`, NOT `Send + Sync`
+/// # Translation notes
 ///
-/// The interceptor is stored inside `ConsumerInterceptors` as
-/// `Vec<Box<dyn ConsumerInterceptor<K, V>>>` with a single owner (the
-/// `ConsumerInterceptors` container on the app side). No `Arc<dyn>` or
-/// shared `&dyn` storage exists across tasks, so `Sync` is not required.
-/// Dropping `Sync` lets users use interior mutability (`RefCell`, `Cell`)
-/// inside their interceptors without wrapping in a `Mutex`.
-///
-/// # Exception model
-///
-/// Java catches `Exception` thrown by interceptors, logs at WARN, and
-/// continues calling the next interceptor with the last successful
-/// `records` value. The Rust analog: `ConsumerInterceptors` wraps each
-/// call in `std::panic::catch_unwind` and passes the previous-good batch
-/// to the next interceptor on panic.
+/// The methods return no error: a panic is what Java's thrown exception
+/// becomes. `KafkaConsumer` takes no interceptors yet, and an interceptor
+/// implementing `ClusterResourceListener` or `Monitorable` gets no callback.
+// Bounds: `Send + 'static`, not `Send + Sync`. The interceptor is stored inside
+// `ConsumerInterceptors` as `Vec<Box<dyn ConsumerInterceptor<K, V>>>` with a
+// single owner, so `Sync` is not required; dropping it lets users use interior
+// mutability (`RefCell`, `Cell`) without a `Mutex`. The chain runs per batch
+// inside `poll()`, not per record, and `#[async_trait]` would change Java's
+// synchronous contract.
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor")]
 pub trait ConsumerInterceptor<K, V>: Send + 'static {
-    /// Called just before records are returned by
+    /// This is called just before the records are returned by
     /// [`Consumer::poll`](crate::consumer::Consumer::poll).
     ///
-    /// This method is allowed to modify the consumer records in place.
-    /// There is no limitation on the number of records that could be left
-    /// in `records` when the method returns; the interceptor can filter
-    /// records, generate new ones, or replace the batch entirely.
+    /// This method is allowed to modify consumer records, in which case the new
+    /// records will be returned. There is no limitation on number of records
+    /// that could be returned from this method. I.e., the interceptor can
+    /// filter the records or generate new records.
     ///
-    /// Corresponds to Java's
-    /// `ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records)`.
+    /// Any panic raised by this method will be caught by the caller, logged,
+    /// but not propagated to the client.
     ///
-    /// # Replacing the batch
+    /// Since the consumer may run multiple interceptors, a particular
+    /// interceptor's `on_consume()` callback will be called in the order the
+    /// interceptors are configured. The first interceptor in the list gets the
+    /// consumed records, the following interceptor will be passed the records
+    /// returned by the previous interceptor, and so on. Since interceptors are
+    /// allowed to modify records, interceptors may potentially get the records
+    /// already modified by other interceptors. However, building a pipeline of
+    /// mutable interceptors that depend on the output of the previous
+    /// interceptor is discouraged, because of potential side-effects caused by
+    /// interceptors potentially failing to modify the record and panicking. If
+    /// one of the interceptors in the list panics from `on_consume()`, the panic
+    /// is caught, logged, and the next interceptor is called with the records
+    /// returned by the last successful interceptor in the list, or otherwise the
+    /// original consumed records.
     ///
-    /// Java's `onConsume` returns a (possibly different) `ConsumerRecords`
-    /// reference, which lets interceptors swap the batch wholesale. The
-    /// Rust translation expresses the same operation via in-place
-    /// reassignment: `*records = new_batch;`.
+    /// # Arguments
     ///
-    /// The `&mut` form (rather than ownership transfer) avoids a
-    /// `K: Clone, V: Clone` bound that would otherwise propagate through
-    /// `ConsumerInterceptors::on_consume` and into the public
-    /// `Consumer<K, V>` trait — Java imposes no `Cloneable` constraint on
-    /// keys/values.
+    /// - `records` - records to be consumed by the client or records returned by
+    ///   the previous interceptors in the list.
     ///
-    /// # Panic safety
+    /// # Translation notes
     ///
-    /// Java's `ConsumerRecords` is **structurally immutable** — its
-    /// fields are `private final` and the maps/lists exposed by its
-    /// getters are unmodifiable views (see
-    /// `ConsumerRecords.java:41-50, 78`). An interceptor that throws
-    /// **cannot** corrupt the input batch in Java; the "next interceptor
-    /// receives the previous-good batch" guarantee
-    /// (`ConsumerInterceptor.java:63-65`) is a structural property of
-    /// the input type, not a contract on interceptor implementations.
-    ///
-    /// The Rust `&mut ConsumerRecords` form cannot reproduce that
-    /// structural immutability — `&mut` permits mutation, and any
-    /// partial write committed before a panic is observable to the next
-    /// interceptor. The chain still catches the panic and continues to
-    /// the next interceptor (mirroring Java's
-    /// `ConsumerInterceptors.java:60-61`), but matching Java's
-    /// "previous-good batch" guarantee becomes an **interceptor-side
-    /// discipline** rather than a structural property.
-    ///
-    /// ## Recommended pattern: build off to the side, commit at the end
-    ///
-    /// ```text
-    /// fn on_consume(&self, records: &mut ConsumerRecords<K, V>) {
-    ///     // Phase 1: read-only inspection / construction.
-    ///     let new_batch = build_replacement(records);  // may panic
-    ///
-    ///     // Phase 2: single non-fallible commit.
-    ///     *records = new_batch;
-    /// }
-    /// ```
-    ///
-    /// A panic anywhere in Phase 1 leaves `*records` unchanged because
-    /// the assignment is the only place we write to the borrow, and that
-    /// assignment cannot panic. This pattern reproduces Java's
-    /// "previous-good batch" guarantee for the common case.
-    ///
-    /// ## Anti-pattern: `std::mem::take` followed by fallible logic
-    ///
-    /// ```text
-    /// // DO NOT do this:
-    /// let owned = std::mem::take(records);           // (a) *records is now empty
-    /// let new_batch = build_from_owned(owned);       // (b) MAY PANIC
-    /// *records = new_batch;                          // (c) only reached on success
-    /// ```
-    ///
-    /// `std::mem::take` writes `ConsumerRecords::default()` (an empty
-    /// batch) to `*records` at step (a). If step (b) panics, the next
-    /// interceptor sees an **empty** batch — not the previous-good
-    /// batch. This is the failure mode Java does not have. If ownership
-    /// transfer is unavoidable, sequence it so that nothing fallible
-    /// runs between the take and the commit assignment.
-    ///
-    /// ## Implementation-defined: interior mutability + partial writes
-    ///
-    /// Even with the recommended pattern, interceptors using interior
-    /// mutability (`RefCell`, `Cell`, atomics, `Mutex`) are responsible
-    /// for their own state consistency on panic. A panic mid-mutation
-    /// of an interior-mutable field leaves that field in whatever state
-    /// the interceptor produced — undefined-by-the-framework. Java has
-    /// the same caveat (its `synchronized` and atomic state are likewise
-    /// the interceptor's responsibility).
+    /// Java returns the records; here the interceptor modifies `records` in
+    /// place, or replaces the batch with `*records = new_batch;`. Since `&mut`
+    /// lets a panicking interceptor leave a half-modified batch, build the new
+    /// batch first and assign it last: then a panic leaves `*records` unchanged,
+    /// as Java's immutable `ConsumerRecords` is. Do not `std::mem::take` the
+    /// batch before work that can panic, or the next interceptor gets an empty
+    /// batch.
+    // The `&mut` form, rather than taking and returning ownership, avoids a
+    // `K: Clone, V: Clone` bound that would otherwise propagate through
+    // `ConsumerInterceptors::on_consume` into the public `Consumer<K, V>` trait.
+    // Java's `ConsumerRecords` is structurally immutable (`private final`
+    // fields, unmodifiable views), so in Java the "previous-good batch"
+    // guarantee of `ConsumerInterceptors#onConsume` is a property of the type;
+    // here it is a discipline of the interceptor. Interior-mutable state of the
+    // interceptor is its own responsibility on panic, as in Java.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#onConsume")]
     fn on_consume(&self, records: &mut ConsumerRecords<K, V>);
 
-    /// Called when offsets get committed.
+    /// This is called when offsets get committed.
     ///
-    /// Corresponds to Java's
-    /// `void onCommit(Map<TopicPartition, OffsetAndMetadata> offsets)`.
+    /// Any panic raised by this method will be ignored by the caller.
     ///
-    /// Takes `&HashMap` because Java's signature is also read-only for the
-    /// interceptor (interceptors should not mutate the commit map; if they
-    /// do, behavior is undefined in Java too).
+    /// # Arguments
+    ///
+    /// - `offsets` - A map of offsets by partition with associated metadata
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#onCommit")]
     fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>);
 
-    /// Configure this interceptor. The default implementation is a no-op.
+    /// Configure this class with the given key-value pairs.
     ///
-    /// Corresponds to Java's `default void configure(Map<String, ?> configs)`.
+    /// # Arguments
+    ///
+    /// - `configs` - The configuration
     #[doc(alias = "org.apache.kafka.common.Configurable#configure")]
-    fn configure(&mut self, _configs: &HashMap<String, String>) {}
+    fn configure(&mut self, configs: &HashMap<String, String>) {
+        let _ = configs;
+    }
 
-    /// Close this interceptor. The default implementation is a no-op.
-    ///
-    /// Corresponds to Java's `void close()`.
+    /// This is called when interceptor is closed.
     #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerInterceptor#close")]
     fn close(&mut self) {}
 }

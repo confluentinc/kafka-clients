@@ -149,13 +149,18 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 // Subscription
 // ---------------------------------------------------------------------------
 
-/// `new Subscription(List<String> topics)`: an owned handle freed with
-/// [`kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`];
-/// `topics` is a list of `char *`, copied during the call.
+/// `new Subscription(List<String> topics)`; `topics` is a list of `char *`.
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
 ///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of strings.
+///
+/// `topics` is copied during the call. The returned handle is owned by the caller, freed with
+/// [`kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_new(
@@ -169,10 +174,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_n
 
 /// `new Subscription(List<String> topics, ByteBuffer userData)`.
 ///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+/// - `user_data` - Nullable user data to include in the subscription
+///
 /// # Safety
 ///
 /// `topics` must be null or a valid list of strings; `user_data`'s `data`
 /// null or pointing to `len` readable bytes not written during the call.
+///
+/// `topics` and `user_data` are copied during the call. The returned handle is owned by the caller,
+/// freed with `kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_user_data(
@@ -191,6 +204,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// `new Subscription(List<String> topics, ByteBuffer userData, List<TopicPartition> ownedPartitions)`;
 /// `owned_partitions` is a list of `kafka_common_TopicPartition_t *`,
 /// copied during the call.
+///
+/// # Parameters
+///
+/// - `topics` - The list of topics to subscribe to
+/// - `user_data` - Nullable user data to include in the subscription
+/// - `owned_partitions` - The partitions currently owned by this consumer
 ///
 /// # Safety
 ///
@@ -220,11 +239,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 }
 
 /// The constructor overloads with more than three parameters, through the
-/// Rust-only options (CLAUDE.md §2); the options stay the caller's.
+/// Rust-only options.
+///
+/// # Parameters
+///
+/// - `options` - the constructor's parameters, which stay the caller's
 ///
 /// # Safety
 ///
 /// `options` must be a valid options handle.
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_with_options(
@@ -238,11 +264,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     ))
 }
 
-/// `topics()`: an owned list of owned `char *`.
+/// `topics()`: a list of `char *`.
+///
+/// # Returns
+///
+/// The list of topics
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_topics(
@@ -253,11 +286,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_t
     box_string_list(unsafe { subscription_ref(self_) }.topics())
 }
 
-/// `ownedPartitions()`: an owned list of owned `kafka_common_TopicPartition_t *`.
+/// `ownedPartitions()`: a list of `kafka_common_TopicPartition_t *`.
+///
+/// # Returns
+///
+/// The list of owned partitions
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_owned_partitions(
@@ -268,11 +308,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_o
     topic_partition_list(unsafe { subscription_ref(self_) }.owned_partitions().iter().cloned())
 }
 
-/// `userData()`: borrowed from the handle, `data == NULL` for Java `null`.
+/// `userData()`, `data == NULL` for Java `null`.
+///
+/// # Returns
+///
+/// The user data, or `NULL` if none was provided
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned bytes are borrowed from the handle: they stay valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_user_data(
@@ -284,12 +330,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_u
     kafka_Bytes_t::from_option(unsafe { subscription_ref(self_) }.user_data())
 }
 
-/// `groupInstanceId()`: borrowed from the handle until the next
-/// `set_group_instance_id`, `NULL` for `Optional.empty()`.
+/// `groupInstanceId()`, `NULL` for `Optional.empty()`.
+///
+/// # Returns
+///
+/// The group instance ID, or empty if this is a dynamic member
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed
+/// or its next `set_group_instance_id`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_group_instance_id(
@@ -308,6 +360,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 }
 
 /// `setGroupInstanceId(Optional<String>)`: `NULL` is `Optional.empty()`.
+///
+/// # Parameters
+///
+/// - `group_instance_id` - The group instance ID
 ///
 /// # Safety
 ///
@@ -330,11 +386,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_s
     inner.sub.set_group_instance_id(id);
 }
 
-/// `rackId()`: borrowed from the handle, `NULL` for `Optional.empty()`.
+/// `rackId()`, `NULL` for `Optional.empty()`.
+///
+/// # Returns
+///
+/// The rack ID, or empty if not provided
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned pointer is borrowed from the handle: it stays valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_rack_id(
@@ -348,9 +410,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
         .map_or(std::ptr::null(), |c| c.as_ptr())
 }
 
-/// `generationId()`: the generation, or `-1` for `Optional.empty()`.
+/// `generationId()`.
 ///
-/// A caught Rust panic returns -2, which is no generation: Java's `Subscription` stores a negative one as `Optional.empty()`.
+/// # Returns
+///
+/// The generation ID, or `-1` if not provided (Java's `Optional.empty()`).
 ///
 /// # Safety
 ///
@@ -362,14 +426,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires.
+    // A caught Rust panic returns -2, which is no generation: Java's `Subscription` stores a
+    // negative one as `Optional.empty()`.
     unsafe { subscription_ref(self_) }.generation_id().unwrap_or(-1)
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid subscription handle, used by no setter during the call.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_to_string(
@@ -402,14 +474,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 // Assignment
 // ---------------------------------------------------------------------------
 
-/// `new Assignment(List<TopicPartition> partitions)`: an owned handle freed
-/// with [`kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy`];
-/// `partitions` is a list of `kafka_common_TopicPartition_t *`, copied
-/// during the call.
+/// `new Assignment(List<TopicPartition> partitions)`; `partitions` is a list
+/// of `kafka_common_TopicPartition_t *`.
+///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions assigned to the consumer
 ///
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles.
+///
+/// `partitions` is copied during the call. The returned handle is owned by the caller, freed with
+/// [`kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new(
@@ -424,11 +501,19 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 
 /// `new Assignment(List<TopicPartition> partitions, ByteBuffer userData)`.
 ///
+/// # Parameters
+///
+/// - `partitions` - The list of partitions assigned to the consumer
+/// - `user_data` - Nullable user data to include in the assignment
+///
 /// # Safety
 ///
 /// `partitions` must be null or a valid list of topic-partition handles;
 /// `user_data`'s `data` null or pointing to `len` readable bytes not written
 /// during the call.
+///
+/// `partitions` and `user_data` are copied during the call. The returned handle is owned by the
+/// caller, freed with `kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_with_user_data(
@@ -446,11 +531,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
     ))) as *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t
 }
 
-/// `partitions()`: an owned list of owned `kafka_common_TopicPartition_t *`.
+/// `partitions()`: a list of `kafka_common_TopicPartition_t *`.
+///
+/// # Returns
+///
+/// The list of partitions
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned list is owned by the caller, freed with `kafka_List_destroy`, which also frees its
+/// elements.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_partitions(
@@ -461,11 +553,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_par
     topic_partition_list(unsafe { assignment_ref(self_) }.partitions().iter().cloned())
 }
 
-/// `userData()`: borrowed from the handle, `data == NULL` for Java `null`.
+/// `userData()`, `data == NULL` for Java `null`.
+///
+/// # Returns
+///
+/// The user data, or `NULL` if none was provided
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle.
+///
+/// The returned bytes are borrowed from the handle: they stay valid until the handle is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_user_data(
@@ -477,11 +575,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_use
     kafka_Bytes_t::from_option(unsafe { assignment_ref(self_) }.user_data())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Java `toString()`.
+///
+/// # Returns
+///
+/// The string form.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid assignment handle.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_to_string(
@@ -535,7 +639,15 @@ unsafe fn with_builder(
     }
 }
 
-/// `SubscriptionOptionsBuilder::new()`: an owned handle freed with
+/// Creates a builder of the `Subscription` constructor's parameters.
+///
+/// # Returns
+///
+/// The builder handle.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_SubscriptionOptionsBuilder_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -543,7 +655,11 @@ pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_
     Box::into_raw(Box::new(Some(SubscriptionOptionsBuilder::new()))) as *mut kafka_consumer_SubscriptionOptionsBuilder_t
 }
 
-/// `set_topics` (mandatory): a list of `char *`, copied during the call.
+/// Sets the subscribed topics.
+///
+/// # Parameters
+///
+/// - `topics` - the subscribed topics (mandatory), a list of `char *` copied during the call
 ///
 /// # Safety
 ///
@@ -564,7 +680,11 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
     unsafe { with_builder(self_, |b| b.set_topics(topics)) }
 }
 
-/// `set_user_data`: copied during the call, `data == NULL` for Java `null`.
+/// Sets the user data.
+///
+/// # Parameters
+///
+/// - `user_data` - the user data, copied during the call; `data == NULL` for Java `null`
 ///
 /// # Safety
 ///
@@ -585,8 +705,11 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data
     unsafe { with_builder(self_, |b| b.set_user_data(user_data)) }
 }
 
-/// `set_owned_partitions`: a list of `kafka_common_TopicPartition_t *`,
-/// copied during the call.
+/// Sets the owned partitions.
+///
+/// # Parameters
+///
+/// - `owned_partitions` - the owned partitions, a list of `kafka_common_TopicPartition_t *` copied during the call
 ///
 /// # Safety
 ///
@@ -608,7 +731,11 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_par
     unsafe { with_builder(self_, |b| b.set_owned_partitions(owned_partitions)) }
 }
 
-/// `set_generation_id`.
+/// Sets the generation ID.
+///
+/// # Parameters
+///
+/// - `generation_id` - the generation ID
 ///
 /// # Safety
 ///
@@ -625,7 +752,11 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_generatio
     unsafe { with_builder(self_, |b| b.set_generation_id(generation_id)) }
 }
 
-/// `set_rack_id`: `NULL` is `Optional.empty()`.
+/// Sets the rack ID.
+///
+/// # Parameters
+///
+/// - `rack_id` - the rack ID, `NULL` for `Optional.empty()`
 ///
 /// # Safety
 ///
@@ -645,14 +776,23 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_rack_id(
     unsafe { with_builder(self_, |b| b.set_rack_id(rack_id)) }
 }
 
-/// `build()`: validates the mandatory fields and delivers the options,
-/// owned by the caller ([`kafka_consumer_SubscriptionOptions_destroy`]), or
-/// returns the `IllegalArgumentError`. The builder is consumed either way.
+/// Validates the mandatory fields and builds the options. The builder is consumed either way.
+///
+/// # Returns
+///
+/// The options, or `NULL` on failure.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if a mandatory field is not set
 ///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the same
 /// time, and `out_err` a valid slot pointing at null.
+///
+/// The returned options are owned by the caller, freed with
+/// [`kafka_consumer_SubscriptionOptions_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(

@@ -104,16 +104,22 @@ unsafe fn handle<'a>(self_: *const kafka_admin_ElectLeadersResult_t) -> &'a Resu
     unsafe { result_ref(self_) }
 }
 
-/// `partitions()`: an owned future freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers a `kafka_Map_t *`
-/// (owned by the future) of `kafka_common_TopicPartition_t *` keys, ordered
-/// by topic then partition and compared by value in `kafka_Map_get`, to a
-/// `kafka_common_Error_t *` for a partition whose election failed or `NULL`
+/// Get a future for the topic partitions for which a leader election was attempted. If the election
+/// succeeded then the value for a topic partition will be the empty Optional. Otherwise the
+/// election failed and the Optional will be set with the error.
+///
+/// # Returns
+///
+/// A future; its `get` delivers a `kafka_Map_t *` (owned by the future) of
+/// `kafka_common_TopicPartition_t *` keys, ordered by topic then partition and compared by value in
+/// `kafka_Map_get`, to a `kafka_common_Error_t *` for a partition whose election failed or `NULL`
 /// for one that succeeded (Java's `Optional<Throwable>`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
@@ -128,13 +134,18 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_partitions(
     unsafe { h.ctx.handle_future(&h.result.partitions(), partitions_map, destroy_map_element) }
 }
 
-/// `all()`: an owned `KafkaFuture<Void>` freed with
-/// `kafka_common_KafkaFuture_destroy`; its `get` delivers `NULL` when every
-/// election succeeded, or the first partition's error.
+/// Return a future which succeeds if all the topic elections succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>`; its `get` delivers `NULL` when every election succeeded, or the first
+/// partition's error.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_all(
@@ -146,12 +157,12 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

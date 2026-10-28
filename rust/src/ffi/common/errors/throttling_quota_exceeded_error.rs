@@ -41,14 +41,17 @@ impl PayloadClass for ThrottlingQuotaExceededError {
     }
 }
 
-/// The payload of a `ThrottlingQuotaExceededException` error, borrowed from
-/// the error handle, or null when the error is another class. The suffix
-/// stays because `kafka_common_Error_throttling_quota_exceeded` is the
-/// `Error` factory.
+/// Returns the payload of a `ThrottlingQuotaExceededException` error, or `NULL` when the error is
+/// another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded_error(
@@ -70,12 +73,17 @@ pub unsafe extern "C" fn kafka_common_Error_throttling_quota_exceeded_error(
 }
 
 /// `new ThrottlingQuotaExceededException(int throttleTimeMs, String
-/// message)`. Owned, freed with
-/// [`kafka_common_ThrottlingQuotaExceededError_destroy`].
+/// message)`.
+///
+/// # Parameters
+///
+/// - `throttle_time_ms` - The throttle time, in milliseconds.
+/// - `message` - The detail message.
 ///
 /// # Safety
 ///
-/// `message` must be a valid NUL-terminated string.
+/// `message` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_ThrottlingQuotaExceededError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_new(
@@ -92,6 +100,14 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_new(
 
 /// `new ThrottlingQuotaExceededException(String message)` with Java's
 /// default message and the given throttle time.
+///
+/// # Parameters
+///
+/// - `throttle_time_ms` - The throttle time, in milliseconds.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_ThrottlingQuotaExceededError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_ThrottlingQuotaExceededError_with_default_message(
@@ -100,7 +116,7 @@ pub extern "C" fn kafka_common_ThrottlingQuotaExceededError_with_default_message
     Payload::boxed(ThrottlingQuotaExceededError::with_default_message(throttle_time_ms))
 }
 
-/// `throttleTimeMs()`.
+/// Returns the throttle time, in milliseconds (`throttleTimeMs()`).
 ///
 /// # Safety
 ///
@@ -119,11 +135,12 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time
         .throttle_time_ms()
 }
 
-/// `getMessage()`: borrowed from the handle.
+/// Returns the detail message of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+/// The returned string is borrowed, valid until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_message(
@@ -137,11 +154,12 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_message(
     unsafe { Payload::<ThrottlingQuotaExceededError>::from_ptr(self_) }.message_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_source(
@@ -155,11 +173,12 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_source(
     unsafe { Payload::<ThrottlingQuotaExceededError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid throttling-quota-exceeded handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_to_string(
@@ -172,12 +191,12 @@ pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_to_string(
     unsafe { Payload::<ThrottlingQuotaExceededError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_destroy(

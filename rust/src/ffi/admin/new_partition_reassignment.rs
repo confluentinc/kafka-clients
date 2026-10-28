@@ -61,17 +61,22 @@ pub(crate) fn box_new_partition_reassignment(
         as *mut kafka_admin_NewPartitionReassignment_t
 }
 
-/// `new NewPartitionReassignment(List<Integer> targetReplicas)`: a borrowed
-/// list of `const int32_t *` broker ids, copied (`NULL` reads as empty).
-/// Returns the owned handle (freed with
-/// [`kafka_admin_NewPartitionReassignment_destroy`]), or stores the owned
-/// `IllegalArgumentException` translation in `*out_err` and returns `NULL` when
-/// the list is empty.
+/// Creates a reassignment.
+///
+/// # Parameters
+///
+/// - `target_replicas` - the broker ids of the target replicas, a borrowed list of
+///   `const int32_t *`, copied; `NULL` reads as empty.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if no replicas are supplied
 ///
 /// # Safety
 ///
-/// `target_replicas` must be null or a valid list whose elements point at
-/// `int32_t`s, and `out_err` a valid slot pointing at null.
+/// `target_replicas` must be `NULL` or a valid list whose elements point at
+/// `int32_t`s, and `out_err` a valid slot pointing at `NULL`. The returned handle is owned, freed
+/// with [`kafka_admin_NewPartitionReassignment_destroy`].
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
@@ -97,12 +102,12 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_new(
     }
 }
 
-/// `targetReplicas()`: an owned list of owned `int32_t *` broker ids, in the
-/// order given, freed together with `kafka_List_destroy`.
+/// Returns the broker ids of the target replicas, in the order given.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid new-partition-reassignment handle.
+/// `self_` must be a valid new-partition-reassignment handle. The returned list of `int32_t *`
+/// is owned, freed together with its elements by `kafka_List_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
@@ -118,11 +123,11 @@ pub unsafe extern "C" fn kafka_admin_NewPartitionReassignment_target_replicas(
     box_list(elements, Some(destroy_boxed::<i32>))
 }
 
-/// Frees an owned handle; null is a no-op.
+/// Frees an owned handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

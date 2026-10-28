@@ -13,9 +13,6 @@
 // limitations under the License.
 
 //! All SASL/SCRAM credentials associated with a user.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.UserScramCredentialsDescription`.
 
 use super::ScramCredentialInfo;
 
@@ -33,9 +30,10 @@ pub struct UserScramCredentialsDescription {
 impl UserScramCredentialsDescription {
     /// Creates a new description.
     ///
-    /// * `name` — the required user name
-    /// * `credential_infos` — the required SASL/SCRAM credential representations
-    ///   for the user
+    /// # Arguments
+    ///
+    /// - `name` - the required user name
+    /// - `credential_infos` - the required SASL/SCRAM credential representations for the user
     #[doc(alias = "org.apache.kafka.clients.admin.UserScramCredentialsDescription#UserScramCredentialsDescription")]
     pub fn new(name: impl Into<String>, credential_infos: Vec<ScramCredentialInfo>) -> Self {
         Self { name: name.into(), credential_infos }

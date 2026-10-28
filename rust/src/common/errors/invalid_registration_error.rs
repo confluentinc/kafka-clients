@@ -18,12 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The controller has considered the broker registration to be invalid.
+    /// Thrown when a broker registration request is considered invalid by the controller.
     ///
-    /// Corresponds to Java's `InvalidRegistrationException`, error code `Errors::InvalidRegistration`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `InvalidRegistrationException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::InvalidRegistration`.
     #[doc(alias = "org.apache.kafka.common.errors.InvalidRegistrationException")]
     InvalidRegistrationError,
     code: Errors::InvalidRegistration,

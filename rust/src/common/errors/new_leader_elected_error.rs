@@ -21,10 +21,8 @@ kafka_error_type! {
     /// The AlterPartition request successfully updated the partition state but
     /// the leader has changed.
     ///
-    /// Corresponds to Java's `NewLeaderElectedException`, error code `Errors::NewLeaderElected`.
-    ///
-    /// Java `extends` chain:
-    ///    `NewLeaderElectedException` -> `ApiException` -> `KafkaException`
+    /// Error code `Errors::NewLeaderElected`. Java `extends` chain: `NewLeaderElectedException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.NewLeaderElectedException")]
     NewLeaderElectedError,
     code: Errors::NewLeaderElected,

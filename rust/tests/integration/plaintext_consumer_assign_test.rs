@@ -50,7 +50,7 @@
 //!
 //! # Added in Apache Kafka 4.3.1
 //!
-//! - `testAsyncPollAfterTopicDeleted` (4.3.1 line 304, KAFKA-20165)
+//! - `testAsyncPollAfterTopicDeleted` (4.3.1, KAFKA-20165)
 //!   → `test_async_poll_after_topic_deleted`
 //!
 //! # SKIPped methods
@@ -191,8 +191,8 @@ fn make_producer_config(ctx: &TestContext) -> ProducerConfig {
 ///
 /// Keys are `b"key {i}"` and values are `b"value {i}"`, matching Java's
 /// `KEY_PREFIX = "key "` and `VALUE_PREFIX = "value "`. Timestamps are
-/// `starting_timestamp + i` (1ms increment, mirroring Java line 185-186
-/// of `ClientsTestUtils.consumeAndVerifyRecords`).
+/// `starting_timestamp + i` (1ms increment, mirroring Java's
+/// `ClientsTestUtils.consumeAndVerifyRecords`).
 ///
 /// All records are fired to the producer up front, then `flush()` waits
 /// for the broker acks. The producer is then closed.
@@ -238,13 +238,13 @@ async fn send_records_bytes(ctx: &TestContext, tp: &TopicPartition, num_records:
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Java `PlaintextConsumerAssignTest.BROKER_COUNT` (`PlaintextConsumerAssignTest.java:63`).
+/// Java `PlaintextConsumerAssignTest#BROKER_COUNT`.
 const BROKER_COUNT: i16 = 3;
 
 /// Pre-create an EMPTY topic, mirroring Java's
-/// `PlaintextConsumerAssignTest.setup()` which does
+/// `PlaintextConsumerAssignTest#setup` which does
 /// `clusterInstance.createTopic(topic, 2, (short) BROKER_COUNT)` in
-/// `@BeforeEach` (`PlaintextConsumerAssignTest.java:74-77`) — i.e. the topic
+/// `@BeforeEach` — i.e. the topic
 /// is created with no records BEFORE any records are produced.
 ///
 /// Creates the topic through the admin client and then waits until every
@@ -489,8 +489,8 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-/// Translates Java's `testAsyncAssignAndCommitAsyncNotCommitted`
-/// (line 83). The consumer assigns a partition (no `poll()` first) and
+/// Translates Java's `testAsyncAssignAndCommitAsyncNotCommitted`.
+/// The consumer assigns a partition (no `poll()` first) and
 /// fires `commitAsync(callback)`. Because there is no fetch position,
 /// the commit completes successfully but commits no offset — the
 /// follow-up `committed(...)` returns a map with no entry for `tp`.
@@ -542,14 +542,11 @@ async fn test_async_assign_and_commit_async_not_committed() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    // Java: `assertNotNull(committedOffset)`. The Rust analog is "we got
-    // a Map back, not an error" — which we already have. Java then
-    // asserts `committedOffset.get(tp)` is null; in the Rust map, no
-    // entry exists for `tp` (since nothing was actually committed).
-    assert!(
-        !committed_offset.contains_key(&tp),
-        "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
-        committed_offset.get(&tp)
+    // Java: `assertNotNull(committedOffset)`, then `assertNull(committedOffset.get(tp))`.
+    assert_eq!(
+        committed_offset.get(&tp),
+        Some(&None),
+        "committed offset for {tp} should be None (no fetch position was established)"
     );
 
     let assignment = consumer.assignment();
@@ -561,8 +558,8 @@ async fn test_async_assign_and_commit_async_not_committed() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncAssignAndCommitSyncNotCommitted`
-/// (line 113). Same shape as the async variant, but `commit_sync()`
+/// Translates Java's `testAsyncAssignAndCommitSyncNotCommitted`.
+/// Same shape as the async variant, but `commit_sync()`
 /// (no offsets argument) commits "all consumed" — which is empty since
 /// `poll()` was never called.
 #[tokio::test(flavor = "multi_thread")]
@@ -594,10 +591,10 @@ async fn test_async_assign_and_commit_sync_not_committed() {
         .committed(std::slice::from_ref(&tp))
         .await
         .expect("committed should succeed");
-    assert!(
-        !committed_offset.contains_key(&tp),
-        "committed offset for {tp} should be absent (no fetch position was established), got {:?}",
-        committed_offset.get(&tp)
+    assert_eq!(
+        committed_offset.get(&tp),
+        Some(&None),
+        "committed offset for {tp} should be None (no fetch position was established)"
     );
 
     let assignment = consumer.assignment();
@@ -609,8 +606,8 @@ async fn test_async_assign_and_commit_sync_not_committed() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncAssignAndCommitSyncAllConsumed`
-/// (line 140). Assign + `seek(tp, 0)`, consume all 10,000 records, then
+/// Translates Java's `testAsyncAssignAndCommitSyncAllConsumed`.
+/// Assign + `seek(tp, 0)`, consume all 10,000 records, then
 /// `commit_sync()` — the committed offset should equal `num_records`.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_assign_and_commit_sync_all_consumed() {
@@ -645,6 +642,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
         .expect("committed should succeed");
     let entry = committed_offset
         .get(&tp)
+        .and_then(Option::as_ref)
         .expect("committed offset for tp should be present after commit_sync");
     assert_eq!(
         entry.offset(),
@@ -655,7 +653,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncAssignAndConsume` (line 168). Assign,
+/// Translates Java's `testAsyncAssignAndConsume`. Assign,
 /// consume 10 records via `consumeAndVerifyRecords`, assert
 /// `position(tp) == numRecords`.
 #[tokio::test(flavor = "multi_thread")]
@@ -692,8 +690,8 @@ async fn test_async_assign_and_consume() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncAssignAndConsumeSkippingPosition`
-/// (line 191). Same as `consume` but `seek(tp, 1)` then consume
+/// Translates Java's `testAsyncAssignAndConsumeSkippingPosition`.
+/// Same as `consume` but `seek(tp, 1)` then consume
 /// `numRecords - 1` records starting at offset 1.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_assign_and_consume_skipping_position() {
@@ -742,8 +740,8 @@ async fn test_async_assign_and_consume_skipping_position() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncAssignAndFetchCommittedOffsets`
-/// (line 216). Consumer #1 assigns, seeks, consumes 100, commits;
+/// Translates Java's `testAsyncAssignAndFetchCommittedOffsets`.
+/// Consumer #1 assigns, seeks, consumes 100, commits;
 /// consumer #2 in the same group asserts the same committed offset is
 /// visible.
 #[tokio::test(flavor = "multi_thread")]
@@ -780,7 +778,10 @@ async fn test_async_assign_and_fetch_committed_offsets() {
             .committed(std::slice::from_ref(&tp))
             .await
             .expect("committed should succeed");
-        let entry = committed.get(&tp).expect("committed offset for tp should be present");
+        let entry = committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed offset for tp should be present");
         assert_eq!(entry.offset(), num_records as i64);
 
         consumer.close().await.expect("consumer 1 close should succeed");
@@ -801,6 +802,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
             .expect("committed should succeed");
         let entry = committed
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed offset for tp should be visible to another consumer in same group");
         assert_eq!(entry.offset(), num_records as i64);
 
@@ -808,8 +810,8 @@ async fn test_async_assign_and_fetch_committed_offsets() {
     }
 }
 
-/// Translates Java's `testAsyncAssignAndConsumeFromCommittedOffsets`
-/// (line 247). Consumer #1 commits a manual offset (10) via
+/// Translates Java's `testAsyncAssignAndConsumeFromCommittedOffsets`.
+/// Consumer #1 commits a manual offset (10) via
 /// `commit_sync_with_offsets(...)`; consumer #2 reads from that offset and
 /// verifies the remaining records.
 #[tokio::test(flavor = "multi_thread")]
@@ -853,7 +855,10 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             .committed(std::slice::from_ref(&tp))
             .await
             .expect("committed should succeed");
-        let entry = committed.get(&tp).expect("committed entry should be present");
+        let entry = committed
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed entry should be present");
         assert_eq!(entry.offset(), offset);
 
         consumer.close().await.expect("consumer 1 close should succeed");
@@ -873,6 +878,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
             .expect("committed should succeed");
         let entry = committed
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed entry should be visible to another consumer in same group");
         assert_eq!(entry.offset(), offset);
 
@@ -892,8 +898,7 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
 }
 
 /// Translates Java's
-/// `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes` (line
-/// 278). Verifies that calling `committed(...)` twice on the same
+/// `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`. Verifies that calling `committed(...)` twice on the same
 /// consumer returns the same value both times (i.e. the API is
 /// idempotent — no caching bug that returns a stale snapshot the second
 /// time).
@@ -930,7 +935,11 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
         .await
         .expect("committed (first call) should succeed");
     assert_eq!(
-        first.get(&tp).expect("committed entry should be present (first call)").offset(),
+        first
+            .get(&tp)
+            .and_then(Option::as_ref)
+            .expect("committed entry should be present (first call)")
+            .offset(),
         num_records as i64
     );
 
@@ -941,6 +950,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     assert_eq!(
         second
             .get(&tp)
+            .and_then(Option::as_ref)
             .expect("committed entry should be present (second call)")
             .offset(),
         num_records as i64
@@ -949,9 +959,9 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     consumer.close().await.expect("consumer close should succeed");
 }
 
-/// Translates Java's `testAsyncPollAfterTopicDeleted`
-/// (`PlaintextConsumerAssignTest.java:304`, body `testPollAfterTopicDeleted`
-/// :317) — validates KAFKA-20165.
+/// Translates Java's `PlaintextConsumerAssignTest#testAsyncPollAfterTopicDeleted`
+/// (body `PlaintextConsumerAssignTest#testPollAfterTopicDeleted`) — validates
+/// KAFKA-20165.
 ///
 /// `poll()` must not fail to retrieve committed offsets after the assigned
 /// topic is deleted: the consumer still has the topic id cached, so the

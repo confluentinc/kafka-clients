@@ -24,7 +24,8 @@ methods that iterate it raise ``TypeError`` where Java's dereference throws. The
 timestamp is mutable through ``set_expiry_timestamp``, as in Java.
 
 As in Java, ``__eq__`` ignores the expiry timestamp while ``__hash__`` includes
-it (``TokenInformation.java:128-150``).
+it (``org.apache.kafka.common.security.token.delegation.TokenInformation#equals``,
+``#hashCode``).
 """
 
 from __future__ import annotations

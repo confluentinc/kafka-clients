@@ -48,14 +48,20 @@ unsafe fn handle<'a>(self_: *const kafka_admin_CreatePartitionsResult_t) -> &'a 
     unsafe { result_ref(self_) }
 }
 
-/// `CreatePartitionsResult.values()`: an owned map, sorted by topic name,
-/// of owned `char *` topic names to owned `kafka_common_KafkaFuture_t *`
-/// (`KafkaFuture<Void>`: `get` delivers `NULL`). Freed with
-/// `kafka_Map_destroy`, which frees the keys and the futures.
+/// Return a map from topic names to futures, which can be used to check the status of individual
+/// partition creations.
+///
+/// # Returns
+///
+/// A map, sorted by topic name, of owned `char *` topic names to owned
+/// `kafka_common_KafkaFuture_t *` (`KafkaFuture<Void>`: `get` delivers `NULL`).
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned map is owned by the caller, freed with `kafka_Map_destroy`, which frees the keys
+/// and the futures.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_values(
@@ -67,13 +73,18 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_values(
     h.ctx.string_keyed_future_map(h.result.values().iter(), FutureCtx::void_future)
 }
 
-/// `CreatePartitionsResult.all()`: an owned `KafkaFuture<Void>` (its `get`
-/// delivers `NULL`) that succeeds once every partition creation succeeded,
-/// freed with `kafka_common_KafkaFuture_destroy`.
+/// Return a future which succeeds if all the partition creations succeed.
+///
+/// # Returns
+///
+/// A `KafkaFuture<Void>` (its `get` delivers `NULL`) that succeeds once every partition creation
+/// succeeded.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(
@@ -85,12 +96,12 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_all(
     h.ctx.void_future(&h.result.all())
 }
 
-/// Frees a result handle; null is a no-op. Maps and futures taken from the
+/// Frees a result handle; `NULL` is a no-op. Maps and futures taken from the
 /// result stay valid until they are destroyed themselves.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

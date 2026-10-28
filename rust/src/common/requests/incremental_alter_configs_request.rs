@@ -105,10 +105,9 @@ impl IncrementalAlterConfigsRequest {
     /// Returns a copy of `data` with every config value replaced by
     /// `"REDACTED"`, for rendering: it is not safe to print all config values.
     ///
-    /// Mirrors Java's private `maskData`
-    /// (`IncrementalAlterConfigsRequest.java:111-118`), shared, as in Java, by
-    /// the request's `toString()` (`:122-123`) and `Builder.toString()`
-    /// (`:74-75`). Like Java's `setValue("REDACTED")` it replaces a null value
+    /// Mirrors Java's private `IncrementalAlterConfigsRequest#maskData`, shared, as in Java, by
+    /// the request's `IncrementalAlterConfigsRequest#toString` and
+    /// `IncrementalAlterConfigsRequest.Builder#toString`. Like Java's `setValue("REDACTED")` it replaces a null value
     /// too. Java returns the copy's `toString()`, and the callers here render
     /// the copy.
     fn mask_data(data: &IncrementalAlterConfigsRequestData) -> IncrementalAlterConfigsRequestData {
@@ -124,10 +123,10 @@ impl IncrementalAlterConfigsRequest {
 
 impl std::fmt::Display for IncrementalAlterConfigsRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors Java's `toString()` (`IncrementalAlterConfigsRequest.java:121-124`),
+        // Mirrors Java's `org.apache.kafka.common.requests.IncrementalAlterConfigsRequest#toString`,
         // which renders `maskData(data)`: the data with every config value
         // replaced by "REDACTED", because "it is not safe to print all config
-        // values" (`:110`).
+        // values" (the comment on `IncrementalAlterConfigsRequest#maskData`).
         write!(
             f,
             "IncrementalAlterConfigsRequest(version={}, data={:?})",
@@ -139,7 +138,7 @@ impl std::fmt::Display for IncrementalAlterConfigsRequest {
 
 /// Renders exactly what the redacting [`Display`](std::fmt::Display) renders.
 ///
-/// Java has a single `toString()` (`IncrementalAlterConfigsRequest.java:122-123`);
+/// Java has a single `IncrementalAlterConfigsRequest#toString`;
 /// a derived `Debug` would be a second, unredacted rendering that prints every
 /// config value being altered.
 impl std::fmt::Debug for IncrementalAlterConfigsRequest {
@@ -197,7 +196,7 @@ impl RequestBuilder for Builder {
     }
 }
 
-/// Mirrors Java's `Builder.toString()` (`IncrementalAlterConfigsRequest.java:74-75`),
+/// Mirrors Java's `IncrementalAlterConfigsRequest.Builder#toString`,
 /// which returns `maskData(data)`: the data with every config value replaced by
 /// `"REDACTED"`.
 impl std::fmt::Display for Builder {
@@ -255,8 +254,8 @@ mod tests {
     }
 
     /// New test, no Java original: the redacting `Display` renders the data
-    /// with every config value replaced by `"REDACTED"`, as Java's `toString()`
-    /// renders `maskData(data)` (`IncrementalAlterConfigsRequest.java:122-123`),
+    /// with every config value replaced by `"REDACTED"`, as Java's
+    /// `IncrementalAlterConfigsRequest#toString` renders `maskData(data)`,
     /// the null value of the deleted config included, while the resource and
     /// config names still show.
     #[test]

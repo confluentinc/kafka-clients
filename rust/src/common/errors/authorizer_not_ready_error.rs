@@ -17,15 +17,11 @@
 use crate::common::error::kafka_error_type;
 
 kafka_error_type! {
-    /// The authorizer is not ready to serve the request yet; retrying may
-    /// succeed.
+    /// An error that indicates that the authorizer is not ready to receive the request yet.
     ///
-    /// Corresponds to Java's `AuthorizerNotReadyException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `AuthorizerNotReadyException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// No protocol code.
     #[doc(alias = "org.apache.kafka.common.errors.AuthorizerNotReadyException")]
     AuthorizerNotReadyError,
     extends: [

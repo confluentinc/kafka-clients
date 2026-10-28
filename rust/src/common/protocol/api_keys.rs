@@ -258,8 +258,8 @@ impl ApiKeys {
 
     /// An english description of the api — used for debugging and metric names.
     ///
-    /// This is Java's public `name` field (`ApiKeys.java:162`, assigned from
-    /// `messageType.name` at `:189`), which carries the specification spelling
+    /// This is Java's public `name` field (`ApiKeys#name`, assigned from
+    /// `messageType.name` in the constructor), which carries the specification spelling
     /// (e.g. `"Metadata"`). It is **not** what Java renders when the enum value
     /// itself is interpolated into a string — see the [`fmt::Display`]
     /// implementation for that.
@@ -452,12 +452,12 @@ impl ApiKeys {
 /// interpolated into a string.
 ///
 /// Java's `ApiKeys` is an enum that does **not** override `toString()`, so
-/// `"The node does not support " + apiKey` (`NodeApiVersions.java:151`) yields
+/// `"The node does not support " + apiKey` (`NodeApiVersions#latestUsableVersion`) yields
 /// the enum constant name — `METADATA`, `CREATE_TOPICS` — not the
 /// specification spelling carried by the `name` field ([`ApiKeys::name`]).
 ///
 /// Every `ApiKeys` constant is named after the `ApiMessageType` constant it
-/// wraps (`ApiKeys.java:174-192`), so this delegates to
+/// wraps (`ApiKeys`'s constants), so this delegates to
 /// [`ApiMessageType::enum_name`], the translation of Java's `Enum.name()`.
 impl fmt::Display for ApiKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -488,7 +488,7 @@ mod tests {
     /// Java's `ApiKeys` is an enum with no `toString()` override, so a string
     /// interpolation of the enum value yields the constant name. This is a
     /// different spelling from the public `name` field asserted above, and both
-    /// are observable in Java-visible messages (`NodeApiVersions.java:151`).
+    /// are observable in Java-visible messages (`NodeApiVersions#latestUsableVersion`).
     #[test]
     fn test_api_key_display_is_the_java_enum_constant_name() {
         assert_eq!(ApiKeys::PRODUCE.to_string(), "PRODUCE");
@@ -501,8 +501,8 @@ mod tests {
 
         // Java derives every `ApiMessageType` constant name from the
         // specification name via `toSnakeCase(name).toUpperCase()`
-        // (`ApiMessageTypeGenerator.java:224`), and every `ApiKeys` constant is
-        // named after the `ApiMessageType` it wraps (`ApiKeys.java:174-192`), so
+        // (`ApiMessageTypeGenerator#generateEnumValues`), and every `ApiKeys` constant is
+        // named after the `ApiMessageType` it wraps (`ApiKeys`'s constants), so
         // the two spellings must agree modulo case and word separators for
         // every API — a mismatch would mean the generated tables diverged.
         for key in ApiKeys::ALL {
@@ -689,7 +689,7 @@ mod tests {
                 || authentication_keys.contains(&api_key.id())
             {
                 // Java interpolates the `ApiKeys` value, so the message carries the
-                // enum constant name (`ApiKeysTest.java:73`, `:75`).
+                // enum constant name (`ApiKeysTest#testResponseThrottleTime`).
                 assert!(throttle_time_field.is_none(), "Unexpected throttle time field: {api_key}");
             } else {
                 assert!(throttle_time_field.is_some(), "Throttle time field missing: {api_key}");

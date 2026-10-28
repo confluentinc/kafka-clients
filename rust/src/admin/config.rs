@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! A configuration object containing the configuration entries for a resource.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.Config`.
 
 use std::collections::HashMap;
 
@@ -22,10 +20,9 @@ use crate::admin::ConfigEntry;
 
 /// A configuration object containing the configuration entries for a resource.
 ///
-/// Corresponds to `org.apache.kafka.clients.admin.Config`.
+/// # Translation notes
 ///
-/// The derived `Debug` renders each entry through [`ConfigEntry`]'s `Debug`,
-/// which redacts a sensitive value as Java's `ConfigEntry.toString()` does.
+/// `Debug` redacts sensitive values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[doc(alias = "org.apache.kafka.clients.admin.Config")]
 pub struct Config {
@@ -34,6 +31,10 @@ pub struct Config {
 
 impl Config {
     /// Create a configuration instance with the provided entries.
+    ///
+    /// # Arguments
+    ///
+    /// - `entries` - the configuration entries.
     #[doc(alias = "org.apache.kafka.clients.admin.Config#Config")]
     pub fn new(entries: impl IntoIterator<Item = ConfigEntry>) -> Self {
         let mut map = HashMap::new();
@@ -43,14 +44,18 @@ impl Config {
         Self { entries: map }
     }
 
-    /// Configuration entries for a resource.
+    /// Returns the configuration entries for a resource.
     #[doc(alias = "org.apache.kafka.clients.admin.Config#entries")]
     pub fn entries(&self) -> impl Iterator<Item = &ConfigEntry> {
         self.entries.values()
     }
 
-    /// Get the configuration entry with the provided name or `None` if there
+    /// Returns the configuration entry with the provided name or `None` if there
     /// isn't one.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the name of the configuration entry.
     #[doc(alias = "org.apache.kafka.clients.admin.Config#get")]
     pub fn get(&self, name: &str) -> Option<&ConfigEntry> {
         self.entries.get(name)
@@ -58,16 +63,16 @@ impl Config {
 }
 
 impl std::hash::Hash for Config {
-    /// Java's `Config.hashCode()` is `entries.hashCode()`, the order-independent
-    /// sum of a `HashMap`'s entry hashes.
+    // Java's `Config.hashCode()` is `entries.hashCode()`, the order-independent
+    // sum of a `HashMap`'s entry hashes.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         crate::common::utils::Utils::hash_unordered(&self.entries, state);
     }
 }
 
 impl std::fmt::Display for Config {
-    /// Mirrors Java's `toString()` (`Config.java:74-75`), which renders each entry
-    /// through `ConfigEntry.toString()`, the redacting rendering.
+    /// Renders each entry through `ConfigEntry`'s redacting `Display`, as Java's
+    /// `org.apache.kafka.clients.admin.Config#toString` does.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let entries: Vec<String> = self.entries.values().map(|e| e.to_string()).collect();
         write!(f, "Config(entries=[{}])", entries.join(", "))
@@ -124,9 +129,9 @@ mod tests {
         ])
     }
 
-    /// Translated from `ConfigTest.shouldImplementToStringProperly`
-    /// (`ConfigTest.java:77-81`): the rendering contains each entry's own
-    /// rendering. Java's fixture holds two plain entries (`a=b`, `c=d`); this
+    /// Translated from `ConfigTest.shouldImplementToStringProperly`: the
+    /// rendering contains each entry's own rendering. Java's fixture holds two plain entries
+    /// (`a=b`, `c=d`); this
     /// one makes the first entry sensitive, so the test also shows that
     /// `Display` renders it through the entry's redacting `Display`, as Java's
     /// `toString()` does, and the secret does not appear.
@@ -148,8 +153,8 @@ mod tests {
         assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
     }
 
-    /// The `Debug` counterpart of `ConfigTest.shouldImplementToStringProperly`
-    /// (`ConfigTest.java:77-81`): the derived `Debug` renders each entry through
+    /// The `Debug` counterpart of `ConfigTest.shouldImplementToStringProperly`:
+    /// the derived `Debug` renders each entry through
     /// its `Debug`, which is the entry's redacting `Display`, so it contains
     /// each entry's `to_string()`, while a non-sensitive value still prints.
     #[test]

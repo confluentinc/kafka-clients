@@ -230,8 +230,8 @@ def close_timeout_ms(timeout: Duration) -> int | None:
 
 
 def check_record(record: object) -> None:
-    """``send(null)``: Java's ``doSend`` reads ``record.topic()`` after the
-    closed check (``KafkaProducer.java:1069``), a ``NullPointerException``
+    """``send(null)``: Java's ``org.apache.kafka.clients.producer.KafkaProducer#doSend`` reads
+    ``record.topic()`` after the closed check, a ``NullPointerException``
     (``TypeError``, CLAUDE.md, Types)."""
     if record is None:
         raise TypeError("record must not be None")
@@ -572,8 +572,8 @@ class _ProducerState:
 
 
 def check_group_metadata(group_metadata: ConsumerGroupMetadata | None) -> None:
-    """The null arm of Java's ``throwIfInvalidGroupMetadata``
-    (KafkaProducer.java:1578-1585), which the core cannot receive; the
-    generation / member id arm is the core's."""
+    """The null arm of Java's
+    ``org.apache.kafka.clients.producer.KafkaProducer#throwIfInvalidGroupMetadata``, which the core cannot
+    receive; the generation / member id arm is the core's."""
     if group_metadata is None:
         raise IllegalArgumentError(message=NULL_GROUP_METADATA_MESSAGE)

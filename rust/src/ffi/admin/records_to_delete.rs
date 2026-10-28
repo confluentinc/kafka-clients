@@ -51,16 +51,28 @@ pub(crate) fn box_records_to_delete(records: RecordsToDelete) -> *mut kafka_admi
     Box::into_raw(Box::new(RecordsToDeleteInner { records })) as *mut kafka_admin_RecordsToDelete_t
 }
 
-/// `RecordsToDelete.beforeOffset(long offset)`, the static factory: delete
-/// every record before `offset`. Owned, freed with
-/// [`kafka_admin_RecordsToDelete_destroy`].
+/// Delete all the records before the given `offset`
+///
+/// # Parameters
+///
+/// - `offset` - The offset before which all records will be deleted. Use `-1` to truncate to the
+///   high watermark.
+///
+/// # Returns
+///
+/// The records to delete.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with `kafka_admin_RecordsToDelete_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_RecordsToDelete_with_offset(offset: i64) -> *mut kafka_admin_RecordsToDelete_t {
     box_records_to_delete(RecordsToDelete::with_offset(offset))
 }
 
-/// `beforeOffset()`, the getter.
+/// Returns the offset before which all records will be deleted. Use `-1` to truncate to the high
+/// watermark.
 ///
 /// # Safety
 ///
@@ -73,11 +85,12 @@ pub unsafe extern "C" fn kafka_admin_RecordsToDelete_before_offset(self_: *const
     unsafe { records_to_delete_ref(self_) }.before_offset()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the records to delete.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid records-to-delete handle.
+/// `self_` must be a valid records-to-delete handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_RecordsToDelete_to_string(
@@ -88,11 +101,11 @@ pub unsafe extern "C" fn kafka_admin_RecordsToDelete_to_string(
     into_c_string(&unsafe { records_to_delete_ref(self_) }.to_string())
 }
 
-/// Frees an owned handle; null is a no-op.
+/// Frees an owned handle; `NULL` is a no-op.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed, that no other
+/// `self_` must be `NULL` or an owned handle not yet destroyed, that no other
 /// call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

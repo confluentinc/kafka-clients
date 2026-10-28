@@ -214,7 +214,7 @@ impl KafkaChannel {
             // retriable network disconnect and reconnect with backoff.
             if let Some(error) = authentication_error(&e) {
                 // Java stores the caught `AuthenticationException` itself
-                // (`KafkaChannel.java:187`), so `ChannelState` is given the typed
+                // (`KafkaChannel#prepare`), so `ChannelState` is given the typed
                 // error the carrier holds, subclass included: a rejected password
                 // stays a `SaslAuthenticationError` (code 58), a disabled mechanism
                 // an `UnsupportedSaslMechanismError`, a rejected certificate an
@@ -508,8 +508,8 @@ impl KafkaChannel {
     /// Stamp [`State::AuthenticationFailed`] when a read failed for authentication
     /// reasons, then hand the error back unchanged.
     ///
-    /// Translates `KafkaChannel.receive`'s `catch (SslAuthenticationException e)`
-    /// (`KafkaChannel.java:460-470`), which exists because under TLS 1.3 a peer
+    /// Translates `KafkaChannel#receive`'s `catch (SslAuthenticationException e)`,
+    /// which exists because under TLS 1.3 a peer
     /// can reject our certificate *after* the handshake — the alert arrives on a
     /// read, and without this the channel would look like an ordinary disconnect
     /// and be retried forever. Transport errors are left untouched so they stay
@@ -517,7 +517,7 @@ impl KafkaChannel {
     fn note_authentication_failure(&mut self, e: io::Error) -> io::Error {
         if let Some(error) = authentication_error(&e) {
             // Java stores the caught `SslAuthenticationException` itself
-            // (`KafkaChannel.java:467`); see `prepare`.
+            // (`KafkaChannel#receive`); see `prepare`.
             let error = error.clone();
             let remote_desc = self.transport_layer.peer_addr().ok().map(|a| a.to_string());
             self.state =
@@ -1309,7 +1309,7 @@ mod tests {
         // is still available on the channel state, asserted below.
         assert_eq!(err.to_string(), "SslAuthenticationError: SSL handshake failed");
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
-        // Java stores the exception object (`ChannelState.java:76`), so the state
+        // Java stores the exception object (`org.apache.kafka.common.network.ChannelState#exception`), so the state
         // carries the typed error, and its `message()` is the authenticator's own
         // text with NO class prefix — the prefix belongs to `Display` alone. A
         // rendered string here would double-prefix at every downstream rebuild
@@ -1331,8 +1331,8 @@ mod tests {
         );
     }
 
-    /// Java's `KafkaChannel.receive` catches `SslAuthenticationException`
-    /// (`KafkaChannel.java:460-470`): under TLS 1.3 a broker rejects the
+    /// Java's `KafkaChannel#receive` catches `SslAuthenticationException`:
+    /// under TLS 1.3 a broker rejects the
     /// client's certificate after the handshake, so the rejection arrives on a
     /// read. The channel moves to AUTHENTICATION_FAILED with the class the
     /// transport raised, as in `prepare`; a plain I/O error on a read leaves the

@@ -18,13 +18,11 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// There are unstable offsets that need to be cleared.
+    /// Error thrown when there are unstable offsets for the requested topic partitions.
     ///
-    /// Corresponds to Java's `UnstableOffsetCommitException`, error code `Errors::UnstableOffsetCommit`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `UnstableOffsetCommitException` -> `RetriableException` ->
-    ///   `ApiException` -> `KafkaException`
+    /// Error code `Errors::UnstableOffsetCommit`.
     #[doc(alias = "org.apache.kafka.common.errors.UnstableOffsetCommitException")]
     UnstableOffsetCommitError,
     code: Errors::UnstableOffsetCommit,

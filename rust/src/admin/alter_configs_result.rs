@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::incremental_alter_configs`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterConfigsResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::common::KafkaFuture;
 use crate::common::config::ConfigResource;
 
 /// The result of the `Admin::incremental_alter_configs` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterConfigsResult`.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult")]
 pub struct AlterConfigsResult {
@@ -46,8 +42,6 @@ impl AlterConfigsResult {
 
     /// Returns a future which succeeds only if all the alteration requests
     /// succeed.
-    ///
-    /// Corresponds to `AlterConfigsResult.all`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterConfigsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

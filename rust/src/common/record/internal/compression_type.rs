@@ -70,8 +70,8 @@ impl CompressionType {
     /// The names of every compression type, in declaration order.
     ///
     /// Stands for Java's `Utils.enumOptions(CompressionType.class)`, which maps
-    /// each enum constant through `toString()` — and `CompressionType.toString()`
-    /// returns `name` (`CompressionType.java:192-195`). Used by the
+    /// each enum constant through `toString()` — and `CompressionType#toString`
+    /// returns `name`. Used by the
     /// `compression.type` config validator to build `ConfigDef`'s
     /// "String must be one of: …" message. Mirrors the existing
     /// `SecurityProtocol::names()` precedent.
@@ -104,7 +104,8 @@ impl CompressionType {
             2 => Ok(Self::Snappy),
             3 => Ok(Self::Lz4),
             4 => Ok(Self::Zstd),
-            // Java throws `IllegalArgumentException` (`CompressionType.java:157`),
+            // Java throws `IllegalArgumentException`
+            // (`org.apache.kafka.common.record.internal.CompressionType#forId`),
             // a plain `RuntimeException` OUTSIDE the `KafkaException` hierarchy.
             // `Error::with_message(Errors::UnknownServerError, ..)` would resolve
             // the code to `UnknownServerException`, flipping both
@@ -130,8 +131,8 @@ impl CompressionType {
             "lz4" => Ok(Self::Lz4),
             "zstd" => Ok(Self::Zstd),
             // Java: `throw new IllegalArgumentException("Unknown compression name: " + name)`
-            // (`CompressionType.java:173`). See `for_id` for why this must not be
-            // an `Errors::UnknownServerError`-coded error.
+            // (`org.apache.kafka.common.record.internal.CompressionType#forName`). See `for_id`
+            // for why this must not be an `Errors::UnknownServerError`-coded error.
             _ => Err(Error::local_illegal_argument(format!("Unknown compression name: {name}"))),
         }
     }
@@ -274,7 +275,8 @@ mod tests {
     fn test_for_id_unknown() {
         let err = CompressionType::for_id(5).unwrap_err();
         assert_eq!(err.message(), "Unknown compression type id: 5");
-        // Java throws `IllegalArgumentException` (`CompressionType.java:157`), which
+        // Java throws `IllegalArgumentException`
+        // (`org.apache.kafka.common.record.internal.CompressionType#forId`), which
         // is neither a `KafkaException` nor an `ApiException`. A code-resolved
         // `UnknownServerError` would answer `true` to both.
         assert!(
@@ -297,7 +299,8 @@ mod tests {
     #[test]
     fn test_for_name_unknown() {
         let err = CompressionType::for_name("unknown").unwrap_err();
-        // Java's literal text is "Unknown compression name: " (`CompressionType.java:173`) —
+        // Java's literal text is "Unknown compression name: "
+        // (`org.apache.kafka.common.record.internal.CompressionType#forName`) —
         // no "type" word, unlike `forId`'s message.
         assert_eq!(err.message(), "Unknown compression name: unknown");
         assert!(

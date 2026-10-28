@@ -19,8 +19,6 @@
 use super::{PatternType, ResourcePattern, ResourceType};
 
 /// Represents a filter that can match [`ResourcePattern`].
-///
-/// Corresponds to `org.apache.kafka.common.resource.ResourcePatternFilter`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter")]
 pub struct ResourcePatternFilter {
@@ -50,49 +48,56 @@ impl ResourcePatternFilter {
         ResourcePatternFilter { resource_type, name, pattern_type }
     }
 
-    /// A filter which matches any resource pattern.
+    /// Matches any resource pattern.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#ANY")]
     pub fn any() -> ResourcePatternFilter {
         ResourcePatternFilter::new(ResourceType::Any, None, PatternType::Any)
     }
 
-    /// Return `true` if this filter has any UNKNOWN components.
+    /// Returns `true` if this filter has any UNKNOWN components.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#isUnknown")]
     pub fn is_unknown(&self) -> bool {
         self.resource_type.is_unknown() || self.pattern_type.is_unknown()
     }
 
-    /// Return the specific resource type this pattern matches.
+    /// Returns the specific resource type this pattern matches.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#resourceType")]
     pub fn resource_type(&self) -> ResourceType {
         self.resource_type
     }
 
-    /// Return the resource name, or `None` to match any name.
+    /// # Returns
+    ///
+    /// the resource name.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#name")]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
 
-    /// Return the resource pattern type.
+    /// Returns the resource pattern type.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#patternType")]
     pub fn pattern_type(&self) -> PatternType {
         self.pattern_type
     }
 
-    /// Return `true` if this filter matches the given pattern.
+    /// # Arguments
+    ///
+    /// - `pattern` - the pattern to match
+    ///
+    /// # Returns
+    ///
+    /// `true` if this filter matches the given pattern.
     ///
     /// # Panics
     ///
     /// Panics with `Unsupported PatternType: UNKNOWN` if this filter's pattern
     /// type is [`PatternType::Match`], it has a name, and `pattern`'s pattern
     /// type is [`PatternType::Unknown`], where Java throws
-    /// `IllegalArgumentException` (`ResourcePatternFilter.java:116-117`); a
-    /// [`ResourcePattern`] cannot hold the other two filter-only types, `Any`
-    /// and `Match`. A pattern with a pattern type a newer broker added reports
-    /// `Unknown`, so check [`ResourcePattern::pattern_type`] before matching it
-    /// against a `Match` filter. The predicate otherwise always answers, so its
-    /// signature stays a plain `bool` (CLAUDE.md §12.5).
+    /// `IllegalArgumentException`; a [`ResourcePattern`] cannot hold the other
+    /// two filter-only types, `Any` and `Match`. A pattern with a pattern type a
+    /// newer broker added reports `Unknown`, so check
+    /// [`ResourcePattern::pattern_type`] before matching it against a `Match`
+    /// filter.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matches")]
     pub fn matches(&self, pattern: &ResourcePattern) -> bool {
         if self.resource_type != ResourceType::Any && self.resource_type != pattern.resource_type() {
@@ -124,14 +129,14 @@ impl ResourcePatternFilter {
         }
     }
 
-    /// Return `true` if this filter could only match one pattern. In other
+    /// Returns `true` if this filter could only match one pattern. In other
     /// words, if there are no ANY or UNKNOWN fields.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#matchesAtMostOne")]
     pub fn matches_at_most_one(&self) -> bool {
         self.find_indefinite_field().is_none()
     }
 
-    /// Return a string describing any ANY or UNKNOWN field, or `None` if there is
+    /// Returns a string describing any ANY or UNKNOWN field, or `None` if there is
     /// no such field.
     #[doc(alias = "org.apache.kafka.common.resource.ResourcePatternFilter#findIndefiniteField")]
     pub fn find_indefinite_field(&self) -> Option<String> {
@@ -180,7 +185,7 @@ mod tests {
 
     /// New test, no Java original: the documented panic (`# Panics` on
     /// `matches`), where Java throws `IllegalArgumentException("Unsupported
-    /// PatternType: UNKNOWN")` (`ResourcePatternFilter.java:116-117`).
+    /// PatternType: UNKNOWN")` (`ResourcePatternFilter#matches`).
     #[test]
     #[should_panic(expected = "Unsupported PatternType: UNKNOWN")]
     fn match_filter_with_a_name_panics_on_an_unknown_pattern_type() {

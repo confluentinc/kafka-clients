@@ -18,17 +18,14 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// Indicates that `DeleteGroups` could not complete for the affected group. The
-    /// accompanying error message describes the underlying cause; the caller may retry once
-    /// the underlying condition is resolved.
+    /// Indicates that `DeleteGroups` could not complete for the affected group. The accompanying
+    /// error message describes the underlying cause; the caller may retry once the underlying
+    /// condition is resolved.
     ///
-    /// Corresponds to Java's `GroupDeletionFailedException`, error code `Errors::GroupDeletionFailed`.
+    /// # Translation notes
     ///
-    /// Java `extends` chain:
-    ///    `GroupDeletionFailedException` -> `ApiException` -> `KafkaException`
-    ///
-    /// Not a `RetriableException`, despite "the caller may retry": Java leaves the
-    /// decision to the caller once the cause is resolved.
+    /// Error code `Errors::GroupDeletionFailed`. Java `extends` chain:
+    /// `GroupDeletionFailedException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.GroupDeletionFailedException")]
     GroupDeletionFailedError,
     code: Errors::GroupDeletionFailed,

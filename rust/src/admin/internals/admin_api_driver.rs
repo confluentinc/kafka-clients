@@ -423,7 +423,7 @@ where
     /// Mirrors `onFailure`.
     ///
     /// The first branch is Java's `t instanceof DisconnectException`
-    /// (`AdminApiDriver.java:265`), which the admin runnable raises as
+    /// (`AdminApiDriver#onFailure`), which the admin runnable raises as
     /// [`Error::Disconnect`]. It used to key off [`Errors::NetworkError`] instead —
     /// the wrong class the runnable happened to build, which also matched a genuine
     /// broker-reported `NETWORK_EXCEPTION` (code 13).
@@ -1008,8 +1008,10 @@ mod tests {
 
     fn disconnect_error() -> Error {
         // Java's `DisconnectException`, which the driver treats as the retry-lookup
-        // trigger (`AdminApiDriver.java:265`). This is what the admin runnable now
-        // raises on `response.was_disconnected()`.
+        // trigger
+        // (`org.apache.kafka.clients.admin.internals.AdminApiDriver#onFailure`).
+        // This is what the admin runnable now raises on
+        // `response.was_disconnected()`.
         Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
     }
 

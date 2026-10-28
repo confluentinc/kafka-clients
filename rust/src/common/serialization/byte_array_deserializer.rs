@@ -23,10 +23,6 @@ use crate::common::serialization::Deserializer;
 
 /// Deserializes byte arrays by returning the bytes unchanged.
 ///
-/// Corresponds to Java's
-/// `org.apache.kafka.common.serialization.ByteArrayDeserializer`, whose
-/// `deserialize` returns the input `byte[]` as-is.
-///
 /// In Java the input array is returned by reference (no copy). In Rust the
 /// [`Deserializer`] trait hands `deserialize` a `&[u8]` borrowed from the
 /// `CompletedFetch` buffer (`consumer-threading.md` §27), so the only way to

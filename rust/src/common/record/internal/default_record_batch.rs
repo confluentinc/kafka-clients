@@ -137,7 +137,7 @@ impl DefaultRecordBatch {
         InvalidRecordError::new(format!("Failed to decompress record stream: {e}"))
     }
 
-    /// Java's `ensureValid()` size-check error (`DefaultRecordBatch.java:152-154`),
+    /// Java's `DefaultRecordBatch#ensureValid` size-check error,
     /// for a batch whose size — `LOG_OVERHEAD` plus its length field — is below
     /// the v2 header.
     fn batch_size_below_overhead_error(size_in_bytes: i64) -> InvalidRecordError {
@@ -147,8 +147,8 @@ impl DefaultRecordBatch {
         ))
     }
 
-    /// The error Java's `RecordIterator` constructor throws for a negative record
-    /// count (`DefaultRecordBatch.java:584-587`), before a single record is read.
+    /// The error Java's `DefaultRecordBatch.RecordIterator#RecordIterator` constructor throws for
+    /// a negative record count, before a single record is read.
     ///
     /// Shared by [`DefaultRecordBatch::iter_records`] and the consumer's receive
     /// path, which iterates a batch through its own cursor instead of a
@@ -194,7 +194,7 @@ impl DefaultRecordBatch {
     /// The buffer must contain exactly one complete v2 record batch starting at
     /// index 0 — at least [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes, which
     /// [`as_ref`](Self::as_ref)'s header accessors rely on. Like Java's
-    /// constructor (`DefaultRecordBatch.java:141-143`), neither this nor
+    /// constructor (`DefaultRecordBatch#DefaultRecordBatch`), neither this nor
     /// [`with_slice`](Self::with_slice) checks that; the callers do. Batches
     /// read off the wire reach this type only through `with_slice`, and `new`
     /// has no production caller: it takes buffers built by hand, in tests.
@@ -502,8 +502,9 @@ impl DefaultRecordBatch {
         let base_timestamp = self.base_timestamp();
         let base_sequence = self.base_sequence();
 
-        // Java sizes the list by the declared count (`new ArrayList<>(count())`,
-        // `DefaultRecordBatch.java:332`), which a header can set to `i32::MAX`.
+        // Java sizes the list by the declared count (`new ArrayList<>(count())` in
+        // `org.apache.kafka.common.record.internal.DefaultRecordBatch#iterator`), which a header
+        // can set to `i32::MAX`.
         // Every record takes at least one byte, so the batch's own record bytes
         // bound the count of an uncompressed batch; for a compressed one they are
         // only a starting capacity, and the list grows past it as records decode.
@@ -547,8 +548,9 @@ impl DefaultRecordBatch {
 
             let mut records = Vec::with_capacity(capacity_hint);
             for _ in 0..num_records {
-                // Java's `streamingIterator(bufferSupplier)` applies
-                // `Records.SOFT_MAX_ARRAY_LENGTH` (`DefaultRecordBatch.java:365`).
+                // Java's
+                // `org.apache.kafka.common.record.internal.DefaultRecordBatch#streamingIterator(BufferSupplier)`
+                // applies `Records.SOFT_MAX_ARRAY_LENGTH`.
                 let record = DefaultRecord::read_from_stream(
                     &mut reader,
                     base_offset,
@@ -564,9 +566,10 @@ impl DefaultRecordBatch {
             let mut check_buf = [0u8; 1];
             match io::Read::read(&mut reader, &mut check_buf) {
                 Ok(0) => {}, // EOF, good
-                // Java's `ensureNoneRemaining` throws here — `catch (IOException e)
-                // { throw new KafkaException("Error checking for remaining bytes
-                // after reading batch", e); }` (`DefaultRecordBatch.java:645-652`).
+                // Java's
+                // `org.apache.kafka.common.record.internal.DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`
+                // throws here — `catch (IOException e) { throw new KafkaException("Error checking
+                // for remaining bytes after reading batch", e); }`.
                 // Treating the failure as a clean EOF hid a truncated or corrupt
                 // decompression stream behind a successful-looking parse. (The class
                 // differs: this function's error type is `InvalidRecordError`, also
@@ -826,9 +829,9 @@ impl DefaultRecordBatch {
 ///
 /// The slice holds exactly one batch: it begins at the batch's `BASE_OFFSET`
 /// and ends at the batch's last byte, the shape of Java's
-/// `batchSlice.limit(batchSize)` (`ByteBufferLogInputStream.java:51`). The CRC
+/// `batchSlice.limit(batchSize)` (in `ByteBufferLogInputStream#nextBatch`). The CRC
 /// and the records section are bounded by the slice, as Java bounds them by
-/// `buffer.limit()` (`DefaultRecordBatch.java:273-277`, `:399-401`), so they
+/// `buffer.limit()` (`DefaultRecordBatch#recordInputStream`, `DefaultRecordBatch#computeChecksum`), so they
 /// never reach into a following batch. The slice is also at least
 /// [`RecordBatch::RECORD_BATCH_OVERHEAD`] bytes long, which
 /// [`new`](Self::new) checks, so every fixed-offset header accessor is in
@@ -844,8 +847,7 @@ impl<'a> DefaultRecordBatchRef<'a> {
     ///
     /// # Errors
     ///
-    /// Returns Java's `ensureValid()` size-check error
-    /// (`DefaultRecordBatch.java:152-154`) when the slice is shorter than
+    /// Returns Java's `DefaultRecordBatch#ensureValid` size-check error when the slice is shorter than
     /// [`RecordBatch::RECORD_BATCH_OVERHEAD`]. For a slice holding exactly one
     /// batch its length is the batch's size, so the message is the one Java
     /// prints. Java builds such a batch anyway and fails at the first header
@@ -926,10 +928,9 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// client does not know — Java's behaviour.
     ///
     /// `COMPRESSION_CODEC_MASK` is `0x07`, so ids 5-7 are wire-reachable and
-    /// CRC-valid. `CompressionType.forId` throws `IllegalArgumentException` for
-    /// them (`CompressionType.java:144-159`) and
-    /// `DefaultRecordBatch.compressionType()` lets it propagate
-    /// (`DefaultRecordBatch.java:217-219`). Reporting `None` instead would mark
+    /// CRC-valid. `CompressionType#forId` throws `IllegalArgumentException` for
+    /// them and `DefaultRecordBatch#compressionType` lets it propagate. Reporting `None` instead
+    /// would mark
     /// such a batch *uncompressed* and hand its still-compressed bytes to the
     /// record parser, so a consumer would either skip the batch or surface
     /// fabricated records.
@@ -956,7 +957,7 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
     ///
-    /// Java's `sizeInBytes()` (`DefaultRecordBatch.java:222-225`) reads the
+    /// Java's `DefaultRecordBatch#sizeInBytes` reads the
     /// header's length field. A view sized by `ByteBufferLogInputStream` carries
     /// a length of at least 49 (a 61-byte header less `LOG_OVERHEAD`), and an
     /// owned [`DefaultRecordBatch`] holds a buffer this client built or already
@@ -1003,8 +1004,8 @@ impl<'a> DefaultRecordBatchRef<'a> {
 
     /// Compute the CRC32C over the attributes through the end of the batch.
     ///
-    /// Java's `computeChecksum()` covers `ATTRIBUTES_OFFSET` to `buffer.limit()`
-    /// (`DefaultRecordBatch.java:399-401`); the slice ends where the batch does.
+    /// Java's `DefaultRecordBatch#computeChecksum` covers `ATTRIBUTES_OFFSET` to
+    /// `buffer.limit()`; the slice ends where the batch does.
     fn compute_checksum(&self) -> u32 {
         crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..])
     }
@@ -1054,7 +1055,8 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// after the batch header), borrowed from the underlying buffer.
     ///
     /// Java positions a duplicate of the batch buffer at `RECORDS_OFFSET` and
-    /// reads to its limit (`DefaultRecordBatch.java:273-277`, `:299-301`); the
+    /// reads to its limit (`DefaultRecordBatch#recordInputStream`,
+    /// `DefaultRecordBatch#uncompressedIterator`); the
     /// slice ends where the batch does.
     pub fn records_section(&self) -> &'a [u8] {
         &self.buffer[RecordBatch::RECORDS_OFFSET..]
@@ -1444,7 +1446,7 @@ mod tests {
     /// Java's `ensureNoneRemaining` turns a failure of the "is there anything
     /// left?" read into an error — `catch (IOException e) { throw new
     /// KafkaException("Error checking for remaining bytes after reading batch",
-    /// e); }` (`DefaultRecordBatch.java:645-652`).
+    /// e); }` (`DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`).
     ///
     /// Truncating the gzip trailer leaves every record decodable but makes the
     /// end-of-stream read fail, which is the only input that reaches that arm.
@@ -1549,9 +1551,8 @@ mod tests {
     }
 
     /// A codec id this client does not know must fail with Java's
-    /// `IllegalArgumentException` message (`CompressionType.java:144-159`,
-    /// propagated by `DefaultRecordBatch.compressionType()` at
-    /// `DefaultRecordBatch.java:217-219`). `try_compression_type` returns
+    /// `IllegalArgumentException` message (`CompressionType#forId`,
+    /// propagated by `DefaultRecordBatch#compressionType`). `try_compression_type` returns
     /// [`CompressionType::for_id`]'s error unchanged, so the message is the one
     /// place both spellings must agree.
     #[test]
@@ -1917,8 +1918,8 @@ mod tests {
     /// A declared count of `i32::MAX` no longer sizes the record list
     /// (`Vec::with_capacity(count)` would abort on capacity overflow): the batch
     /// fails with Java's premature-EOF text once its real records run out — the
-    /// uncompressed iterator's (`DefaultRecordBatch.java:307-308`), and for every
-    /// codec `StreamRecordIterator.readNext`'s (`:636-644`).
+    /// uncompressed iterator's (`DefaultRecordBatch#uncompressedIterator`), and for every
+    /// codec `DefaultRecordBatch.StreamRecordIterator#readNext`'s.
     #[test]
     fn test_iter_records_with_i32_max_record_count_errors_instead_of_aborting() {
         let uncompressed = records_with_invalid_record_count(1_700_000_000_000, CompressionType::None, i32::MAX);

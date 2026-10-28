@@ -193,8 +193,8 @@ impl TestContext {
     }
 
     /// Container-network bootstrap servers for the [`protocol`](Self::protocol)
-    /// selected this run: PLAINTEXT -> `:9099`, SSL -> `:9100`,
-    /// SASL_SSL -> `:9101`.
+    /// selected this run: PLAINTEXT -> port 9099, SSL -> port 9100,
+    /// SASL_SSL -> port 9101.
     ///
     /// The container-side analogue of
     /// [`protocol_bootstrap_servers`](Self::protocol_bootstrap_servers): the
@@ -231,14 +231,14 @@ impl TestContext {
     }
 
     /// Host-loopback bootstrap servers for the [`protocol`](Self::protocol)
-    /// selected this run: PLAINTEXT -> `:9092`, SSL -> `:9096`,
-    /// SASL_SSL -> `:9097`.
+    /// selected this run: PLAINTEXT -> port 9092, SSL -> port 9096,
+    /// SASL_SSL -> port 9097.
     ///
     /// This is the address native (in-process Rust) clients should use.
     /// Container-backed gRPC backends must instead call
     /// [`container_protocol_bootstrap_servers`](Self::container_protocol_bootstrap_servers),
     /// which selects the protocol-matched CONTAINER listener
-    /// (PLAINTEXT `:9099` / SSL `:9100` / SASL_SSL `:9101`) advertised on the
+    /// (PLAINTEXT port 9099 / SSL port 9100 / SASL_SSL port 9101) advertised on the
     /// broker's container hostname — reachable from a sibling container, unlike
     /// these host-loopback addresses.
     pub fn protocol_bootstrap_servers(&self) -> &str {

@@ -41,17 +41,21 @@ impl PayloadClass for GroupAuthorizationError {
     }
 
     fn text(&self) -> Option<&str> {
-        Some(self.group_id())
+        self.group_id()
     }
 }
 
-/// The payload of a `GroupAuthorizationException` error, borrowed from the
-/// error handle, or null when the error is another class. The suffix stays
-/// because `kafka_common_Error_group_authorization` is the `Error` factory.
+/// Returns the payload of a `GroupAuthorizationException` error, or `NULL` when the error is
+/// another class.
+///
+/// # Parameters
+///
+/// - `error` - The error handle.
 ///
 /// # Safety
 ///
 /// `error` must be a valid error handle.
+/// The returned view is borrowed, valid as long as `error`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
@@ -70,13 +74,17 @@ pub unsafe extern "C" fn kafka_common_Error_group_authorization_error(
     }
 }
 
-/// `GroupAuthorizationException.forGroupId(String groupId)`: Java's default
-/// message for the group. Owned, freed with
-/// [`kafka_common_GroupAuthorizationError_destroy`].
+/// Returns a `GroupAuthorizationException.forGroupId(String groupId)` error: Java's default
+/// message for the group.
+///
+/// # Parameters
+///
+/// - `group_id` - The group ID that failed authorization.
 ///
 /// # Safety
 ///
-/// `group_id` must be a valid NUL-terminated string.
+/// `group_id` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_GroupAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_for_group_id(
@@ -88,27 +96,60 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_for_group_id(
     Payload::boxed(GroupAuthorizationError::for_group_id(unsafe { c_str_to_string(group_id) }))
 }
 
-/// `new GroupAuthorizationException(String groupId, String message)`.
+/// `new GroupAuthorizationException(String message)`: an error without a group ID.
+///
+/// # Parameters
+///
+/// - `message` - The detail message.
 ///
 /// # Safety
 ///
-/// `group_id` and `message` must be valid NUL-terminated strings.
+/// `message` must be a valid NUL-terminated string. The returned handle is owned, freed with
+/// `kafka_common_GroupAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_new(
+    message: *const c_char,
+) -> *mut kafka_common_GroupAuthorizationError_t {
+    // SAFETY: Per this function's `# Safety`, `message` is a valid NUL-terminated string, as
+    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // this call.
+    Payload::boxed(GroupAuthorizationError::new(unsafe { c_str_to_string(message) }))
+}
+
+/// `new GroupAuthorizationException(String message, String groupId)`.
+///
+/// # Parameters
+///
+/// - `group_id` - The group ID that failed authorization.
+/// - `message` - The detail message.
+///
+/// # Safety
+///
+/// `group_id` and `message` must be valid NUL-terminated strings. The returned handle is owned,
+/// freed with `kafka_common_GroupAuthorizationError_destroy`.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_with_group_id(
     group_id: *const c_char,
     message: *const c_char,
 ) -> *mut kafka_common_GroupAuthorizationError_t {
     // SAFETY: Per this function's `# Safety`, `group_id` and `message` are each a valid
     // NUL-terminated string, as `c_str_to_string` requires; both are copied into owned `String`s,
     // so nothing borrows them after this call.
-    Payload::boxed(GroupAuthorizationError::new(unsafe { c_str_to_string(group_id) }, unsafe {
-        c_str_to_string(message)
-    }))
+    Payload::boxed(GroupAuthorizationError::with_group_id(
+        unsafe { c_str_to_string(group_id) },
+        unsafe { c_str_to_string(message) },
+    ))
 }
 
 /// `new GroupAuthorizationException(String message)` with Java's default
 /// message and no group id.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_GroupAuthorizationError_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_GroupAuthorizationError_with_default_message()
@@ -116,11 +157,17 @@ pub extern "C" fn kafka_common_GroupAuthorizationError_with_default_message()
     Payload::boxed(GroupAuthorizationError::with_default_message())
 }
 
-/// `groupId()`: borrowed from the handle, valid until it is destroyed.
+/// Return the group ID that failed authorization. May be `NULL` if it is not known
+/// in the context the error was raised in.
+///
+/// # Returns
+///
+/// nullable groupId
 ///
 /// # Safety
 ///
-/// `self_` must be a valid group-authorization handle.
+/// `self_` must be a valid group-authorization handle. The returned string is borrowed, valid
+/// until `self_` is destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
@@ -133,11 +180,12 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.text_ptr()
 }
 
-/// `getCause()`: borrowed from the handle, or null.
+/// Returns the cause of the error, or `NULL` if there is none.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid group-authorization handle.
+/// The returned handle is borrowed, valid until `self_` is destroyed.
 #[ffi_guard(fallback = ::core::ptr::null())]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
@@ -151,11 +199,12 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_source(
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.source_ptr()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the error.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid group-authorization handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
@@ -168,12 +217,12 @@ pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_to_string(
     unsafe { Payload::<GroupAuthorizationError>::from_ptr(self_) }.to_c_string()
 }
 
-/// Frees an owned handle; null is a no-op. A view borrowed from a
+/// Frees an owned handle; `NULL` is a no-op. A view borrowed from a
 /// `kafka_common_Error_t` is never passed here.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned handle not yet destroyed.
+/// `self_` must be `NULL` or an owned handle not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_destroy(
@@ -217,7 +266,7 @@ mod tests {
             assert!(kafka_common_Error_group_authorization_error(other).is_null());
             kafka_common_Error_destroy(other);
 
-            let built = kafka_common_GroupAuthorizationError_new(g2.as_ptr(), message.as_ptr());
+            let built = kafka_common_GroupAuthorizationError_with_group_id(g2.as_ptr(), message.as_ptr());
             assert_eq!(
                 CStr::from_ptr(kafka_common_GroupAuthorizationError_group_id(built))
                     .to_str()
@@ -236,6 +285,42 @@ mod tests {
             kafka_common_GroupAuthorizationError_destroy(for_group);
             kafka_common_GroupAuthorizationError_destroy(kafka_common_GroupAuthorizationError_with_default_message());
             kafka_common_GroupAuthorizationError_destroy(ptr::null_mut());
+        }
+    }
+
+    /// Java's `groupId()` is null when the group is not known: the `(String message)`
+    /// constructor, the broker's error code, and a `NULL` group id to the `kafka_common_Error_*`
+    /// constructors.
+    #[test]
+    fn group_id_is_null_when_unknown() {
+        let message = CString::new("m").unwrap();
+        // SAFETY: Test code: this module's and `crate::ffi::common`'s constructors make every
+        // handle used, each destroyed once; views are used only while their error is alive, and
+        // the `CString` outlives the calls that read it.
+        unsafe {
+            let built = kafka_common_GroupAuthorizationError_new(message.as_ptr());
+            assert!(kafka_common_GroupAuthorizationError_group_id(built).is_null());
+            kafka_common_GroupAuthorizationError_destroy(built);
+            let default = kafka_common_GroupAuthorizationError_with_default_message();
+            assert!(kafka_common_GroupAuthorizationError_group_id(default).is_null());
+            kafka_common_GroupAuthorizationError_destroy(default);
+
+            let with_message =
+                crate::ffi::common::kafka_common_Error_group_authorization_with_message(ptr::null(), message.as_ptr());
+            let view = kafka_common_Error_group_authorization_error(with_message);
+            assert!(kafka_common_GroupAuthorizationError_group_id(view).is_null());
+            kafka_common_Error_destroy(with_message);
+
+            let for_null = crate::ffi::common::kafka_common_Error_group_authorization(ptr::null());
+            let view = kafka_common_Error_group_authorization_error(for_null);
+            assert!(kafka_common_GroupAuthorizationError_group_id(view).is_null());
+            let s = kafka_common_GroupAuthorizationError_to_string(view);
+            assert_eq!(
+                CStr::from_ptr(s).to_str().unwrap(),
+                "GroupAuthorizationError: Not authorized to access group: null"
+            );
+            crate::ffi::util::kafka_string_destroy(s);
+            kafka_common_Error_destroy(for_null);
         }
     }
 }

@@ -35,7 +35,7 @@ pub struct kafka_common_acl_AclBinding_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_acl_AclBinding_t`] points at: the binding plus the
+/// What a `kafka_common_acl_AclBinding_t` points at: the binding plus the
 /// handles of its two parts, which the getters borrow out.
 pub(crate) struct AclBindingInner {
     binding: AclBinding,
@@ -85,19 +85,23 @@ pub(crate) unsafe fn acl_binding_ref<'a>(binding: *const kafka_common_acl_AclBin
 }
 
 /// Hands `binding` to C as an owned handle, freed with
-/// [`kafka_common_acl_AclBinding_destroy`].
+/// `kafka_common_acl_AclBinding_destroy`.
 pub(crate) fn box_acl_binding(binding: AclBinding) -> *mut kafka_common_acl_AclBinding_t {
     Box::into_raw(Box::new(AclBindingInner::new(binding))) as *mut kafka_common_acl_AclBinding_t
 }
 
-/// `new AclBinding(ResourcePattern pattern, AccessControlEntry entry)`: both
-/// are copied, the caller keeps its handles. Owned, freed with
-/// [`kafka_common_acl_AclBinding_destroy`].
+/// Create an instance of this class with the provided parameters.
+///
+/// # Parameters
+///
+/// - `pattern` - non-`NULL` resource pattern.
+/// - `entry` - non-`NULL` entry
 ///
 /// # Safety
 ///
 /// `pattern` must be a valid resource-pattern handle and `entry` a valid
-/// access-control-entry handle.
+/// access-control-entry handle; both are copied, the caller keeps its handles.
+/// The returned binding is owned, freed with `kafka_common_acl_AclBinding_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
@@ -115,8 +119,11 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_new(
     ))
 }
 
-/// `isUnknown()`: whether the pattern or the entry has an `UNKNOWN`
-/// component.
+/// `isUnknown()`.
+///
+/// # Returns
+///
+/// 1 if this binding has any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -129,12 +136,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_is_unknown(self_: *const ka
     i8::from(unsafe { acl_binding_ref(self_) }.is_unknown())
 }
 
-/// `pattern()`: a borrowed handle valid as long as the binding, never
-/// passed to `kafka_common_resource_ResourcePattern_destroy`.
+/// `pattern()`.
+///
+/// # Returns
+///
+/// the resource pattern for this binding.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+/// The returned handle is borrowed, valid as long as the binding.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
@@ -147,12 +158,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_pattern(
     unsafe { inner_ref(self_) }.pattern.as_ptr()
 }
 
-/// `entry()`: a borrowed handle valid as long as the binding, never passed
-/// to `kafka_common_acl_AccessControlEntry_destroy`.
+/// `entry()`.
+///
+/// # Returns
+///
+/// the access control entry for this binding.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+/// The returned handle is borrowed, valid as long as the binding.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
@@ -165,12 +180,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_entry(
     unsafe { inner_ref(self_) }.entry.as_ptr()
 }
 
-/// `toFilter()`: an owned filter matching exactly this binding, freed with
-/// `kafka_common_acl_AclBindingFilter_destroy`.
+/// Create a filter which matches only this AclBinding.
+///
+/// # Returns
+///
+/// The filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+/// The returned filter is owned, freed with `kafka_common_acl_AclBindingFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
@@ -182,11 +201,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_filter(
     box_acl_binding_filter(unsafe { acl_binding_ref(self_) }.to_filter())
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the binding.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBinding_to_string(

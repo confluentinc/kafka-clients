@@ -36,7 +36,7 @@ pub struct kafka_common_acl_AclBindingFilter_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_acl_AclBindingFilter_t`] points at: the filter plus
+/// What a `kafka_common_acl_AclBindingFilter_t` points at: the filter plus
 /// the handles of its two parts, which the getters borrow out.
 pub(crate) struct AclBindingFilterInner {
     filter: AclBindingFilter,
@@ -88,19 +88,24 @@ pub(crate) unsafe fn acl_binding_filter_ref<'a>(
 }
 
 /// Hands `filter` to C as an owned handle, freed with
-/// [`kafka_common_acl_AclBindingFilter_destroy`].
+/// `kafka_common_acl_AclBindingFilter_destroy`.
 pub(crate) fn box_acl_binding_filter(filter: AclBindingFilter) -> *mut kafka_common_acl_AclBindingFilter_t {
     Box::into_raw(Box::new(AclBindingFilterInner::new(filter))) as *mut kafka_common_acl_AclBindingFilter_t
 }
 
-/// `new AclBindingFilter(ResourcePatternFilter patternFilter, AccessControlEntryFilter entryFilter)`:
-/// both are copied, the caller keeps its handles. Owned, freed with
-/// [`kafka_common_acl_AclBindingFilter_destroy`].
+/// Create an instance of this filter with the provided parameters.
+///
+/// # Parameters
+///
+/// - `pattern_filter` - non-`NULL` pattern filter
+/// - `entry_filter` - non-`NULL` access control entry filter
 ///
 /// # Safety
 ///
 /// `pattern_filter` must be a valid resource-pattern-filter handle and
-/// `entry_filter` a valid access-control-entry-filter handle.
+/// `entry_filter` a valid access-control-entry-filter handle; both are copied,
+/// the caller keeps its handles. The returned filter is owned, freed with
+/// `kafka_common_acl_AclBindingFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_new(
@@ -119,15 +124,26 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_new(
     ))
 }
 
-/// `AclBindingFilter.ANY`: a filter matching every binding. Owned, as every
-/// handle of this type.
+/// A filter which matches any ACL binding.
+///
+/// # Returns
+///
+/// The filter.
+///
+/// # Safety
+///
+/// The returned filter is owned, freed with `kafka_common_acl_AclBindingFilter_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_acl_AclBindingFilter_any() -> *mut kafka_common_acl_AclBindingFilter_t {
     box_acl_binding_filter(AclBindingFilter::any())
 }
 
-/// `isUnknown()`: whether either part has an `UNKNOWN` component.
+/// `isUnknown()`.
+///
+/// # Returns
+///
+/// 1 if this filter has any UNKNOWN components, else 0.
 ///
 /// # Safety
 ///
@@ -142,12 +158,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_is_unknown(
     i8::from(unsafe { acl_binding_filter_ref(self_) }.is_unknown())
 }
 
-/// `patternFilter()`: a borrowed handle valid as long as this filter, never
-/// passed to `kafka_common_resource_ResourcePatternFilter_destroy`.
+/// `patternFilter()`.
+///
+/// # Returns
+///
+/// the resource pattern filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding-filter handle.
+/// The returned handle is borrowed, valid as long as the filter.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_filter(
@@ -160,12 +180,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_filter(
     unsafe { inner_ref(self_) }.pattern_filter.as_ptr()
 }
 
-/// `entryFilter()`: a borrowed handle valid as long as this filter, never
-/// passed to `kafka_common_acl_AccessControlEntryFilter_destroy`.
+/// `entryFilter()`.
+///
+/// # Returns
+///
+/// the access control entry filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding-filter handle.
+/// The returned handle is borrowed, valid as long as the filter.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_entry_filter(
@@ -178,7 +202,8 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_entry_filter(
     unsafe { inner_ref(self_) }.entry_filter.as_ptr()
 }
 
-/// `matchesAtMostOne()`: whether both parts match at most one value.
+/// Returns 1 if the resource and entry filters can only match one ACE. In other words, if
+/// there are no ANY or UNKNOWN fields. Else 0.
 ///
 /// # Safety
 ///
@@ -193,13 +218,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_matches_at_most_one(
     i8::from(unsafe { acl_binding_filter_ref(self_) }.matches_at_most_one())
 }
 
-/// `findIndefiniteField()`: a description of the first field that keeps
-/// the filter from matching at most one binding, as an owned string freed
-/// with `kafka_string_destroy`, or null when there is none.
+/// Returns a string describing an ANY or UNKNOWN field, or `NULL` if there is no such field.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_find_indefinite_field(
@@ -213,11 +237,16 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_find_indefinite_field
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
 }
 
-/// `matches(AclBinding binding)`: whether the filter matches `binding`.
+/// Returns 1 if the resource filter matches the binding's resource and the entry filter matches
+/// binding's entry, else 0.
+///
+/// # Parameters
+///
+/// - `binding` - The binding to match.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid ACL-binding-filter handle and `binding` a valid
+/// `self_` must be a valid ACL-binding-filter handle. `binding` must be a valid
 /// ACL-binding handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -231,11 +260,12 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_matches(
     i8::from(unsafe { acl_binding_filter_ref(self_) }.matches(unsafe { acl_binding_ref(binding) }))
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns the text form of the filter.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid ACL-binding-filter handle.
+/// The returned string is owned, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_to_string(

@@ -71,16 +71,29 @@ unsafe fn handle<'a>(
     unsafe { result_ref(self_) }
 }
 
-/// `description(String transactionalId)`: returns an owned future (freed with
-/// `kafka_common_KafkaFuture_destroy`) whose `get` yields a
-/// `kafka_admin_TransactionDescription_t *` owned by the future, or stores the
-/// owned `IllegalArgumentError` in `*out_err` and returns `NULL` when
-/// `transactional_id` was not part of the request.
+/// Get the description of a specific transactional ID.
+///
+/// # Parameters
+///
+/// - `transactional_id` - the transactional ID to describe
+///
+/// # Returns
+///
+/// A future which completes when the transaction description of a particular transactional ID is
+/// available.
+///
+/// # Errors
+///
+/// - `kafka_common_Error_is_local_illegal_argument_error` if the `transactional_id` was not included
+///   in the respective call to `kafka_admin_Admin_describe_transactions`.
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle, `transactional_id` a valid
-/// NUL-terminated string and `out_err` a valid slot pointing at null.
+/// NUL-terminated string and `out_err` a valid slot pointing at `NULL`.
+///
+/// The returned future is owned and freed with `kafka_common_KafkaFuture_destroy`; its `get` yields
+/// a `kafka_admin_TransactionDescription_t *` owned by the future. `NULL` is returned on failure.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
@@ -109,13 +122,19 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_description(
     }
 }
 
-/// `all()`: an owned future freed with `kafka_common_KafkaFuture_destroy`;
-/// its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *`
+/// `all()`: a future; its `get` delivers a `kafka_Map_t *` (owned by the future) of `char *`
 /// transactional ids, sorted, to `kafka_admin_TransactionDescription_t *`.
+///
+/// # Returns
+///
+/// A future which either completes when all transaction descriptions complete or fails if any of
+/// the descriptions cannot be obtained
 ///
 /// # Safety
 ///
 /// `self_` must be a live result handle.
+///
+/// The returned future is owned by the caller, freed with `kafka_common_KafkaFuture_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
@@ -130,12 +149,12 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_all(
     unsafe { h.ctx.handle_future(&h.result.all(), descriptions_map, destroy_map_element) }
 }
 
-/// Frees a result handle; null is a no-op. Futures already taken from it
+/// Frees a result handle; `NULL` is a no-op. Futures already taken from it
 /// stay valid.
 ///
 /// # Safety
 ///
-/// `self_` must be null or an owned result handle not yet destroyed, that
+/// `self_` must be `NULL` or an owned result handle not yet destroyed, that
 /// no other call uses at the same time; it is not used afterwards.
 #[ffi_guard]
 #[unsafe(no_mangle)]

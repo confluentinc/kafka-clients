@@ -20,12 +20,9 @@ use crate::common::protocol::Errors;
 kafka_error_type! {
     /// The preferred leader was not available.
     ///
-    /// Corresponds to Java's `PreferredLeaderNotAvailableException`, error code `Errors::PreferredLeaderNotAvailable`.
-    ///
-    /// Java `extends` chain:
-    ///    `PreferredLeaderNotAvailableException` -> `InvalidMetadataException` ->
-    ///   `RefreshRetriableException` -> `RetriableException` -> `ApiException` ->
-    ///   `KafkaException`
+    /// Error code `Errors::PreferredLeaderNotAvailable`. Java `extends` chain:
+    /// `PreferredLeaderNotAvailableException` -> `InvalidMetadataException` ->
+    /// `RefreshRetriableException` -> `RetriableException` -> `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.PreferredLeaderNotAvailableException")]
     PreferredLeaderNotAvailableError,
     code: Errors::PreferredLeaderNotAvailable,

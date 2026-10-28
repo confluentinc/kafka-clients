@@ -24,7 +24,7 @@ use crate::common::error::message_only_error;
 message_only_error! {
     /// Illegal argument error — an invalid argument was provided to a method.
     ///
-    /// Corresponds to Java's `java.lang.IllegalArgumentException`, a sibling of
+    /// Java's `java.lang.IllegalArgumentException`, a sibling of
     /// `KafkaException` rather than a subclass, so no predicate holds for it.
     // translates java.lang.IllegalArgumentException, a JDK runtime exception (CLAUDE.md §2)
     #[doc(alias = "rust-only")]

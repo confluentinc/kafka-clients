@@ -24,7 +24,7 @@ pub(crate) mod internals;
 // for external users. In Java these live in
 // `org.apache.kafka.common.header.internals` as `public class` declarations
 // — they are part of the public API surface despite being in an `internals`
-// package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
+// package. The translation rules keep the `internals` Rust module `pub(crate)`, so
 // we re-export the public types at the `common::header` level to make them
 // reachable from external code (matching Java's effective visibility).
 use crate::common::LocalIllegalStateError;
@@ -32,82 +32,106 @@ use crate::common::LocalIllegalStateError;
 pub use internals::{RecordHeader, RecordHeaders};
 
 /// A header is a key-value pair.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.Header`.
 #[doc(alias = "org.apache.kafka.common.header.Header")]
 pub trait Header {
     /// Returns the key of the header.
     ///
-    /// The key must not be null (always returns a valid string reference).
+    /// # Returns
+    ///
+    /// the header's key; must not be `None`.
     #[doc(alias = "org.apache.kafka.common.header.Header#key")]
     fn key(&self) -> &str;
 
     /// Returns the value of the header.
     ///
-    /// The value may be `None` (corresponding to Java's null).
+    /// # Returns
+    ///
+    /// the header's value; may be `None`.
     #[doc(alias = "org.apache.kafka.common.header.Header#value")]
     fn value(&self) -> Option<&[u8]>;
 }
 
-/// A mutable ordered collection of [`Header`] objects.
+/// A mutable ordered collection of [`Header`] objects. Note that multiple headers may have the same
+/// key.
 ///
-/// Note that multiple headers may have the same key. The order of headers
-/// is preserved in the order they were added.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.Headers`.
+/// The order of headers is preserved in the order they were added.
 #[doc(alias = "org.apache.kafka.common.header.Headers")]
 pub trait Headers {
     /// Adds a header (key inside), to the end, returning if the operation succeeded.
     ///
-    /// Translates Java's `Headers add(Header header)` (`Headers.java:34`). Java
-    /// overloads `add` with `add(String key, byte[] value)`; the two parameter
-    /// lists have nothing in common, so under CLAUDE.md §2 neither overload keeps
-    /// the plain name and both name their parameters after `_with_`.
+    /// # Arguments
+    ///
+    /// - `header` - the Header to be added.
     ///
     /// # Errors
     ///
-    /// Returns an error if headers are in a read-only state.
+    /// - [`Error::is_local_illegal_state_error`](crate::common::Error::is_local_illegal_state_error)
+    ///   if headers are in a read-only state.
     #[doc(alias = "org.apache.kafka.common.header.Headers#add")]
     fn add_with_header(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
     ///
-    /// Translates Java's `Headers add(String key, byte[] value)`
-    /// (`Headers.java:44`) — see [`add_with_header`](Headers::add_with_header) for why
-    /// neither overload keeps the plain name.
+    /// # Arguments
     ///
-    /// The key and value are borrowed; the allocation is performed internally.
+    /// - `key` - of the header to be added.
+    /// - `value` - of the header to be added; may be `None`.
     ///
     /// # Errors
     ///
-    /// Returns an error if headers are in a read-only state.
+    /// - [`Error::is_local_illegal_state_error`](crate::common::Error::is_local_illegal_state_error)
+    ///   if headers are in a read-only state.
+    ///
+    /// # Translation notes
+    ///
+    /// The key and value are borrowed and copied into the new header.
     #[doc(alias = "org.apache.kafka.common.header.Headers#add")]
     fn add_with_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.
     ///
+    /// # Arguments
+    ///
+    /// - `key` - to remove all headers for.
+    ///
     /// # Errors
     ///
-    /// Returns an error if headers are in a read-only state.
+    /// - [`Error::is_local_illegal_state_error`](crate::common::Error::is_local_illegal_state_error)
+    ///   if headers are in a read-only state.
     #[doc(alias = "org.apache.kafka.common.header.Headers#remove")]
     fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError>;
 
     /// Returns just one (the very last) header for the given key, if present.
+    ///
+    /// # Arguments
+    ///
+    /// - `key` - to get the last header for.
+    ///
+    /// # Returns
+    ///
+    /// this last header matching the given key, returns `None` if not present.
     #[doc(alias = "org.apache.kafka.common.header.Headers#lastHeader")]
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;
 
-    /// Returns all headers for the given key, in the order they were added in.
+    /// Returns all headers for the given key, in the order they were added in, if present.
     ///
-    /// Translates Java's `Iterable<Header> headers(String key)`
-    /// (`Headers.java:71`), which is not overloaded — so the plain translated
-    /// name is the whole name (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `key` - to return the headers for.
+    ///
+    /// # Returns
+    ///
+    /// all headers for the given key, in the order they were added in, if NO headers are present an
+    /// empty list is returned.
     #[doc(alias = "org.apache.kafka.common.header.Headers#headers")]
     fn headers(&self, key: &str) -> Vec<&RecordHeader>;
 
-    /// Returns all headers as a slice.
+    /// Returns all headers as a slice, in the order they were added in.
     ///
-    /// If no headers are present an empty slice is returned.
+    /// # Returns
+    ///
+    /// the headers, if NO headers are present an empty slice is returned.
     #[doc(alias = "org.apache.kafka.common.header.Headers#toArray")]
     fn to_array(&self) -> &[RecordHeader];
 

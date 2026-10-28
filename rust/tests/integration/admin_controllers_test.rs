@@ -234,7 +234,7 @@ async fn assert_active_controller_rejected<A: AdminBackend>(admin: &A, backend: 
 }
 
 /// The `usingBootstrapControllers = true` arm of
-/// `KRaftClusterTest.testUnregisterControllerError` (`KRaftClusterTest.java:716-746`):
+/// `org.apache.kafka.server.KRaftClusterTest#testUnregisterControllerError`:
 /// (a) and (b) through `bootstrap.controllers`. `unregisterController` uses
 /// `LeastLoadedBrokerOrActiveKController`, so the request goes to the active
 /// controller itself.

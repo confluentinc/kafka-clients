@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::delete_records`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.DeleteRecordsResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::admin::DeletedRecords;
 use crate::common::{KafkaFuture, TopicPartition};
 
 /// The result of `Admin::delete_records`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.DeleteRecordsResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult")]
 pub struct DeleteRecordsResult {
@@ -32,19 +28,23 @@ pub struct DeleteRecordsResult {
 
 impl DeleteRecordsResult {
     /// Creates a result from the per-partition futures.
+    ///
+    /// # Arguments
+    ///
+    /// - `futures` - the future of each partition.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#DeleteRecordsResult")]
     pub fn new(futures: HashMap<TopicPartition, KafkaFuture<DeletedRecords>>) -> Self {
         Self { futures }
     }
 
-    /// Return a map from topic partition to futures which can be used to check
+    /// Returns a map from topic partition to futures which can be used to check
     /// the status of individual deletions.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#lowWatermarks")]
     pub fn low_watermarks(&self) -> &HashMap<TopicPartition, KafkaFuture<DeletedRecords>> {
         &self.futures
     }
 
-    /// Return a future which succeeds only if all the records deletions succeed.
+    /// Returns a future which succeeds only if all the records deletions succeed.
     #[doc(alias = "org.apache.kafka.clients.admin.DeleteRecordsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().map(|f| f.then_apply(|_| Ok(()))).collect())

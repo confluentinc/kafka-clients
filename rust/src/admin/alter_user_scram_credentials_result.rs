@@ -13,18 +13,12 @@
 // limitations under the License.
 
 //! The result of the `Admin::alter_user_scram_credentials` call.
-//!
-//! Corresponds to
-//! `org.apache.kafka.clients.admin.AlterUserScramCredentialsResult`.
 
 use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 
 /// The result of the `Admin::alter_user_scram_credentials` call.
-///
-/// Corresponds to
-/// `org.apache.kafka.clients.admin.AlterUserScramCredentialsResult`.
 #[derive(Debug, Clone)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult")]
 pub struct AlterUserScramCredentialsResult {
@@ -34,8 +28,10 @@ pub struct AlterUserScramCredentialsResult {
 impl AlterUserScramCredentialsResult {
     /// Creates a new result from the per-user futures.
     ///
-    /// * `futures` — the required map from user names to futures representing the
-    ///   results of the alteration(s) for each user
+    /// # Arguments
+    ///
+    /// - `futures` - the required map from user names to futures representing the results of the
+    ///   alteration(s) for each user
     #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#AlterUserScramCredentialsResult")]
     pub fn new(futures: HashMap<String, KafkaFuture<()>>) -> Self {
         Self { futures }
@@ -43,8 +39,6 @@ impl AlterUserScramCredentialsResult {
 
     /// Returns a map from user names to futures, which can be used to check the
     /// status of the alteration(s) for each user.
-    ///
-    /// Mirrors `AlterUserScramCredentialsResult.values()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#values")]
     pub fn values(&self) -> &HashMap<String, KafkaFuture<()>> {
         &self.futures
@@ -52,8 +46,6 @@ impl AlterUserScramCredentialsResult {
 
     /// Returns a future which succeeds only if all the user SCRAM credential
     /// alterations succeed.
-    ///
-    /// Mirrors `AlterUserScramCredentialsResult.all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterUserScramCredentialsResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

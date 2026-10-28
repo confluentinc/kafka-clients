@@ -47,18 +47,28 @@ unsafe fn handle<'a>(self_: *const kafka_common_metrics_stats_SimpleRate_t) -> &
     unsafe { StatHandle::from_ptr(self_ as *const StatHandle<SimpleRate>) }
 }
 
-/// `new SimpleRate()`. Owned, freed with
-/// [`kafka_common_metrics_stats_SimpleRate_destroy`].
+/// `new SimpleRate()`.
+///
+/// # Safety
+///
+/// The returned handle is owned by the caller, freed with
+/// `kafka_common_metrics_stats_SimpleRate_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_metrics_stats_SimpleRate_new() -> *mut kafka_common_metrics_stats_SimpleRate_t {
     StatHandle::boxed(SimpleRate::new()) as *mut kafka_common_metrics_stats_SimpleRate_t
 }
 
-/// `windowSize(MetricConfig config, long now)`: the elapsed window in
-/// milliseconds.
+/// `windowSize(MetricConfig config, long now)`.
 ///
-/// A caught Rust panic returns -1, which no window size is.
+/// # Parameters
+///
+/// - `config` - The metric configuration.
+/// - `now` - The current time in milliseconds.
+///
+/// # Returns
+///
+/// The elapsed window in milliseconds; -1 on a caught Rust panic, which no window size is.
 ///
 /// # Safety
 ///
@@ -80,12 +90,14 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_window_size(
         .window_size(unsafe { metric_config_ref(config) }, now)
 }
 
-/// The stat as the `Stat` interface: a borrowed view valid as long as the
-/// handle, never passed to an interface `_destroy`.
+/// Returns the stat as the `Stat` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`, and is never passed to an interface
+/// `_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
@@ -97,12 +109,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Stat(
     unsafe { handle(self_) }.as_stat()
 }
 
-/// The stat as the `Measurable` interface: a borrowed view valid as long as
-/// the handle.
+/// Returns the stat as the `Measurable` interface.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
@@ -114,12 +127,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_Measurable(
     unsafe { handle(self_) }.as_measurable()
 }
 
-/// The stat as the `MetricValueProvider` interface (Java's `Measurable`
-/// extends it): a borrowed view valid as long as the handle.
+/// Returns the stat as the `MetricValueProvider` interface (Java's `Measurable` extends it).
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MetricValueProvider(
@@ -131,12 +145,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MetricValuePr
     unsafe { handle(self_) }.as_metric_value_provider()
 }
 
-/// The stat as the `MeasurableStat` interface: a borrowed view valid as
-/// long as the handle; a sensor it is added to shares the stat.
+/// Returns the stat as the `MeasurableStat` interface; a sensor it is added to shares the stat.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned view is borrowed, valid as long as `self_`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableStat(
@@ -148,11 +163,13 @@ pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate__as_MeasurableSta
     unsafe { handle(self_) }.as_measurable_stat()
 }
 
-/// `toString()`, as an owned string freed with `kafka_string_destroy`.
+/// Returns `toString()`, as a string.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid handle of this class.
+///
+/// The returned string is owned by the caller, freed with `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_stats_SimpleRate_to_string(

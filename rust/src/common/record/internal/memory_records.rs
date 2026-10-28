@@ -105,8 +105,8 @@ impl MemoryRecords {
     /// Each batch is a `DefaultRecordBatch` containing the full batch header
     /// and record data.
     ///
-    /// Corresponds to Java's `batches()` / `batchIterator()`
-    /// (`MemoryRecords.java:110-113`), a `ByteBufferLogInputStream` walk with no
+    /// Corresponds to Java's `batches()` / `MemoryRecords#batchIterator`, a
+    /// `ByteBufferLogInputStream` walk with no
     /// message size limit. See [`BatchIterator`] for how a header the stream
     /// rejects ends the iteration.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#batches")]
@@ -117,7 +117,7 @@ impl MemoryRecords {
     /// Returns an iterator over all individual records across all batches.
     ///
     /// A batch this client cannot parse contributes no records. Java's
-    /// `RecordBatchIterator` throws instead (`DefaultRecordBatch.java:645-652`), so
+    /// `RecordBatchIterator` throws instead (`DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`), so
     /// the failure is logged here rather than passed silently: an `Iterator` cannot
     /// report it, and the alternative — a fallible signature — would reach eight
     /// call sites for a case only a corrupt buffer produces. The one production
@@ -149,8 +149,7 @@ impl MemoryRecords {
     /// Returns the first batch size including `LOG_OVERHEAD` if the buffer
     /// contains the header up to the magic byte, `None` otherwise.
     ///
-    /// Corresponds to Java's `MemoryRecords.firstBatchSize()`
-    /// (`MemoryRecords.java:121-125`): `None` below `HEADER_SIZE_UP_TO_MAGIC`
+    /// Corresponds to Java's `MemoryRecords#firstBatchSize`: `None` below `HEADER_SIZE_UP_TO_MAGIC`
     /// bytes, else `ByteBufferLogInputStream.nextBatchSize()` with no message size
     /// limit.
     ///
@@ -170,8 +169,7 @@ impl MemoryRecords {
     /// Returns `true` if the buffer holds at least one *complete* record batch.
     ///
     /// Corresponds to Java's `records().batches().iterator().hasNext()`, which is
-    /// `ByteBufferLogInputStream.nextBatch() != null`
-    /// (`ByteBufferLogInputStream.java:41-46`):
+    /// `ByteBufferLogInputStream#nextBatch` returning non-null:
     ///
     /// ```java
     /// public MutableRecordBatch nextBatch() {
@@ -185,7 +183,7 @@ impl MemoryRecords {
     /// `nextBatchSize()`, which only validates the header up to the magic byte —
     /// **plus** the completeness test `remaining < batchSize`. It deliberately
     /// does not go through [`first_batch_size`](Self::first_batch_size), whose
-    /// `HEADER_SIZE_UP_TO_MAGIC` early return (`MemoryRecords.java:122-123`) is
+    /// `HEADER_SIZE_UP_TO_MAGIC` early return (in `MemoryRecords#firstBatchSize`) is
     /// not part of `nextBatch()`: 12 to 16 bytes carrying a corrupt size make
     /// `hasNext()` throw, where `firstBatchSize()` answers `null`. The distinction
     /// matters: a buffer holding an intact header that declares `N` bytes but
@@ -197,8 +195,8 @@ impl MemoryRecords {
     ///
     /// Propagates the `CorruptMessage` error `next_batch_size` raises for an
     /// invalid record size or magic byte, exactly as Java's
-    /// `hasNext()` propagates `CorruptRecordException` out of `nextBatchSize()`
-    /// (`ByteBufferLogInputStream.java:73`, `:76`, `:84`). A corrupt header is
+    /// `hasNext()` propagates `CorruptRecordException` out of
+    /// `ByteBufferLogInputStream#nextBatchSize`. A corrupt header is
     /// NOT "no batch"; conflating the two loses both the error class and the
     /// message that says what is wrong.
     pub fn has_complete_first_batch(&self) -> Result<bool, Error> {
@@ -230,8 +228,7 @@ impl MemoryRecords {
 
     // -- Builder factory methods --
 
-    // Java's nine `builder` overloads
-    // (`MemoryRecords.java:475,482,496,507,520,531,543,556,571`) have the
+    // Java's nine `org.apache.kafka.common.record.internal.MemoryRecords#builder` overloads have the
     // parameter-name intersection {buffer, compression, baseOffset}, and NO
     // overload has exactly that signature — so under CLAUDE.md §2 nobody keeps
     // the plain translated name `builder`, and every form is suffixed with the
@@ -246,17 +243,20 @@ impl MemoryRecords {
     // [`Self::builder_with_initial_capacity_magic`] and
     // [`Self::builder_with_buffer_magic`] would collide.
     //
-    // Java's `:520`, `:531`, `:543`, `:556` and `:571` each add four or more
-    // parameters, past §2's cap of three, so all five are served by
-    // [`Self::builder_with_options`] and [`MemoryRecordsBuilderOptions`]. `:520`,
-    // `:531` and `:556` have no Rust caller and are not separately translated;
-    // the options builder expresses them (DoD #2).
+    // Java's `builder(ByteBuffer,byte,Compression,TimestampType,long,long,int)`,
+    // `builder(ByteBuffer,Compression,long,long,short,int,boolean)`,
+    // `builder(ByteBuffer,byte,Compression,TimestampType,long,long,long,short,int)`,
+    // `builder(ByteBuffer,byte,Compression,TimestampType,long,long,long,short,int,boolean,int)` and
+    // `builder(ByteBuffer,byte,Compression,TimestampType,long,long,long,short,int,boolean,boolean,int)`
+    // each add four or more parameters, past §2's cap of three, so all five are served by
+    // [`Self::builder_with_options`] and [`MemoryRecordsBuilderOptions`]. The first, second and
+    // fourth have no Rust caller and are not separately translated; the options builder expresses
+    // them (DoD #2).
 
     /// Create a builder with default parameters.
     ///
-    /// Corresponds to Java's `builder(ByteBuffer, Compression, TimestampType,
-    /// long)` (`MemoryRecords.java:475`), with the buffer allocated here from
-    /// `initial_capacity`.
+    /// Corresponds to Java's `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long)`,
+    /// with the buffer allocated here from `initial_capacity`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity(
         initial_capacity: usize,
@@ -275,9 +275,8 @@ impl MemoryRecords {
 
     /// Create a builder with a specific magic value.
     ///
-    /// Corresponds to Java's `builder(ByteBuffer, byte, Compression,
-    /// TimestampType, long)` (`MemoryRecords.java:507`), with the buffer
-    /// allocated here from `initial_capacity`.
+    /// Corresponds to Java's `MemoryRecords#builder(ByteBuffer,byte,Compression,TimestampType,long)`,
+    /// with the buffer allocated here from `initial_capacity`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_magic(
         initial_capacity: usize,
@@ -300,8 +299,7 @@ impl MemoryRecords {
 
     /// Create a builder using a pre-allocated buffer.
     ///
-    /// Corresponds to Java's `builder(ByteBuffer, byte, Compression,
-    /// TimestampType, long)` (`MemoryRecords.java:507`) taking the buffer
+    /// Corresponds to Java's `MemoryRecords#builder(ByteBuffer,byte,Compression,TimestampType,long)` taking the buffer
     /// directly — e.g. one from a buffer pool — rather than allocating it. The
     /// `buffer` token in the name discriminates it from
     /// [`Self::builder_with_initial_capacity_magic`], which translates the same
@@ -335,9 +333,8 @@ impl MemoryRecords {
 
     /// Create a builder with a max size limit.
     ///
-    /// Corresponds to Java's `builder(ByteBuffer, Compression, TimestampType,
-    /// long, int)` (`MemoryRecords.java:482`), with the buffer allocated here
-    /// from `initial_capacity`.
+    /// Corresponds to Java's `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long,int)`,
+    /// with the buffer allocated here from `initial_capacity`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_max_size(
         initial_capacity: usize,
@@ -360,8 +357,8 @@ impl MemoryRecords {
 
     /// Create a builder with magic, compression, timestamp type, and log append time.
     ///
-    /// Corresponds to Java's `builder(ByteBuffer, byte, Compression,
-    /// TimestampType, long, long)` (`MemoryRecords.java:496`), with the buffer
+    /// Corresponds to Java's
+    /// `MemoryRecords#builder(ByteBuffer,byte,Compression,TimestampType,long,long)`, with the buffer
     /// allocated here from `initial_capacity`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#builder")]
     pub fn builder_with_initial_capacity_magic_log_append_time(
@@ -395,9 +392,9 @@ impl MemoryRecords {
     ///   nine parameters beyond the group's intersection, past CLAUDE.md §2's
     ///   cap of three.
     ///
-    /// Corresponds to Java's widest `builder` overload (`MemoryRecords.java:571`)
-    /// and, through the builder's defaults, to `:520`, `:531`, `:543` and `:556`
-    /// as well. Setting `delete_horizon_ms` selects
+    /// Corresponds to Java's widest `MemoryRecords#builder` overload, the one taking twelve
+    /// parameters, and, through the builder's defaults, to the other four overloads that add four
+    /// or more parameters as well. Setting `delete_horizon_ms` selects
     /// [`MemoryRecordsBuilder::new`] over
     /// [`MemoryRecordsBuilder::with_default`]; Java has no `builder` overload
     /// carrying a delete horizon, only the `MemoryRecordsBuilder` constructor
@@ -460,7 +457,8 @@ impl MemoryRecords {
     }
 
     /// The `logAppendTime` every Java `builder` overload that does not take one
-    /// computes for itself (`MemoryRecords.java:487-489`, `:511-513`).
+    /// computes for itself (in `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long,int)`
+    /// and `MemoryRecords#builder(ByteBuffer,byte,Compression,TimestampType,long)`).
     fn default_log_append_time(timestamp_type: TimestampType) -> i64 {
         if timestamp_type == TimestampType::LogAppendTime {
             current_time_millis()
@@ -471,26 +469,27 @@ impl MemoryRecords {
 
     // -- Convenience factory methods for creating records directly --
 
-    // Java's eight `withRecords` overloads
-    // (`MemoryRecords.java:588,592,598,602,607,611,656,663`) have the
-    // parameter-name intersection {compression, records}, and `:588` has
-    // exactly that signature — so under CLAUDE.md §2 it keeps the plain
-    // translated name and every sibling is suffixed with the parameters it adds
-    // beyond the intersection, in Java declaration order. `:663` adds eight,
-    // past §2's cap of three, so it is served by
+    // Java's eight `org.apache.kafka.common.record.internal.MemoryRecords#withRecords` overloads
+    // have the parameter-name intersection {compression, records}, and
+    // `withRecords(Compression,SimpleRecord[])` has exactly that signature — so under CLAUDE.md §2
+    // it keeps the plain translated name and every sibling is suffixed with the parameters it adds
+    // beyond the intersection, in Java declaration order.
+    // `withRecords(byte,long,Compression,TimestampType,long,short,int,int,boolean,SimpleRecord[])`
+    // adds eight, past §2's cap of three, so it is served by
     // [`Self::with_records_with_options`] and [`MemoryRecordsOptions`] rather
     // than by a name listing them all.
     //
-    // Three Java overloads have no Rust caller and are not translated: `:592`
-    // (`compression, partitionLeaderEpoch, records`), `:602`
-    // (`initialOffset, compression, records`) and `:607`
-    // (`magic, initialOffset, compression, records`). That is a DoD #2
+    // Three Java overloads have no Rust caller and are not translated:
+    // `withRecords(Compression,int,SimpleRecord[])` (`compression, partitionLeaderEpoch, records`),
+    // `withRecords(long,Compression,SimpleRecord[])` (`initialOffset, compression, records`) and
+    // `withRecords(byte,long,Compression,SimpleRecord[])` (`magic, initialOffset, compression,
+    // records`). That is a DoD #2
     // completeness gap, not a naming one.
 
     /// Create a `MemoryRecords` with the given records using default settings.
     ///
-    /// Corresponds to Java's `withRecords(Compression, SimpleRecord...)`
-    /// (`MemoryRecords.java:588`) — the overload whose parameters are the
+    /// Corresponds to Java's `MemoryRecords#withRecords(Compression,SimpleRecord[])` — the
+    /// overload whose parameters are the
     /// group's intersection, which is why it keeps the plain name.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records(compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
@@ -499,8 +498,7 @@ impl MemoryRecords {
 
     /// Create a `MemoryRecords` with a specific magic value.
     ///
-    /// Corresponds to Java's `withRecords(byte, Compression, SimpleRecord...)`
-    /// (`MemoryRecords.java:598`).
+    /// Corresponds to Java's `MemoryRecords#withRecords(byte,Compression,SimpleRecord[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_magic(magic: i8, compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
         Self::with_records_with_magic_initial_offset_timestamp_type(
@@ -514,8 +512,8 @@ impl MemoryRecords {
 
     /// Create a `MemoryRecords` with records starting at a specific offset.
     ///
-    /// Corresponds to Java's `withRecords(byte, long, Compression,
-    /// TimestampType, SimpleRecord...)` (`MemoryRecords.java:656`).
+    /// Corresponds to Java's
+    /// `MemoryRecords#withRecords(byte,long,Compression,TimestampType,SimpleRecord[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_magic_initial_offset_timestamp_type(
         magic: i8,
@@ -538,8 +536,7 @@ impl MemoryRecords {
 
     /// Create a `MemoryRecords` with records at a specific offset and partition leader epoch.
     ///
-    /// Corresponds to Java's `withRecords(long, Compression, int,
-    /// SimpleRecord...)` (`MemoryRecords.java:611`).
+    /// Corresponds to Java's `MemoryRecords#withRecords(long,Compression,int,SimpleRecord[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub fn with_records_with_initial_offset_partition_leader_epoch(
         initial_offset: i64,
@@ -560,11 +557,13 @@ impl MemoryRecords {
 
     /// Create idempotent records.
     ///
-    /// Corresponds to Java's `withIdempotentRecords(Compression, long, short,
-    /// int, SimpleRecord...)` (`MemoryRecords.java:616`) — the overload whose
-    /// parameters are that group's intersection, which is why it keeps the
-    /// plain name. Java's other two (`:622`, `:629`) have no Rust caller and are
-    /// not translated (DoD #2).
+    /// Corresponds to Java's
+    /// `MemoryRecords#withIdempotentRecords(Compression,long,short,int,SimpleRecord[])` — the
+    /// overload whose parameters are that group's intersection, which is why it keeps the
+    /// plain name. Java's other two
+    /// (`withIdempotentRecords(byte,long,Compression,long,short,int,int,SimpleRecord[])`,
+    /// `withIdempotentRecords(long,Compression,long,short,int,int,SimpleRecord[])`) have no Rust
+    /// caller and are not translated (DoD #2).
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withIdempotentRecords")]
     pub fn with_idempotent_records(
         compression: Compression,
@@ -587,11 +586,13 @@ impl MemoryRecords {
 
     /// Create transactional records.
     ///
-    /// Corresponds to Java's `withTransactionalRecords(Compression, long,
-    /// short, int, SimpleRecord...)` (`MemoryRecords.java:636`) — the overload
-    /// whose parameters are that group's intersection, which is why it keeps the
-    /// plain name. Java's other two (`:642`, `:649`) have no Rust caller and are
-    /// not translated (DoD #2).
+    /// Corresponds to Java's
+    /// `MemoryRecords#withTransactionalRecords(Compression,long,short,int,SimpleRecord[])` — the
+    /// overload whose parameters are that group's intersection, which is why it keeps the
+    /// plain name. Java's other two
+    /// (`withTransactionalRecords(byte,long,Compression,long,short,int,int,SimpleRecord[])`,
+    /// `withTransactionalRecords(long,Compression,long,short,int,int,SimpleRecord[])`) have no
+    /// Rust caller and are not translated (DoD #2).
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withTransactionalRecords")]
     pub fn with_transactional_records(
         compression: Compression,
@@ -623,9 +624,8 @@ impl MemoryRecords {
     ///   parameters beyond the group's intersection, past CLAUDE.md §2's cap of
     ///   three.
     ///
-    /// Corresponds to Java's `withRecords(byte, long, Compression,
-    /// TimestampType, long, short, int, int, boolean, SimpleRecord...)`
-    /// (`MemoryRecords.java:663`).
+    /// Corresponds to Java's
+    /// `MemoryRecords#withRecords(byte,long,Compression,TimestampType,long,short,int,int,boolean,SimpleRecord[])`.
     #[doc(alias = "org.apache.kafka.common.record.internal.MemoryRecords#withRecords")]
     pub(crate) fn with_records_with_options(options: MemoryRecordsOptions<'_>) -> MemoryRecords {
         let MemoryRecordsOptions {
@@ -794,7 +794,7 @@ impl MemoryRecords {
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
 /// CLAUDE.md §2's cap on derived overload names: Java's `builder` group has the
 /// parameter-name intersection {`buffer`, `compression`, `baseOffset`}, and its
-/// five widest overloads (`MemoryRecords.java:520,531,543,556,571`) each add
+/// five widest overloads (`MemoryRecords#builder` with seven or more parameters) each add
 /// four or more parameters beyond it — so the cap fires and this struct becomes
 /// the method's *only* parameter, carrying every Java parameter.
 ///
@@ -813,15 +813,19 @@ pub(crate) struct MemoryRecordsBuilderOptions {
     /// group's intersection, hence mandatory.
     pub initial_capacity: usize,
     /// The record format version. Java's `magic`; starts at
-    /// [`RecordBatch::CURRENT_MAGIC_VALUE`], the value `:475`, `:482` and `:531`
-    /// pass on the caller's behalf.
+    /// [`RecordBatch::CURRENT_MAGIC_VALUE`], the value
+    /// `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long)`,
+    /// `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long,int)` and
+    /// `MemoryRecords#builder(ByteBuffer,Compression,long,long,short,int,boolean)` pass on the
+    /// caller's behalf.
     pub magic: i8,
     /// The compression to apply. Java's `compression` — in the group's
     /// intersection, hence mandatory.
     pub compression: Compression,
     /// How record timestamps are interpreted. Java's `timestampType`; starts at
-    /// [`TimestampType::CreateTime`], the value `:531` passes on the caller's
-    /// behalf.
+    /// [`TimestampType::CreateTime`], the value
+    /// `MemoryRecords#builder(ByteBuffer,Compression,long,long,short,int,boolean)` passes on the
+    /// caller's behalf.
     pub timestamp_type: TimestampType,
     /// The offset of the first record. Java's `baseOffset` — in the group's
     /// intersection, hence mandatory.
@@ -829,7 +833,8 @@ pub(crate) struct MemoryRecordsBuilderOptions {
     /// The log-append timestamp. Java's `logAppendTime`; starts at the value
     /// every overload that does not take one computes for itself — `now()` for
     /// [`TimestampType::LogAppendTime`], else [`RecordBatch::NO_TIMESTAMP`]
-    /// (`MemoryRecords.java:487-489`). Because that default reads
+    /// (`MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long,int)`). Because that
+    /// default reads
     /// `timestamp_type`, setting `timestamp_type` after this field still yields
     /// the right value: the derivation happens in
     /// [`MemoryRecordsBuilderOptionsBuilder::build`], not in the setter.
@@ -852,10 +857,11 @@ pub(crate) struct MemoryRecordsBuilderOptions {
     /// The partition leader epoch. Java's `partitionLeaderEpoch`; starts at
     /// [`RecordBatch::NO_PARTITION_LEADER_EPOCH`].
     pub partition_leader_epoch: i32,
-    /// The byte budget for the batch. Java's `writeLimit`, which `:571` fills
-    /// with `buffer.remaining()`; starts at `initial_capacity`, the Rust
-    /// equivalent of that expression. This is also where Java's `:482` `maxSize`
-    /// lands.
+    /// The byte budget for the batch. Java's `writeLimit`, which
+    /// `MemoryRecords#builder(ByteBuffer,byte,Compression,TimestampType,long,long,long,short,int,boolean,int)`
+    /// fills with `buffer.remaining()`; starts at `initial_capacity`, the Rust equivalent of that
+    /// expression. This is also where the `maxSize` of Java's
+    /// `MemoryRecords#builder(ByteBuffer,Compression,TimestampType,long,int)` lands.
     pub write_limit: usize,
     /// The delete horizon, or `None` for a batch without one. No Java `builder`
     /// overload carries this; it reaches `MemoryRecordsBuilder`'s own
@@ -959,8 +965,9 @@ impl MemoryRecordsBuilderOptionsBuilder {
     // No Rust caller sets this today (outside the unit tests that go through
     // `builder_with_options` directly). Kept because CLAUDE.md §2 requires a
     // fluent setter for *every* optional parameter of an `Options` struct, so
-    // the builder can express Java's `:520`/`:531`/`:543`/`:556`/`:571`
-    // overloads; the `dead_code` lint sees only the subset today's callers use.
+    // the builder can express Java's five widest
+    // `org.apache.kafka.common.record.internal.MemoryRecords#builder` overloads; the
+    // `dead_code` lint sees only the subset today's callers use.
     /// Sets [`MemoryRecordsBuilderOptions::producer_id`].
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn set_producer_id(mut self, producer_id: i64) -> Self {
@@ -1066,7 +1073,9 @@ impl MemoryRecordsBuilderOptionsBuilder {
 ///
 /// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
 /// CLAUDE.md §2's cap on derived overload names: Java's widest `withRecords`
-/// overload (`MemoryRecords.java:663`) adds eight parameters beyond the
+/// overload
+/// (`MemoryRecords#withRecords(byte,long,Compression,TimestampType,long,short,int,int,boolean,SimpleRecord[])`)
+/// adds eight parameters beyond the
 /// `withRecords` group's parameter-name intersection — which is
 /// {`compression`, `records`} — so the cap fires and this struct becomes the
 /// method's *only* parameter, carrying every Java parameter.
@@ -1082,22 +1091,25 @@ impl MemoryRecordsBuilderOptionsBuilder {
 #[non_exhaustive]
 pub(crate) struct MemoryRecordsOptions<'a> {
     /// The record format version. Java's `magic`; starts at
-    /// [`RecordBatch::CURRENT_MAGIC_VALUE`], the value `:588` passes on the
-    /// caller's behalf.
+    /// [`RecordBatch::CURRENT_MAGIC_VALUE`], the value
+    /// `MemoryRecords#withRecords(Compression,SimpleRecord[])` passes on the caller's behalf.
     pub magic: i8,
     /// The base offset of the first record. Java's `initialOffset`; starts at
-    /// `0`, the value `:598` passes on the caller's behalf.
+    /// `0`, the value `MemoryRecords#withRecords(byte,Compression,SimpleRecord[])` passes on the
+    /// caller's behalf.
     pub initial_offset: i64,
     /// The compression to apply. Java's `compression` — in the group's
     /// intersection, hence mandatory.
     pub compression: Compression,
     /// How record timestamps are interpreted. Java's `timestampType`; starts at
-    /// [`TimestampType::CreateTime`], the value `:656` passes on the caller's
-    /// behalf.
+    /// [`TimestampType::CreateTime`], the value
+    /// `MemoryRecords#withRecords(byte,long,Compression,TimestampType,SimpleRecord[])` passes on
+    /// the caller's behalf.
     pub timestamp_type: TimestampType,
     /// The producer id. Java's `producerId`; starts at
-    /// [`RecordBatch::NO_PRODUCER_ID`], the value `:656` passes on the caller's
-    /// behalf.
+    /// [`RecordBatch::NO_PRODUCER_ID`], the value
+    /// `MemoryRecords#withRecords(byte,long,Compression,TimestampType,SimpleRecord[])` passes on
+    /// the caller's behalf.
     pub producer_id: i64,
     /// The producer epoch. Java's `producerEpoch`; starts at
     /// [`RecordBatch::NO_PRODUCER_EPOCH`].
@@ -1218,7 +1230,8 @@ impl<'a> MemoryRecordsOptionsBuilder<'a> {
 
     /// Sets [`MemoryRecordsOptions::records`], a mandatory parameter:
     /// [`Self::build`] returns an error if it was not set. An empty slice is a
-    /// valid value — Java's `:663` returns `MemoryRecords.EMPTY` for it — so
+    /// valid value — Java's widest `MemoryRecords#withRecords` returns `MemoryRecords.EMPTY`
+    /// for it — so
     /// "not set" and "set to empty" stay distinct.
     pub(crate) fn set_records(mut self, records: &'a [SimpleRecord]) -> Self {
         self.records = Some(records);
@@ -1285,7 +1298,7 @@ impl std::fmt::Display for MemoryRecords {
 /// Iterator over record batches in a `MemoryRecords`.
 ///
 /// Corresponds to Java's `RecordBatchIterator` over a `ByteBufferLogInputStream`
-/// (`RecordBatchIterator.java:26-47`, `MemoryRecords.java:110-113`): every header
+/// (`RecordBatchIterator`, `MemoryRecords#batchIterator`): every header
 /// goes through [`ByteBufferLogInputStream::next_batch`] before its batch is
 /// yielded.
 ///
@@ -1845,7 +1858,7 @@ mod tests {
 
     /// An intact header declaring more bytes than are present. This is the case
     /// Java's `nextBatch()` rejects via `remaining < batchSize`
-    /// (`ByteBufferLogInputStream.java:44-45`) but `nextBatchSize()` accepts —
+    /// (in `ByteBufferLogInputStream#nextBatch`) but `nextBatchSize()` accepts —
     /// so `first_batch_size` alone reports a batch where `hasNext()` is false.
     /// A broker cutting a fetch response at `max.partition.fetch.bytes`
     /// produces exactly this.
@@ -1871,7 +1884,7 @@ mod tests {
     }
 
     /// A record size below the minimum overhead: Java's `nextBatchSize()`
-    /// throws `CorruptRecordException` (`ByteBufferLogInputStream.java:72-74`),
+    /// throws `CorruptRecordException` (`ByteBufferLogInputStream#nextBatchSize`),
     /// so `hasNext()` propagates it rather than answering "no batch". Folding
     /// the two would relabel a retriable `CORRUPT_MESSAGE` as something else.
     #[test]
@@ -1884,7 +1897,7 @@ mod tests {
     }
 
     /// The magic-byte half of the same check
-    /// (`ByteBufferLogInputStream.java:83-84`).
+    /// (`ByteBufferLogInputStream#nextBatchSize`).
     #[test]
     fn test_has_complete_first_batch_propagates_corrupt_magic() {
         let mut buf = vec![0u8; AbstractRecords::HEADER_SIZE_UP_TO_MAGIC];
@@ -1902,9 +1915,9 @@ mod tests {
     }
 
     /// Java's `firstBatchSize()` returns `null` below `HEADER_SIZE_UP_TO_MAGIC`
-    /// bytes before it looks at the size (`MemoryRecords.java:122-123`), while
-    /// `hasNext()` runs `nextBatchSize()` directly, which checks the size from
-    /// `LOG_OVERHEAD` bytes on (`ByteBufferLogInputStream.java:68-77`). So the
+    /// bytes before it looks at the size, while
+    /// `hasNext()` runs `ByteBufferLogInputStream#nextBatchSize` directly, which checks the size
+    /// from `LOG_OVERHEAD` bytes on. So the
     /// same short buffer with a corrupt size is "no size yet" to one and an error
     /// to the other, and `has_complete_first_batch` must not be built on
     /// `first_batch_size`.
@@ -1971,7 +1984,7 @@ mod tests {
     /// whole iteration or yielding garbage.
     ///
     /// Java's `RecordBatchIterator` throws instead
-    /// (`DefaultRecordBatch.java:645-652`); Rust cannot report from an
+    /// (`DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`); Rust cannot report from an
     /// `Iterator`, so the failure is logged and the batch skipped — the
     /// deviation documented on [`MemoryRecords::records`]. This pins the
     /// contract that the *following* well-formed batch is still iterated, which

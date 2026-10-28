@@ -18,13 +18,17 @@ use crate::common::error::kafka_error_type;
 use crate::common::protocol::Errors;
 
 kafka_error_type! {
-    /// The coordinator is not available.
+    /// In the context of the group coordinator, the broker returns this error code for metadata or
+    /// offset commit requests if the group metadata topic has not been created yet.
     ///
-    /// Corresponds to Java's `CoordinatorNotAvailableException`, error code `Errors::CoordinatorNotAvailable`.
+    /// In the context of the transactional coordinator, this error will be returned if the
+    /// underlying transactional log is under replicated or if an append to the log times out.
     ///
-    /// Java `extends` chain:
-    ///    `CoordinatorNotAvailableException` -> `RefreshRetriableException` ->
-    ///   `RetriableException` -> `ApiException` -> `KafkaException`
+    /// # Translation notes
+    ///
+    /// Error code `Errors::CoordinatorNotAvailable`. Java `extends` chain:
+    /// `CoordinatorNotAvailableException` -> `RefreshRetriableException` -> `RetriableException` ->
+    /// `ApiException` -> `KafkaException`.
     #[doc(alias = "org.apache.kafka.common.errors.CoordinatorNotAvailableException")]
     CoordinatorNotAvailableError,
     code: Errors::CoordinatorNotAvailable,

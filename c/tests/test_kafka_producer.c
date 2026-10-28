@@ -294,8 +294,8 @@ static void on_close(kafka_common_Error_t *error, void *opaque) {
     atomic_fetch_add(&r->fired, 1);
 }
 
-/* A KafkaProducer rejects a negative close timeout with Java's
- * KafkaProducer.close(Duration) message (KafkaProducer.java:1480-1481), on both
+/* A KafkaProducer rejects a negative close timeout with the message of Java's
+ * `org.apache.kafka.clients.producer.KafkaProducer#close(Duration,boolean)`, on both
  * the blocking and the `_cb` entry point, and stays open for a real close. */
 void test_close_with_negative_timeout_is_rejected(void) {
     kafka_producer_KafkaProducer_t *producer = make_producer(BOOTSTRAP_ONLY);
@@ -383,8 +383,8 @@ static void late_close_close(void *self, int64_t callback_id) {
 }
 
 /* A constructor that fails after taking the serializers closes them, as
- * Java's does (`KafkaProducer.java:519-523`), without waiting for a C `close`
- * to report: the report arrives after the constructor returned, on the
+ * Java's does (the constructor of `org.apache.kafka.clients.producer.KafkaProducer`),
+ * without waiting for a C `close` to report: the report arrives after the constructor returned, on the
  * consumed handle, which stays valid for it (run under valgrind: no read of
  * freed memory, no leak). */
 void test_failed_create_keeps_a_closing_serializer_until_it_reports(void) {
@@ -403,7 +403,8 @@ void test_failed_create_keeps_a_closing_serializer_until_it_reports(void) {
     TEST_ASSERT_NULL(producer);
     TEST_ASSERT_NOT_NULL(err);
     /* Java's `KafkaException("Failed to construct kafka producer", t)` around
-     * the `ConfigException` (`KafkaProducer.java:522`). */
+     * the `ConfigException` (the constructor of
+     * `org.apache.kafka.clients.producer.KafkaProducer`). */
     TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
     const kafka_common_Error_t *cause = kafka_common_Error_source(err);
     TEST_ASSERT_NOT_NULL(cause);
@@ -974,12 +975,14 @@ void test_transaction_methods_on_non_transactional_producer(void) {
      * the suite reaches it — the mock tests take the other arm.
      *
      * Since Kafka 4.4 (KIP-1319) the producer first awaits metadata for the
-     * offsets' topics (KafkaProducer.java:803), and only then calls into the
-     * transaction manager. Two outcomes are both Java-faithful:
+     * offsets' topics
+     * (`org.apache.kafka.clients.producer.KafkaProducer#sendOffsetsToTransaction`),
+     * and only then calls into the transaction manager. Two outcomes are both Java-faithful:
      *   - the metadata wait times out after max.block.ms (no reachable broker);
      *   - the wait ends early because the sender's lazy bootstrap of
-     *     bootstrap.servers lands after the version was taken: Metadata.bootstrap
-     *     bumps updateVersion (Metadata.java:309), which satisfies awaitUpdate,
+     *     bootstrap.servers lands after the version was taken:
+     *     `org.apache.kafka.clients.Metadata#bootstrap` bumps updateVersion, which
+     *     satisfies awaitUpdate,
      *     and the transaction manager then rejects the call with the
      *     non-transactional error. That needs only a slow first sender poll, as
      *     on a loaded CI runner, so neither outcome can be pinned here. */

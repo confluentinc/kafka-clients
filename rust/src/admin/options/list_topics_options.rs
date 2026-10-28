@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Options for `Admin::list_topics`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
 
 /// Options for `Admin::list_topics`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.ListTopicsOptions`.
 #[derive(Clone, Debug, Default)]
 #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions")]
 pub struct ListTopicsOptions {
@@ -33,8 +29,16 @@ impl ListTopicsOptions {
         Self::default()
     }
 
-    /// Set the timeout in milliseconds for this operation, or `None` to use the
-    /// default API timeout for the `AdminClient`.
+    /// Set the timeout in milliseconds for this operation, or `None` if the default
+    /// API timeout for the `AdminClient` should be used.
+    ///
+    /// # Arguments
+    ///
+    /// - `timeout_ms` - the timeout in milliseconds, or `None` for the default API timeout.
+    ///
+    /// # Returns
+    ///
+    /// This `ListTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#timeoutMs")]
     pub fn set_timeout_ms(mut self, timeout_ms: Option<i32>) -> Self {
@@ -42,14 +46,22 @@ impl ListTopicsOptions {
         self
     }
 
-    /// The timeout in milliseconds for this operation, or `None` if the default
-    /// API timeout should be used.
+    /// Returns the timeout in milliseconds for this operation, or `None` if the
+    /// default API timeout for the `AdminClient` should be used.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#timeoutMs")]
     pub fn timeout_ms(&self) -> Option<i32> {
         self.timeout_ms
     }
 
     /// Set whether we should list internal topics.
+    ///
+    /// # Arguments
+    ///
+    /// - `list_internal` - Whether we should list internal topics.
+    ///
+    /// # Returns
+    ///
+    /// This `ListTopicsOptions` instance.
     #[must_use]
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#listInternal")]
     pub fn set_list_internal(mut self, list_internal: bool) -> Self {
@@ -57,7 +69,7 @@ impl ListTopicsOptions {
         self
     }
 
-    /// Return true if we should list internal topics.
+    /// Returns true if we should list internal topics.
     #[doc(alias = "org.apache.kafka.clients.admin.ListTopicsOptions#shouldListInternal")]
     pub fn should_list_internal(&self) -> bool {
         self.list_internal
@@ -65,8 +77,8 @@ impl ListTopicsOptions {
 }
 
 impl PartialEq for ListTopicsOptions {
-    /// Java's `ListTopicsOptions.equals()` compares `listInternal` only:
-    /// `timeoutMs` is left out.
+    // Java's `ListTopicsOptions.equals()` compares `listInternal` only:
+    // `timeoutMs` is left out.
     fn eq(&self, other: &Self) -> bool {
         self.list_internal == other.list_internal
     }
@@ -75,8 +87,8 @@ impl PartialEq for ListTopicsOptions {
 impl Eq for ListTopicsOptions {}
 
 impl std::hash::Hash for ListTopicsOptions {
-    /// Java's `ListTopicsOptions.hashCode()` is `Objects.hash(listInternal)`,
-    /// without `timeoutMs`, as `equals()`.
+    // Java's `ListTopicsOptions.hashCode()` is `Objects.hash(listInternal)`,
+    // without `timeoutMs`, as `equals()`.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.list_internal.hash(state);
     }

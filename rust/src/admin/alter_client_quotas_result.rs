@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! The result of `Admin::alter_client_quotas`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.AlterClientQuotasResult`.
 
 use std::collections::HashMap;
 
@@ -22,8 +20,6 @@ use crate::common::KafkaFuture;
 use crate::common::quota::ClientQuotaEntity;
 
 /// The result of the `Admin::alter_client_quotas` call.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.AlterClientQuotasResult`.
 #[derive(Clone, Debug)]
 #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasResult")]
 pub struct AlterClientQuotasResult {
@@ -32,6 +28,10 @@ pub struct AlterClientQuotasResult {
 
 impl AlterClientQuotasResult {
     /// Creates a new result from the per-entity alteration futures.
+    ///
+    /// # Arguments
+    ///
+    /// - `futures` - maps entity to its alteration result
     #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasResult#AlterClientQuotasResult")]
     pub fn new(futures: HashMap<ClientQuotaEntity, KafkaFuture<()>>) -> Self {
         Self { futures }
@@ -39,16 +39,12 @@ impl AlterClientQuotasResult {
 
     /// Returns a map from quota entity to a future which can be used to check
     /// the status of the operation.
-    ///
-    /// Mirrors `AlterClientQuotasResult.values()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasResult#values")]
     pub fn values(&self) -> &HashMap<ClientQuotaEntity, KafkaFuture<()>> {
         &self.futures
     }
 
     /// Returns a future which succeeds only if all quota alterations succeed.
-    ///
-    /// Mirrors `AlterClientQuotasResult.all()`.
     #[doc(alias = "org.apache.kafka.clients.admin.AlterClientQuotasResult#all")]
     pub fn all(&self) -> KafkaFuture<()> {
         KafkaFuture::all_of(self.futures.values().cloned().collect())

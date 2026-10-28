@@ -34,17 +34,17 @@
 //! production ctor (channels + NetworkClient + bg-task spawn + clean
 //! close) without requiring a broker.
 //!
-//! `ConsumerIntegrationTest.testAsyncConsumerWithConsumerProtocolDisabled`
-//! (line 69) is translated as
+//! `ConsumerIntegrationTest.testAsyncConsumerWithConsumerProtocolDisabled` is
+//! translated as
 //! [`test_async_consumer_with_consumer_protocol_disabled`] on its own
 //! single-broker cluster with `group.version` downgraded to 0.
 //!
-//! `ConsumerIntegrationTest.testLeaderEpoch` (line 196) is translated as
+//! `ConsumerIntegrationTest.testLeaderEpoch` is translated as
 //! [`test_leader_epoch`] on a dedicated `Type::Kraft` cluster (3 brokers +
 //! 1 isolated controller), stopping the partition leader with
 //! `KafkaCluster::shutdown_broker`.
 //!
-//! `ConsumerIntegrationTest.testRackAwareAssignment` (line 263; added in 4.1.0 by
+//! `ConsumerIntegrationTest.testRackAwareAssignment` (added in 4.1.0 by
 //! `949617b0b2`, changed in 4.4 by `90a4c93979`)
 //! is NOT translated: it configures the broker with
 //! `group.consumer.assignors=org.apache.kafka.clients.consumer.RackAwareTestAssignor`,
@@ -503,8 +503,7 @@ impl ConsumerRebalanceListener for AlwaysFailAssignedListener {
 }
 
 /// Translates Java's
-/// `testFetchPartitionsAfterFailedListenerWithGroupProtocolConsumer`
-/// (line 100).
+/// `testFetchPartitionsAfterFailedListenerWithGroupProtocolConsumer`.
 ///
 /// The listener throws on the first `onPartitionsAssigned`; the consumer
 /// must recover and still deliver the single produced record. We poll
@@ -573,8 +572,7 @@ async fn test_fetch_partitions_after_failed_listener() {
 }
 
 /// Translates Java's
-/// `testFetchPartitionsWithAlwaysFailedListenerWithGroupProtocolConsumer`
-/// (line 148).
+/// `testFetchPartitionsWithAlwaysFailedListenerWithGroupProtocolConsumer`.
 ///
 /// The listener always throws. Java's contract: for ~3 seconds, each
 /// `poll(1s)` either returns 0 records (the assigned partitions are never
@@ -585,7 +583,7 @@ async fn test_fetch_partitions_after_failed_listener() {
 /// failed")`, the analog of Java's `IllegalArgumentException("always
 /// failed")`). Java's `invokeRebalanceCallbacks` runs that through
 /// `maybeWrapAsKafkaException(e, "User rebalance callback throws an
-/// error")` (`AsyncKafkaConsumer.java:2334`), so `poll()` surfaces a
+/// error")` (`AsyncKafkaConsumer#invokeRebalanceCallbacks`), so `poll()` surfaces a
 /// `KafkaException` whose `getMessage()` is exactly `"User rebalance
 /// callback throws an error"`. The Rust production code now mirrors this
 /// wrap (Phase 39 fixup), so this test asserts BOTH:
@@ -628,10 +626,10 @@ async fn test_fetch_partitions_with_always_failed_listener() {
                 );
             },
             Err(err) => {
-                // Java's optional `catch (KafkaException ex)` arm asserts
-                // `assertEquals("User rebalance callback throws an error",
-                // ex.getMessage())` (ConsumerIntegrationTest.java:185). The
-                // Rust production wrap surfaces the same message, so pin it
+                // Java's optional `catch (KafkaException ex)` arm of
+                // org.apache.kafka.clients.consumer.ConsumerIntegrationTest#testFetchPartitionsWithAlwaysFailedListener
+                // asserts `assertEquals("User rebalance callback throws an error",
+                // ex.getMessage())`. The Rust production wrap surfaces the same message, so pin it
                 // exactly — a regression that masked the callback path with
                 // an unrelated error (timeout, connection) would now fail.
                 assert_eq!(
@@ -673,8 +671,7 @@ fn consumer_protocol_disabled_cluster_config() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
-/// Translates `testAsyncConsumerWithConsumerProtocolDisabled`
-/// (`ConsumerIntegrationTest.java:69`).
+/// Translates `ConsumerIntegrationTest#testAsyncConsumerWithConsumerProtocolDisabled`.
 ///
 /// With the consumer rebalance protocol disabled on the cluster, polling a
 /// `group.protocol=consumer` consumer must eventually fail with an
@@ -762,8 +759,8 @@ async fn test_async_consumer_with_consumer_protocol_disabled() {
 
 // ── Leader epoch across a leader failover (ConsumerIntegrationTest) ────
 
-/// Java's `sendMsg(clusterInstance, topic, sendMsgNum)`
-/// (`ConsumerIntegrationTest.java:408`): a String-serialized producer with
+/// Java's `ConsumerIntegrationTest#sendMsg`, called as
+/// `sendMsg(clusterInstance, topic, sendMsgNum)`: a String-serialized producer with
 /// `acks=-1` sends `key_i` / `value_i` for `i` in `0..send_msg_num`, then
 /// flushes.
 async fn send_msg(bootstrap: &str, topic: &str, send_msg_num: usize) {
@@ -785,8 +782,8 @@ async fn send_msg(bootstrap: &str, topic: &str, send_msg_num: usize) {
     producer.close().await.expect("producer close should succeed");
 }
 
-/// Java's `ClusterInstance.getLeaderBrokerId(topicPartition)`
-/// (`ClusterInstance.java:406`): the current leader of `tp` per
+/// Java's `ClusterInstance#getLeaderBrokerId`, called as
+/// `getLeaderBrokerId(topicPartition)`: the current leader of `tp` per
 /// `describeTopics`.
 async fn leader_broker_id(admin: &dyn confluent_kafka::admin::Admin, tp: &TopicPartition) -> i32 {
     let described = admin
@@ -836,7 +833,7 @@ async fn consume_asserting_leader_epoch(
     }
 }
 
-/// Translates `testLeaderEpoch` (`ConsumerIntegrationTest.java:196`), on the
+/// Translates `ConsumerIntegrationTest#testLeaderEpoch`, on the
 /// Java shape `@ClusterTest(types = {Type.KRAFT}, brokers = 3)` — a dedicated
 /// cluster with an isolated controller, since the test stops a broker.
 ///

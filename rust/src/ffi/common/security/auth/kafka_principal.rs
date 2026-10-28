@@ -27,7 +27,7 @@ pub struct kafka_common_security_auth_KafkaPrincipal_t {
     _private: [u8; 0],
 }
 
-/// What a [`kafka_common_security_auth_KafkaPrincipal_t`] points at: the
+/// What a `kafka_common_security_auth_KafkaPrincipal_t` points at: the
 /// principal plus the NUL-terminated type and name its getters borrow out.
 pub(crate) struct KafkaPrincipalInner {
     principal: KafkaPrincipal,
@@ -79,7 +79,7 @@ pub(crate) unsafe fn kafka_principal_ref<'a>(
 }
 
 /// Hands `principal` to C as an owned handle, freed with
-/// [`kafka_common_security_auth_KafkaPrincipal_destroy`].
+/// `kafka_common_security_auth_KafkaPrincipal_destroy`.
 pub(crate) fn box_kafka_principal(principal: KafkaPrincipal) -> *mut kafka_common_security_auth_KafkaPrincipal_t {
     Box::into_raw(Box::new(KafkaPrincipalInner::new(principal))) as *mut kafka_common_security_auth_KafkaPrincipal_t
 }
@@ -104,14 +104,17 @@ pub(crate) unsafe fn list_kafka_principals(list: *const kafka_List_t) -> Vec<Kaf
         .collect()
 }
 
-/// `new KafkaPrincipal(String principalType, String name)`: not token
-/// authenticated. Owned, freed with
-/// [`kafka_common_security_auth_KafkaPrincipal_destroy`]; the strings are
-/// copied.
+/// Creates a principal that is not token authenticated.
+///
+/// # Parameters
+///
+/// - `principal_type` - the principal type, e.g. `User`
+/// - `name` - the principal name
 ///
 /// # Safety
 ///
-/// `principal_type` and `name` must be valid NUL-terminated strings.
+/// `principal_type` and `name` must be valid NUL-terminated strings, copied. The returned handle is
+/// owned, freed with `kafka_common_security_auth_KafkaPrincipal_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
@@ -126,12 +129,18 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_new(
     }))
 }
 
-/// `new KafkaPrincipal(String principalType, String name, boolean tokenAuthenticated)`.
-/// Owned; the strings are copied.
+/// Creates a principal.
+///
+/// # Parameters
+///
+/// - `principal_type` - the principal type, e.g. `User`
+/// - `name` - the principal name
+/// - `token_authenticated` - 1 if the principal authenticated with a delegation token, else 0
 ///
 /// # Safety
 ///
-/// `principal_type` and `name` must be valid NUL-terminated strings.
+/// `principal_type` and `name` must be valid NUL-terminated strings, copied. The returned handle is
+/// owned, freed with `kafka_common_security_auth_KafkaPrincipal_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_authenticated(
@@ -152,7 +161,11 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_with_token_au
     ))
 }
 
-/// `KafkaPrincipal.ANONYMOUS`: the `User:ANONYMOUS` principal. Owned.
+/// Returns `KafkaPrincipal.ANONYMOUS`, the `User:ANONYMOUS` principal.
+///
+/// # Safety
+///
+/// The returned handle is owned, freed with `kafka_common_security_auth_KafkaPrincipal_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_common_security_auth_KafkaPrincipal_anonymous()
@@ -160,11 +173,12 @@ pub extern "C" fn kafka_common_security_auth_KafkaPrincipal_anonymous()
     box_kafka_principal(KafkaPrincipal::anonymous())
 }
 
-/// `getName()`: borrowed from the handle.
+/// Returns the principal name.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid principal handle.
+/// `self_` must be a valid principal handle. The returned string is borrowed, valid as long as the
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
@@ -176,11 +190,12 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_name(
     unsafe { inner_ref(self_) }.name_c.as_ptr()
 }
 
-/// `getPrincipalType()`, e.g. `User`: borrowed from the handle.
+/// Returns the principal type, e.g. `User`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid principal handle.
+/// `self_` must be a valid principal handle. The returned string is borrowed, valid as long as the
+/// handle.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_type(
@@ -192,8 +207,11 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_principal_typ
     unsafe { inner_ref(self_) }.principal_type_c.as_ptr()
 }
 
-/// `tokenAuthenticated(boolean)`: records whether this principal
-/// authenticated with a delegation token.
+/// Records whether this principal authenticated with a delegation token.
+///
+/// # Parameters
+///
+/// - `token_authenticated` - 1 if it did, else 0
 ///
 /// # Safety
 ///
@@ -215,8 +233,7 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_set_token_aut
         .set_token_authenticated(token_authenticated != 0);
 }
 
-/// `tokenAuthenticated()`: whether this principal authenticated with a
-/// delegation token.
+/// Returns 1 if this principal authenticated with a delegation token, else 0.
 ///
 /// # Safety
 ///
@@ -231,12 +248,12 @@ pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_token_authent
     i8::from(unsafe { kafka_principal_ref(self_) }.token_authenticated())
 }
 
-/// `toString()`, `<type>:<name>`, as an owned string freed with
-/// `kafka_string_destroy`.
+/// Returns `<type>:<name>`.
 ///
 /// # Safety
 ///
-/// `self_` must be a valid principal handle.
+/// `self_` must be a valid principal handle. The returned string is owned, freed with
+/// `kafka_string_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_security_auth_KafkaPrincipal_to_string(

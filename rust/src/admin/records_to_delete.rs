@@ -13,12 +13,8 @@
 // limitations under the License.
 
 //! Describes records to delete in a call to `Admin::delete_records`.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.RecordsToDelete`.
 
 /// Describe records to delete in a call to `Admin::delete_records`.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.RecordsToDelete`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete")]
 pub struct RecordsToDelete {
@@ -28,17 +24,16 @@ pub struct RecordsToDelete {
 impl RecordsToDelete {
     /// Delete all the records before the given `offset`.
     ///
-    /// Use `-1` to truncate to the high watermark.
+    /// # Arguments
     ///
-    /// Java's static factory `beforeOffset(long offset)` shares its name with
-    /// the getter [`before_offset`](Self::before_offset), which keeps it, so the
-    /// factory is `with_<parameters>` (CLAUDE.md §2).
+    /// - `offset` - The offset before which all records will be deleted. Use `-1` to truncate to
+    ///   the high watermark.
     #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset(long)")]
     pub fn with_offset(offset: i64) -> Self {
         Self { offset }
     }
 
-    /// The offset before which all records will be deleted.
+    /// Returns the offset before which all records will be deleted.
     ///
     /// Use `-1` to truncate to the high watermark.
     #[doc(alias = "org.apache.kafka.clients.admin.RecordsToDelete#beforeOffset()")]

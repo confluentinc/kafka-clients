@@ -101,7 +101,7 @@ impl CompletableEventReaper {
             }
 
             // Past due: count it BEFORE attempting expiration. Java's
-            // `reap(currentTimeMs)` (CompletableEventReaper.java:115)
+            // `org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#reap(long)`
             // increments unconditionally once it has seen the event is
             // past-due — the count means "events that were not done at
             // observation time", regardless of who wins a concurrent
@@ -140,14 +140,13 @@ impl CompletableEventReaper {
         expired_count
     }
 
-    /// Java: `reap(Collection<?> events) -> long` — see
-    /// `CompletableEventReaper.java:143`.
+    /// Java: `CompletableEventReaper#reap(Collection)`.
     ///
     /// Called during consumer close. Expires both the tracked list AND
     /// any handles passed in (typically drained from the application
     /// event queue). Does NOT consider deadlines — closes everything.
     ///
-    /// **Side effect**: like Java's `events.clear()` (line 150), this
+    /// **Side effect**: like Java's `events.clear()`, this
     /// CLEARS `unprocessed_events` after iteration so the caller does
     /// not need to drain it separately. Returns the total number of
     /// events that were expired (i.e. that were still not done at the
@@ -193,8 +192,7 @@ impl CompletableEventReaper {
     }
 }
 
-/// Java: `completeEventsExceptionallyOnClose(Collection<?> events)`
-/// (see `CompletableEventReaper.java:186-209`).
+/// Java: `CompletableEventReaper#completeEventsExceptionallyOnClose`.
 ///
 /// For each handle in the iterator, if it isn't already done, increment
 /// the count BEFORE attempting expiration. Java counts the event as soon
@@ -280,7 +278,7 @@ mod tests {
         assert_eq!(reaper.reap(200), 0);
         assert_eq!(reaper.size(), 0);
 
-        // Java `testCompleted` (CompletableEventReaperTest.java:96) asserts
+        // Java `org.apache.kafka.clients.consumer.internals.events.CompletableEventReaperTest#testCompleted` asserts
         // the successful value survives the reap untouched. `Error`
         // does not derive `PartialEq`, so we pattern-match instead of
         // `assert_eq!`-ing against `Ok(())`.
@@ -299,7 +297,8 @@ mod tests {
 
         assert_eq!(reaper.reap_on_close(&mut extras), 2);
         assert_eq!(reaper.size(), 0);
-        // Java: `events.clear()` (CompletableEventReaper.java:150).
+        // Java: `events.clear()`
+        // (`org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper#reap(Collection)`).
         assert!(extras.is_empty(), "reap_on_close must clear the supplied collection");
 
         assert!(matches!(rx1.try_recv().unwrap(), Err(Error::Timeout(_))));

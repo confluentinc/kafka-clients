@@ -13,15 +13,11 @@
 // limitations under the License.
 
 //! A range of version levels supported by every broker for a feature.
-//!
-//! Corresponds to `org.apache.kafka.clients.admin.FinalizedVersionRange`.
 
 use crate::common::Error;
 
 /// Represents a range of version levels supported by every broker in a cluster
 /// for some feature.
-///
-/// Corresponds to `org.apache.kafka.clients.admin.FinalizedVersionRange`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange")]
 pub struct FinalizedVersionRange {
@@ -30,13 +26,22 @@ pub struct FinalizedVersionRange {
 }
 
 impl FinalizedVersionRange {
-    /// Creates a new `FinalizedVersionRange`.
+    /// Raises an error unless the following condition is met: `min_version_level >= 0` and
+    /// `max_version_level >= 0` and `max_version_level >= min_version_level`.
+    ///
+    /// # Arguments
+    ///
+    /// - `min_version_level` - The minimum version level value.
+    /// - `max_version_level` - The maximum version level value.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::local_illegal_argument`] (mirroring Java's
-    /// `IllegalArgumentException`) unless `min_version_level >= 0`,
-    /// `max_version_level >= 0`, and `max_version_level >= min_version_level`.
+    /// - `Error::is_local_illegal_argument_error` Raised when the condition described above is not
+    ///   met.
+    ///
+    /// # Translation notes
+    ///
+    /// Java's Javadoc says `>= 1`; Java's code, like this one, checks `>= 0`.
     #[doc(alias = "org.apache.kafka.clients.admin.FinalizedVersionRange#FinalizedVersionRange")]
     pub fn new(min_version_level: i16, max_version_level: i16) -> Result<Self, Error> {
         if min_version_level < 0 || max_version_level < 0 || max_version_level < min_version_level {

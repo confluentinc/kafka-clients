@@ -170,7 +170,7 @@ pub(crate) trait ErrorHierarchy {
     ///
     /// `false` for exactly the generic `java.lang` / `java.util` runtime
     /// exceptions, which are siblings of `KafkaException` rather than
-    /// subclasses (`common/KafkaException.java:22`): [`LocalIllegalArgumentError`],
+    /// subclasses (`org.apache.kafka.common.KafkaException` extends `RuntimeException`): [`LocalIllegalArgumentError`],
     /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`],
     /// [`LocalTimeoutError`], [`LocalUnsupportedOperationError`] — and
     /// [`LocalCallbackError`], which has no Java class
@@ -1276,7 +1276,7 @@ pub(crate) trait ErrorHierarchy {
 /// **Mechanism, not API**, like [`ErrorHierarchy`]. Java's exceptions do not
 /// store their code; `Errors` keeps a `CLASS_TO_ERROR` map and
 /// `Errors.forException(t)` looks the class up in it
-/// (`protocol/Errors.java:521`). This trait is that map inverted into a
+/// (`org.apache.kafka.common.protocol.Errors#forException`). This trait is that map inverted into a
 /// per-type answer, which is the only form the compiler can check.
 ///
 /// The default is [`Errors::UnknownServerError`], matching what
@@ -1297,7 +1297,7 @@ pub(crate) trait ErrorCode {
 /// **Mechanism, not API**, like [`ErrorMessage`]: it exists so
 /// [`Errors::error_name`] can answer without matching on 138 codes a second
 /// time. Callers use [`Errors::error_name`], which translates
-/// `Errors.exceptionName()` (`protocol/Errors.java:470`).
+/// `org.apache.kafka.common.protocol.Errors#exceptionName`.
 ///
 /// Java returns the *fully qualified* class name
 /// (`"org.apache.kafka.common.errors.UnknownServerException"`). Rust has no Java
@@ -2348,7 +2348,7 @@ impl ErrorHierarchy for LocalCallbackError {
 /// and every intermediate Java class has one too. Prefer them to
 /// `matches!(e, Error::TopicAuthorization(_))`. A predicate means "this class
 /// or a subclass", like `instanceof`, so it still matches a subclass a later
-/// Java release adds, whereas a variant match would miss it (CLAUDE.md §3).
+/// Java release adds, whereas a variant match would miss it.
 /// There is no public numeric
 /// error code: the wire-level `Errors` enum lives in `common.protocol`, a
 /// package Java marks "not a supported API", so the crate keeps it
@@ -2358,9 +2358,9 @@ impl ErrorHierarchy for LocalCallbackError {
 /// `message()` and `is_retriable_error()` are delegated to the inner
 /// [`KafkaError`] base. `request_utils::RequestUtils::is_fatal_error` and
 /// `is_transaction_abortable_error()`
-/// live only here: `KafkaError` mirrors Java's `KafkaException`, which has
-/// neither — they are librdkafka-style predicates required by CLAUDE.md
-/// §12.3, so they belong on this enum rather than on the Java-shaped base.
+/// live only here: `KafkaError` is Java's `KafkaException`, which has
+/// neither, so these librdkafka-style predicates belong on this enum rather
+/// than on the Java-shaped base.
 ///
 /// This type is used in `Result` return types and `Option` storage where
 /// any kind of Kafka error may occur.
@@ -2383,16 +2383,16 @@ pub enum Error {
     KafkaError(KafkaError),
     /// Illegal argument error — an invalid argument was provided to a method.
     ///
-    /// Corresponds to Java's `IllegalArgumentException`.
+    /// Java's `IllegalArgumentException`.
     LocalIllegalArgument(LocalIllegalArgumentError),
     /// Illegal state error — a method was called in an invalid state.
     ///
-    /// Corresponds to Java's `IllegalStateException`.
+    /// Java's `IllegalStateException`.
     LocalIllegalState(LocalIllegalStateError),
     /// Concurrent modification error — the consumer was accessed from more
     /// than one thread.
     ///
-    /// Corresponds to Java's `java.util.ConcurrentModificationException`,
+    /// Java's `java.util.ConcurrentModificationException`,
     /// thrown by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
     /// multi-threaded access"). Like `LocalIllegalState`, it is a plain
     /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
@@ -2400,7 +2400,7 @@ pub enum Error {
     LocalConcurrentModification(LocalConcurrentModificationError),
     /// A wait on a future timed out.
     ///
-    /// Corresponds to Java's `java.util.concurrent.TimeoutException` raised by
+    /// Java's `java.util.concurrent.TimeoutException` raised by
     /// `Future.get(timeout, unit)`. Distinct from
     /// [`Timeout`](Self::Timeout), which is
     /// `org.apache.kafka.common.errors.TimeoutException` — a
@@ -2409,7 +2409,7 @@ pub enum Error {
     LocalTimeout(LocalTimeoutError),
     /// Unsupported operation error — the requested operation is not supported.
     ///
-    /// Corresponds to Java's `java.lang.UnsupportedOperationException`, thrown
+    /// Java's `java.lang.UnsupportedOperationException`, thrown
     /// where Java leaves an operation unimplemented (`MockAdminClient`'s "Not
     /// implemented yet" methods, `MockConsumer.offsetsForTimes`) or rejects it
     /// (`Compression.decompressionOutputSize`). Like `LocalIllegalState` it is a
@@ -2794,91 +2794,112 @@ impl Error {
             .unwrap_or_else(|| Self::KafkaError(KafkaError::with_message(error, message)))
     }
 
-    /// Create a bare Kafka error with no message, translating Java's no-arg
-    /// `new KafkaException()` (`KafkaException.java:38`).
+    /// Creates a bare Kafka error with no message, Java's no-arg `new KafkaException()`.
     ///
-    /// The four `kafka*` constructors below translate `KafkaException`'s four
-    /// (`:38`, `:30`, `:34`, `:26`). Their parameter-name intersection is empty
-    /// and the no-arg form matches it, so under CLAUDE.md §2 this one keeps the
-    /// plain name and the others are suffixed with their parameters.
+    /// The four `kafka*` constructors translate `KafkaException`'s four constructors.
+    /// Their parameter-name intersection is empty and the no-arg form matches it, so
+    /// this one keeps the plain name and the others are suffixed with their parameters.
     ///
-    /// This is deliberately NOT `new` with
-    /// `Errors::UnknownServerError`: that constructor resolves the code to the
-    /// class Java associates with it and yields
+    /// This is deliberately NOT `new` with `Errors::UnknownServerError`: that
+    /// constructor resolves the code to the class Java associates with it and yields
     /// [`UnknownServer`](Self::UnknownServer), an `ApiException`. Java's bare
-    /// `KafkaException` is a *sibling* of `ApiException`, not a subclass, so it
-    /// belongs in the [`KafkaError`](Self::KafkaError) variant. The difference is
-    /// observable: [`is_api_error`](Self::is_api_error) answers `false` here and
-    /// `true` there, and callers such as `KafkaProducer.doSend` dispatch on
-    /// exactly that (`catch (ApiException e)` returns a failed future,
-    /// `catch (KafkaException e)` rethrows).
+    /// `KafkaException` is a *sibling* of `ApiException`, not a subclass, so it belongs
+    /// in the [`KafkaError`](Self::KafkaError) variant. The difference is observable:
+    /// [`is_api_error`](Self::is_api_error) answers `false` here and `true` there, and
+    /// callers such as `KafkaProducer.doSend` dispatch on exactly that
+    /// (`catch (ApiException e)` returns a failed future, `catch (KafkaException e)`
+    /// rethrows).
     ///
-    /// The wire code stays `Errors::UnknownServerError` because a
-    /// client-constructed `KafkaException` has no protocol code of its own.
+    /// The wire code stays `Errors::UnknownServerError` because a client-constructed
+    /// `KafkaException` has no protocol code of its own.
     ///
-    /// Java's no-arg form leaves the message null; Rust reports the code's
-    /// default message instead, since [`KafkaError`] stores the code rather than
-    /// deriving it from a subclass and always has one to fall back on.
+    /// Java's no-arg form leaves the message null; Rust reports the code's default
+    /// message instead, since [`KafkaError`] stores the code rather than deriving it
+    /// from a subclass and always has one to fall back on.
     pub fn kafka() -> Self {
         Self::KafkaError(KafkaError::new(Errors::UnknownServerError))
     }
 
-    /// Create a bare Kafka error, translating Java's
-    /// `new KafkaException(String message)` (`KafkaException.java:30`).
+    /// Creates a bare Kafka error, Java's `new KafkaException(String message)`.
     ///
-    /// See [`kafka`](Self::kafka) for why this does not go through
-    /// `with_message`.
+    /// See [`kafka`](Self::kafka) for why this does not go through `with_message`.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn kafka_message(message: impl Into<String>) -> Self {
         Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
     }
 
-    /// Create a bare Kafka error carrying only the error that caused it,
-    /// translating Java's `new KafkaException(Throwable cause)`
-    /// (`KafkaException.java:34`).
+    /// Creates a bare Kafka error carrying only the error that caused it, Java's
+    /// `new KafkaException(Throwable cause)`.
     ///
-    /// See [`kafka`](Self::kafka) for why this does not go through
-    /// `with_message`.
+    /// See [`kafka`](Self::kafka) for why this does not go through `with_message`.
+    ///
+    /// # Arguments
+    ///
+    /// - `source` - the error that caused this one, returned by [`source`](Self::source)
     pub fn kafka_source(source: Error) -> Self {
         Self::KafkaError(KafkaError::with_source(Errors::UnknownServerError, source))
     }
 
-    /// Create a bare Kafka error carrying the error that caused it, translating
-    /// Java's `new KafkaException(String message, Throwable cause)`
-    /// (`KafkaException.java:26`).
+    /// Creates a bare Kafka error carrying the error that caused it, Java's
+    /// `new KafkaException(String message, Throwable cause)`.
     ///
-    /// See [`kafka`](Self::kafka) for why this does not go through
-    /// `with_message`.
+    /// See [`kafka`](Self::kafka) for why this does not go through `with_message`.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
+    /// - `source` - the error that caused this one, returned by [`source`](Self::source)
     pub fn kafka_message_source(message: impl Into<String>, source: Error) -> Self {
         Self::KafkaError(KafkaError::with_message_source(Errors::UnknownServerError, message, source))
     }
 
-    /// Create a topic authorization error
-    /// (Java: `new TopicAuthorizationException(unauthorizedTopics)`).
+    /// Creates a topic authorization error, Java's
+    /// `new TopicAuthorizationException(unauthorizedTopics)`.
     ///
-    /// The pair intersects on `{unauthorizedTopics}`, which is exactly this
-    /// overload, so it keeps the plain name (CLAUDE.md §2).
+    /// The pair intersects on `{unauthorizedTopics}`, which is exactly this overload,
+    /// so it keeps the plain name.
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - the topics the client is not authorized to access
     pub fn topic_authorization(topics: HashSet<String>) -> Self {
         Self::TopicAuthorization(TopicAuthorizationError::new(topics))
     }
 
-    /// Create a topic authorization error carrying a custom message
-    /// (Java: `new TopicAuthorizationException(message, unauthorizedTopics)`).
+    /// Creates a topic authorization error carrying a custom message, Java's
+    /// `new TopicAuthorizationException(message, unauthorizedTopics)`.
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - the topics the client is not authorized to access
+    /// - `message` - the error message
     pub fn topic_authorization_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self::TopicAuthorization(TopicAuthorizationError::with_message(topics, message))
     }
 
-    /// Create an invalid topic error
-    /// (Java: `new InvalidTopicException(invalidTopics)`).
+    /// Creates an invalid topic error, Java's `new InvalidTopicException(invalidTopics)`.
     ///
-    /// The pair intersects on `{invalidTopics}`, which is exactly this overload,
-    /// so it keeps the plain name (CLAUDE.md §2).
+    /// The pair intersects on `{invalidTopics}`, which is exactly this overload, so it
+    /// keeps the plain name.
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - the invalid topic names
     pub fn invalid_topics(topics: HashSet<String>) -> Self {
         Self::InvalidTopic(InvalidTopicError::new(topics))
     }
 
-    /// Create an invalid topic error carrying a custom message
-    /// (Java: `new InvalidTopicException(message, invalidTopics)`, and the
-    /// `new InvalidTopicException(String message)` form when `topics` is empty).
+    /// Creates an invalid topic error carrying a custom message, Java's
+    /// `new InvalidTopicException(message, invalidTopics)`, and the
+    /// `new InvalidTopicException(String message)` form when `topics` is empty.
+    ///
+    /// # Arguments
+    ///
+    /// - `topics` - the invalid topic names, possibly empty
+    /// - `message` - the error message
     pub fn invalid_topics_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self::InvalidTopic(InvalidTopicError::with_message(topics, message))
     }
@@ -2888,39 +2909,55 @@ impl Error {
     // `(String message, String groupId)` constructor. Distinct Java members, so
     // CLAUDE.md §2's suffixing does not apply and neither name changes.
 
-    /// Create a group authorization error for a group ID, formatting the group
-    /// into the message (Java: `GroupAuthorizationException.forGroupId(groupId)`).
+    /// Creates a group authorization error for a group ID, formatting the group into
+    /// the message, Java's `GroupAuthorizationException.forGroupId(groupId)`.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - the group the client is not authorized to access
     pub fn group_authorization(group_id: impl Into<String>) -> Self {
         Self::GroupAuthorization(GroupAuthorizationError::for_group_id(group_id))
     }
 
-    /// Create a group authorization error carrying a custom message
-    /// (Java: `new GroupAuthorizationException(message, groupId)`).
+    /// Creates a group authorization error carrying a custom message, Java's
+    /// `new GroupAuthorizationException(message, groupId)`.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - the group the client is not authorized to access
+    /// - `message` - the error message
     pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::new(group_id, message))
+        Self::GroupAuthorization(GroupAuthorizationError::with_group_id(group_id, message))
     }
 
-    /// Create an invalid group ID error.
+    /// Creates an invalid group ID error, Java's `InvalidGroupIdException` (an
+    /// `ApiException` carrying the code `Errors::InvalidGroupId`).
     ///
-    /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
-    /// subclass carrying error code `Errors::InvalidGroupId`). Thrown
-    /// by group-management / offset-commit APIs when the consumer was
+    /// Returned by group-management and offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
         Self::InvalidGroupId(InvalidGroupIdError::new(message))
     }
 
-    /// Create a throttling quota exceeded error.
+    /// Creates a throttling quota exceeded error, Java's
+    /// `ThrottlingQuotaExceededException(int, String)`.
     ///
-    /// Corresponds to Java's `ThrottlingQuotaExceededException(int, String)`.
+    /// # Arguments
+    ///
+    /// - `throttle_time_ms` - how long, in milliseconds, the client is throttled
+    /// - `message` - the error message
     pub fn throttling_quota_exceeded(throttle_time_ms: i32, message: impl Into<String>) -> Self {
         Self::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(throttle_time_ms, message))
     }
 
-    /// The throttle time carried by a [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded)
-    /// error, or `None` for any other error.
-    ///
-    /// Mirrors Java's `ThrottlingQuotaExceededException.throttleTimeMs()`.
+    /// Returns the throttle time carried by a
+    /// [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded) error, Java's
+    /// `ThrottlingQuotaExceededException.throttleTimeMs()`, or `None` for any other
+    /// error.
     pub fn throttle_time_ms(&self) -> Option<i32> {
         match self {
             Self::ThrottlingQuotaExceeded(e) => Some(e.throttle_time_ms),
@@ -2928,44 +2965,63 @@ impl Error {
         }
     }
 
-    /// Create a buffer exhausted error.
+    /// Creates a buffer exhausted error, Java's `BufferExhaustedException`.
     ///
-    /// Corresponds to Java's `BufferExhaustedException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn buffer_exhausted(message: impl Into<String>) -> Self {
         Self::ProducerBufferExhausted(ProducerBufferExhaustedError::new(message))
     }
 
-    /// Create an illegal argument error.
+    /// Creates an illegal argument error, Java's `IllegalArgumentException`.
     ///
-    /// Corresponds to Java's `IllegalArgumentException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn local_illegal_argument(message: impl Into<String>) -> Self {
         Self::LocalIllegalArgument(LocalIllegalArgumentError::new(message))
     }
 
     // Java's three `ConfigException` constructors have an empty parameter-name
     // intersection and none is no-arg, so no factory below keeps the plain name
-    // `config` (CLAUDE.md §2) — each takes its full parameter list as the suffix.
+    // `config` — each takes its full parameter list as the suffix.
     // [`ConfigError::new`] is the one exception, and only because it is
     // macro-generated; see the note there.
 
-    /// Create a configuration error, in Java's `ConfigException(message)` format.
+    /// Creates a configuration error, Java's `ConfigException(message)`: an invalid
+    /// config value.
     ///
-    /// Corresponds to Java's `ConfigException` — an invalid config value. Unlike
-    /// [`illegal_argument`](Self::local_illegal_argument) this is inside the
-    /// `KafkaException` hierarchy, so [`is_kafka_error`](Self::is_kafka_error) is
+    /// Unlike [`local_illegal_argument`](Self::local_illegal_argument) this is inside
+    /// the `KafkaException` hierarchy, so [`is_kafka_error`](Self::is_kafka_error) is
     /// `true` for it.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn config_message(message: impl Into<String>) -> Self {
         Self::Config(ConfigError::new(message))
     }
 
-    /// Create a configuration error naming the offending value and key, in
-    /// Java's `ConfigException(name, value)` format.
+    /// Creates a configuration error naming the offending value and key, in Java's
+    /// `ConfigException(name, value)` format.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the name of the configuration
+    /// - `value` - the value of the configuration
     pub fn config_name_value(name: impl std::fmt::Display, value: impl std::fmt::Display) -> Self {
         Self::Config(ConfigError::with_name_value(name, value))
     }
 
-    /// Create a configuration error naming the value, key, and a detail message,
-    /// in Java's `ConfigException(name, value, message)` format.
+    /// Creates a configuration error naming the value, key, and a detail message, in
+    /// Java's `ConfigException(name, value, message)` format.
+    ///
+    /// # Arguments
+    ///
+    /// - `name` - the name of the configuration
+    /// - `value` - the value of the configuration
+    /// - `message` - why the value is invalid
     pub fn config_name_value_message(
         name: impl std::fmt::Display,
         value: impl std::fmt::Display,
@@ -2974,42 +3030,56 @@ impl Error {
         Self::Config(ConfigError::with_name_value_message(name, value, message))
     }
 
-    /// Create an illegal state error.
+    /// Creates an illegal state error, Java's `IllegalStateException`.
     ///
-    /// Corresponds to Java's `IllegalStateException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn local_illegal_state(message: impl Into<String>) -> Self {
         Self::LocalIllegalState(LocalIllegalStateError::new(message))
     }
 
-    /// Create an unsupported operation error.
+    /// Creates an unsupported operation error, Java's
+    /// `java.lang.UnsupportedOperationException`.
     ///
-    /// Corresponds to Java's `java.lang.UnsupportedOperationException`. Use
-    /// [`Error::unsupported_version`] instead for
-    /// `org.apache.kafka.common.errors.UnsupportedVersionException`, the
-    /// wire-level class for an API version the broker does not support.
+    /// Use [`Error::unsupported_version`] instead for
+    /// `org.apache.kafka.common.errors.UnsupportedVersionException`, the wire-level
+    /// class for an API version the broker does not support.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn local_unsupported_operation(message: impl Into<String>) -> Self {
         Self::LocalUnsupportedOperation(LocalUnsupportedOperationError::new(message))
     }
 
-    /// Create a timeout error.
+    /// Creates a timeout error, Java's `org.apache.kafka.common.errors.TimeoutException`.
     ///
-    /// Corresponds to Java's `TimeoutException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(TimeoutError::new(message))
     }
 
-    /// Create a record too large error.
+    /// Creates a record too large error, Java's `RecordTooLargeException`.
     ///
-    /// Corresponds to Java's `RecordTooLargeException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn record_too_large(message: impl Into<String>) -> Self {
         Self::RecordTooLarge(RecordTooLargeError::new(message))
     }
 
-    /// Create a correlation-id mismatch error.
+    /// Creates a correlation-id mismatch error, Java's
+    /// `CorrelationIdMismatchException(String, int, int)`: an `IllegalStateException`,
+    /// so outside the `KafkaException` hierarchy.
     ///
-    /// Corresponds to Java's
-    /// `CorrelationIdMismatchException(String, int, int)` — an
-    /// `IllegalStateException`, so outside the `KafkaException` hierarchy.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
+    /// - `request_correlation_id` - the correlation id of the request sent
+    /// - `response_correlation_id` - the correlation id the response carried
     pub fn correlation_id_mismatch(
         message: impl Into<String>,
         request_correlation_id: i32,
@@ -3022,82 +3092,107 @@ impl Error {
         ))
     }
 
-    /// Create an invalid-receive error.
+    /// Creates an invalid-receive error, Java's `InvalidReceiveException(String)`.
     ///
-    /// Corresponds to Java's `InvalidReceiveException(String)`. The class is not
-    /// public API (`common.network`), so this constructor is how code outside
-    /// the crate — e.g. a test backend decoding an error sent over the wire —
+    /// The class is not public API (`common.network`), so this constructor is how code
+    /// outside the crate, such as a test backend decoding an error sent over the wire,
     /// builds the variant.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn invalid_receive(message: impl Into<String>) -> Self {
         Self::InvalidReceive(InvalidReceiveError::new(message))
     }
 
-    /// Create a protocol-schema error.
+    /// Creates a protocol-schema error, Java's `SchemaException(String)`.
     ///
-    /// Corresponds to Java's `SchemaException(String)`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn schema(message: impl Into<String>) -> Self {
         Self::Schema(SchemaError::new(message))
     }
 
-    /// Create a protocol-schema error carrying the failure that caused it.
+    /// Creates a protocol-schema error carrying the failure that caused it, Java's
+    /// `SchemaException(String, Throwable)`, used by `NetworkClient.parseResponse` to
+    /// wrap a buffer underflow.
     ///
-    /// Corresponds to Java's `SchemaException(String, Throwable)`, used by
-    /// `NetworkClient.parseResponse` to wrap a buffer underflow.
+    /// The pair intersects on `{message}`, which is exactly [`schema`](Self::schema),
+    /// so that one keeps the plain name and this is suffixed with the parameter beyond
+    /// it.
     ///
-    /// The pair intersects on `{message}`, which is exactly
-    /// [`schema`](Self::schema), so that one keeps the plain name and this is
-    /// suffixed with the parameter beyond it (CLAUDE.md §2).
+    /// # Arguments
+    ///
+    /// - `message` - the error message
+    /// - `source` - the error that caused this one, returned by [`source`](Self::source)
     pub fn schema_source(message: impl Into<String>, source: Error) -> Self {
         Self::Schema(SchemaError::with_source(message, source))
     }
 
-    /// Create a serialization error.
+    /// Creates a serialization error, Java's `SerializationException`.
     ///
-    /// Corresponds to Java's `SerializationException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn serialization(message: impl Into<String>) -> Self {
         Self::Serialization(SerializationError::new(message))
     }
 
-    /// Create an unsupported version error.
+    /// Creates an unsupported version error, Java's `UnsupportedVersionException`.
     ///
-    /// Corresponds to Java's `UnsupportedVersionException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn unsupported_version(message: impl Into<String>) -> Self {
         Self::UnsupportedVersion(UnsupportedVersionError::new(message))
     }
 
-    /// Create a wakeup error.
+    /// Creates a wakeup error, Java's `WakeupException`.
     ///
-    /// Corresponds to Java's `WakeupException`. Returned from blocking
-    /// `Consumer` operations (`poll`, `commit_sync`, `position`, etc.)
-    /// when `wakeup()` is invoked from another task.
+    /// Returned from blocking `Consumer` operations (`poll`, `commit_sync`, `position`,
+    /// etc.) when `wakeup()` is invoked from another task.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn wakeup(message: impl Into<String>) -> Self {
         Self::Wakeup(WakeupError::new(message))
     }
 
-    /// Create a concurrent modification error.
-    ///
-    /// Corresponds to Java's `ConcurrentModificationException` thrown by
-    /// `KafkaConsumer.acquire()` when the consumer is accessed from more
+    /// Creates a concurrent modification error, Java's `ConcurrentModificationException`,
+    /// which `KafkaConsumer.acquire()` throws when the consumer is accessed from more
     /// than one thread.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn local_concurrent_modification(message: impl Into<String>) -> Self {
         Self::LocalConcurrentModification(LocalConcurrentModificationError::new(message))
     }
 
-    /// Create a timed-out-waiting-on-a-future error.
+    /// Creates a timed-out-waiting-on-a-future error, Java's
+    /// `java.util.concurrent.TimeoutException` from `Future.get(timeout, unit)`.
     ///
-    /// Corresponds to Java's `java.util.concurrent.TimeoutException` from
-    /// `Future.get(timeout, unit)`. Use [`Error::timeout`] instead for
-    /// `org.apache.kafka.common.errors.TimeoutException`, the retriable Kafka
-    /// class the broker reports.
+    /// Use [`Error::timeout`] instead for
+    /// `org.apache.kafka.common.errors.TimeoutException`, the retriable Kafka class the
+    /// broker reports.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn local_timeout(message: impl Into<String>) -> Self {
         Self::LocalTimeout(LocalTimeoutError::new(message))
     }
 
-    /// Create the error a callback written in another language reports when
-    /// it raised one of that language's errors: `message` is its text, for the
-    /// client's logs, and `opaque` the binding's pointer to it, never
-    /// dereferenced by Rust and not owned by the error. See
-    /// [`LocalCallbackError`].
+    /// Creates the error a callback written in another language reports when it raised
+    /// one of that language's errors. See [`LocalCallbackError`].
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the foreign error's text, for the client's logs
+    /// - `opaque` - the binding's pointer to the foreign error, never dereferenced by
+    ///   Rust and not owned by the error
     pub fn local_callback(message: impl Into<String>, opaque: *mut c_void) -> Self {
         Self::LocalCallback(LocalCallbackError::new(message, opaque))
     }
@@ -3123,38 +3218,40 @@ impl Error {
         Self::LocalCallback(unsafe { LocalCallbackError::with_release(message, opaque, release) })
     }
 
-    /// Create a transaction aborted error with Java's default message.
-    ///
-    /// Corresponds to Java's no-arg `TransactionAbortedException()`
-    /// (`TransactionAbortedException.java:35`), whose message is
+    /// Creates a transaction aborted error with Java's default message, Java's no-arg
+    /// `TransactionAbortedException()`, whose message is
     /// `"Failing batch since transaction was aborted"`.
     ///
-    /// The pair's parameter-name intersection is empty and this overload matches
-    /// it, so it keeps the plain name (CLAUDE.md §2).
+    /// The pair's parameter-name intersection is empty and this overload matches it,
+    /// so it keeps the plain name.
     pub fn transaction_aborted() -> Self {
         Self::TransactionAborted(TransactionAbortedError::new("Failing batch since transaction was aborted"))
     }
 
-    /// Create a transaction aborted error with a custom message.
+    /// Creates a transaction aborted error with a custom message, Java's
+    /// `TransactionAbortedException(String)`.
     ///
-    /// Corresponds to Java's `TransactionAbortedException(String)` (`:31`).
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn transaction_aborted_message(message: impl Into<String>) -> Self {
         Self::TransactionAborted(TransactionAbortedError::new(message))
     }
 
-    /// Create a record batch too large error.
+    /// Creates a record batch too large error, Java's `RecordBatchTooLargeException`.
     ///
-    /// Corresponds to Java's `RecordBatchTooLargeException`.
+    /// # Arguments
+    ///
+    /// - `message` - the error message
     pub fn record_batch_too_large(message: impl Into<String>) -> Self {
         Self::RecordBatchTooLarge(RecordBatchTooLargeError::new(message))
     }
 
     // -- Base access -------------------------------------------------------
 
-    /// Access the base [`KafkaError`] common to all variants.
-    ///
-    /// Returns `None` for variants that do not carry a [`KafkaError`]
-    /// (e.g. [`LocalIllegalArgument`](Self::LocalIllegalArgument), [`LocalIllegalState`](Self::LocalIllegalState)).
+    /// Returns the base [`KafkaError`] common to all variants, or `None` for variants
+    /// that do not carry one (e.g. [`LocalIllegalArgument`](Self::LocalIllegalArgument),
+    /// [`LocalIllegalState`](Self::LocalIllegalState)).
     pub fn kafka_error(&self) -> Option<&KafkaError> {
         match self {
             Self::KafkaError(e) => Some(e),
@@ -3186,31 +3283,31 @@ impl Error {
         ErrorCode::error(self)
     }
 
-    /// The error message, translating Java's `Throwable.getMessage()`.
+    /// Returns the error message, Java's `Throwable.getMessage()`.
     ///
-    /// Delegated to the variant's payload: a message-only error returns the text
-    /// it was constructed with, and a payload wrapping a [`KafkaError`] returns
-    /// its custom message if set, otherwise the default text for its error code.
+    /// A message-only error returns the text it was constructed with, and a payload
+    /// wrapping a [`KafkaError`] returns its custom message if set, otherwise the
+    /// default text for its error code.
     ///
     /// This is NOT what `to_string()` produces. [`std::fmt::Display`] translates
     /// `Throwable.toString()`, which Java renders as
-    /// `getClass().getName() + ": " + getLocalizedMessage()` — so `Display`
-    /// carries a class-name prefix and, for some payloads, extra subclass state.
-    /// Use this method for log fields and equality assertions; use `Display`
-    /// when rendering the error to a human.
+    /// `getClass().getName() + ": " + getLocalizedMessage()`, so `Display` carries a
+    /// class-name prefix and, for some payloads, extra subclass state. Use this method
+    /// for log fields and equality assertions; use `Display` when rendering the error
+    /// to a human.
     pub fn message(&self) -> &str {
         // UFCS: `self.message()` would resolve to this inherent method and recurse.
         ErrorMessage::message(self)
     }
 
-    /// The error that caused this one, translating Java's `Throwable.getCause()`.
+    /// Returns the error that caused this one, Java's `Throwable.getCause()`, or
+    /// `None` when there is none.
     ///
-    /// `getCause()` lives on `Throwable`, so every error can carry a cause — this
-    /// answers for all of them, delegated to the variant's payload. `None` is the
-    /// common case, mirroring Java's null default.
+    /// `getCause()` lives on `Throwable`, so every error can carry a cause: this
+    /// answers for all of them. `None` is the common case, as Java's null default.
     ///
-    /// [`std::error::Error::source`] returns the same value, so the standard
-    /// library's chain-walking works on any [`Error`].
+    /// [`std::error::Error::source`] returns the same value, so the standard library's
+    /// chain-walking works on any [`Error`].
     pub fn source(&self) -> Option<&Error> {
         // UFCS: `self.source()` would resolve to this inherent method and recurse.
         ErrorSource::source(self)
@@ -3219,7 +3316,7 @@ impl Error {
     // -- Hierarchy predicates ----------------------------------------------
     //
     // Java's exception hierarchy is flattened into this enum, so each
-    // intermediate class becomes a predicate (CLAUDE.md §12.4). The answers
+    // intermediate class becomes a predicate. The answers
     // come from the variant's payload via `ErrorHierarchy`, which is crate
     // -internal; these forwarders are the public surface.
     //
@@ -3227,12 +3324,12 @@ impl Error {
     // `Error::is_x` resolves back to this inherent method — inherent beats
     // trait — and recurses forever at run time while compiling cleanly.
 
-    /// Whether this is a Kafka error rather than a generic programming error.
+    /// Returns whether this is a Kafka error rather than a generic programming error.
     ///
     /// This enum flattens two families that Java keeps apart by class
     /// hierarchy: Kafka's own `KafkaException` tree, and the generic
     /// `java.lang` / `java.util` runtime exceptions that sit beside it as
-    /// siblings rather than below it (`common/KafkaException.java:22`). This
+    /// siblings rather than below it (`KafkaException` extends `RuntimeException`). This
     /// predicate recovers that distinction, mirroring Java's
     /// `t instanceof KafkaException`.
     ///
@@ -3263,8 +3360,8 @@ impl Error {
     /// `ApiException`s, so they return `true` here and `false` there.
     ///
     /// Two call sites depend on this:
-    /// `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
-    /// (`ConsumerUtils.java:256`) — a Kafka error passes through unchanged, a
+    /// `org.apache.kafka.clients.consumer.internals.ConsumerUtils#maybeWrapAsKafkaException`
+    /// — a Kafka error passes through unchanged, a
     /// generic one gets wrapped in a new `KafkaException(message, t)` — and
     /// `FetchCollector`, whose Java `catch (KafkaException e)` cannot catch a
     /// generic error, so those propagate where Kafka errors are swallowed.
@@ -3272,7 +3369,7 @@ impl Error {
         ErrorHierarchy::is_kafka_error(self)
     }
 
-    /// Whether this error corresponds to a Java `ApiException`.
+    /// Returns whether this error's Java class is `ApiException` or extends it.
     ///
     /// In Java, `ApiException` is a subclass of `KafkaException` representing
     /// errors from the Kafka API. In `KafkaProducer.doSend()`, `ApiException`s
@@ -3308,8 +3405,8 @@ impl Error {
         ErrorHierarchy::is_api_error(self)
     }
 
-    /// Whether this error's Java class extends `RetriableException` — i.e.
-    /// whether re-sending the failed request can succeed.
+    /// Returns whether this error's Java class extends `RetriableException` — i.e. whether
+    /// re-sending the failed request can succeed.
     ///
     /// The answer belongs to the payload, not to the enum: each error class
     /// names `is_retriable_error` in its `extends:` list, so the covered set is
@@ -3334,9 +3431,8 @@ impl Error {
         ErrorHierarchy::is_retriable_error(self)
     }
 
-    /// Whether this error's Java class extends `RefreshRetriableException`
-    /// (CLAUDE.md §12.4) — retriable, and a metadata / coordinator refresh is
-    /// what clears it.
+    /// Returns whether this error's Java class extends `RefreshRetriableException` — retriable, and
+    /// a metadata / coordinator refresh is what clears it.
     ///
     /// Fifteen payloads name it in their `extends:` list: the thirteen that also
     /// answer [`is_invalid_metadata_error`](Self::is_invalid_metadata_error)
@@ -3352,8 +3448,7 @@ impl Error {
         ErrorHierarchy::is_refresh_retriable_error(self)
     }
 
-    /// Whether this error's Java class extends `TimeoutException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `TimeoutException`.
     ///
     /// Wider than the [`Timeout`](Self::Timeout) variant:
     /// `BufferExhaustedException extends TimeoutException`, so
@@ -3368,8 +3463,8 @@ impl Error {
         ErrorHierarchy::is_timeout_error(self)
     }
 
-    /// Whether this error's Java class extends `InvalidMetadataException`
-    /// (CLAUDE.md §12.4) — the client's cached metadata may be stale.
+    /// Returns whether this error's Java class extends `InvalidMetadataException` — the client's
+    /// cached metadata may be stale.
     ///
     /// Nested inside [`is_refresh_retriable_error`](Self::is_refresh_retriable_error),
     /// which is nested inside [`is_retriable_error`](Self::is_retriable_error).
@@ -3380,8 +3475,7 @@ impl Error {
         ErrorHierarchy::is_invalid_metadata_error(self)
     }
 
-    /// Whether this error's Java class extends `InvalidConfigurationException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `InvalidConfigurationException`.
     ///
     /// Wider than its name suggests: in Kafka 4.2 **both**
     /// `AuthenticationException` and `AuthorizationException` extend
@@ -3398,10 +3492,9 @@ impl Error {
         ErrorHierarchy::is_invalid_configuration_error(self)
     }
 
-    /// Whether this error's Java class extends `ApplicationRecoverableException`
-    /// (CLAUDE.md §12.4) — the application can recover, but only by
-    /// re-initialising its producer or rejoining its group; the current epoch or
-    /// session is gone.
+    /// Returns whether this error's Java class extends `ApplicationRecoverableException` — the
+    /// application can recover, but only by re-initialising its producer or rejoining its group;
+    /// the current epoch or session is gone.
     ///
     /// 6 codes, covering the transaction and group-membership fencing paths:
     /// `Errors::FencedInstanceId`, `Errors::IllegalGeneration`,
@@ -3411,8 +3504,7 @@ impl Error {
         ErrorHierarchy::is_application_recoverable_error(self)
     }
 
-    /// Whether this error's Java class extends `InvalidOffsetException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `InvalidOffsetException`.
     ///
     /// `Errors::OffsetOutOfRange` is the only member carrying a protocol code;
     /// the sibling `NoOffsetForPartitionException` is raised client-side.
@@ -3420,8 +3512,7 @@ impl Error {
         ErrorHierarchy::is_invalid_offset_error(self)
     }
 
-    /// Whether this error's Java class extends `OutOfOrderSequenceException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `OutOfOrderSequenceException`.
     ///
     /// Two codes: `Errors::OutOfOrderSequenceNumber` itself and
     /// `Errors::UnknownProducerId`, its only subclass.
@@ -3429,16 +3520,16 @@ impl Error {
         ErrorHierarchy::is_out_of_order_sequence_error(self)
     }
 
-    /// Whether this error's Java class extends
-    /// `org.apache.kafka.clients.consumer.InvalidOffsetException`
-    /// (CLAUDE.md §12.4) — no offset is usable for the partition.
+    /// Returns whether this error's Java class extends
+    /// `org.apache.kafka.clients.consumer.InvalidOffsetException` — no offset is usable for the
+    /// partition.
     ///
     /// Covers
     /// [`ConsumerNoOffsetForPartition`](Self::ConsumerNoOffsetForPartition),
     /// [`ConsumerOffsetOutOfRange`](Self::ConsumerOffsetOutOfRange) and
     /// [`ConsumerLogTruncation`](Self::ConsumerLogTruncation) — the `Consumer`
-    /// prefix is what CLAUDE.md §2 adds to the `clients.consumer` package's
-    /// classes, so it is part of the variant name.
+    /// prefix marks the `clients.consumer` package's classes, so it is part of
+    /// the variant name.
     ///
     /// Distinct from [`is_invalid_offset_error`](Self::is_invalid_offset_error),
     /// which tests `common.errors.InvalidOffsetException` — a different Java
@@ -3449,9 +3540,8 @@ impl Error {
         ErrorHierarchy::is_consumer_invalid_offset_error(self)
     }
 
-    /// Whether this error's Java class extends
-    /// `org.apache.kafka.clients.consumer.OffsetOutOfRangeException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends
+    /// `org.apache.kafka.clients.consumer.OffsetOutOfRangeException`.
     ///
     /// Wider than the [`ConsumerOffsetOutOfRange`](Self::ConsumerOffsetOutOfRange)
     /// variant: `LogTruncationException` extends that class, so
@@ -3467,8 +3557,7 @@ impl Error {
         ErrorHierarchy::is_consumer_offset_out_of_range_error(self)
     }
 
-    /// Whether this error's Java class extends `SerializationException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `SerializationException`.
     ///
     /// No protocol code maps here — `SerializationException` and its subclass
     /// `RecordDeserializationException` are raised client-side — so only
@@ -3479,8 +3568,7 @@ impl Error {
         ErrorHierarchy::is_serialization_error(self)
     }
 
-    /// Whether this error's Java class extends `AuthenticationException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `AuthenticationException`.
     ///
     /// Five payloads name it in their `extends:` list:
     /// [`Authentication`](Self::Authentication) — the concrete base class, which
@@ -3509,8 +3597,7 @@ impl Error {
         ErrorHierarchy::is_authentication_error(self)
     }
 
-    /// Whether this error's Java class extends `AuthorizationException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `AuthorizationException`.
     ///
     /// Six payloads name it in their `extends:` list:
     /// [`Authorization`](Self::Authorization) — the concrete base class, which
@@ -3536,9 +3623,10 @@ impl Error {
     //
     // One per variant, mirroring `ErrorHierarchy`'s class predicates: use these
     // instead of matching on a variant, so that a subclass a later Java release
-    // adds — a new variant — still answers `true` (CLAUDE.md §3).
+    // adds — a new variant — still answers `true`.
 
-    /// Whether this error's Java class is, or extends, `java.lang.IllegalArgumentException`.
+    /// Returns whether this error's Java class is, or extends,
+    /// `java.lang.IllegalArgumentException`.
     ///
     /// Prefer this to matching [`Error::LocalIllegalArgument`](Self::LocalIllegalArgument): a
     /// variant match misses the subclasses a later Java release may add.
@@ -3546,7 +3634,7 @@ impl Error {
         ErrorHierarchy::is_local_illegal_argument_error(self)
     }
 
-    /// Whether this error's Java class is, or extends, `java.lang.IllegalStateException`.
+    /// Returns whether this error's Java class is, or extends, `java.lang.IllegalStateException`.
     ///
     /// Prefer this to matching [`Error::LocalIllegalState`](Self::LocalIllegalState): a variant
     /// match misses the subclasses a later Java release may add.
@@ -3554,7 +3642,8 @@ impl Error {
         ErrorHierarchy::is_local_illegal_state_error(self)
     }
 
-    /// Whether this error's Java class is, or extends, `java.util.ConcurrentModificationException`.
+    /// Returns whether this error's Java class is, or extends,
+    /// `java.util.ConcurrentModificationException`.
     ///
     /// Prefer this to matching
     /// [`Error::LocalConcurrentModification`](Self::LocalConcurrentModification): a variant match
@@ -3563,7 +3652,8 @@ impl Error {
         ErrorHierarchy::is_local_concurrent_modification_error(self)
     }
 
-    /// Whether this error's Java class is, or extends, `java.util.concurrent.TimeoutException`.
+    /// Returns whether this error's Java class is, or extends,
+    /// `java.util.concurrent.TimeoutException`.
     ///
     /// Prefer this to matching [`Error::LocalTimeout`](Self::LocalTimeout): a variant match misses
     /// the subclasses a later Java release may add.
@@ -3571,7 +3661,8 @@ impl Error {
         ErrorHierarchy::is_local_timeout_error(self)
     }
 
-    /// Whether this error's Java class is, or extends, `java.lang.UnsupportedOperationException`.
+    /// Returns whether this error's Java class is, or extends,
+    /// `java.lang.UnsupportedOperationException`.
     ///
     /// Covers exactly [`Error::LocalUnsupportedOperation`](Self::LocalUnsupportedOperation), a
     /// plain `RuntimeException` beside `KafkaException`: it answers `false` to
@@ -3587,8 +3678,8 @@ impl Error {
         ErrorHierarchy::is_local_unsupported_operation_error(self)
     }
 
-    /// Whether this is an error raised by a callback written in another
-    /// language ([`Error::LocalCallback`](Self::LocalCallback); no Java class).
+    /// Returns whether this is an error raised by a callback written in another language
+    /// ([`Error::LocalCallback`](Self::LocalCallback); no Java class).
     ///
     /// Covers exactly that variant. Like the `java.lang` runtime errors it is
     /// outside the Kafka hierarchy: [`is_kafka_error`](Self::is_kafka_error) and
@@ -3597,7 +3688,7 @@ impl Error {
         ErrorHierarchy::is_local_callback_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.AuthorizerNotReadyException`.
     ///
     /// Prefer this to matching [`Error::AuthorizerNotReady`](Self::AuthorizerNotReady): a variant
@@ -3606,7 +3697,7 @@ impl Error {
         ErrorHierarchy::is_authorizer_not_ready_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.BootstrapResolutionException`.
     ///
     /// Prefer this to matching [`Error::BootstrapResolution`](Self::BootstrapResolution): a variant
@@ -3615,7 +3706,7 @@ impl Error {
         ErrorHierarchy::is_bootstrap_resolution_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.BrokerIdNotRegisteredException`.
     ///
     /// Prefer this to matching [`Error::BrokerIdNotRegistered`](Self::BrokerIdNotRegistered): a
@@ -3624,7 +3715,7 @@ impl Error {
         ErrorHierarchy::is_broker_id_not_registered_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.BrokerNotAvailableException`.
     ///
     /// Prefer this to matching [`Error::BrokerNotAvailable`](Self::BrokerNotAvailable): a variant
@@ -3633,7 +3724,7 @@ impl Error {
         ErrorHierarchy::is_broker_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.clients.producer.BufferExhaustedException`.
     ///
     /// Prefer this to matching [`Error::ProducerBufferExhausted`](Self::ProducerBufferExhausted): a
@@ -3642,7 +3733,7 @@ impl Error {
         ErrorHierarchy::is_producer_buffer_exhausted_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ClusterAuthorizationException`.
     ///
     /// Prefer this to matching [`Error::ClusterAuthorization`](Self::ClusterAuthorization): a
@@ -3651,7 +3742,7 @@ impl Error {
         ErrorHierarchy::is_cluster_authorization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ConcurrentTransactionsException`.
     ///
     /// Prefer this to matching [`Error::ConcurrentTransactions`](Self::ConcurrentTransactions): a
@@ -3660,7 +3751,7 @@ impl Error {
         ErrorHierarchy::is_concurrent_transactions_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ControllerIdNotRegisteredException`.
     ///
     /// Prefer this to matching [`Error::ControllerIdNotRegistered`](Self::ControllerIdNotRegistered): a variant
@@ -3669,7 +3760,7 @@ impl Error {
         ErrorHierarchy::is_controller_id_not_registered_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ControllerMovedException`.
     ///
     /// Prefer this to matching [`Error::ControllerMoved`](Self::ControllerMoved): a variant match
@@ -3678,7 +3769,7 @@ impl Error {
         ErrorHierarchy::is_controller_moved_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.CoordinatorLoadInProgressException`.
     ///
     /// Prefer this to matching
@@ -3688,7 +3779,7 @@ impl Error {
         ErrorHierarchy::is_coordinator_load_in_progress_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.CoordinatorNotAvailableException`.
     ///
     /// Prefer this to matching [`Error::CoordinatorNotAvailable`](Self::CoordinatorNotAvailable): a
@@ -3697,7 +3788,7 @@ impl Error {
         ErrorHierarchy::is_coordinator_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.requests.CorrelationIdMismatchException`.
     ///
     /// Prefer this to matching [`Error::CorrelationIdMismatch`](Self::CorrelationIdMismatch): a
@@ -3706,7 +3797,7 @@ impl Error {
         ErrorHierarchy::is_correlation_id_mismatch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.CorruptRecordException`.
     ///
     /// Prefer this to matching [`Error::CorruptRecord`](Self::CorruptRecord): a variant match
@@ -3715,7 +3806,7 @@ impl Error {
         ErrorHierarchy::is_corrupt_record_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DelegationTokenAuthorizationException`.
     ///
     /// Prefer this to matching
@@ -3725,7 +3816,7 @@ impl Error {
         ErrorHierarchy::is_delegation_token_authorization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DelegationTokenDisabledException`.
     ///
     /// Prefer this to matching [`Error::DelegationTokenDisabled`](Self::DelegationTokenDisabled): a
@@ -3734,7 +3825,7 @@ impl Error {
         ErrorHierarchy::is_delegation_token_disabled_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DelegationTokenExpiredException`.
     ///
     /// Prefer this to matching [`Error::DelegationTokenExpired`](Self::DelegationTokenExpired): a
@@ -3743,7 +3834,7 @@ impl Error {
         ErrorHierarchy::is_delegation_token_expired_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DelegationTokenNotFoundException`.
     ///
     /// Prefer this to matching [`Error::DelegationTokenNotFound`](Self::DelegationTokenNotFound): a
@@ -3752,7 +3843,7 @@ impl Error {
         ErrorHierarchy::is_delegation_token_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DelegationTokenOwnerMismatchException`.
     ///
     /// Prefer this to matching
@@ -3762,7 +3853,7 @@ impl Error {
         ErrorHierarchy::is_delegation_token_owner_mismatch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DisconnectException`.
     ///
     /// Prefer this to matching [`Error::Disconnect`](Self::Disconnect): a variant match misses the
@@ -3771,7 +3862,7 @@ impl Error {
         ErrorHierarchy::is_disconnect_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DuplicateBrokerRegistrationException`.
     ///
     /// Prefer this to matching
@@ -3781,7 +3872,7 @@ impl Error {
         ErrorHierarchy::is_duplicate_broker_registration_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DuplicateResourceException`.
     ///
     /// Prefer this to matching [`Error::DuplicateResource`](Self::DuplicateResource): a variant
@@ -3790,7 +3881,7 @@ impl Error {
         ErrorHierarchy::is_duplicate_resource_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DuplicateSequenceException`.
     ///
     /// Prefer this to matching [`Error::DuplicateSequence`](Self::DuplicateSequence): a variant
@@ -3799,7 +3890,7 @@ impl Error {
         ErrorHierarchy::is_duplicate_sequence_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.DuplicateVoterException`.
     ///
     /// Prefer this to matching [`Error::DuplicateVoter`](Self::DuplicateVoter): a variant match
@@ -3808,7 +3899,7 @@ impl Error {
         ErrorHierarchy::is_duplicate_voter_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ElectionNotNeededException`.
     ///
     /// Prefer this to matching [`Error::ElectionNotNeeded`](Self::ElectionNotNeeded): a variant
@@ -3817,7 +3908,7 @@ impl Error {
         ErrorHierarchy::is_election_not_needed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.EligibleLeadersNotAvailableException`.
     ///
     /// Prefer this to matching
@@ -3827,7 +3918,7 @@ impl Error {
         ErrorHierarchy::is_eligible_leaders_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FeatureUpdateFailedException`.
     ///
     /// Prefer this to matching [`Error::FeatureUpdateFailed`](Self::FeatureUpdateFailed): a variant
@@ -3836,7 +3927,7 @@ impl Error {
         ErrorHierarchy::is_feature_update_failed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FencedInstanceIdException`.
     ///
     /// Prefer this to matching [`Error::FencedInstanceId`](Self::FencedInstanceId): a variant match
@@ -3845,7 +3936,7 @@ impl Error {
         ErrorHierarchy::is_fenced_instance_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FencedLeaderEpochException`.
     ///
     /// Prefer this to matching [`Error::FencedLeaderEpoch`](Self::FencedLeaderEpoch): a variant
@@ -3854,7 +3945,7 @@ impl Error {
         ErrorHierarchy::is_fenced_leader_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FencedMemberEpochException`.
     ///
     /// Prefer this to matching [`Error::FencedMemberEpoch`](Self::FencedMemberEpoch): a variant
@@ -3863,7 +3954,7 @@ impl Error {
         ErrorHierarchy::is_fenced_member_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FencedStateEpochException`.
     ///
     /// Prefer this to matching [`Error::FencedStateEpoch`](Self::FencedStateEpoch): a variant match
@@ -3872,7 +3963,7 @@ impl Error {
         ErrorHierarchy::is_fenced_state_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FetchSessionIdNotFoundException`.
     ///
     /// Prefer this to matching [`Error::FetchSessionIdNotFound`](Self::FetchSessionIdNotFound): a
@@ -3881,7 +3972,7 @@ impl Error {
         ErrorHierarchy::is_fetch_session_id_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.FetchSessionTopicIdException`.
     ///
     /// Prefer this to matching [`Error::FetchSessionTopicId`](Self::FetchSessionTopicId): a variant
@@ -3890,7 +3981,7 @@ impl Error {
         ErrorHierarchy::is_fetch_session_topic_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupAuthorizationException`.
     ///
     /// Prefer this to matching [`Error::GroupAuthorization`](Self::GroupAuthorization): a variant
@@ -3899,7 +3990,7 @@ impl Error {
         ErrorHierarchy::is_group_authorization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupDeletionFailedException`.
     ///
     /// Prefer this to matching [`Error::GroupDeletionFailed`](Self::GroupDeletionFailed): a variant
@@ -3908,7 +3999,7 @@ impl Error {
         ErrorHierarchy::is_group_deletion_failed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupIdNotFoundException`.
     ///
     /// Prefer this to matching [`Error::GroupIdNotFound`](Self::GroupIdNotFound): a variant match
@@ -3917,7 +4008,7 @@ impl Error {
         ErrorHierarchy::is_group_id_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupMaxSizeReachedException`.
     ///
     /// Prefer this to matching [`Error::GroupMaxSizeReached`](Self::GroupMaxSizeReached): a variant
@@ -3926,7 +4017,7 @@ impl Error {
         ErrorHierarchy::is_group_max_size_reached_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupNotEmptyException`.
     ///
     /// Prefer this to matching [`Error::GroupNotEmpty`](Self::GroupNotEmpty): a variant match
@@ -3935,7 +4026,7 @@ impl Error {
         ErrorHierarchy::is_group_not_empty_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.GroupSubscribedToTopicException`.
     ///
     /// Prefer this to matching [`Error::GroupSubscribedToTopic`](Self::GroupSubscribedToTopic): a
@@ -3944,7 +4035,7 @@ impl Error {
         ErrorHierarchy::is_group_subscribed_to_topic_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.IllegalGenerationException`.
     ///
     /// Prefer this to matching [`Error::IllegalGeneration`](Self::IllegalGeneration): a variant
@@ -3953,7 +4044,7 @@ impl Error {
         ErrorHierarchy::is_illegal_generation_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.IllegalSaslStateException`.
     ///
     /// Prefer this to matching [`Error::IllegalSaslState`](Self::IllegalSaslState): a variant match
@@ -3962,7 +4053,7 @@ impl Error {
         ErrorHierarchy::is_illegal_sasl_state_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InconsistentClusterIdException`.
     ///
     /// Prefer this to matching [`Error::InconsistentClusterId`](Self::InconsistentClusterId): a
@@ -3971,7 +4062,7 @@ impl Error {
         ErrorHierarchy::is_inconsistent_cluster_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InconsistentGroupProtocolException`.
     ///
     /// Prefer this to matching
@@ -3981,7 +4072,7 @@ impl Error {
         ErrorHierarchy::is_inconsistent_group_protocol_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InconsistentTopicIdException`.
     ///
     /// Prefer this to matching [`Error::InconsistentTopicId`](Self::InconsistentTopicId): a variant
@@ -3990,7 +4081,7 @@ impl Error {
         ErrorHierarchy::is_inconsistent_topic_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InconsistentVoterSetException`.
     ///
     /// Prefer this to matching [`Error::InconsistentVoterSet`](Self::InconsistentVoterSet): a
@@ -3999,7 +4090,7 @@ impl Error {
         ErrorHierarchy::is_inconsistent_voter_set_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.IneligibleReplicaException`.
     ///
     /// Prefer this to matching [`Error::IneligibleReplica`](Self::IneligibleReplica): a variant
@@ -4008,7 +4099,7 @@ impl Error {
         ErrorHierarchy::is_ineligible_replica_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InterruptException`.
     ///
     /// Prefer this to matching [`Error::Interrupt`](Self::Interrupt): a variant match misses the
@@ -4017,7 +4108,7 @@ impl Error {
         ErrorHierarchy::is_interrupt_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidCommitOffsetSizeException`.
     ///
     /// Prefer this to matching [`Error::InvalidCommitOffsetSize`](Self::InvalidCommitOffsetSize): a
@@ -4026,7 +4117,7 @@ impl Error {
         ErrorHierarchy::is_invalid_commit_offset_size_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidFetchSessionEpochException`.
     ///
     /// Prefer this to matching [`Error::InvalidFetchSessionEpoch`](Self::InvalidFetchSessionEpoch):
@@ -4035,7 +4126,7 @@ impl Error {
         ErrorHierarchy::is_invalid_fetch_session_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidFetchSizeException`.
     ///
     /// Prefer this to matching [`Error::InvalidFetchSize`](Self::InvalidFetchSize): a variant match
@@ -4044,7 +4135,7 @@ impl Error {
         ErrorHierarchy::is_invalid_fetch_size_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidGroupIdException`.
     ///
     /// Prefer this to matching [`Error::InvalidGroupId`](Self::InvalidGroupId): a variant match
@@ -4053,7 +4144,7 @@ impl Error {
         ErrorHierarchy::is_invalid_group_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidPartitionsException`.
     ///
     /// Prefer this to matching [`Error::InvalidPartitions`](Self::InvalidPartitions): a variant
@@ -4062,7 +4153,7 @@ impl Error {
         ErrorHierarchy::is_invalid_partitions_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidPidMappingException`.
     ///
     /// Prefer this to matching [`Error::InvalidPidMapping`](Self::InvalidPidMapping): a variant
@@ -4071,7 +4162,7 @@ impl Error {
         ErrorHierarchy::is_invalid_pid_mapping_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidPrincipalTypeException`.
     ///
     /// Prefer this to matching [`Error::InvalidPrincipalType`](Self::InvalidPrincipalType): a
@@ -4080,7 +4171,7 @@ impl Error {
         ErrorHierarchy::is_invalid_principal_type_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidProducerEpochException`.
     ///
     /// Prefer this to matching [`Error::InvalidProducerEpoch`](Self::InvalidProducerEpoch): a
@@ -4089,7 +4180,7 @@ impl Error {
         ErrorHierarchy::is_invalid_producer_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.InvalidRecordException`.
     ///
     /// Prefer this to matching [`Error::InvalidRecord`](Self::InvalidRecord): a variant match
@@ -4098,7 +4189,7 @@ impl Error {
         ErrorHierarchy::is_invalid_record_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidRecordStateException`.
     ///
     /// Prefer this to matching [`Error::InvalidRecordState`](Self::InvalidRecordState): a variant
@@ -4107,7 +4198,7 @@ impl Error {
         ErrorHierarchy::is_invalid_record_state_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidRegistrationException`.
     ///
     /// Prefer this to matching [`Error::InvalidRegistration`](Self::InvalidRegistration): a variant
@@ -4116,7 +4207,7 @@ impl Error {
         ErrorHierarchy::is_invalid_registration_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidRegularExpression`.
     ///
     /// Prefer this to matching [`Error::InvalidRegularExpression`](Self::InvalidRegularExpression):
@@ -4125,7 +4216,7 @@ impl Error {
         ErrorHierarchy::is_invalid_regular_expression_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidReplicaAssignmentException`.
     ///
     /// Prefer this to matching [`Error::InvalidReplicaAssignment`](Self::InvalidReplicaAssignment):
@@ -4134,7 +4225,7 @@ impl Error {
         ErrorHierarchy::is_invalid_replica_assignment_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidReplicationFactorException`.
     ///
     /// Prefer this to matching [`Error::InvalidReplicationFactor`](Self::InvalidReplicationFactor):
@@ -4143,7 +4234,7 @@ impl Error {
         ErrorHierarchy::is_invalid_replication_factor_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidRequestException`.
     ///
     /// Prefer this to matching [`Error::InvalidRequest`](Self::InvalidRequest): a variant match
@@ -4152,7 +4243,7 @@ impl Error {
         ErrorHierarchy::is_invalid_request_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidRequiredAcksException`.
     ///
     /// Prefer this to matching [`Error::InvalidRequiredAcks`](Self::InvalidRequiredAcks): a variant
@@ -4161,7 +4252,7 @@ impl Error {
         ErrorHierarchy::is_invalid_required_acks_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidSessionTimeoutException`.
     ///
     /// Prefer this to matching [`Error::InvalidSessionTimeout`](Self::InvalidSessionTimeout): a
@@ -4170,7 +4261,7 @@ impl Error {
         ErrorHierarchy::is_invalid_session_timeout_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidShareSessionEpochException`.
     ///
     /// Prefer this to matching [`Error::InvalidShareSessionEpoch`](Self::InvalidShareSessionEpoch):
@@ -4179,7 +4270,7 @@ impl Error {
         ErrorHierarchy::is_invalid_share_session_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidTimestampException`.
     ///
     /// Prefer this to matching [`Error::InvalidTimestamp`](Self::InvalidTimestamp): a variant match
@@ -4188,7 +4279,7 @@ impl Error {
         ErrorHierarchy::is_invalid_timestamp_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidTopicException`.
     ///
     /// Prefer this to matching [`Error::InvalidTopic`](Self::InvalidTopic): a variant match misses
@@ -4197,7 +4288,7 @@ impl Error {
         ErrorHierarchy::is_invalid_topic_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidTxnStateException`.
     ///
     /// Prefer this to matching [`Error::InvalidTxnState`](Self::InvalidTxnState): a variant match
@@ -4206,7 +4297,7 @@ impl Error {
         ErrorHierarchy::is_invalid_txn_state_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidTxnTimeoutException`.
     ///
     /// Prefer this to matching [`Error::InvalidTxnTimeout`](Self::InvalidTxnTimeout): a variant
@@ -4215,7 +4306,7 @@ impl Error {
         ErrorHierarchy::is_invalid_txn_timeout_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidUpdateVersionException`.
     ///
     /// Prefer this to matching [`Error::InvalidUpdateVersion`](Self::InvalidUpdateVersion): a
@@ -4224,7 +4315,7 @@ impl Error {
         ErrorHierarchy::is_invalid_update_version_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.InvalidVoterKeyException`.
     ///
     /// Prefer this to matching [`Error::InvalidVoterKey`](Self::InvalidVoterKey): a variant match
@@ -4233,7 +4324,7 @@ impl Error {
         ErrorHierarchy::is_invalid_voter_key_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.KafkaStorageException`.
     ///
     /// Prefer this to matching [`Error::KafkaStorage`](Self::KafkaStorage): a variant match misses
@@ -4242,7 +4333,7 @@ impl Error {
         ErrorHierarchy::is_kafka_storage_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.LeaderNotAvailableException`.
     ///
     /// Prefer this to matching [`Error::LeaderNotAvailable`](Self::LeaderNotAvailable): a variant
@@ -4251,7 +4342,7 @@ impl Error {
         ErrorHierarchy::is_leader_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ListenerNotFoundException`.
     ///
     /// Prefer this to matching [`Error::ListenerNotFound`](Self::ListenerNotFound): a variant match
@@ -4260,7 +4351,7 @@ impl Error {
         ErrorHierarchy::is_listener_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.LogDirNotFoundException`.
     ///
     /// Prefer this to matching [`Error::LogDirNotFound`](Self::LogDirNotFound): a variant match
@@ -4269,7 +4360,7 @@ impl Error {
         ErrorHierarchy::is_log_dir_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.MemberIdRequiredException`.
     ///
     /// Prefer this to matching [`Error::MemberIdRequired`](Self::MemberIdRequired): a variant match
@@ -4278,7 +4369,7 @@ impl Error {
         ErrorHierarchy::is_member_id_required_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.MismatchedEndpointTypeException`.
     ///
     /// Prefer this to matching [`Error::MismatchedEndpointType`](Self::MismatchedEndpointType): a
@@ -4287,7 +4378,7 @@ impl Error {
         ErrorHierarchy::is_mismatched_endpoint_type_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NetworkException`.
     ///
     /// Prefer this to matching [`Error::Network`](Self::Network): a variant match misses the
@@ -4296,7 +4387,7 @@ impl Error {
         ErrorHierarchy::is_network_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NewLeaderElectedException`.
     ///
     /// Prefer this to matching [`Error::NewLeaderElected`](Self::NewLeaderElected): a variant match
@@ -4305,7 +4396,7 @@ impl Error {
         ErrorHierarchy::is_new_leader_elected_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NoReassignmentInProgressException`.
     ///
     /// Prefer this to matching [`Error::NoReassignmentInProgress`](Self::NoReassignmentInProgress):
@@ -4314,7 +4405,7 @@ impl Error {
         ErrorHierarchy::is_no_reassignment_in_progress_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NotControllerException`.
     ///
     /// Prefer this to matching [`Error::NotController`](Self::NotController): a variant match
@@ -4323,7 +4414,7 @@ impl Error {
         ErrorHierarchy::is_not_controller_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NotCoordinatorException`.
     ///
     /// Prefer this to matching [`Error::NotCoordinator`](Self::NotCoordinator): a variant match
@@ -4332,7 +4423,7 @@ impl Error {
         ErrorHierarchy::is_not_coordinator_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NotEnoughReplicasException`.
     ///
     /// Prefer this to matching [`Error::NotEnoughReplicas`](Self::NotEnoughReplicas): a variant
@@ -4341,7 +4432,7 @@ impl Error {
         ErrorHierarchy::is_not_enough_replicas_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`.
     ///
     /// Prefer this to matching
@@ -4351,7 +4442,7 @@ impl Error {
         ErrorHierarchy::is_not_enough_replicas_after_append_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.NotLeaderOrFollowerException`.
     ///
     /// Prefer this to matching [`Error::NotLeaderOrFollower`](Self::NotLeaderOrFollower): a variant
@@ -4360,7 +4451,7 @@ impl Error {
         ErrorHierarchy::is_not_leader_or_follower_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.OffsetMetadataTooLarge`.
     ///
     /// Prefer this to matching [`Error::OffsetMetadataTooLarge`](Self::OffsetMetadataTooLarge): a
@@ -4369,7 +4460,7 @@ impl Error {
         ErrorHierarchy::is_offset_metadata_too_large_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.OffsetMovedToTieredStorageException`.
     ///
     /// Prefer this to matching
@@ -4379,7 +4470,7 @@ impl Error {
         ErrorHierarchy::is_offset_moved_to_tiered_storage_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.OffsetNotAvailableException`.
     ///
     /// Prefer this to matching [`Error::OffsetNotAvailable`](Self::OffsetNotAvailable): a variant
@@ -4388,7 +4479,7 @@ impl Error {
         ErrorHierarchy::is_offset_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.OffsetOutOfRangeException`.
     ///
     /// Prefer this to matching [`Error::OffsetOutOfRange`](Self::OffsetOutOfRange): a variant match
@@ -4397,7 +4488,7 @@ impl Error {
         ErrorHierarchy::is_offset_out_of_range_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.OperationNotAttemptedException`.
     ///
     /// Prefer this to matching [`Error::OperationNotAttempted`](Self::OperationNotAttempted): a
@@ -4406,7 +4497,7 @@ impl Error {
         ErrorHierarchy::is_operation_not_attempted_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.PolicyViolationException`.
     ///
     /// Prefer this to matching [`Error::PolicyViolation`](Self::PolicyViolation): a variant match
@@ -4415,7 +4506,7 @@ impl Error {
         ErrorHierarchy::is_policy_violation_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.PositionOutOfRangeException`.
     ///
     /// Prefer this to matching [`Error::PositionOutOfRange`](Self::PositionOutOfRange): a variant
@@ -4424,7 +4515,7 @@ impl Error {
         ErrorHierarchy::is_position_out_of_range_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.PreferredLeaderNotAvailableException`.
     ///
     /// Prefer this to matching
@@ -4434,7 +4525,7 @@ impl Error {
         ErrorHierarchy::is_preferred_leader_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.PrincipalDeserializationException`.
     ///
     /// Prefer this to matching [`Error::PrincipalDeserialization`](Self::PrincipalDeserialization):
@@ -4443,7 +4534,7 @@ impl Error {
         ErrorHierarchy::is_principal_deserialization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ProducerFencedException`.
     ///
     /// Prefer this to matching [`Error::ProducerFenced`](Self::ProducerFenced): a variant match
@@ -4452,7 +4543,7 @@ impl Error {
         ErrorHierarchy::is_producer_fenced_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.metrics.QuotaViolationException`.
     ///
     /// Prefer this to matching [`Error::QuotaViolation`](Self::QuotaViolation): a variant match
@@ -4461,7 +4552,7 @@ impl Error {
         ErrorHierarchy::is_quota_violation_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ReassignmentInProgressException`.
     ///
     /// Prefer this to matching [`Error::ReassignmentInProgress`](Self::ReassignmentInProgress): a
@@ -4470,7 +4561,7 @@ impl Error {
         ErrorHierarchy::is_reassignment_in_progress_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.RebalanceInProgressException`.
     ///
     /// Prefer this to matching [`Error::RebalanceInProgress`](Self::RebalanceInProgress): a variant
@@ -4479,7 +4570,7 @@ impl Error {
         ErrorHierarchy::is_rebalance_in_progress_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.RebootstrapRequiredException`.
     ///
     /// Prefer this to matching [`Error::RebootstrapRequired`](Self::RebootstrapRequired): a variant
@@ -4488,7 +4579,7 @@ impl Error {
         ErrorHierarchy::is_rebootstrap_required_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.RecordBatchTooLargeException`.
     ///
     /// Prefer this to matching [`Error::RecordBatchTooLarge`](Self::RecordBatchTooLarge): a variant
@@ -4497,7 +4588,7 @@ impl Error {
         ErrorHierarchy::is_record_batch_too_large_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.RecordDeserializationException`.
     ///
     /// Prefer this to matching [`Error::RecordDeserialization`](Self::RecordDeserialization): a
@@ -4506,7 +4597,7 @@ impl Error {
         ErrorHierarchy::is_record_deserialization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.RecordTooLargeException`.
     ///
     /// Prefer this to matching [`Error::RecordTooLarge`](Self::RecordTooLarge): a variant match
@@ -4515,7 +4606,7 @@ impl Error {
         ErrorHierarchy::is_record_too_large_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.network.InvalidReceiveException`.
     ///
     /// Prefer this to matching [`Error::InvalidReceive`](Self::InvalidReceive): a variant match
@@ -4524,7 +4615,7 @@ impl Error {
         ErrorHierarchy::is_invalid_receive_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.config.ConfigException`.
     ///
     /// Prefer this to matching [`Error::Config`](Self::Config): a variant match misses the
@@ -4533,7 +4624,7 @@ impl Error {
         ErrorHierarchy::is_config_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.clients.consumer.RetriableCommitFailedException`.
     ///
     /// Prefer this to matching
@@ -4543,7 +4634,7 @@ impl Error {
         ErrorHierarchy::is_consumer_retriable_commit_failed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.clients.consumer.CommitFailedException`.
     ///
     /// Prefer this to matching [`Error::ConsumerCommitFailed`](Self::ConsumerCommitFailed): a
@@ -4552,7 +4643,7 @@ impl Error {
         ErrorHierarchy::is_consumer_commit_failed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.clients.consumer.NoOffsetForPartitionException`.
     ///
     /// Prefer this to matching
@@ -4562,7 +4653,7 @@ impl Error {
         ErrorHierarchy::is_consumer_no_offset_for_partition_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.clients.consumer.LogTruncationException`.
     ///
     /// Prefer this to matching [`Error::ConsumerLogTruncation`](Self::ConsumerLogTruncation): a
@@ -4571,7 +4662,7 @@ impl Error {
         ErrorHierarchy::is_consumer_log_truncation_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ReplicaNotAvailableException`.
     ///
     /// Prefer this to matching [`Error::ReplicaNotAvailable`](Self::ReplicaNotAvailable): a variant
@@ -4580,7 +4671,7 @@ impl Error {
         ErrorHierarchy::is_replica_not_available_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ResourceNotFoundException`.
     ///
     /// Prefer this to matching [`Error::ResourceNotFound`](Self::ResourceNotFound): a variant match
@@ -4589,7 +4680,7 @@ impl Error {
         ErrorHierarchy::is_resource_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.SaslAuthenticationException`.
     ///
     /// Prefer this to matching [`Error::SaslAuthentication`](Self::SaslAuthentication): a variant
@@ -4598,7 +4689,7 @@ impl Error {
         ErrorHierarchy::is_sasl_authentication_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.protocol.types.SchemaException`.
     ///
     /// Prefer this to matching [`Error::Schema`](Self::Schema): a variant match misses the
@@ -4607,7 +4698,7 @@ impl Error {
         ErrorHierarchy::is_schema_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.SecurityDisabledException`.
     ///
     /// Prefer this to matching [`Error::SecurityDisabled`](Self::SecurityDisabled): a variant match
@@ -4616,7 +4707,7 @@ impl Error {
         ErrorHierarchy::is_security_disabled_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ShareSessionLimitReachedException`.
     ///
     /// Prefer this to matching [`Error::ShareSessionLimitReached`](Self::ShareSessionLimitReached):
@@ -4625,7 +4716,7 @@ impl Error {
         ErrorHierarchy::is_share_session_limit_reached_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ShareSessionNotFoundException`.
     ///
     /// Prefer this to matching [`Error::ShareSessionNotFound`](Self::ShareSessionNotFound): a
@@ -4634,7 +4725,7 @@ impl Error {
         ErrorHierarchy::is_share_session_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.SnapshotNotFoundException`.
     ///
     /// Prefer this to matching [`Error::SnapshotNotFound`](Self::SnapshotNotFound): a variant match
@@ -4643,7 +4734,7 @@ impl Error {
         ErrorHierarchy::is_snapshot_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.SslAuthenticationException`.
     ///
     /// Prefer this to matching [`Error::SslAuthentication`](Self::SslAuthentication): a variant
@@ -4652,7 +4743,7 @@ impl Error {
         ErrorHierarchy::is_ssl_authentication_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StaleBrokerEpochException`.
     ///
     /// Prefer this to matching [`Error::StaleBrokerEpoch`](Self::StaleBrokerEpoch): a variant match
@@ -4661,7 +4752,7 @@ impl Error {
         ErrorHierarchy::is_stale_broker_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StaleMemberEpochException`.
     ///
     /// Prefer this to matching [`Error::StaleMemberEpoch`](Self::StaleMemberEpoch): a variant match
@@ -4670,7 +4761,7 @@ impl Error {
         ErrorHierarchy::is_stale_member_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StreamsInvalidTopologyException`.
     ///
     /// Prefer this to matching [`Error::StreamsInvalidTopology`](Self::StreamsInvalidTopology): a
@@ -4679,7 +4770,7 @@ impl Error {
         ErrorHierarchy::is_streams_invalid_topology_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StreamsInvalidTopologyEpochException`.
     ///
     /// Prefer this to matching
@@ -4689,7 +4780,7 @@ impl Error {
         ErrorHierarchy::is_streams_invalid_topology_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StreamsTopologyDescriptionUpdateFailedException`.
     ///
     /// Prefer this to matching [`Error::StreamsTopologyDescriptionUpdateFailed`](Self::StreamsTopologyDescriptionUpdateFailed): a variant
@@ -4698,7 +4789,7 @@ impl Error {
         ErrorHierarchy::is_streams_topology_description_update_failed_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.StreamsTopologyFencedException`.
     ///
     /// Prefer this to matching [`Error::StreamsTopologyFenced`](Self::StreamsTopologyFenced): a
@@ -4707,7 +4798,7 @@ impl Error {
         ErrorHierarchy::is_streams_topology_fenced_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TelemetryTooLargeException`.
     ///
     /// Prefer this to matching [`Error::TelemetryTooLarge`](Self::TelemetryTooLarge): a variant
@@ -4716,7 +4807,7 @@ impl Error {
         ErrorHierarchy::is_telemetry_too_large_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.ThrottlingQuotaExceededException`.
     ///
     /// Prefer this to matching [`Error::ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded): a
@@ -4725,7 +4816,7 @@ impl Error {
         ErrorHierarchy::is_throttling_quota_exceeded_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TopicAuthorizationException`.
     ///
     /// Prefer this to matching [`Error::TopicAuthorization`](Self::TopicAuthorization): a variant
@@ -4734,7 +4825,7 @@ impl Error {
         ErrorHierarchy::is_topic_authorization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TopicDeletionDisabledException`.
     ///
     /// Prefer this to matching [`Error::TopicDeletionDisabled`](Self::TopicDeletionDisabled): a
@@ -4743,7 +4834,7 @@ impl Error {
         ErrorHierarchy::is_topic_deletion_disabled_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TopicExistsException`.
     ///
     /// Prefer this to matching [`Error::TopicExists`](Self::TopicExists): a variant match misses
@@ -4752,7 +4843,7 @@ impl Error {
         ErrorHierarchy::is_topic_exists_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TransactionAbortableException`.
     ///
     /// Prefer this to matching [`Error::TransactionAbortable`](Self::TransactionAbortable): a
@@ -4761,12 +4852,12 @@ impl Error {
     /// Java tests this class in two ways: by code (`error == Errors.TRANSACTION_ABORTABLE`,
     /// four sites in `TransactionManager`) and by class
     /// (`error.exception() instanceof TransactionAbortableException`,
-    /// `TransactionManager.java:1783`). This predicate is the class test.
+    /// in `TransactionManager`). This predicate is the class test.
     pub fn is_transaction_abortable_error(&self) -> bool {
         ErrorHierarchy::is_transaction_abortable_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TransactionAbortedException`.
     ///
     /// Prefer this to matching [`Error::TransactionAborted`](Self::TransactionAborted): a variant
@@ -4775,7 +4866,7 @@ impl Error {
         ErrorHierarchy::is_transaction_aborted_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TransactionCoordinatorFencedException`.
     ///
     /// Prefer this to matching
@@ -4785,7 +4876,7 @@ impl Error {
         ErrorHierarchy::is_transaction_coordinator_fenced_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TransactionalIdAuthorizationException`.
     ///
     /// Prefer this to matching
@@ -4795,7 +4886,7 @@ impl Error {
         ErrorHierarchy::is_transactional_id_authorization_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.TransactionalIdNotFoundException`.
     ///
     /// Prefer this to matching [`Error::TransactionalIdNotFound`](Self::TransactionalIdNotFound): a
@@ -4804,7 +4895,7 @@ impl Error {
         ErrorHierarchy::is_transactional_id_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnacceptableCredentialException`.
     ///
     /// Prefer this to matching [`Error::UnacceptableCredential`](Self::UnacceptableCredential): a
@@ -4813,7 +4904,7 @@ impl Error {
         ErrorHierarchy::is_unacceptable_credential_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownControllerIdException`.
     ///
     /// Prefer this to matching [`Error::UnknownControllerId`](Self::UnknownControllerId): a variant
@@ -4822,7 +4913,7 @@ impl Error {
         ErrorHierarchy::is_unknown_controller_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownLeaderEpochException`.
     ///
     /// Prefer this to matching [`Error::UnknownLeaderEpoch`](Self::UnknownLeaderEpoch): a variant
@@ -4831,7 +4922,7 @@ impl Error {
         ErrorHierarchy::is_unknown_leader_epoch_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownMemberIdException`.
     ///
     /// Prefer this to matching [`Error::UnknownMemberId`](Self::UnknownMemberId): a variant match
@@ -4840,7 +4931,7 @@ impl Error {
         ErrorHierarchy::is_unknown_member_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownProducerIdException`.
     ///
     /// Prefer this to matching [`Error::UnknownProducerId`](Self::UnknownProducerId): a variant
@@ -4849,7 +4940,7 @@ impl Error {
         ErrorHierarchy::is_unknown_producer_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownServerException`.
     ///
     /// Prefer this to matching [`Error::UnknownServer`](Self::UnknownServer): a variant match
@@ -4858,7 +4949,7 @@ impl Error {
         ErrorHierarchy::is_unknown_server_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownSubscriptionIdException`.
     ///
     /// Prefer this to matching [`Error::UnknownSubscriptionId`](Self::UnknownSubscriptionId): a
@@ -4867,7 +4958,7 @@ impl Error {
         ErrorHierarchy::is_unknown_subscription_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownTopicIdException`.
     ///
     /// Prefer this to matching [`Error::UnknownTopicId`](Self::UnknownTopicId): a variant match
@@ -4876,7 +4967,7 @@ impl Error {
         ErrorHierarchy::is_unknown_topic_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnknownTopicOrPartitionException`.
     ///
     /// Prefer this to matching [`Error::UnknownTopicOrPartition`](Self::UnknownTopicOrPartition): a
@@ -4885,7 +4976,7 @@ impl Error {
         ErrorHierarchy::is_unknown_topic_or_partition_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnreleasedInstanceIdException`.
     ///
     /// Prefer this to matching [`Error::UnreleasedInstanceId`](Self::UnreleasedInstanceId): a
@@ -4894,7 +4985,7 @@ impl Error {
         ErrorHierarchy::is_unreleased_instance_id_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnstableOffsetCommitException`.
     ///
     /// Prefer this to matching [`Error::UnstableOffsetCommit`](Self::UnstableOffsetCommit): a
@@ -4903,7 +4994,7 @@ impl Error {
         ErrorHierarchy::is_unstable_offset_commit_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedAssignorException`.
     ///
     /// Prefer this to matching [`Error::UnsupportedAssignor`](Self::UnsupportedAssignor): a variant
@@ -4912,7 +5003,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_assignor_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedByAuthenticationException`.
     ///
     /// Prefer this to matching
@@ -4922,7 +5013,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_by_authentication_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedCompressionTypeException`.
     ///
     /// Prefer this to matching
@@ -4932,7 +5023,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_compression_type_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedEndpointTypeException`.
     ///
     /// Prefer this to matching [`Error::UnsupportedEndpointType`](Self::UnsupportedEndpointType): a
@@ -4941,7 +5032,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_endpoint_type_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedForMessageFormatException`.
     ///
     /// Prefer this to matching
@@ -4951,7 +5042,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_for_message_format_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.UnsupportedSaslMechanismException`.
     ///
     /// Prefer this to matching [`Error::UnsupportedSaslMechanism`](Self::UnsupportedSaslMechanism):
@@ -4960,8 +5051,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_sasl_mechanism_error(self)
     }
 
-    /// Whether this error's Java class extends `UnsupportedVersionException`
-    /// (CLAUDE.md §12.4).
+    /// Returns whether this error's Java class extends `UnsupportedVersionException`.
     ///
     /// Exactly the [`UnsupportedVersion`](Self::UnsupportedVersion) variant
     /// (`Errors::UnsupportedVersion`). Java's subclasses —
@@ -4983,7 +5073,7 @@ impl Error {
         ErrorHierarchy::is_unsupported_version_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.VoterNotFoundException`.
     ///
     /// Prefer this to matching [`Error::VoterNotFound`](Self::VoterNotFound): a variant match
@@ -4992,7 +5082,7 @@ impl Error {
         ErrorHierarchy::is_voter_not_found_error(self)
     }
 
-    /// Whether this error's Java class is, or extends,
+    /// Returns whether this error's Java class is, or extends,
     /// `org.apache.kafka.common.errors.WakeupException`.
     ///
     /// Prefer this to matching [`Error::Wakeup`](Self::Wakeup): a variant match misses the
@@ -5007,8 +5097,8 @@ impl Error {
 // that payload's Java class implements `toString()`.
 
 impl std::error::Error for Error {
-    /// The standard-library view of Java's `Throwable.getCause()`, so
-    /// `{:#}`-style reporters and `anyhow`-style chains walk the cause chain.
+    // The standard-library view of Java's `Throwable.getCause()`, so
+    // `{:#}`-style reporters and `anyhow`-style chains walk the cause chain.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         // UFCS: `self.source()` would resolve to the inherent method below.
         ErrorSource::source(self).map(|e| e as &(dyn std::error::Error + 'static))

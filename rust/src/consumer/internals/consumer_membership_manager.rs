@@ -169,12 +169,12 @@ enum PendingReconcile {
     /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
     /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
     /// mirroring Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:953-973`).
+    /// (`AbstractMembershipManager#maybeReconcile`).
     ///
     /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
     /// continuation when the commit resolves while the `ConsumerNetworkThread`
     /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
-    /// fired (`ApplicationEventProcessor.java:732-736`). The pre-fix Rust
+    /// fired (`ApplicationEventProcessor#process(AsyncPollEvent)`). The pre-fix Rust
     /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
     /// only marked `reconciliation_check_complete` after the commit resolved,
     /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
@@ -420,7 +420,7 @@ impl ConsumerMembershipManager {
     /// [`AbstractMembershipManager::on_heartbeat_success`] (KAFKA-20681).
     ///
     /// Java: `protected short errorCode(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager.java:211-214`), the override of the
+    /// (`ConsumerMembershipManager#errorCode`), the override of the
     /// abstract hook.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#errorCode")]
     pub(crate) fn error_code(response: &ConsumerGroupHeartbeatResponse) -> i16 {
@@ -433,7 +433,7 @@ impl ConsumerMembershipManager {
     /// beside the `memberEpoch()` getter ([`Self::member_epoch`]).
     ///
     /// Java: `protected int memberEpoch(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager.java:216-219`).
+    /// (`ConsumerMembershipManager#memberEpoch`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#memberEpoch")]
     pub(crate) fn member_epoch_with_response(response: &ConsumerGroupHeartbeatResponse) -> i32 {
         response.data().member_epoch
@@ -451,7 +451,7 @@ impl ConsumerMembershipManager {
     ///
     /// Java: `protected Optional<Map<Uuid, SortedSet<Integer>>>
     /// extractAssignment(ConsumerGroupHeartbeatResponse response)`
-    /// (`ConsumerMembershipManager.java:221-231`).
+    /// (`ConsumerMembershipManager#extractAssignment`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#extractAssignment")]
     pub(crate) fn extract_assignment(response: &ConsumerGroupHeartbeatResponse) -> Option<HashMap<Uuid, Vec<i32>>> {
         let assignment = response.data().assignment.as_ref()?;
@@ -497,8 +497,8 @@ impl ConsumerMembershipManager {
         // If we were UNSUBSCRIBED / LEAVING / PREPARE_LEAVING, Java's
         // semantics are: no onPartitionsLost callback, and the ongoing leave
         // (if any) is completed — Java's `maybeCompleteLeaveInProgress()` in
-        // both the "already left" (`AbstractMembershipManager.java:509`) and
-        // the "was leaving" (`:519`) branches.
+        // both the "already left" and the "was leaving" branches of
+        // `AbstractMembershipManager#transitionToFatal`.
         if matches!(
             previous_state,
             MemberState::Unsubscribed | MemberState::Leaving | MemberState::PrepareLeaving
@@ -565,7 +565,7 @@ impl ConsumerMembershipManager {
         // Handle Java's "already leaving / unsubscribed" short-circuit.
         match pre_state {
             MemberState::PrepareLeaving => {
-                // Java (`AbstractMembershipManager.java:449-461`): briefly go
+                // Java (`AbstractMembershipManager#transitionToFenced`): briefly go
                 // through LEAVING (clear epoch, notify listeners), then
                 // UNSUBSCRIBED, and complete the ongoing leave operation. An
                 // `on_partitions_revoked` callback still in flight for the
@@ -583,8 +583,9 @@ impl ConsumerMembershipManager {
                 return Ok(());
             },
             MemberState::Leaving => {
-                // Java (`:463-470`): no leave request is needed once fenced;
-                // complete the ongoing leave operation.
+                // Java (`AbstractMembershipManager#transitionToFenced`): no leave
+                // request is needed once fenced; complete the ongoing leave
+                // operation.
                 {
                     let mut guard = match self.abstract_mm.inner.lock() {
                         Ok(g) => g,
@@ -654,8 +655,7 @@ impl ConsumerMembershipManager {
     /// to STALE because of an expired poll timer, then (if a timer reset
     /// already requested it) rejoin.
     ///
-    /// Java: the async tail of `AbstractMembershipManager.transitionToStale()`
-    /// (`AbstractMembershipManager.java:839-854`):
+    /// Java: the async tail of `AbstractMembershipManager#transitionToStale`:
     ///
     /// ```java
     /// CompletableFuture<Void> callbackResult = signalPartitionsLost(subscriptions.assignedPartitions());
@@ -757,20 +757,18 @@ impl ConsumerMembershipManager {
     /// triggered on reconciliations initiated within a call to
     /// `consumer.poll()`; if `can_commit` is `false` and either condition
     /// applies, the reconciliation is skipped (KAFKA-20106 / KAFKA-20145
-    /// javadoc, `AbstractMembershipManager.java:868-874`). Java passes `false` from
+    /// javadoc of `AbstractMembershipManager#maybeReconcile`). Java passes `false` from
     /// `AbstractMembershipManager.poll(now)` (the per-iteration
     /// `entries()` walk) and `true` from
     /// `ApplicationEventProcessor.process(AsyncPollEvent)` (the
-    /// poll-time entry point, before any new fetching starts — see
-    /// Java line 729-732). The poll-time path passes `true` because
+    /// poll-time entry point, before any new fetching starts). The poll-time path passes `true` because
     /// any pending offsets can be safely flushed via the commit
     /// manager's auto-commit-before-rebalance path inside this method.
     /// The Rust translation mirrors this through the bg-task call site
     /// (passes `false`) and the `process_async_poll` arm (passes
     /// `true`).
     ///
-    /// Java: `maybeReconcile(boolean canCommit)`
-    /// (`AbstractMembershipManager.java:875`).
+    /// Java: `AbstractMembershipManager#maybeReconcile`.
     pub(crate) fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
         // Phase 41b: if a reconcile rebalance callback is already in
         // flight, drive it non-blockingly instead of starting a new
@@ -821,8 +819,8 @@ impl ConsumerMembershipManager {
 
         // 4. Short-circuit: if the resolved subset equals the current
         // assignment's partitions, just bump epoch and ACK — once per target
-        // epoch. KAFKA-20145 (`AbstractMembershipManager.java:896-905`): when
-        // the current assignment already carries the target's local epoch,
+        // epoch. KAFKA-20145 (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`):
+        // when the current assignment already carries the target's local epoch,
         // this partial assignment was acknowledged before, so return without
         // acknowledging it again. Without the check every reconcile attempt
         // (the bg loop's `reconcile(now, false)` runs on every iteration)
@@ -933,8 +931,8 @@ impl ConsumerMembershipManager {
 
         // 8a. Java `signalReconciliationStarted()` →
         // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
-        // (`ConsumerMembershipManager.java:236-244`,
-        //  `AbstractMembershipManager.java:953-973`).
+        // (`org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#signalReconciliationStarted`,
+        // `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`).
         //
         // Commit `subscriptions.allConsumed()` synchronously if auto-commit is
         // enabled. The deadline mirrors Java: the rebalance timeout (configured
@@ -943,8 +941,8 @@ impl ConsumerMembershipManager {
         // runs the continuation (step 8b onward) WHEN the commit resolves, while
         // the `ConsumerNetworkThread` keeps spinning and
         // `markReconciliationCheckCompleted()` has already fired
-        // (`ApplicationEventProcessor.java:732-736`). Awaiting inline here froze
-        // the AsyncPoll task's reconciliation-check mark behind a slow commit, so
+        // (`org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(AsyncPollEvent)`).
+        // Awaiting inline here froze the AsyncPoll task's reconciliation-check mark behind a slow commit, so
         // `poll()` returned empty even for RETAINED partitions until the commit
         // resolved. Instead we store an `AwaitingCommit` leg (member stays
         // `RECONCILING`) and let the bg loop `try_recv` the commit result on a
@@ -954,9 +952,9 @@ impl ConsumerMembershipManager {
         // Java's `whenComplete` on an ALREADY-completed future runs
         // synchronously (auto-commit disabled or no consumed offsets →
         // `maybeAutoCommitSyncBeforeRebalance` returns a completed future; and
-        // the base `signalReconciliationStarted()` at
-        // `AbstractMembershipManager.java:1064` returns a completed future when
-        // there is no commit manager). We reproduce that by `try_recv`ing once:
+        // the base
+        // `org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#signalReconciliationStarted` returns a
+        // completed future when there is no commit manager). We reproduce that by `try_recv`ing once:
         // if the result is already available, fall straight through to
         // `continue_after_commit` inline (behavior unchanged from before the
         // fix); only a genuinely in-flight commit stores the `AwaitingCommit`
@@ -1012,7 +1010,7 @@ impl ConsumerMembershipManager {
 
     /// Log the auto-commit-before-rebalance result. Mirrors Java's
     /// `commitResult.whenComplete` success / failure logging
-    /// (`AbstractMembershipManager.java:958-965`). The abort check + revoke
+    /// (`AbstractMembershipManager#maybeReconcile`). The abort check + revoke
     /// enqueue in [`Self::continue_after_commit`] run on BOTH the success and
     /// failure branches, which is why the logging is separated from them —
     /// exactly as Java's `whenComplete` logs, then unconditionally runs
@@ -1036,7 +1034,7 @@ impl ConsumerMembershipManager {
     /// Steps 8b-9 of `reconcile`, run after the auto-commit-before-rebalance
     /// has resolved (or was a no-op / had no commit manager). Mirrors the body
     /// of Java's `commitResult.whenComplete(...)` continuation
-    /// (`AbstractMembershipManager.java:967-969`):
+    /// (`AbstractMembershipManager#maybeReconcile`):
     ///
     /// ```java
     /// if (!maybeAbortReconciliation()) {
@@ -1059,8 +1057,8 @@ impl ConsumerMembershipManager {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-        // (`AbstractMembershipManager.java:967`) — the guard runs on BOTH the
-        // success and failure paths of the commit.
+        // (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#maybeReconcile`) — the guard runs on
+        // BOTH the success and failure paths of the commit.
         //
         // Since the divergence fix (PR #176) the commit receiver IS stored as
         // an `AwaitingCommit` leg while in flight, so a concurrent fence /
@@ -1124,7 +1122,7 @@ impl ConsumerMembershipManager {
     }
 
     /// Java's `reconciliationResult.whenComplete` error arm
-    /// (`AbstractMembershipManager.java:1015-1022`):
+    /// (`AbstractMembershipManager#revokeAndAssign`):
     ///
     /// ```java
     /// reconciliationResult.whenComplete((__, error) -> {
@@ -2843,7 +2841,7 @@ mod tests {
     /// is a no-op when auto-commit is enabled AND a commit manager is
     /// present, mirroring the auto-commit half of Java's gate
     /// `if (!canCommit && (autoCommitEnabled || !revokedPartitions.isEmpty())) return;`
-    /// (`AbstractMembershipManager.java:929`; KAFKA-20106 added the
+    /// (`AbstractMembershipManager#maybeReconcile`; KAFKA-20106 added the
     /// revocation half).
     ///
     /// Path: state is `Reconciling` with a real target assignment that
@@ -3940,13 +3938,12 @@ mod tests {
     }
 
     /// Translated from
-    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`
-    /// (`ConsumerMembershipManagerTest.java:1727`).
+    /// `ConsumerMembershipManagerTest#testReconcilePartitionsRevokedWithFailedAutoCommitCompletesRevocationAnyway`.
     /// Even if the auto-commit before rebalance fails EXCEPTIONALLY, the
     /// revocation still completes (Java's "proceed with reconciliation
     /// anyway"). Java arranges a commit future and
     /// `commitResult.completeExceptionally(new KafkaException("...non-retriable
-    /// error"))` (test:1596), then asserts the revocation reaches
+    /// error"))`, then asserts the revocation reaches
     /// completion regardless.
     ///
     /// To exercise the failure arm (`log_commit_result`'s `Err` branch, run on
@@ -4027,7 +4024,9 @@ mod tests {
     // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and
     // `process(AsyncPoll)` marks reconciliation-check-complete, letting `poll()`
     // return RETAINED-partition records) WHILE the commit is still in flight,
-    // matching Java `ApplicationEventProcessor.java:732-736`. ───────────────
+    // matching Java
+    // `org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#process(AsyncPollEvent)`.
+    // ───────────────
 
     /// (a) With auto-commit enabled and the commit response withheld, a single
     /// `reconcile()` call parks on the `AwaitingCommit` leg: it returns without
@@ -4872,7 +4871,7 @@ mod tests {
     ///
     /// Java funnels every failure in the revocation+assignment chain through
     /// one arm that logs and calls `markReconciliationCompleted()`
-    /// (`AbstractMembershipManager.java:1015-1022`). Rust replaced the
+    /// (`AbstractMembershipManager#revokeAndAssign`). Rust replaced the
     /// `CompletableFuture` chain with explicit steps and `?`, which returns
     /// *past* the clearing — so the flag stayed set and every later
     /// `reconcile()` short-circuited on "Another reconciliation is already in
@@ -4969,7 +4968,7 @@ mod tests {
     ///
     /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
     /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-    /// (`AbstractMembershipManager.java:967`).
+    /// (`AbstractMembershipManager#maybeReconcile`).
     ///
     /// Failure without the guard: the listener is told its partition was LOST
     /// (by the fence) and then REVOKED (by the stale reconcile), and the
@@ -5238,14 +5237,12 @@ mod tests {
     }
 
     /// Translated from
-    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`
-    /// (`ConsumerMembershipManagerTest.java:632`).
+    /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins`.
     /// A member is stuck reconciling assignment A, parked on the REVOCATION
-    /// COMMIT future (Java's `mockNewAssignmentAndRevocationStuckOnCommit`,
-    /// test:576). While parked on the commit it gets fenced and rejoins;
-    /// when the commit later completes (`commitResult.complete(null)`,
-    /// test:591) the in-flight reconcile must be DISCARDED — no assignment
-    /// applied, no ack sent.
+    /// COMMIT future (Java's
+    /// `ConsumerMembershipManagerTest#mockNewAssignmentAndRevocationStuckOnCommit`). While parked on the commit it
+    /// gets fenced and rejoins; when the commit later completes (`commitResult.complete(null)`) the in-flight reconcile
+    /// must be DISCARDED — no assignment applied, no ack sent.
     ///
     /// Unlike the sibling
     /// `delayed_reconciliation_result_discarded_after_partitions_revoked_callback_if_member_rejoins`
@@ -5609,7 +5606,8 @@ mod tests {
     /// kinds, mirroring Java's three error types.
     #[tokio::test]
     async fn listener_callbacks_throws_error_on_partitions_revoked() {
-        // Java's three, class for class (`ConsumerMembershipManagerTest.java:2000-2002`):
+        // Java's three, class for class
+        // (`ConsumerMembershipManagerTest#testListenerCallbacksThrowsErrorOnPartitionsRevoked`):
         // `WakeupException`, `InterruptException`, `IllegalArgumentException`.
         // `Interrupt` is not interchangeable with any other class here: together
         // with `Wakeup` it is one of the two that
@@ -6250,7 +6248,7 @@ mod tests {
     /// Translated from
     /// `ConsumerMembershipManagerTest#testLeaveGroupWhenMemberAlreadyLeaving`.
     /// A second leave while LEAVING triggers nothing and returns the SAME
-    /// in-progress future (`AbstractMembershipManager.java:637-643`), so
+    /// in-progress future (`AbstractMembershipManager#leaveGroup(boolean)`), so
     /// both complete together on the leave heartbeat's response.
     #[tokio::test]
     async fn leave_group_when_member_already_leaving() {
@@ -6380,7 +6378,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Fatal);
         // Beyond Java's test (which does not keep the leave future): the
         // fatal transition completes the ongoing leave
-        // (`AbstractMembershipManager.java:519`).
+        // (`AbstractMembershipManager#transitionToFatal`).
         assert_leave_completed_successfully(&leave_result);
 
         // Complete the stuck callback -> the leave is aborted; remains FATAL.
@@ -6445,7 +6443,7 @@ mod tests {
     /// `ConsumerMembershipManagerTest#testHeartbeatSuccessfulResponseWhenLeavingGroupCompletesLeave`.
     /// `leave_group()` returns the leave-in-progress future, completed only by
     /// `maybe_complete_leave_in_progress()` when the response to the leave
-    /// heartbeat arrives (`AbstractMembershipManager.java:309`) — not when the
+    /// heartbeat arrives (`AbstractMembershipManager#onHeartbeatSuccess`) — not when the
     /// member reaches LEAVING, nor when the leave heartbeat is only generated,
     /// nor on a non-leave response.
     #[tokio::test]
@@ -6526,7 +6524,7 @@ mod tests {
     }
 
     /// Translated from the `onHeartbeatRequestSkipped` branch of
-    /// `AbstractMembershipManager` (`:779-788`): when the leave heartbeat
+    /// `AbstractMembershipManager`: when the leave heartbeat
     /// cannot be sent (e.g. no coordinator), the member transitions LEAVING
     /// -> UNSUBSCRIBED and completes the leave, so `unsubscribe()` does not
     /// wait for a response that will never come.
@@ -6542,7 +6540,7 @@ mod tests {
         assert_leave_completed_successfully(&leave_result);
     }
 
-    /// Java `onHeartbeatSuccess` (`:318-325`): a response carrying an invalid
+    /// Java `AbstractMembershipManager#onHeartbeatSuccess`: a response carrying an invalid
     /// negative epoch for a member still in the group completes any leave in
     /// progress. A member in PREPARE_LEAVING (its leave callback still
     /// running) is such a member: it is neither LEAVING nor out of the group.
@@ -6772,7 +6770,7 @@ mod tests {
         let err = mgr.abstract_mm.on_heartbeat_success(&resp).unwrap_err();
         // Error message content is part of the contract (DoD §3). Java formats
         // the `Errors` constant with `%s`, i.e. its enum name
-        // (`AbstractMembershipManager.java:342-349`).
+        // (`org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#throwIfUnexpectedError`).
         assert!(
             matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
@@ -7170,7 +7168,7 @@ mod tests {
     /// When the pre-rebalance auto-commit resolves, the background loop must
     /// be woken to resume the parked reconciliation (`drive_pending_reconcile`),
     /// as Java's `commitResult.whenComplete(...)` resumes it inside
-    /// `client.poll` (`AbstractMembershipManager.java:967`).
+    /// `client.poll` (`AbstractMembershipManager#maybeReconcile`).
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_before_rebalance_completion_wakes_background_task() {
         let (mgr, notify) = member_revoking_with_consumed_offset();

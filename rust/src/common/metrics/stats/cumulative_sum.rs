@@ -24,13 +24,12 @@ use crate::common::metrics::{Measurable, MetricConfig, Stat};
 ///
 /// See also [`crate::common::metrics::stats::CumulativeCount`] if you just want to
 /// increment the value by 1 on each recording.
-///
-/// The running total `f64` is held as its bit pattern in an [`AtomicU64`] and
-/// updated with a compare-exchange add loop. The arithmetic is the identical
-/// IEEE-754 `f64` addition Java performs in `total += value`; the CAS only
-/// serializes concurrent recorders, exactly as Java's sensor `synchronized` does.
 #[derive(Debug)]
 #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeSum")]
+// The running total `f64` is held as its bit pattern in an `AtomicU64` and
+// updated with a compare-exchange add loop: the same IEEE-754 addition as Java's
+// `total += value`, the CAS only serializing concurrent recorders as Java's
+// sensor `synchronized` does.
 pub struct CumulativeSum {
     total: AtomicU64,
 }
@@ -43,6 +42,10 @@ impl CumulativeSum {
     }
 
     /// Create a `CumulativeSum` initialized to `value`.
+    ///
+    /// # Arguments
+    ///
+    /// - `value` - the initial total
     #[doc(alias = "org.apache.kafka.common.metrics.stats.CumulativeSum#CumulativeSum")]
     pub fn with_value(value: f64) -> Self {
         Self { total: AtomicU64::new(value.to_bits()) }

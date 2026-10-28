@@ -765,7 +765,9 @@ def test_async_listener_error_is_wrapped_as_java_does(kafka_broker: Any) -> None
 def test_close_wraps_a_listener_kafka_error(kafka_broker: Any) -> None:
     # Java's close() wraps runRebalanceCallbacksOnClose's exception, a
     # KafkaException too, in KafkaException("Failed to close kafka consumer", e)
-    # (AsyncKafkaConsumer.java:1669-1675), where poll raises it as it is.
+    # (org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer
+    # #close(Duration,GroupMembershipOperation,boolean)), where poll raises it as
+    # it is.
     topic = _topic(kafka_broker, [])
     raised = _MyCommitFailed(message="revoke boom")
 
