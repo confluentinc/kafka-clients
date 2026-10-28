@@ -57,6 +57,7 @@ fn main() -> anyhow::Result<()> {
         Some("coverage-all") => coverage_all()?,
         Some("test-multilanguage") => test_multilanguage()?,
         Some("producer-perf-test") => producer_perf_test()?,
+        Some("integrity-test") => integrity_test()?,
         Some("package-check") => package_check()?,
         Some("api-compat") => api_compat::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("bump-version") => bump_version::run(&env::args().skip(2).collect::<Vec<_>>())?,
@@ -826,6 +827,49 @@ fn producer_perf_test() -> anyhow::Result<()> {
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_command("cargo", &arg_refs)
+}
+
+/// Runs the long-running data-integrity test (`tests/integrity`): by default
+/// half an hour of writers and a transactional copier, all at once, read by a
+/// restarting consumer group and checked by a final read-back of every record.
+/// Against the cluster in
+/// `BOOTSTRAP_SERVERS`, or a local three-broker one when it is unset, whose
+/// image tag defaults to Apache Kafka 4.4.0 (`INTEGRATION_TEST_BROKER_TAG`).
+/// Configure it through environment variables, listed in
+/// `tests/integrity/README.md`; extra arguments go to the test binary.
+fn integrity_test() -> anyhow::Result<()> {
+    println!("🔎 Running the long-running data-integrity test...");
+    println!("   Configure via environment variables (BOOTSTRAP_SERVERS, DURATION_S,");
+    println!("   RATE_PER_WRITER, CONSUMER_RESTART_S, INTEGRITY_SEED, ...).");
+    println!("   See tests/integrity/README.md for the full list.");
+
+    let mut args: Vec<String> = [
+        "test",
+        "--release",
+        "--features",
+        "integration-tests",
+        "--test",
+        "integrity",
+        "--",
+        "--ignored",
+        "--exact",
+        "integrity_run::integrity_run",
+        "--nocapture",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.extend(env::args().skip(2));
+
+    let mut command = Command::new("cargo");
+    command.args(&args);
+    if env::var_os("INTEGRATION_TEST_BROKER_TAG").is_none() {
+        command.env("INTEGRATION_TEST_BROKER_TAG", "4.4.0");
+    }
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("Command failed: cargo {}", args.join(" "));
+    }
+    Ok(())
 }
 
 /// Runs the flag-driven chaos / fault-injection runner (producer + KIP-848
@@ -2704,6 +2748,7 @@ Usage:
   cargo xtask coverage-all
   cargo xtask test-multilanguage
   cargo xtask producer-perf-test
+  cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
   cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440]
