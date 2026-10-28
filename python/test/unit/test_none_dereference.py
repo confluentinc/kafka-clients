@@ -19,12 +19,19 @@ a bare dereference of the argument in the method's body)."""
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
-from confluent_kafka import ExecutionError, IllegalArgumentError
+from confluent_kafka import (
+    ConcurrentModificationError,
+    ExecutionError,
+    IllegalArgumentError,
+    IllegalStateError,
+)
 from confluent_kafka.admin import (
     Admin,
     Config,
@@ -254,3 +261,57 @@ async def test_async_consumers_subscribe_to_a_none_pattern(with_callback: bool) 
         assert str(e.value) == "SubscriptionPattern.pattern must not be None"
     finally:
         await consumer.close()
+
+
+def _holding_another_thread(consumer: Any) -> tuple[threading.Thread, threading.Event]:
+    """Another thread inside the consumer: it holds a use (Java's acquire())
+    until the returned event is set."""
+    entered, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with consumer._use():
+            entered.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert entered.wait(10)
+    return thread, release
+
+
+@pytest.mark.parametrize("kind", ["sync", "async"])
+def test_a_none_pattern_is_checked_after_the_closed_and_thread_checks(kind: str) -> None:
+    """Java's subscribeToRegex calls acquireAndEnsureOpen() before it reads the
+    pattern: a closed consumer, and a call while another thread is inside it,
+    report that first (Order)."""
+    from confluent_kafka.consumer import AsyncKafkaConsumer, KafkaConsumer, SubscriptionPattern
+
+    configs = {"bootstrap.servers": "localhost:1", "group.id": "g", "group.protocol": "consumer"}
+    pattern = SubscriptionPattern(pattern=N)
+
+    async def main() -> None:
+        consumer: Any = (KafkaConsumer if kind == "sync" else AsyncKafkaConsumer)(configs=configs)
+
+        async def subscribe() -> None:
+            if kind == "sync":
+                consumer.subscribe(pattern=pattern)
+            else:
+                await consumer.subscribe(pattern=pattern)
+
+        thread, release = _holding_another_thread(consumer)
+        try:
+            with pytest.raises(ConcurrentModificationError) as e:
+                await subscribe()
+            assert str(e.value) == "KafkaConsumer is not safe for multi-threaded access."
+        finally:
+            release.set()
+            thread.join(10)
+        if kind == "sync":
+            consumer.close()
+        else:
+            await consumer.close()
+        with pytest.raises(IllegalStateError) as closed:
+            await subscribe()
+        assert str(closed.value) == "This consumer has already been closed."
+
+    asyncio.run(main())

@@ -560,8 +560,10 @@ class Consumer(Generic[K, V], _ConsumerState):
         self._check_not_null("subscribe_pattern", pattern)
         if pattern.pattern() is None:
             # Java's subscriptionPattern.pattern().isEmpty() dereferences it; the FFI
-            # cannot carry it (Types; exception 4).
-            raise TypeError("SubscriptionPattern.pattern must not be None")
+            # cannot carry it (Types; exception 4). Java checks it after acquire()
+            # (subscribeToRegex), so the closed and the concurrency checks come first.
+            with self._use():
+                raise TypeError("SubscriptionPattern.pattern must not be None")
         previous, self._listener = self._listener, listener
         try:
             self._run_sync(*self._subscribe_pattern_spec(pattern.pattern(), listener))
