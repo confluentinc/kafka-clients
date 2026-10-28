@@ -15,8 +15,10 @@
 """Tests of ``confluent_kafka._config``: Java's ``ConfigDef`` / ``AbstractConfig``
 parsing of ``configs``.
 
-The config classes are not translated (CLAUDE.md, Python Binding Conventions,
-Scope), so there is no Java test of this module; the ``ConfigDef.parseType`` /
+The config classes are translated for their constants only, their ``ConfigDef``
+machinery not (CLAUDE.md, Python Binding Conventions, Scope; their Java tests are
+inventoried in ``test_config_class_ports.py``), so there is no Java test of this
+module; the ``ConfigDef.parseType`` /
 ``convertToString`` cases of Java's ``ConfigDefTest`` are translated
 (``testBasicTypes``, ``testBadInputs``, ``testConvertValueToString*``), with
 Java's ``ConfigException`` messages. The validator, documentation, dependents

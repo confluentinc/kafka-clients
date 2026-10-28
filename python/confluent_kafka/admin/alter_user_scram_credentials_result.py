@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 __all__ = ["AlterUserScramCredentialsResult"]
 
 
-class AlterUserScramCredentialsResult(Generic[KindT]):
+class AlterUserScramCredentialsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.alter_user_scram_credentials()`` call.
 
     Java: ``org.apache.kafka.clients.admin.AlterUserScramCredentialsResult``.

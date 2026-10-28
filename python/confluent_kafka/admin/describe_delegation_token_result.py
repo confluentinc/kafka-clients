@@ -23,16 +23,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import DelegationToken
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
+    from confluent_kafka.common.security.token.delegation import DelegationToken
 
 __all__ = ["DescribeDelegationTokenResult"]
 
 
-class DescribeDelegationTokenResult(Generic[KindT]):
+class DescribeDelegationTokenResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_delegation_token()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeDelegationTokenResult``.

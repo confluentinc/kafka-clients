@@ -31,7 +31,9 @@ arguments named after Java's parameters): one without raises
 constructor parameter (``key_serializer``) on the argument route and the config
 key (``key.serializer``) on the config route, where it is checked before
 ``configure``, the instance then being closed, as Java's
-``getConfiguredInstance`` checks the type before it configures.
+``getConfiguredInstance`` checks the type before it configures. An ``async def``
+serde, or an object whose ``__call__`` is one, raises ``TypeError("<name>: an async
+def serializer is not supported")`` the same way, named the same way.
 """
 
 from __future__ import annotations
@@ -49,6 +51,19 @@ from confluent_kafka.common.kafka_error import KafkaError
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
 
 _LOG = logging.getLogger("confluent_kafka")
+
+
+def reject_async_serde(serde: object, name: str) -> None:
+    """Raise ``TypeError("<name>: an async def <serializer|deserializer> is not
+    supported")`` for an ``async def`` serde, or an object whose ``__call__`` is
+    one: on every client a serde is a plain function (CLAUDE.md, Python Binding
+    Conventions, Serialization). ``name`` is the constructor parameter on the
+    argument route and the config key on the config route."""
+    call = getattr(type(serde), "__call__", None)
+    if inspect.iscoroutinefunction(serde) or (
+            not inspect.isfunction(serde) and inspect.iscoroutinefunction(call)):
+        kind = "deserializer" if name.endswith("deserializer") else "serializer"
+        raise TypeError(f"{name}: an async def {kind} is not supported")
 
 
 def configure_if_defined(serde: object, configs: dict[str, object], is_key: bool) -> None:
@@ -171,6 +186,7 @@ def resolve_serde(
                 f"got {type(kwarg).__name__}"
             )
         require_kwargs(kwarg, key.replace(".", "_"))
+        reject_async_serde(kwarg, key.replace(".", "_"))
         return cast("Callable[..., object]", kwarg)
 
     config_value = config.get(key)
@@ -196,6 +212,11 @@ def resolve_serde(
     if not accepts_kwargs(instance):
         close_if_defined(instance)
         require_kwargs(instance, key)
+    try:
+        reject_async_serde(instance, key)
+    except TypeError:
+        close_if_defined(instance)
+        raise
     try:
         configure_if_defined(instance, config, is_key)
     except Exception as exc:

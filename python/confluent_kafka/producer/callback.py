@@ -40,7 +40,8 @@ record's future completes, and ``flush()``, the transaction-end calls and
 returned, as Java fires the callbacks before completing the future. By rule 3
 the asyncio producers also accept an ``async def`` callback, which they await
 on the event loop; the sync producers reject a coroutine function with
-``TypeError`` at ``send()``. This protocol stays the synchronous form.
+``TypeError`` at ``send()``. This protocol stays the synchronous form; its
+asyncio form is ``AsyncCallback``.
 
 The callback is called when the record sent to the server has been
 acknowledged. ``metadata`` is the metadata for the record that was sent (i.e.

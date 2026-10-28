@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from confluent_kafka.common.errors.serialization_error import SerializationError
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 _CLASS_NAME_BY_SIZE = {4: "IntegerDeserializer", 8: "LongDeserializer"}
 

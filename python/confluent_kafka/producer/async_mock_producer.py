@@ -21,8 +21,8 @@ where :class:`AsyncProducer`'s are, and the Java mock's own methods are plain
 ``def``, as none of them waits. Sends complete, and their callbacks run, on the
 event loop that awaits ``send()``.
 
-As on ``AsyncKafkaProducer``, a ``send()`` callback may be an ``async def``
-(rule 3): run on the loop completing the record, it is awaited in a task before
+As on ``AsyncKafkaProducer``, a ``send()`` callback may be an ``AsyncCallback``,
+an ``async def`` (rule 3): run on the loop completing the record, it is awaited in a task before
 the record's future completes, a later callback of the mock waiting for it, and
 ``flush()``, ``commit_transaction()``, ``abort_transaction()`` and ``close()``
 wait for the callbacks awaited when they are called. A completion outside a
@@ -56,12 +56,15 @@ from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from ._mock_core import MockProducerCore
 from ._record_future import AsyncRecordFuture
 from ._send import check_callback, run_callback
-from .async_producer import AsyncProducer, _AsyncCallback, _in_async_callback, _running_loop
+from .async_producer import AsyncProducer, _in_async_callback, _running_loop
 from .mock_producer import _FORMS
 from .record_metadata import RecordMetadata
 
 if TYPE_CHECKING:
     from confluent_kafka import Duration
+
+    from .async_callback import AsyncCallback
+    from .callback import Callback
     from confluent_kafka.common import (
         AsyncKafkaFuture,
         Cluster,
@@ -219,10 +222,10 @@ class AsyncMockProducer(MockProducerCore[K, V], AsyncProducer[K, V]):
     @overload
     async def send(self, *, record: ProducerRecord[K, V]) -> AsyncKafkaFuture[RecordMetadata]: ...
     @overload
-    async def send(self, *, record: ProducerRecord[K, V], callback: _AsyncCallback | None
+    async def send(self, *, record: ProducerRecord[K, V], callback: Callback | AsyncCallback | None
                    ) -> AsyncKafkaFuture[RecordMetadata]: ...
     async def send(self, *, record: ProducerRecord[K, V],
-                   callback: _AsyncCallback | None = MISSING
+                   callback: Callback | AsyncCallback | None = MISSING
                    ) -> AsyncKafkaFuture[RecordMetadata]:
         """See ``MockProducer.send``; the returned ``AsyncKafkaFuture`` is
         complete when this returns if ``auto_complete`` (and the callback is

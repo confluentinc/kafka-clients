@@ -104,11 +104,18 @@ class RecordMetadata:
 
     def topic(self) -> str:
         """The topic the record was appended to."""
-        return self._topic_partition.topic()
+        return self._tp().topic()
 
     def partition(self) -> int:
         """The partition the record was sent to."""
-        return self._topic_partition.partition()
+        return self._tp().partition()
 
     def __str__(self) -> str:
-        return str(self._topic_partition) + "@" + str(self._offset)
+        return str(self._tp()) + "@" + str(self._offset)
+
+    def _tp(self) -> TopicPartition:
+        """The stored partition, which Java's ``topic()``, ``partition()`` and
+        ``toString()`` dereference (Types)."""
+        if self._topic_partition is None:
+            raise TypeError("topic_partition must not be None")
+        return self._topic_partition

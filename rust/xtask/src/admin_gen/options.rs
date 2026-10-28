@@ -766,7 +766,7 @@ enum Dir {
 }
 
 /// The Python module a Java type lives in (CLAUDE.md, Python Binding
-/// Conventions, Modules): an admin type by its file, any other by its package.
+/// Conventions, Modules): an admin type by its file, any other by its Java package.
 fn py_module(fqcn: &str) -> Option<String> {
     let (pkg, simple) = fqcn.rsplit_once('.')?;
     if pkg == "org.apache.kafka.clients.admin" {
@@ -775,14 +775,10 @@ fn py_module(fqcn: &str) -> Option<String> {
     if pkg.contains(".internals") {
         return None;
     }
-    if pkg == "org.apache.kafka.common.config" || pkg.starts_with("org.apache.kafka.common.config.") {
-        return Some("confluent_kafka.common.config".into());
-    }
-    if pkg.starts_with("org.apache.kafka.common.serialization") {
-        return Some("confluent_kafka.common.serialization".into());
-    }
+    // Any other type: the module of its Java package (`common.acl.AclBinding` ->
+    // `confluent_kafka.common.acl`).
     if pkg == "org.apache.kafka.common" || pkg.starts_with("org.apache.kafka.common.") {
-        return Some("confluent_kafka.common".into());
+        return Some(format!("confluent_kafka.{}", &pkg["org.apache.kafka.".len()..]));
     }
     None
 }
@@ -1339,7 +1335,7 @@ impl Renderer<'_> {
                     "    def __init__(self, *args: Any, **kwargs: Any) -> None:".to_string(),
                     format!("        if type(self) is {}:", self.name()),
                     format!(
-                        "            raise TypeError(\"{} is an abstract class; use one of its subclasses\")",
+                        "            raise TypeError(\"{} cannot be constructed directly; use one of its subclasses\")",
                         self.name()
                     ),
                 ];

@@ -29,18 +29,18 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_error import KafkaError
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding, AclBindingFilter
+    from confluent_kafka.common.acl import AclBinding, AclBindingFilter
     from confluent_kafka.common.errors import ApiError
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DeleteAclsResult"]
 
 
-class DeleteAclsResult(Generic[KindT]):
+class DeleteAclsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.delete_acls()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DeleteAclsResult``.
@@ -57,8 +57,8 @@ class DeleteAclsResult(Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "FilterResult cannot be constructed directly; use the admin client's "
-                "delete_acls()")
+                "DeleteAclsResult.FilterResult cannot be constructed directly; use "
+                "DeleteAclsResult.FilterResults.values()")
 
         @classmethod
         def _new(cls, *, binding: AclBinding | None,
@@ -88,15 +88,15 @@ class DeleteAclsResult(Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "FilterResults cannot be constructed directly; use the admin client's "
-                "delete_acls()")
+                "DeleteAclsResult.FilterResults cannot be constructed directly; use the "
+                "futures of DeleteAclsResult.values()")
 
         @classmethod
         def _new(cls, *, values: Iterable[DeleteAclsResult.FilterResult]
                  ) -> DeleteAclsResult.FilterResults:
             """Java's package-private ``FilterResults(values)``."""
             result = cls.__new__(cls)
-            result._values = list(values)
+            result._values = None if values is None else list(values)
             return result
 
         def values(self) -> list[DeleteAclsResult.FilterResult]:
@@ -116,7 +116,7 @@ class DeleteAclsResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> DeleteAclsResult[Any]:
         """Java's package-private ``DeleteAclsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

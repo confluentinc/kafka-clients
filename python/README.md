@@ -30,10 +30,14 @@ from confluent_kafka.consumer import (
 )
 from confluent_kafka.common import (
     TopicPartition, TopicIdPartition, Node, PartitionInfo, Uuid,
-    MetricName, Metric, KafkaMetric, TimestampType, Header, Headers,
+    MetricName, Metric,
     KafkaError,  # Java's org.apache.kafka.common.KafkaException
     KafkaFuture, AsyncKafkaFuture,  # every future the package hands out
 )
+# Every type lives in the module of its Java package, `clients` dropped:
+from confluent_kafka.common.header import Header, Headers  # common.header
+from confluent_kafka.common.metrics import KafkaMetric  # common.metrics
+from confluent_kafka.common.record import TimestampType  # common.record
 from confluent_kafka.common.errors import RetriableError  # typed hierarchy
 from confluent_kafka.common.serialization import (
     bytes_serializer, string_serializer, int_serializer, json_serializer,  # etc.
@@ -44,7 +48,7 @@ from confluent_kafka.common.serialization import (
 from confluent_kafka import (
     IllegalArgumentError, IllegalStateError, ConcurrentModificationError,
     TimeoutError, NoSuchElementError, ExecutionError, UnsupportedOperationError,
-    Duration,
+    IndexOutOfBoundsError, Duration,
 )
 ```
 
@@ -73,7 +77,7 @@ and is never a value to pass.
 ## Headers
 
 A record's headers are Java's: `record.headers()` returns a `Headers`
-(`confluent_kafka.common`), never `None` and empty when there are none, holding
+(`confluent_kafka.common.header`), never `None` and empty when there are none, holding
 `Header` objects with `key()` and `value()`, a `memoryview` or `None` (for a
 fetched record, a view into the fetch batch, never a copy). `Headers` has
 Java's `add(header=…)` / `add(key=…, value=…)`, `remove(key=…)`,
@@ -219,8 +223,9 @@ rewritten in this form.
   `KafkaError("User rebalance callback throws an error")` with it as the
   cause.
 - `KafkaConsumer` is not thread-safe: a call while another thread is inside it
-  raises `ConcurrentModificationError`. `wakeup()` is the exception: from any
-  thread, it makes the waiting call raise `WakeupError`.
+  raises `ConcurrentModificationError`, `wakeup()` and `metrics()` excepted, as
+  Java leaves both outside `acquire()`: from any thread, `wakeup()` makes the
+  waiting call raise `WakeupError`, and `metrics()` answers.
 - `close()` closes with Java's default timeout; `close(option=CloseOptions(timeout=…))`
   bounds it. Java's deprecated `close(Duration)` is not generated.
 - A deserializer defaults to the `key.deserializer` / `value.deserializer`
@@ -288,8 +293,8 @@ retriability is `except RetriableError`, and each Java exception class has a
 `…Error` Python analog in the module of its Java package (generated from the
 Java sources). The Java built-in exception classes (`IllegalStateError`,
 `IllegalArgumentError`, `ConcurrentModificationError`, `TimeoutError`,
-`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`) live at the
-package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
+`NoSuchElementError`, `ExecutionError`, `UnsupportedOperationError`,
+`IndexOutOfBoundsError`) live at the package root. `UnsupportedOperationError` is Java's `UnsupportedOperationException`,
 which the mocks raise for what Java's mocks do not implement
 (`MockConsumer.offsets_for_times`, `MockAdminClient`'s "Not implemented yet"), and the
 client's core for what this client does not support yet; it is not a `KafkaError`, so

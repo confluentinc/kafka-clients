@@ -65,6 +65,9 @@ class GroupState(Enum):
     @staticmethod
     def parse(*, name: str) -> GroupState:
         """Case-insensitive group state lookup by string name."""
+        if name is None:
+            # Java's ``name.toUpperCase(Locale.ROOT)`` dereferences it (Types).
+            raise TypeError("name must not be None")
         state = _NAME_TO_ENUM.get(name.upper())
         return GroupState.UNKNOWN if state is None else state
 

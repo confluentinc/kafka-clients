@@ -23,16 +23,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
-    from confluent_kafka.common import AclBinding
+    from confluent_kafka.common.acl import AclBinding
     from confluent_kafka.common.kafka_future import AsyncKafkaFuture, KafkaFuture
 
 __all__ = ["DescribeAclsResult"]
 
 
-class DescribeAclsResult(Generic[KindT]):
+class DescribeAclsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_acls()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeAclsResult``.

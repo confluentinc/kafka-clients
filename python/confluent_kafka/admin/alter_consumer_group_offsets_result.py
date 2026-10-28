@@ -34,7 +34,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.common.kafka_future import _KafkaFutureImpl
 from confluent_kafka.admin._internals import _errors_exception
 from confluent_kafka.illegal_argument_error import IllegalArgumentError
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 __all__ = ["AlterConsumerGroupOffsetsResult"]
 
 
-class AlterConsumerGroupOffsetsResult(Generic[KindT]):
+class AlterConsumerGroupOffsetsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.alter_consumer_group_offsets()`` call.
 
     Java: ``org.apache.kafka.clients.admin.AlterConsumerGroupOffsetsResult``.
@@ -86,6 +86,12 @@ class AlterConsumerGroupOffsetsResult(Generic[KindT]):
     def partition_result(self, *, partition: TopicPartition) -> KafkaFuture[None] | AsyncKafkaFuture[None]:
         """Return a future which can be used to check the result for a given partition."""
         if self._client_partition_result is not None:
+            if partition is None:
+                # *(deviation: Java's future fails after the request, with the
+                # request's error or with "Alter offset for partition \"null\" was
+                # not attempted". Why: a null partition cannot cross the FFI, and the
+                # C result hands out no request-level future to wait on; exception 4)*
+                raise TypeError("partition must not be None")
             return self._client_partition_result(partition)  # type: ignore[no-any-return]
         result: _KafkaFutureImpl[None] = _KafkaFutureImpl()
 

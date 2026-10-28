@@ -43,6 +43,9 @@ class NewPartitionReassignment:
             raise IllegalArgumentError(
                 message="Cannot create a new partition reassignment without any replicas")
         self._target_replicas = tuple(target_replicas)
+        if None in self._target_replicas:
+            # Java's ``List.copyOf`` rejects a null element (Types).
+            raise TypeError("target_replicas must not contain None")
 
     def target_replicas(self) -> list[int]:
         return list(self._target_replicas)

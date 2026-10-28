@@ -61,11 +61,11 @@ class LogTruncationError(OffsetOutOfRangeError):
         if message is not MISSING:
             _throwable.init(self, message, None)
             self._offset_out_of_range_partitions = _throwable.copy_dict(fetch_offsets)
-            self._divergent_offsets = _throwable.copy_dict(divergent_offsets)
+            self._divergent_offsets = _throwable.checked_dict(divergent_offsets, "divergent_offsets", entries=False)
         else:
             _throwable.init(self, "Truncated partitions detected with divergent offsets " + java_str(divergent_offsets), None)
             self._offset_out_of_range_partitions = _throwable.copy_dict(fetch_offsets)
-            self._divergent_offsets = _throwable.copy_dict(divergent_offsets)
+            self._divergent_offsets = _throwable.checked_dict(divergent_offsets, "divergent_offsets", entries=False)
         self._java_kwargs = _throwable.kwargs(message=message, fetch_offsets=fetch_offsets, divergent_offsets=divergent_offsets)
 
     def divergent_offsets(self) -> dict[TopicPartition, OffsetAndMetadata]:

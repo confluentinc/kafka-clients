@@ -63,7 +63,7 @@ class NoOffsetForPartitionError(InvalidOffsetError):
             self._partitions = {partition}
         else:
             _throwable.init(self, "Undefined offset with no reset policy for partitions: " + java_str(partitions), None)
-            self._partitions = _throwable.copy_set(partitions)
+            self._partitions = _throwable.checked_set(partitions, "partitions", elements=True)
         self._java_kwargs = _throwable.kwargs(partition=partition, partitions=partitions)
 
     def partitions(self) -> set[TopicPartition]:

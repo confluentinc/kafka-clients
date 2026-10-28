@@ -31,6 +31,35 @@ static int checked_len_to_int32(Py_ssize_t len, const char* what, int32_t* out) 
     return 0;
 }
 
+// Converts a Python int to a Java integer type of `bits` bits (8, 16 or 32),
+// as Java's `byte`, `short` and `int`: 0 with the value stored in *out, or -1
+// with OverflowError("<v> does not fit a <bits>-bit signed int") set when it
+// is outside the type's range (CLAUDE.md, Python Binding Conventions, Types: an
+// int wider than the Java type raises OverflowError where it reaches the FFI),
+// never a narrowing cast that would send another number.
+static int py_as_signed(PyObject* value, int bits, int32_t* out) {
+    long long v = PyLong_AsLongLong(value);
+    if (v == -1 && PyErr_Occurred()) return -1;
+    long long hi = bits == 8 ? INT8_MAX : bits == 16 ? INT16_MAX : INT32_MAX;
+    long long lo = -hi - 1;
+    if (v < lo || v > hi) {
+        PyErr_Format(PyExc_OverflowError, "%lld does not fit a %d-bit signed int", v, bits);
+        return -1;
+    }
+    *out = (int32_t)v;
+    return 0;
+}
+
+// The int a PyArg_ParseTuple "i" unit gave, as a Java `short` (see py_as_signed).
+static int int_as_i16(int value, int16_t* out) {
+    if (value < INT16_MIN || value > INT16_MAX) {
+        PyErr_Format(PyExc_OverflowError, "%d does not fit a 16-bit signed int", value);
+        return -1;
+    }
+    *out = (int16_t)value;
+    return 0;
+}
+
 // ---- calling the C API -----------------------------------------------------
 //
 // Only confluent_kafka_bindings.h is included. It declares every function that
@@ -678,6 +707,642 @@ static PyTypeObject ConsumerGroupMetadataType = {
     .tp_dealloc = (destructor)ConsumerGroupMetadata_dealloc,
     .tp_getset = ConsumerGroupMetadata_getsetters,
     .tp_repr = (reprfunc)ConsumerGroupMetadata_repr,
+};
+
+// ===========================================================================
+// Use -- one use of a client's native handle, counted under the client's
+// lifecycle lock (CLAUDE.md, Python Binding Conventions, Implementation over
+// the FFI).
+//
+// close() waits for the uses of the native handle to end before it frees it,
+// so a use must never stay counted after its call has ended, and the lock must
+// never stay held. Python raises a pending KeyboardInterrupt at its check
+// points: the entry of a Python function, a backward jump, the return of a
+// call. A use taken or released in Python code therefore has a gap between
+// the count and the code that ends it (the entry of an __exit__, a
+// Condition.__enter__ around the lock). Here both ends are C methods: the
+// with statement calls __enter__ and sets up its __exit__ with no check point
+// in between, and the count, the release and the lock all happen inside one C
+// call, with the lock taken through the C RLock (``state._lifecycle_lock``),
+// never through threading.Condition's Python-level __enter__ / __exit__.
+//
+// The only Python code run under the lock is the waiters' wake-up
+// (``state._lifecycle.notify_all()``) and, on the consumer's start path before
+// anything is counted, ``state._release_abandoned()``. A contended acquire can
+// still run a signal handler (the RLock's wait is interruptible) and the
+// wake-up is Python code: on the END path both are retried, the first
+// exception kept and raised once the use has ended, so the use always ends.
+// On the START path an exception there simply propagates: nothing is counted.
+//
+// Kinds (the state's attributes it reads and writes, all plain attributes):
+//   USE_CALL    a call of the producer or the admin client: refused with
+//               ``error()`` once ``state._closed`` is set; returns the handle
+//               (attribute ``handle``). Its end wakes a waiting close() when
+//               the count reaches zero with ``_closed`` set (only a close()
+//               waits, after setting ``_closed`` under the lock). Holds no
+//               per-use state, so one instance serves concurrent calls (the
+//               producer's send()).
+//   USE_PUMP    a run of a callback pump: not counted (``__enter__`` returns
+//               False) once ``state.<flag>`` is set or the handle is 0.
+//   USE_CONSUMER  Java's acquire(), per thread: ``error()`` once closed
+//               (``state._state`` is ``closed`` or the handle 0);
+//               ``concurrent()`` while another thread is closing or holds a
+//               use (after ``state._release_abandoned()``). ``release()`` ends
+//               it once; a second call does nothing.
+//   USE_HOLD    a consumer use without acquire() (``metrics()``): ``error()``
+//               once closed.
+//   USE_WAKEUP  the consumer's ``wakeup()``: not counted (``__enter__``
+//               returns 0) once the handle is 0; counts the user's wakeup
+//               (``_user_wakeups``, ``_own_wake_left``) under the same lock.
+// ===========================================================================
+
+enum { USE_CALL = 0, USE_PUMP = 1, USE_CONSUMER = 2, USE_HOLD = 3, USE_WAKEUP = 4 };
+
+typedef struct {
+    PyObject_HEAD
+    PyObject* state;
+    PyObject* handle;      // the state's handle attribute name
+    PyObject* flag;        // USE_PUMP: the attribute that refuses a run
+    PyObject* error;       // a callable building the closed error, or NULL
+    PyObject* concurrent;  // USE_CONSUMER: a callable building the concurrent error
+    PyObject* closed;      // USE_CONSUMER / USE_HOLD: the state's closed value
+    PyObject* closing;     // USE_CONSUMER: the state's closing value
+    int kind;
+    int counted;           // per-use kinds: whether __enter__ counted
+    unsigned long thread;  // USE_CONSUMER: the thread counted, 0 once released
+} UseObject;
+
+static PyObject* use_str_lock = NULL;
+static PyObject* use_str_cond = NULL;
+static PyObject* use_str_uses = NULL;
+static PyObject* use_str_acquire = NULL;
+static PyObject* use_str_release = NULL;
+static PyObject* use_str_notify_all = NULL;
+static PyObject* use_str_closed_flag = NULL;
+static PyObject* use_str_state = NULL;
+static PyObject* use_str_closing_thread = NULL;
+static PyObject* use_str_use_threads = NULL;
+static PyObject* use_str_release_abandoned = NULL;
+static PyObject* use_str_user_wakeups = NULL;
+static PyObject* use_str_own_wake_left = NULL;
+
+static int use_init_strings(void) {
+    struct { PyObject** slot; const char* text; } names[] = {
+        {&use_str_lock, "_lifecycle_lock"}, {&use_str_cond, "_lifecycle"},
+        {&use_str_uses, "_uses"}, {&use_str_acquire, "acquire"},
+        {&use_str_release, "release"}, {&use_str_notify_all, "notify_all"},
+        {&use_str_closed_flag, "_closed"}, {&use_str_state, "_state"},
+        {&use_str_closing_thread, "_closing_thread"},
+        {&use_str_use_threads, "_use_threads"},
+        {&use_str_release_abandoned, "_release_abandoned"},
+        {&use_str_user_wakeups, "_user_wakeups"},
+        {&use_str_own_wake_left, "_own_wake_left"},
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        *names[i].slot = PyUnicode_InternFromString(names[i].text);
+        if (*names[i].slot == NULL) return -1;
+    }
+    return 0;
+}
+
+// The first exception an end path met, raised once the use has ended.
+typedef struct { PyObject *type, *value, *tb; } UseSavedError;
+
+static void use_keep_error(UseSavedError* saved) {
+    if (saved->type == NULL) {
+        PyErr_Fetch(&saved->type, &saved->value, &saved->tb);
+    } else {
+        PyErr_Clear();
+    }
+}
+
+static PyObject* use_raise_kept(UseSavedError* saved, PyObject* result) {
+    if (saved->type != NULL) {
+        Py_XDECREF(result);
+        PyErr_Restore(saved->type, saved->value, saved->tb);
+        return NULL;
+    }
+    return result;
+}
+
+// ``state.<method_owner>.<method>()`` on the end path: retried until it
+// succeeds (a signal handler raised in it), the first exception kept. Gives up
+// after many attempts, so an error that is not an interruption cannot loop.
+static int use_call_retried(PyObject* owner, PyObject* method, UseSavedError* saved) {
+    for (int attempt = 0; attempt < 1000; attempt++) {
+        PyObject* r = PyObject_CallMethodNoArgs(owner, method);
+        if (r != NULL) {
+            Py_DECREF(r);
+            return 0;
+        }
+        use_keep_error(saved);
+    }
+    return -1;
+}
+
+// The lifecycle lock, acquired (start path: an exception propagates, NULL).
+static PyObject* use_lock(PyObject* state) {
+    PyObject* lock = PyObject_GetAttr(state, use_str_lock);
+    if (lock == NULL) return NULL;
+    PyObject* r = PyObject_CallMethodNoArgs(lock, use_str_acquire);
+    if (r == NULL) {
+        Py_DECREF(lock);
+        return NULL;
+    }
+    Py_DECREF(r);
+    return lock;
+}
+
+// The lifecycle lock, acquired on the end path (retried; NULL only when the
+// state has no lock at all).
+static PyObject* use_lock_retried(PyObject* state, UseSavedError* saved) {
+    PyObject* lock = PyObject_GetAttr(state, use_str_lock);
+    if (lock == NULL) return NULL;
+    if (use_call_retried(lock, use_str_acquire, saved) < 0) {
+        Py_DECREF(lock);
+        return NULL;
+    }
+    return lock;
+}
+
+// Release the lock (never blocks); a failure is kept, the lock reference dropped.
+static void use_unlock(PyObject* lock, UseSavedError* saved) {
+    PyObject* r = PyObject_CallMethodNoArgs(lock, use_str_release);
+    if (r == NULL) {
+        if (saved != NULL) use_keep_error(saved);
+    } else {
+        Py_DECREF(r);
+    }
+    Py_DECREF(lock);
+}
+
+// Release the lock on the start path, keeping the exception being raised.
+static void use_unlock_raising(PyObject* lock) {
+    PyObject *t, *v, *tb;
+    PyErr_Fetch(&t, &v, &tb);
+    use_unlock(lock, NULL);
+    PyErr_Clear();
+    PyErr_Restore(t, v, tb);
+}
+
+// ``state._uses += delta`` (the lock held); the new count, or -1.
+static Py_ssize_t use_add(PyObject* state, Py_ssize_t delta) {
+    PyObject* uses = PyObject_GetAttr(state, use_str_uses);
+    if (uses == NULL) return -1;
+    Py_ssize_t n = PyLong_AsSsize_t(uses);
+    Py_DECREF(uses);
+    if (n == -1 && PyErr_Occurred()) return -1;
+    n += delta;
+    PyObject* value = PyLong_FromSsize_t(n);
+    if (value == NULL) return -1;
+    int rc = PyObject_SetAttr(state, use_str_uses, value);
+    Py_DECREF(value);
+    return rc < 0 ? -1 : n;
+}
+
+// Raise what ``factory()`` builds (the lock already released).
+static PyObject* use_raise_built(PyObject* factory) {
+    PyObject* e = PyObject_CallNoArgs(factory);
+    if (e == NULL) return NULL;
+    PyErr_SetObject((PyObject*)Py_TYPE(e), e);
+    Py_DECREF(e);
+    return NULL;
+}
+
+// Whether ``state.<name>`` is true (-1 on error).
+static int use_attr_true(PyObject* state, PyObject* name) {
+    PyObject* v = PyObject_GetAttr(state, name);
+    if (v == NULL) return -1;
+    int t = PyObject_IsTrue(v);
+    Py_DECREF(v);
+    return t;
+}
+
+// Whether the consumer is closed: ``state._state`` is the closed value or the
+// handle is 0 (-1 on error).
+static int use_consumer_closed(UseObject* self) {
+    PyObject* st = PyObject_GetAttr(self->state, use_str_state);
+    if (st == NULL) return -1;
+    int closed = PyObject_RichCompareBool(st, self->closed, Py_EQ);
+    Py_DECREF(st);
+    if (closed != 0) return closed;
+    int open = use_attr_true(self->state, self->handle);
+    return open < 0 ? -1 : !open;
+}
+
+// Whether a thread other than ``me`` holds a use (-1 on error).
+static int use_other_thread(PyObject* threads, PyObject* me) {
+    Py_ssize_t pos = 0;
+    PyObject *key, *value;
+    while (PyDict_Next(threads, &pos, &key, &value)) {
+        int same = PyObject_RichCompareBool(key, me, Py_EQ);
+        if (same < 0) return -1;
+        if (!same) return 1;
+    }
+    return 0;
+}
+
+// The checks of Java's acquire(), then the count (the lock held): 0 counted,
+// -1 raised (the caller releases the lock); 2 closed and 1 concurrent, whose
+// errors the caller builds once the lock is released.
+static int use_consumer_check(UseObject* self, PyObject* me) {
+    int closed = use_consumer_closed(self);
+    if (closed < 0) return -1;
+    if (closed) return 2;
+    PyObject* st = PyObject_GetAttr(self->state, use_str_state);
+    if (st == NULL) return -1;
+    int closing = PyObject_RichCompareBool(st, self->closing, Py_EQ);
+    Py_DECREF(st);
+    if (closing < 0) return -1;
+    if (closing) {
+        // Java's close() holds the consumer's lock (acquire()).
+        PyObject* ct = PyObject_GetAttr(self->state, use_str_closing_thread);
+        if (ct == NULL) return -1;
+        int same = PyObject_RichCompareBool(ct, me, Py_EQ);
+        Py_DECREF(ct);
+        if (same < 0) return -1;
+        if (!same) return 1;
+    }
+    PyObject* threads = PyObject_GetAttr(self->state, use_str_use_threads);
+    if (threads == NULL) return -1;
+    if (!PyDict_Check(threads)) {
+        Py_DECREF(threads);
+        PyErr_SetString(PyExc_TypeError, "_use_threads must be a dict");
+        return -1;
+    }
+    int other = use_other_thread(threads, me);
+    if (other > 0) {
+        // An awaiting call left on a closed event loop can never end its use:
+        // end it first, so it does not hold the consumer.
+        PyObject* r = PyObject_CallMethodNoArgs(self->state, use_str_release_abandoned);
+        if (r == NULL) {
+            Py_DECREF(threads);
+            return -1;
+        }
+        Py_DECREF(r);
+        other = use_other_thread(threads, me);
+    }
+    if (other < 0) {
+        Py_DECREF(threads);
+        return -1;
+    }
+    if (other) {
+        // Java's acquire(): another thread is inside the consumer.
+        Py_DECREF(threads);
+        return 1;
+    }
+    // Count it, per thread.
+    PyObject* count = PyDict_GetItemWithError(threads, me);
+    if (count == NULL && PyErr_Occurred()) {
+        Py_DECREF(threads);
+        return -1;
+    }
+    long n = count == NULL ? 0 : PyLong_AsLong(count);
+    if (n == -1 && PyErr_Occurred()) {
+        Py_DECREF(threads);
+        return -1;
+    }
+    PyObject* next = PyLong_FromLong(n + 1);
+    if (next == NULL || PyDict_SetItem(threads, me, next) < 0) {
+        Py_XDECREF(next);
+        Py_DECREF(threads);
+        return -1;
+    }
+    Py_DECREF(next);
+    Py_DECREF(threads);
+    if (use_add(self->state, 1) < 0) {
+        // Put the per-thread count back (the dict is the source of truth for
+        // the concurrency checks).
+        PyObject *t, *v, *tb;
+        PyErr_Fetch(&t, &v, &tb);
+        PyObject* th = PyObject_GetAttr(self->state, use_str_use_threads);
+        if (th != NULL) {
+            if (n) {
+                PyObject* back = PyLong_FromLong(n);
+                if (back != NULL) PyDict_SetItem(th, me, back);
+                Py_XDECREF(back);
+            } else {
+                PyDict_DelItem(th, me);
+            }
+            Py_DECREF(th);
+        }
+        PyErr_Clear();
+        PyErr_Restore(t, v, tb);
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject* use_end(UseObject* self);
+
+static PyObject* Use_enter(UseObject* self, PyObject* Py_UNUSED(ignored)) {
+    PyObject* lock = use_lock(self->state);
+    if (lock == NULL) return NULL;
+    PyObject* result = NULL;
+    PyObject* factory = NULL;  // the error to raise once the lock is released
+    switch (self->kind) {
+    case USE_CALL: {
+        int closed = use_attr_true(self->state, use_str_closed_flag);
+        if (closed < 0) break;
+        if (closed) {
+            factory = self->error;
+            break;
+        }
+        PyObject* h = PyObject_GetAttr(self->state, self->handle);
+        if (h == NULL) break;
+        if (use_add(self->state, 1) < 0) {
+            Py_DECREF(h);
+            break;
+        }
+        result = h;
+        break;
+    }
+    case USE_PUMP: {
+        int refused = use_attr_true(self->state, self->flag);
+        if (refused < 0) break;
+        int open = refused ? 0 : use_attr_true(self->state, self->handle);
+        if (open < 0) break;
+        if (!open) {
+            result = Py_NewRef(Py_False);
+            break;
+        }
+        if (use_add(self->state, 1) < 0) break;
+        self->counted = 1;
+        result = Py_NewRef(Py_True);
+        break;
+    }
+    case USE_CONSUMER: {
+        if (self->thread) {
+            PyErr_SetString(PyExc_RuntimeError, "a consumer use is entered once");
+            break;
+        }
+        unsigned long ident = PyThread_get_thread_ident();
+        PyObject* h = PyObject_GetAttr(self->state, self->handle);
+        if (h == NULL) break;
+        PyObject* me = PyLong_FromUnsignedLong(ident);
+        if (me == NULL) {
+            Py_DECREF(h);
+            break;
+        }
+        int rc = use_consumer_check(self, me);
+        Py_DECREF(me);
+        if (rc != 0) {
+            Py_DECREF(h);
+            if (rc == 2) factory = self->error;
+            else if (rc == 1) factory = self->concurrent;
+            break;
+        }
+        self->thread = ident;
+        result = h;
+        break;
+    }
+    case USE_HOLD: {
+        int closed = use_consumer_closed(self);
+        if (closed < 0) break;
+        if (closed) {
+            factory = self->error;
+            break;
+        }
+        PyObject* h = PyObject_GetAttr(self->state, self->handle);
+        if (h == NULL) break;
+        if (use_add(self->state, 1) < 0) {
+            Py_DECREF(h);
+            break;
+        }
+        result = h;
+        break;
+    }
+    case USE_WAKEUP: {
+        PyObject* h = PyObject_GetAttr(self->state, self->handle);
+        if (h == NULL) break;
+        int open = PyObject_IsTrue(h);
+        if (open <= 0) {
+            // Closed: wakeup() does nothing (the handle 0, uncounted).
+            if (open < 0) Py_CLEAR(h);
+            result = h;
+            break;
+        }
+        PyObject* wakeups = PyObject_GetAttr(self->state, use_str_user_wakeups);
+        long made = wakeups ? PyLong_AsLong(wakeups) : -1;
+        Py_XDECREF(wakeups);
+        PyObject* next = (made == -1 && PyErr_Occurred()) ? NULL : PyLong_FromLong(made + 1);
+        if (next == NULL) {
+            Py_DECREF(h);
+            break;
+        }
+        int rc = PyObject_SetAttr(self->state, use_str_user_wakeups, next);
+        Py_DECREF(next);
+        if (rc < 0 || PyObject_SetAttr(self->state, use_str_own_wake_left, Py_False) < 0
+                || use_add(self->state, 1) < 0) {
+            Py_DECREF(h);
+            break;
+        }
+        self->counted = 1;
+        result = h;
+        break;
+    }
+    default:
+        PyErr_SetString(PyExc_ValueError, "unknown use kind");
+    }
+    if (result == NULL && factory == NULL) {
+        use_unlock_raising(lock);
+        return NULL;
+    }
+    use_unlock(lock, NULL);
+    if (PyErr_Occurred()) {
+        // The release itself raised (only a lock that is not the C RLock can):
+        // a use counted is ended again before the error is raised, as the
+        // with statement calls no __exit__ for a failed __enter__.
+        PyObject *t, *v, *tb;
+        PyErr_Fetch(&t, &v, &tb);
+        if (result != NULL) {
+            PyObject* ended = use_end(self);
+            Py_XDECREF(ended);
+            PyErr_Clear();
+        }
+        Py_XDECREF(result);
+        PyErr_Restore(t, v, tb);
+        return NULL;
+    }
+    if (factory != NULL) {
+        if (factory == Py_None) {
+            PyErr_SetString(PyExc_RuntimeError, "the client is closed");
+            return NULL;
+        }
+        return use_raise_built(factory);
+    }
+    return result;
+}
+
+// End the use (the end path): the count goes down under the lock, whatever a
+// signal handler raises meanwhile; that exception is raised afterwards.
+static PyObject* use_end(UseObject* self) {
+    switch (self->kind) {
+    case USE_PUMP:
+    case USE_WAKEUP:
+        if (!self->counted) Py_RETURN_NONE;
+        break;
+    case USE_CONSUMER:
+        if (!self->thread) Py_RETURN_NONE;
+        break;
+    default:
+        break;
+    }
+    UseSavedError saved = {NULL, NULL, NULL};
+    PyObject* lock = use_lock_retried(self->state, &saved);
+    if (lock == NULL) {
+        if (PyErr_Occurred()) use_keep_error(&saved);
+        if (saved.type == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "the lifecycle lock could not be taken");
+            return NULL;
+        }
+        return use_raise_kept(&saved, NULL);
+    }
+    int failed = 0;
+    if (self->kind == USE_CONSUMER) {
+        if (!self->thread) {
+            // Ended meanwhile, by another release() (_release_abandoned).
+            use_unlock(lock, &saved);
+            return use_raise_kept(&saved, Py_NewRef(Py_None));
+        }
+        PyObject* me = PyLong_FromUnsignedLong(self->thread);
+        PyObject* threads = me ? PyObject_GetAttr(self->state, use_str_use_threads) : NULL;
+        if (threads != NULL) {
+            PyObject* count = PyDict_GetItemWithError(threads, me);
+            long n = count == NULL ? 0 : PyLong_AsLong(count);
+            if (n > 1) {
+                PyObject* next = PyLong_FromLong(n - 1);
+                if (next == NULL || PyDict_SetItem(threads, me, next) < 0) failed = 1;
+                Py_XDECREF(next);
+            } else if (count != NULL) {
+                if (PyDict_DelItem(threads, me) < 0) failed = 1;
+            }
+            Py_DECREF(threads);
+        } else {
+            failed = 1;
+        }
+        Py_XDECREF(me);
+        if (failed) use_keep_error(&saved);
+        self->thread = 0;
+    } else {
+        self->counted = 0;
+    }
+    Py_ssize_t left = use_add(self->state, -1);
+    if (left < 0) {
+        use_keep_error(&saved);
+    } else if (left == 0) {
+        int wake = 1;
+        if (self->kind == USE_CALL) {
+            // Only a close() waits, and it sets _closed under this lock first.
+            wake = use_attr_true(self->state, use_str_closed_flag);
+            if (wake < 0) {
+                use_keep_error(&saved);
+                wake = 0;
+            }
+        }
+        if (wake) {
+            PyObject* cond = PyObject_GetAttr(self->state, use_str_cond);
+            if (cond == NULL) {
+                use_keep_error(&saved);
+            } else {
+                use_call_retried(cond, use_str_notify_all, &saved);
+                Py_DECREF(cond);
+            }
+        }
+    }
+    use_unlock(lock, &saved);
+    return use_raise_kept(&saved, Py_NewRef(Py_None));
+}
+
+static PyObject* Use_exit(UseObject* self, PyObject* const* args, Py_ssize_t nargs) {
+    (void)args;
+    (void)nargs;
+    PyObject* r = use_end(self);
+    if (r == NULL) return NULL;
+    Py_DECREF(r);
+    Py_RETURN_FALSE;  // never swallows the body's exception
+}
+
+static PyObject* Use_release(UseObject* self, PyObject* Py_UNUSED(ignored)) {
+    return use_end(self);
+}
+
+static PyObject* Use_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
+    static char* kwlist[] = {"state", "kind", "handle", "flag", "error", "concurrent",
+                             "closed", "closing", NULL};
+    PyObject *state, *handle, *flag = Py_None, *error = Py_None, *concurrent = Py_None;
+    PyObject *closed = Py_None, *closing = Py_None;
+    int kind;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "OiU|$OOOOO:Use", kwlist, &state, &kind,
+                                     &handle, &flag, &error, &concurrent, &closed, &closing)) {
+        return NULL;
+    }
+    if (kind < USE_CALL || kind > USE_WAKEUP) {
+        PyErr_SetString(PyExc_ValueError, "unknown use kind");
+        return NULL;
+    }
+    if (kind == USE_PUMP && !PyUnicode_Check(flag)) {
+        PyErr_SetString(PyExc_TypeError, "a pump use needs its flag attribute");
+        return NULL;
+    }
+    UseObject* self = (UseObject*)type->tp_alloc(type, 0);
+    if (self == NULL) return NULL;
+    self->state = Py_NewRef(state);
+    self->handle = Py_NewRef(handle);
+    self->flag = Py_NewRef(flag);
+    self->error = Py_NewRef(error);
+    self->concurrent = Py_NewRef(concurrent);
+    self->closed = Py_NewRef(closed);
+    self->closing = Py_NewRef(closing);
+    self->kind = kind;
+    self->counted = 0;
+    self->thread = 0;
+    return (PyObject*)self;
+}
+
+static int Use_traverse(UseObject* self, visitproc visit, void* arg) {
+    Py_VISIT(self->state);
+    Py_VISIT(self->error);
+    Py_VISIT(self->concurrent);
+    return 0;
+}
+
+static int Use_clear(UseObject* self) {
+    Py_CLEAR(self->state);
+    Py_CLEAR(self->handle);
+    Py_CLEAR(self->flag);
+    Py_CLEAR(self->error);
+    Py_CLEAR(self->concurrent);
+    Py_CLEAR(self->closed);
+    Py_CLEAR(self->closing);
+    return 0;
+}
+
+static void Use_dealloc(UseObject* self) {
+    PyObject_GC_UnTrack(self);
+    Use_clear(self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyMethodDef Use_methods[] = {
+    {"__enter__", (PyCFunction)Use_enter, METH_NOARGS, "Take the use; the handle (or the pump's go-ahead)."},
+    {"__exit__", (PyCFunction)(void (*)(void))Use_exit, METH_FASTCALL, "End the use."},
+    {"release", (PyCFunction)Use_release, METH_NOARGS, "End the use; a second call does nothing."},
+    {NULL}
+};
+
+static PyTypeObject UseType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_confluentkafka.Use",
+    .tp_doc = "One use of a client's native handle, counted under its lifecycle lock",
+    .tp_basicsize = sizeof(UseObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_new = Use_new,
+    .tp_traverse = (traverseproc)Use_traverse,
+    .tp_clear = (inquiry)Use_clear,
+    .tp_dealloc = (destructor)Use_dealloc,
+    .tp_methods = Use_methods,
 };
 
 // ===========================================================================
@@ -2483,8 +3148,8 @@ static PyObject* py_MockProducer_set_commit_transaction_error(PyObject* self, Py
     Producer* p = producer_from_handle(ptr);
     kafka_common_Error_t* err = NULL;
     if (code_obj != Py_None) {
-        long code = PyLong_AsLong(code_obj);
-        if (code == -1 && PyErr_Occurred()) return NULL;
+        int32_t code;
+        if (py_as_signed(code_obj, 32, &code) < 0) return NULL;
         err = mock_error_from_code((int)code, message);
         if (err == NULL) return NULL;
     }
@@ -3073,6 +3738,87 @@ static PyObject* str_or_none(const char* s) {
     return PyUnicode_FromString(s);
 }
 
+// A RecordDeserializationException's payload: `origin` its name ("KEY" /
+// "VALUE"), `topic_partition` (topic, partition), `offset`, `timestamp`,
+// `timestamp_type` Java's TimestampType.id, `key_buffer` / `value_buffer` bytes
+// copies (the views live only as long as the error handle) or None for Java's
+// null, and `headers` a list of (key, bytes | None) in insertion order, or None
+// for Java's null. 0 on success, -1 with a Python exception set.
+static int record_deserialization_payload(PyObject* d, const kafka_common_RecordDeserializationError_t* rd) {
+    kafka_common_Error_t *ffi_err = NULL;
+    const kafka_common_RecordDeserializationError_DeserializationErrorOrigin_t* origin = NULL;
+    kafka_common_RecordDeserializationError_DeserializationErrorOrigin_e origin_e =
+        kafka_common_RecordDeserializationError_DeserializationErrorOrigin_KEY;
+    const kafka_common_TopicPartition_t* tp = NULL;
+    int64_t offset = 0;
+    int64_t timestamp = 0;
+    const kafka_common_record_TimestampType_t* tt = NULL;
+    int32_t tt_id = -1;
+    kafka_Bytes_t key = {0};
+    kafka_Bytes_t value = {0};
+    const kafka_common_header_internals_RecordHeaders_t* rh = NULL;
+    if (ffi_raise((origin = kafka_common_RecordDeserializationError_origin_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || (origin != NULL && ffi_raise((origin_e = kafka_common_RecordDeserializationError_DeserializationErrorOrigin__enum_err(origin, &ffi_err), ffi_take(&ffi_err))))
+        || ffi_raise((tp = kafka_common_RecordDeserializationError_topic_partition_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((offset = kafka_common_RecordDeserializationError_offset_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((timestamp = kafka_common_RecordDeserializationError_timestamp_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((tt = kafka_common_RecordDeserializationError_timestamp_type_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || (tt != NULL && ffi_raise((tt_id = kafka_common_record_TimestampType_id_err(tt, &ffi_err), ffi_take(&ffi_err))))
+        || ffi_raise((key = kafka_common_RecordDeserializationError_key_buffer_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((value = kafka_common_RecordDeserializationError_value_buffer_err(rd, &ffi_err), ffi_take(&ffi_err)))
+        || ffi_raise((rh = kafka_common_RecordDeserializationError_headers_err(rd, &ffi_err), ffi_take(&ffi_err)))) return -1;
+    PyObject* headers = NULL;
+    if (rh == NULL) {
+        Py_INCREF(Py_None);
+        headers = Py_None;
+    } else {
+        // The interface view is borrowed from the class handle; only the reading
+        // `to_array` is called on it, as the poll path reads a record's headers.
+        kafka_common_header_Headers_t* view = NULL;
+        kafka_List_t* arr = NULL;  // owned list of borrowed headers
+        int32_t n = 0;
+        if (ffi_raise((view = kafka_common_header_internals_RecordHeaders__as_Headers_err(rh, &ffi_err), ffi_take(&ffi_err)))
+            || ffi_raise((arr = kafka_common_header_Headers_to_array_err(view, &ffi_err), ffi_take(&ffi_err)))) return -1;
+        if (arr != NULL && ffi_raise((n = kafka_List_size_err(arr, &ffi_err), ffi_take(&ffi_err)))) n = -1;
+        headers = n >= 0 ? PyList_New(n) : NULL;
+        for (int32_t i = 0; headers != NULL && i < n; i++) {
+            void* rec_header = NULL;
+            const kafka_common_header_Header_t* h = NULL;
+            const char* hkey = NULL;
+            kafka_Bytes_t hval = {0};
+            PyObject* pair = NULL;
+            if (!ffi_raise((rec_header = kafka_List_get_err(arr, i, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((h = kafka_common_header_internals_RecordHeader__as_Header_err(
+                       (const kafka_common_header_internals_RecordHeader_t*)rec_header, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((hkey = kafka_common_header_Header_key_err(h, &ffi_err), ffi_take(&ffi_err)))
+                && !ffi_raise((hval = kafka_common_header_Header_value_err(h, &ffi_err), ffi_take(&ffi_err)))) {
+                PyObject* pykey = PyUnicode_FromString(hkey ? hkey : "");
+                PyObject* pyval = bytes_to_py(&hval);
+                if (pykey != NULL && pyval != NULL) pair = PyTuple_Pack(2, pykey, pyval);
+                Py_XDECREF(pykey);
+                Py_XDECREF(pyval);
+            }
+            if (pair == NULL) { Py_CLEAR(headers); break; }
+            PyList_SET_ITEM(headers, i, pair);  // steals ref
+        }
+        if (arr != NULL) ffi_unraisable((kafka_List_destroy_err(arr, &ffi_err), ffi_take(&ffi_err)));
+        if (headers == NULL) return -1;
+    }
+    // `headers` is set first, so payload_set takes its reference on every path.
+    int rc = (payload_set(d, "headers", headers) == 0
+              && payload_set(d, "origin", PyUnicode_FromString(
+                  origin_e == kafka_common_RecordDeserializationError_DeserializationErrorOrigin_VALUE
+                      ? "VALUE" : "KEY")) == 0
+              && payload_set(d, "topic_partition",
+                             tp != NULL ? tp_to_py(tp) : (Py_INCREF(Py_None), Py_None)) == 0
+              && payload_set(d, "offset", PyLong_FromLongLong(offset)) == 0
+              && payload_set(d, "timestamp", PyLong_FromLongLong(timestamp)) == 0
+              && payload_set(d, "timestamp_type", PyLong_FromLong(tt_id)) == 0
+              && payload_set(d, "key_buffer", bytes_to_py(&key)) == 0
+              && payload_set(d, "value_buffer", bytes_to_py(&value)) == 0) ? 0 : -1;
+    return rc;
+}
+
 // KafkaError_payload(err) -> dict | None. The handle is not consumed: owned or
 // borrowed, its owner still frees it.
 static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
@@ -3202,6 +3948,13 @@ static PyObject* py_KafkaError_payload(PyObject* self, PyObject* args) {
         ok = payload_set(d, "resource",
                          ffi_raise((resource = kafka_common_ResourceNotFoundError_resource_err(rnf, &ffi_err), ffi_take(&ffi_err)))
                              ? NULL : str_or_none(resource)) == 0;
+        goto done;
+    }
+
+    const kafka_common_RecordDeserializationError_t* rd = NULL;
+    if (ffi_raise((rd = kafka_common_Error_record_deserialization_err(e, &ffi_err), ffi_take(&ffi_err)))) goto done;
+    if (rd != NULL) {
+        ok = record_deserialization_payload(d, rd) == 0;
         goto done;
     }
 
@@ -3564,8 +4317,8 @@ static PyObject* ConsumerRecord_get_delivery_count(ConsumerRecordObject* self, v
 }
 
 // The Python classes a fetched record's headers are built as --
-// `confluent_kafka.common.header.Header` and `confluent_kafka.common.headers.
-// Headers` -- and the slot descriptors of their fields, looked up once. The
+// `confluent_kafka.common.header.Header` and `confluent_kafka.common.header.Headers`
+// -- and the slot descriptors of their fields, looked up once. The
 // objects are allocated without running the classes' keyword constructors and
 // their slots set directly: the values are already in the form the
 // constructors would make (a str key, a read-only byte view).
@@ -3588,7 +4341,7 @@ static PyObject* slot_descriptor(PyTypeObject* type, const char* name) {
 
 static int load_header_types(void) {
     if (py_headers_type != NULL) return 0;
-    PyObject* module = PyImport_ImportModule("confluent_kafka.common.headers");
+    PyObject* module = PyImport_ImportModule("confluent_kafka.common.header.headers");
     if (module == NULL) return -1;
     PyObject* header = PyObject_GetAttrString(module, "Header");
     PyObject* headers = header ? PyObject_GetAttrString(module, "Headers") : NULL;
@@ -3645,7 +4398,7 @@ static PyObject* new_headers(PyObject* items) {
     return hs;
 }
 
-// headers -> a `confluent_kafka.common.Headers` of `Header`s, in insertion
+// headers -> a `confluent_kafka.common.header.Headers` of `Header`s, in insertion
 // order (CLAUDE.md, Python Binding Conventions, Behaviour with no other home):
 // each key a str, each value a memoryview into the batch, never copied
 // (CLAUDE.md §14), or None for a null value. A mock batch's values are bytes
@@ -3738,7 +4491,7 @@ static PyGetSetDef ConsumerRecord_getsetters[] = {
     {"serialized_value_size", (getter)ConsumerRecord_get_serialized_value_size, NULL, "Serialized value size", NULL},
     {"leader_epoch", (getter)ConsumerRecord_get_leader_epoch, NULL, "Leader epoch or None", NULL},
     {"delivery_count", (getter)ConsumerRecord_get_delivery_count, NULL, "Delivery count or None", NULL},
-    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.Headers of Header objects", NULL},
+    {"headers", (getter)ConsumerRecord_get_headers, NULL, "Headers: a confluent_kafka.common.header.Headers of Header objects", NULL},
     {NULL}
 };
 
@@ -5951,8 +6704,8 @@ static PyObject* py_MockConsumer_update_partitions(PyObject* self, PyObject* arg
 static kafka_common_Error_t* mock_error_build(const char* message, PyObject* code) {
     kafka_common_Error_t *ffi_err = NULL;
     if (code == Py_None) return ffi_built(kafka_common_Error_kafka_message_err(message, &ffi_err), &ffi_err);
-    long c = PyLong_AsLong(code);
-    if (c == -1 && PyErr_Occurred()) return NULL;
+    int32_t c;
+    if (py_as_signed(code, 32, &c) < 0) return NULL;
     return mock_error_from_code((int)c, message);
 }
 
@@ -6653,9 +7406,9 @@ static int i32_list_build(PyObject* seq, i32_list_t* l, const char* what) {
     if (n > 0 && l->vals == NULL) { Py_DECREF(fast); i32_list_free(l); PyErr_NoMemory(); return -1; }
     l->n = n;
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { Py_DECREF(fast); i32_list_free(l); return -1; }
-        l->vals[i] = (int32_t)v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 32, &l->vals[i]) < 0) {
+            Py_DECREF(fast); i32_list_free(l); return -1;
+        }
         if (ffi_raise((kafka_List_add_err(l->list, &l->vals[i], &ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(fast); i32_list_free(l); return -1; }
     }
     Py_DECREF(fast);
@@ -7964,9 +8717,9 @@ static kafka_List_t* i32_list_boxed(PyObject* seq, const char* what) {
     obj_list_t l;
     if (obj_list_init(&l, n, pymem_free) < 0) { Py_DECREF(fast); return NULL; }
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
-        int32_t* b = box_i32((int32_t)v);
+        int32_t v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 32, &v) < 0) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
+        int32_t* b = box_i32(v);
         if (b == NULL || obj_list_add(&l, b) < 0) { Py_DECREF(fast); obj_list_free(&l); return NULL; }
     }
     Py_DECREF(fast);
@@ -8276,8 +9029,8 @@ typedef struct {
 
 // `AbstractOptions.timeoutMs(Integer)`: None is Java's null (`-1` in the C
 // API: `default.api.timeout.ms` applies); a given negative value crosses as 0,
-// as Java's `calcDeadlineMs` takes `Math.max(0, timeoutMs)`; one above
-// INT32_MAX (Java's `Integer`) raises OverflowError.
+// as Java's `calcDeadlineMs` takes `Math.max(0, timeoutMs)`; one outside
+// Java's `Integer` raises OverflowError.
 static int admin_option_timeout(PyObject* value, int32_t* out) {
     if (value == Py_None) { *out = -1; return 0; }
     long long t = PyLong_AsLongLong(value);
@@ -8285,6 +9038,11 @@ static int admin_option_timeout(PyObject* value, int32_t* out) {
     if (t > INT32_MAX) {
         PyErr_Format(PyExc_OverflowError, "timeout of %lld ms does not fit a 32-bit signed int (max %d ms)",
                      t, (int)INT32_MAX);
+        return -1;
+    }
+    if (t < INT32_MIN) {
+        PyErr_Format(PyExc_OverflowError, "timeout of %lld ms does not fit a 32-bit signed int (min %d ms)",
+                     t, (int)INT32_MIN);
         return -1;
     }
     *out = t < 0 ? 0 : (int32_t)t;
@@ -8472,9 +9230,13 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
             if (ok) ok = !ffi_raise((t = kafka_admin_NewTopic_with_replicas_assignments_err(name, m.map, &ffi_err), ffi_take(&ffi_err)));
             obj_map_free(&m);
             if (!ok) goto fail;
-        } else if (ffi_raise((t = kafka_admin_NewTopic_with_num_partitions_replication_factor_err(
-                       name, (int32_t)np, (int16_t)rf, &ffi_err), ffi_take(&ffi_err)))) {
-            goto fail;
+        } else {
+            int16_t replication_factor;
+            if (int_as_i16(rf, &replication_factor) < 0) goto fail;
+            if (ffi_raise((t = kafka_admin_NewTopic_with_num_partitions_replication_factor_err(
+                    name, (int32_t)np, replication_factor, &ffi_err), ffi_take(&ffi_err)))) {
+                goto fail;
+            }
         }
         if (obj_list_add(&topics, t) < 0) goto fail;
         if (configs != Py_None) {
@@ -9080,14 +9842,14 @@ static PyObject* py_Admin_list_config_resources(PyObject* self, PyObject* args) 
     kafka_List_t* list = NULL;   // borrowed Type singletons
     if (ffi_raise((list = kafka_List_new_err(&ffi_err), ffi_take(&ffi_err)))) { Py_DECREF(fast); return NULL; }
     for (Py_ssize_t i = 0; i < n; i++) {
-        long v = PyLong_AsLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL; }
+        int32_t v;
+        if (py_as_signed(PySequence_Fast_GET_ITEM(fast, i), 8, &v) < 0) { ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL; }
         const kafka_common_config_ConfigResource_Type_t* rt = NULL;
         if (ffi_raise((rt = kafka_common_config_ConfigResource_Type_for_id_err((int8_t)v, &ffi_err), ffi_take(&ffi_err)))) {
             ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL;
         }
         if (rt == NULL) {
-            PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %ld", v);
+            PyErr_Format(PyExc_ValueError, "unknown ConfigResource type id %d", (int)v);
             ffi_unraisable((kafka_List_destroy_err(list, &ffi_err), ffi_take(&ffi_err))); Py_DECREF(fast); return NULL;
         }
         if (ffi_raise((kafka_List_add_err(list, (void*)rt, &ffi_err), ffi_take(&ffi_err)))) {
@@ -11253,6 +12015,9 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     if (PyType_Ready(&ConsumerGroupMetadataType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&UseType) < 0 || use_init_strings() < 0) {
+        return NULL;
+    }
 
     m = PyModule_Create(&kafkanativemodule);
     if (m == NULL) {
@@ -11301,6 +12066,21 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     Py_INCREF(&ConsumerGroupMetadataType);
     if (PyModule_AddObject(m, "ConsumerGroupMetadata", (PyObject*)&ConsumerGroupMetadataType) < 0) {
         Py_DECREF(&ConsumerGroupMetadataType);
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    Py_INCREF(&UseType);
+    if (PyModule_AddObject(m, "Use", (PyObject*)&UseType) < 0) {
+        Py_DECREF(&UseType);
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(m, "USE_CALL", USE_CALL) < 0
+        || PyModule_AddIntConstant(m, "USE_PUMP", USE_PUMP) < 0
+        || PyModule_AddIntConstant(m, "USE_CONSUMER", USE_CONSUMER) < 0
+        || PyModule_AddIntConstant(m, "USE_HOLD", USE_HOLD) < 0
+        || PyModule_AddIntConstant(m, "USE_WAKEUP", USE_WAKEUP) < 0) {
         Py_DECREF(m);
         return NULL;
     }

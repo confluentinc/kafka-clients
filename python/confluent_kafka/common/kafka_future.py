@@ -66,10 +66,11 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, TypeVar, overload
 
 from confluent_kafka import _throwable
 from confluent_kafka._args import MISSING
+from confluent_kafka._native_copy import not_copyable
 from confluent_kafka._wait import WAIT_SLICE_S, done_within
 
 if TYPE_CHECKING:
@@ -564,6 +565,16 @@ class _KafkaFutureBase(Generic[T]):
         if impl is None:
             return _to_string(_PENDING, None)
         return _to_string(impl._state, impl._outcome)
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> str | tuple[Any, ...]:
+        """``copy``, ``deepcopy`` and ``pickle``: refused for a future over a C
+        handle, whose copy would share the native future, as Java's
+        ``KafkaFuture`` is neither ``Cloneable`` nor ``Serializable`` (CLAUDE.md,
+        Python Binding Conventions, Types, the ``java.io.Serializable`` row); a
+        future over Python state keeps Python's default."""
+        if self._native is not None:
+            raise not_copyable(type(self).__name__, "it holds the client's native future")
+        return super().__reduce_ex__(protocol)
 
 
 
