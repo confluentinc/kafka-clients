@@ -129,8 +129,13 @@ internal static class ConfigEntriesMarshal
         };
     }
 
-    private static ConfigEntry.ConfigType TypeOf(IntPtr type)
+    private static ConfigEntry.ConfigType? TypeOf(IntPtr type)
     {
+        if (type == IntPtr.Zero)
+        {
+            return null;
+        }
+
         IntPtr outErr = IntPtr.Zero;
         int id = NativeMethods.ConfigTypeEnum(type, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);

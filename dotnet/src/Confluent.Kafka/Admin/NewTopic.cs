@@ -191,9 +191,9 @@ public sealed class NewTopic
     /// mutating the dictionary changes the hash code, as in Java.
     /// </para>
     /// <para>
-    /// A <see langword="null"/> value is accepted here, but the core cannot send it, so
-    /// <c>CreateTopics</c> rejects the topic with <see cref="System.ArgumentException"/> before
-    /// anything is sent, as the Python client does. The annotation stays <c>string</c> so that a
+    /// A <see langword="null"/> value is Java's null config value: <c>CreateTopics</c> sends it as a
+    /// null value, as Java and the Python client do, and <see cref="ToString"/> prints it as
+    /// <c>null</c>. The annotation stays <c>string</c> so that a
     /// <c>Dictionary&lt;string, string&gt;</c> can be assigned without a warning.
     /// </para>
     /// </remarks>

@@ -99,7 +99,7 @@ public sealed class PublicAdminShapeParityTests
             (typeof(bool), "isSensitive"),
             (typeof(bool), "isReadOnly"),
             (typeof(IReadOnlyList<ConfigEntry.ConfigSynonym>), "synonyms"),
-            (typeof(ConfigEntry.ConfigType), "type"),
+            (typeof(ConfigEntry.ConfigType?), "type"),
             (typeof(string), "documentation"));
 
         Assert.Empty(typeof(ConfigEntry.ConfigSynonym).GetConstructors());

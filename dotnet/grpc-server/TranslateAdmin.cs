@@ -285,7 +285,11 @@ internal static class TranslateAdmin
     {
         Proto.ConfigEntry proto = ConfigEntryToProto(entry);
         proto.Source = ConfigSourceName(entry.Source);
-        proto.ConfigType = ConfigTypeName(entry.Type);
+        if (entry.Type is ConfigEntry.ConfigType type)
+        {
+            proto.ConfigType = ConfigTypeName(type);
+        }
+
         if (entry.Documentation is not null)
         {
             proto.Documentation = entry.Documentation;

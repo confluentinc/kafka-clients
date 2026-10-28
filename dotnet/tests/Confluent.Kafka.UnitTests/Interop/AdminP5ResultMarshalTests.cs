@@ -494,7 +494,7 @@ public sealed class AdminP5ResultMarshalTests
             IntPtr outErr = IntPtr.Zero;
             IntPtr singleton = state(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr description = Native.ClassicGroupDescriptionNew(
+            IntPtr description = Native.ClassicGroupDescriptionWithAuthorizedOperations(
                 Pin(groupId), Pin(protocol), Pin(protocolData), members, singleton, coordinator, operations,
                 ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -579,8 +579,8 @@ public sealed class AdminP5ResultMarshalTests
         [DllImport(DllName, EntryPoint = "kafka_admin_ConsumerGroupDescription_destroy_err", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void ConsumerGroupDescriptionDestroy(IntPtr self, ref IntPtr outErr);
 
-        [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_new_err", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern IntPtr ClassicGroupDescriptionNew(
+        [DllImport(DllName, EntryPoint = "kafka_admin_ClassicGroupDescription_with_authorized_operations_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ClassicGroupDescriptionWithAuthorizedOperations(
             IntPtr groupId,
             IntPtr protocol,
             IntPtr protocolData,

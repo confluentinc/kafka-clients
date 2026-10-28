@@ -93,7 +93,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     public AsyncDeleteTopicsResult DeleteTopics(
         IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
         AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(
-            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
+            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
             options));
 
     /// <inheritdoc/>

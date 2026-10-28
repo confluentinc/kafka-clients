@@ -662,7 +662,7 @@ public sealed class AdminP5SubmitArgumentTests
             new[] { nameof(RemoveMembersFromConsumerGroupOptions.Reason), nameof(RemoveMembersFromConsumerGroupOptions.TimeoutMs) },
             remove.Setters.InOrder);
         RemoveMembersReadBack sent = ReadBack(remove);
-        Assert.Equal(string.Empty, sent.Reason);
+        Assert.Null(sent.Reason);
         Assert.Equal(6, sent.TimeoutMs);
     }
 

@@ -29,14 +29,14 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// </summary>
 public sealed class GroupMarshalClassicStateTests
 {
-    private static readonly (ClassicGroupState State, string Name)[] s_javaConstants =
+    private static readonly (ClassicGroupState State, string Name, string ConstantName)[] s_javaConstants =
     {
-        (ClassicGroupState.Unknown, "Unknown"),
-        (ClassicGroupState.PreparingRebalance, "PreparingRebalance"),
-        (ClassicGroupState.CompletingRebalance, "CompletingRebalance"),
-        (ClassicGroupState.Stable, "Stable"),
-        (ClassicGroupState.Dead, "Dead"),
-        (ClassicGroupState.Empty, "Empty"),
+        (ClassicGroupState.Unknown, "Unknown", "UNKNOWN"),
+        (ClassicGroupState.PreparingRebalance, "PreparingRebalance", "PREPARING_REBALANCE"),
+        (ClassicGroupState.CompletingRebalance, "CompletingRebalance", "COMPLETING_REBALANCE"),
+        (ClassicGroupState.Stable, "Stable", "STABLE"),
+        (ClassicGroupState.Dead, "Dead", "DEAD"),
+        (ClassicGroupState.Empty, "Empty", "EMPTY"),
     };
 
     private static readonly Native.Singleton[] s_singletons =
@@ -70,16 +70,17 @@ public sealed class GroupMarshalClassicStateTests
     }
 
     [Fact]
-    public void EveryCSingleton_DecodesToJavasConstant_AndKeepsJavasName()
+    public void EveryCSingleton_DecodesToJavasConstant_WithJavasNameAndText()
     {
         for (int i = 0; i < s_javaConstants.Length; i++)
         {
-            (ClassicGroupState state, string expectedName) = s_javaConstants[i];
+            (ClassicGroupState state, string expectedName, string constantName) = s_javaConstants[i];
             IntPtr singleton = Read(s_singletons[i]);
 
             Assert.Equal(state, GroupMarshal.ClassicStateFrom(singleton));
             Assert.Equal(expectedName, GroupMarshal.NameFromClassicState(state));
-            Assert.Equal(expectedName, ReadName(singleton));
+            Assert.Equal(expectedName, ReadToString(singleton));
+            Assert.Equal(constantName, ReadName(singleton));
         }
     }
 
@@ -149,6 +150,22 @@ public sealed class GroupMarshalClassicStateTests
         return Utf8Marshal.PtrToString(name);
     }
 
+    private static string? ReadToString(IntPtr singleton)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr text = Native.ToText(singleton, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            return Utf8Marshal.PtrToString(text);
+        }
+        finally
+        {
+            NativeMethods.StringDestroy(text, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+    }
+
     /// <summary>The C functions only these tests call.</summary>
     private static class Native
     {
@@ -176,6 +193,9 @@ public sealed class GroupMarshalClassicStateTests
 
         [DllImport(DllName, EntryPoint = "kafka_common_ClassicGroupState_name_err", CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr Name(IntPtr self, ref IntPtr outErr);
+
+        [DllImport(DllName, EntryPoint = "kafka_common_ClassicGroupState_to_string_err", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ToText(IntPtr self, ref IntPtr outErr);
 
         [DllImport(DllName, EntryPoint = "kafka_common_ClassicGroupState_parse_err", CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ParseName(IntPtr name, ref IntPtr outErr);

@@ -202,13 +202,10 @@ internal sealed partial class NativeAdminClient
                 foreach (KeyValuePair<string, string> config in topic.Configs)
                 {
                     AdminStrings.Validate(config.Key, nameof(newTopics));
-                    if (config.Value is null)
+                    if (config.Value is not null)
                     {
-                        throw new ArgumentException(
-                            "The topics to create must not contain a null configuration value.", nameof(newTopics));
+                        AdminStrings.Validate(config.Value, nameof(newTopics));
                     }
-
-                    AdminStrings.Validate(config.Value, nameof(newTopics));
                 }
             }
 
@@ -313,9 +310,15 @@ internal sealed partial class NativeAdminClient
             {
                 Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(config.Key);
                 pins.Add(key);
-                Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(config.Value);
-                pins.Add(value);
-                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
+                IntPtr value = IntPtr.Zero;
+                if (config.Value is not null)
+                {
+                    Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(config.Value);
+                    pins.Add(pinned);
+                    value = pinned.Pointer;
+                }
+
+                NativeMethods.MapPut(map, key.Pointer, value, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
@@ -572,7 +575,7 @@ internal sealed partial class NativeAdminClient
                     NewDeleteTopicsOptions(options),
                     s_destroyDeleteTopicsOptions,
                     (SafeAdminClientHandle admin, IntPtr nativeOptions, ref IntPtr outErr) =>
-                        NativeMethods.AdminDeleteTopicsWithOptions(admin, collection, nativeOptions, ref outErr),
+                        NativeMethods.AdminDeleteTopicsWithTopicCollectionOptions(admin, collection, nativeOptions, ref outErr),
                     s_destroyDeleteTopicsResult);
             }
             finally
@@ -593,6 +596,44 @@ internal sealed partial class NativeAdminClient
                         result, s_deleteTopicsTopicNameValues, s_stringKey, StringComparer.Ordinal, s_noValue),
                     null,
                     result);
+        }
+        finally
+        {
+            ExitUse();
+        }
+    }
+
+    internal (
+        IReadOnlyDictionary<string, KafkaFutureImpl<object?>>? ByName,
+        IReadOnlyDictionary<Uuid, KafkaFutureImpl<object?>>? ById,
+        SafeAdminResultHandle Result) DeleteTopics(IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options)
+    {
+        EnterUse();
+        try
+        {
+            List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(topicNames.Count);
+            IntPtr list = IntPtr.Zero;
+            SafeAdminResultHandle result;
+            try
+            {
+                list = NewTopicNameList(topicNames, nameof(topicNames), pins);
+                result = CallWithOptions(
+                    NewDeleteTopicsOptions(options),
+                    s_destroyDeleteTopicsOptions,
+                    (SafeAdminClientHandle admin, IntPtr nativeOptions, ref IntPtr outErr) =>
+                        NativeMethods.AdminDeleteTopicsWithStringSliceOptions(admin, list, nativeOptions, ref outErr),
+                    s_destroyDeleteTopicsResult);
+            }
+            finally
+            {
+                DestroyList(list);
+                ReleasePins(pins);
+            }
+
+            return (StartMapFutures(
+                    result, s_deleteTopicsTopicNameValues, s_stringKey, StringComparer.Ordinal, s_noValue),
+                null,
+                result);
         }
         finally
         {

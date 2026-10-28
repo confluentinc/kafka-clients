@@ -91,7 +91,7 @@ public sealed class MockAdminClient : IAdmin
     public DeleteTopicsResult DeleteTopics(
         IReadOnlyCollection<string> topicNames, DeleteTopicsOptions? options = null) =>
         DeleteTopicsResult.OfClient(_native.DeleteTopics(
-            TopicCollection.OfTopicNames(topicNames ?? throw new ArgumentNullException(nameof(topicNames))),
+            topicNames ?? throw new ArgumentNullException(nameof(topicNames)),
             options));
 
     /// <inheritdoc/>

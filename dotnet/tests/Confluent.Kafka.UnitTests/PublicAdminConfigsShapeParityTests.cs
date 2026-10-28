@@ -118,7 +118,7 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(
             typeof(ConfigEntry.ConfigSource), Property(typeof(ConfigEntry), nameof(ConfigEntry.Source)).PropertyType);
         Assert.Equal(
-            typeof(ConfigEntry.ConfigType), Property(typeof(ConfigEntry), nameof(ConfigEntry.Type)).PropertyType);
+            typeof(ConfigEntry.ConfigType?), Property(typeof(ConfigEntry), nameof(ConfigEntry.Type)).PropertyType);
         Assert.Equal(
             typeof(string), Property(typeof(ConfigEntry), nameof(ConfigEntry.Documentation)).PropertyType);
         Assert.Equal(

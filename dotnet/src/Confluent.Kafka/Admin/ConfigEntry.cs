@@ -75,7 +75,10 @@ public sealed class ConfigEntry
     /// </param>
     /// <param name="isReadOnly">Whether the entry is read-only and cannot be updated.</param>
     /// <param name="synonyms">The synonyms, in Java's order of precedence.</param>
-    /// <param name="type">The value's data type.</param>
+    /// <param name="type">
+    /// The value's data type, or <see langword="null"/> for Java's null type, which the entries of a
+    /// <c>createTopics</c> result carry.
+    /// </param>
     /// <param name="documentation">The documentation, or <see langword="null"/>.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="synonyms"/> is null, or
@@ -88,7 +91,7 @@ public sealed class ConfigEntry
         bool isSensitive,
         bool isReadOnly,
         IReadOnlyList<ConfigSynonym> synonyms,
-        ConfigType type,
+        ConfigType? type,
         string? documentation)
     {
         Name = name ?? throw new ArgumentNullException(nameof(name));
@@ -134,8 +137,11 @@ public sealed class ConfigEntry
     /// </summary>
     public IReadOnlyList<ConfigSynonym> Synonyms => _synonyms;
 
-    /// <summary>The value's data type (Java's <c>type()</c>).</summary>
-    public ConfigType Type { get; }
+    /// <summary>
+    /// The value's data type (Java's <c>type()</c>), or <see langword="null"/> for the entries of a
+    /// <c>createTopics</c> result, which Java builds with a null type.
+    /// </summary>
+    public ConfigType? Type { get; }
 
     /// <summary>
     /// The documentation for this config, or <see langword="null"/> when the broker did
@@ -200,7 +206,7 @@ public sealed class ConfigEntry
     /// <remarks>
     /// <see cref="Source"/> and <see cref="Type"/> print as Java's constant names
     /// (<c>DEFAULT_CONFIG</c>, <c>STRING</c>), the two booleans lowercase, and a
-    /// <see langword="null"/> value or documentation as <c>null</c>. A source or type that is not a
+    /// <see langword="null"/> value, type or documentation as <c>null</c>. A source or type that is not a
     /// defined member prints as its numeric value.
     /// </remarks>
     public override string ToString()
@@ -228,7 +234,7 @@ public sealed class ConfigEntry
             IsSensitive ? "true" : "false",
             IsReadOnly ? "true" : "false",
             synonyms,
-            JavaName(Type),
+            Type is null ? "null" : JavaName(Type.Value),
             Documentation ?? "null");
     }
 

@@ -182,8 +182,11 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_admin_ConfigEntry_ConfigType__enum_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int ConfigTypeEnum(IntPtr self, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_admin_Admin_delete_topics_with_options_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr AdminDeleteTopicsWithOptions(SafeAdminClientHandle self, IntPtr topics, IntPtr options, ref IntPtr outErr);
+    [DllImport(DllName, EntryPoint = "kafka_admin_Admin_delete_topics_with_string_slice_options_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AdminDeleteTopicsWithStringSliceOptions(SafeAdminClientHandle self, IntPtr topics, IntPtr options, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_admin_Admin_delete_topics_with_topic_collection_options_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr AdminDeleteTopicsWithTopicCollectionOptions(SafeAdminClientHandle self, IntPtr topics, IntPtr options, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_admin_DeleteTopicsResult_topic_id_values_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DeleteTopicsResultTopicIdValues(IntPtr self, ref IntPtr outErr);

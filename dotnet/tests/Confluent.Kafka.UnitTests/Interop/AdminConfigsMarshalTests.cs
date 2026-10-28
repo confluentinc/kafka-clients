@@ -137,6 +137,26 @@ public sealed class AdminConfigsMarshalTests
     }
 
     [Fact]
+    public void ConfigType_ANullType_CopiesOutAsNull()
+    {
+        Config config = CopyOut(new[]
+        {
+            new NativeEntry("t", "v", s_sources[8].Singleton(), false, false, IntPtr.Zero, null),
+        });
+
+        ConfigEntry entry = config.Get("t")!;
+        Assert.Null(entry.Type);
+        Assert.Contains(", type=null, ", entry.ToString(), StringComparison.Ordinal);
+        Assert.Equal(
+            new ConfigEntry("t", "v", entry.Source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(), null, null),
+            entry);
+        Assert.NotEqual(
+            new ConfigEntry(
+                "t", "v", entry.Source, false, false, Array.Empty<ConfigEntry.ConfigSynonym>(), ConfigEntry.ConfigType.Unknown, null),
+            entry);
+    }
+
+    [Fact]
     public async Task DescribeConfigs_APresentTopic_DeliversItsConfigs()
     {
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
