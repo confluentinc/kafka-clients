@@ -762,18 +762,20 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.commit_transaction`: when it returns, the
         callbacks of the transaction's records have run, ``async def`` ones
         awaited, but for those of a record whose event loop has closed, which
-        are dropped (see :meth:`send`). From an ``async def`` callback, which
-        it would wait for, it raises ``TimeoutError`` after ``max.block.ms``,
-        as Java's does from a callback."""
+        are dropped (see :meth:`send`). On ``AsyncKafkaProducer``, from an
+        ``async def`` callback, which it would wait for, it raises
+        ``TimeoutError`` after ``max.block.ms``, as Java's does from a callback;
+        ``AsyncMockProducer`` returns, as Java's mock does."""
         self._check_not_closed()
         sent = list(self._futures)
         await self._run_async(_lib.Producer_commit_transaction_cb, reports="EndTxn(true)")
         await _await_all(asyncio.get_running_loop(), self._completable(sent))
 
     async def abort_transaction(self) -> None:
-        """See :meth:`Producer.abort_transaction`. From an ``async def``
-        callback, which it would wait for, it raises ``TimeoutError`` after
-        ``max.block.ms``, as Java's does from a callback."""
+        """See :meth:`Producer.abort_transaction`. On ``AsyncKafkaProducer``,
+        from an ``async def`` callback, which it would wait for, it raises
+        ``TimeoutError`` after ``max.block.ms``, as Java's does from a callback;
+        ``AsyncMockProducer`` returns, as Java's mock does."""
         self._check_not_closed()
         await self._run_async(_lib.Producer_abort_transaction_cb, reports="EndTxn(false)")
 
@@ -897,8 +899,10 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         """See :meth:`Producer.flush`: when it returns, the callbacks of the
         records sent before it have run, ``async def`` ones awaited, but for
         those of a record whose event loop has closed, which are dropped (see
-        :meth:`send`). From an ``async def`` callback it raises ``KafkaError``,
-        as Java's does from a callback: it would wait for that callback."""
+        :meth:`send`). On ``AsyncKafkaProducer``, from an ``async def``
+        callback it raises ``KafkaError``, as Java's does from a callback: it
+        would wait for that callback; ``AsyncMockProducer`` returns, as Java's
+        mock does."""
         self._check_not_closed()
         if self._in_own_callback():
             _LOG.error(FLUSH_IN_CALLBACK_MESSAGE)
