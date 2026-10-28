@@ -231,11 +231,15 @@ class MockConsumerCore(Generic[K, V]):
     async def _a_rebalance(self, new_assignment: Iterable[TopicPartition]) -> None:
         """Async ``rebalance``: a coroutine listener method is awaited, the
         monitor held for this task throughout (``_Monitor``)."""
-        with self._lock:
-            new_list, added, removed = self._rebalance_begin(new_assignment)
-            listener = self._subscriptions.rebalance_listener()
-            previous, self._lock.owner = self._lock.owner, _current_task()
+        handed, previous = False, None
+        # The hand-over is inside the try, and the finally gives the monitor
+        # back with a plain assignment: a KeyboardInterrupt at any check point
+        # after it (the monitor's own __exit__ included) cannot leave it owned.
         try:
+            with self._lock:
+                new_list, added, removed = self._rebalance_begin(new_assignment)
+                listener = self._subscriptions.rebalance_listener()
+                previous, self._lock.owner, handed = self._lock.owner, _current_task(), True
             if removed and listener is not None:
                 result = listener.on_partitions_revoked(set(removed))
                 if inspect.isawaitable(result):
@@ -248,7 +252,8 @@ class MockConsumerCore(Generic[K, V]):
                 if inspect.isawaitable(result):
                     await result
         finally:
-            self._lock.owner = previous
+            if handed:
+                self._lock.owner = previous
 
     def _lose_partitions_begin(self, partitions_lost: Iterable[TopicPartition]
                                ) -> tuple[set[TopicPartition], list[TopicPartition]]:
@@ -284,11 +289,13 @@ class MockConsumerCore(Generic[K, V]):
         """Async ``losePartitions``: a coroutine listener method is awaited, the
         monitor held for this task throughout (``_Monitor``), as in
         ``_a_rebalance``."""
-        with self._lock:
-            lost, remaining = self._lose_partitions_begin(partitions_lost)
-            listener = self._subscriptions.rebalance_listener()
-            previous, self._lock.owner = self._lock.owner, _current_task()
+        handed, previous = False, None
+        # The hand-over inside the try, as in _a_rebalance.
         try:
+            with self._lock:
+                lost, remaining = self._lose_partitions_begin(partitions_lost)
+                listener = self._subscriptions.rebalance_listener()
+                previous, self._lock.owner, handed = self._lock.owner, _current_task(), True
             if listener is not None:
                 result = listener.on_partitions_lost(lost)  # type: ignore[func-returns-value]
                 if inspect.isawaitable(result):
@@ -296,7 +303,8 @@ class MockConsumerCore(Generic[K, V]):
             with self._lock:
                 self._subscriptions.assign_from_subscribed(remaining)
         finally:
-            self._lock.owner = previous
+            if handed:
+                self._lock.owner = previous
 
     def _c_subscription(self) -> set[str]:
         with self._lock:
@@ -359,19 +367,22 @@ class MockConsumerCore(Generic[K, V]):
         """Async ``poll``: a poll task may be ``async def``; it is awaited with
         the locks released and the monitor held for this task meanwhile
         (``_Monitor``), as ``_a_rebalance`` awaits the listener."""
-        with self._lock:
-            self._poll_start(timeout)
-            # Lock around the task, so a task may schedule the next one.
-            with self._poll_tasks_lock:
-                task = self._poll_tasks.popleft() if self._poll_tasks else None
-                result = task() if task is not None else None
-            if not inspect.isawaitable(result):
-                return self._poll_rest()
-            previous, self._lock.owner = self._lock.owner, _current_task()
+        handed, previous = False, None
+        # The hand-over inside the try, as in _a_rebalance.
         try:
+            with self._lock:
+                self._poll_start(timeout)
+                # Lock around the task, so a task may schedule the next one.
+                with self._poll_tasks_lock:
+                    task = self._poll_tasks.popleft() if self._poll_tasks else None
+                    result = task() if task is not None else None
+                if not inspect.isawaitable(result):
+                    return self._poll_rest()
+                previous, self._lock.owner, handed = self._lock.owner, _current_task(), True
             await result
         finally:
-            self._lock.owner = previous
+            if handed:
+                self._lock.owner = previous
         with self._lock:
             return self._poll_rest()
 
@@ -708,15 +719,18 @@ class MockConsumerCore(Generic[K, V]):
         inside ``commitAsync``, and the monitor held for this task until it
         returns (``_Monitor``); an exception it raises, ``CancelledError``
         included, propagates."""
-        with self._lock:
-            result = self._commit_async_body(self._nowait_offsets(offsets), callback)
-            if not inspect.isawaitable(result):
-                return
-            previous, self._lock.owner = self._lock.owner, _current_task()
+        handed, previous = False, None
+        # The hand-over inside the try, as in _a_rebalance.
         try:
+            with self._lock:
+                result = self._commit_async_body(self._nowait_offsets(offsets), callback)
+                if not inspect.isawaitable(result):
+                    return
+                previous, self._lock.owner, handed = self._lock.owner, _current_task(), True
             await result
         finally:
-            self._lock.owner = previous
+            if handed:
+                self._lock.owner = previous
 
     async def _a_close(self, option: CloseOptions) -> None:
         self._c_close(option)
