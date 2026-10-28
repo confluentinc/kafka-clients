@@ -1,5 +1,8 @@
 /rust/target
 /target
+# Linux build of the Python verifiable clients for the ducker system tests
+# (python/verifiable_clients/README.md), kept apart from the host's target dir.
+/rust/target-linux
 /rust/tests/integration/admin_smoke_test_manual.rs
 tools/java-perf-test/bin/
 *.class

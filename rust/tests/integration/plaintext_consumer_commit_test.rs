@@ -1328,7 +1328,7 @@ async fn test_async_consumer_committed_deleted_topic() {
 
     // Delete the topic
     admin
-        .delete_topics(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
+        .delete_topics_with_topic_collection(TopicCollection::of_topic_names(vec![topic_to_delete.clone()]))
         .all()
         .get()
         .await
