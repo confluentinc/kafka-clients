@@ -28,7 +28,13 @@ from typing import Any
 
 import pytest
 
-from confluent_kafka.admin import Admin, AsyncAdmin, MockAdminClient, NewTopic
+from confluent_kafka.admin import (
+    Admin,
+    AsyncAdmin,
+    ListConfigResourcesOptions,
+    MockAdminClient,
+    NewTopic,
+)
 from confluent_kafka.common import KafkaFuture, Node, TopicPartition
 from confluent_kafka.common.kafka_future import AsyncKafkaFuture
 from confluent_kafka.consumer import (
@@ -46,6 +52,8 @@ from confluent_kafka.producer import (
     MockProducer,
     ProducerRecord,
 )
+
+from .test_admin_none_arguments import RPCS
 
 _COPIES: list[Callable[[Any], object]] = [copy.copy, copy.deepcopy, pickle.dumps]
 _CONSUMER_CONFIGS = {"bootstrap.servers": "localhost:1", "group.protocol": "consumer"}
@@ -162,6 +170,52 @@ def test_an_async_admin_clients_results_and_futures_refuse_copy() -> None:
         await admin.close(timeout=0)
 
     asyncio.run(main())
+
+
+def _call(admin: Any, form: str) -> Any:
+    """The Result of one RPC call form (``RPCS``: every RPC, ``#`` a second form)."""
+    kwargs = dict(RPCS[form][0])
+    if form == "list_config_resources":
+        # Java's only overload with the types takes the options too.
+        kwargs["options"] = ListConfigResourcesOptions()
+    return getattr(admin, form.split("#")[0])(**kwargs)
+
+
+@pytest.mark.parametrize("form", sorted(RPCS))
+def test_every_result_a_real_admin_client_builds_refuses_copy(form: str) -> None:
+    """Every Result the client builds over its C result refuses, whether it holds
+    the C result in its futures, in futures composed over them or in the closures
+    of its accessors."""
+    admin = Admin.create(configs=_CONFIGS)
+    try:
+        result = _call(admin, form)
+        _refused(result, _RESULT_MESSAGE.format(type(result).__name__))
+    finally:
+        admin.close(timeout=0)
+
+
+@pytest.mark.parametrize("form", sorted(RPCS))
+def test_every_result_an_async_admin_client_builds_refuses_copy(form: str) -> None:
+    async def main() -> None:
+        admin = AsyncAdmin.create(configs=_CONFIGS)
+        try:
+            result = _call(admin, form)
+            _refused(result, _RESULT_MESSAGE.format(type(result).__name__))
+        finally:
+            await admin.close(timeout=0)
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("form", sorted(RPCS))
+def test_a_result_the_mock_builds_keeps_pythons_default_copy(form: str) -> None:
+    mock = MockAdminClient(brokers=[Node(id=0, host="localhost", port=9092)],
+                           controller=Node(id=0, host="localhost", port=9092))
+    try:
+        result = _call(mock, form)
+    except Exception:  # noqa: BLE001 - a call Java's mock does not support, or refuses
+        pytest.skip("the mock does not build this Result")
+    assert type(copy.copy(result)) is type(result)
 
 
 def test_the_async_producers_record_future_refuses_copy() -> None:
