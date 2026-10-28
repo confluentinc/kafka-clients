@@ -73,6 +73,7 @@ from confluent_kafka._kwargs import DESERIALIZER_NAMES, require_kwargs, serde_ca
 from confluent_kafka._async import Undelivered, call_soon_on
 from confluent_kafka._config import duration_to_ms, prepare
 from confluent_kafka._errors import from_ffi_error
+from confluent_kafka._preview import log_preview_warning
 from confluent_kafka.common.errors.invalid_group_id_error import InvalidGroupIdError
 from confluent_kafka.common.errors.wakeup_error import WakeupError
 from confluent_kafka.common.kafka_error import KafkaError
@@ -650,6 +651,7 @@ class _ConsumerState:
         # (kafka_consumer_Consumer__set_callbacks_notify).
         self._pending_notify_ref = self._on_pending_notify
         _lib.Consumer__set_callbacks_notify(self._h, self._pending_notify_ref)
+        log_preview_warning(_LOG)
 
     # ---- lifecycle ------------------------------------------------------
     def _use(self) -> _Use:
