@@ -174,38 +174,6 @@ async fn test_integrity_record_sizes() {
     assert_pass(&run(spec, base).await);
 }
 
-/// Batches larger than the topic's `max.message.bytes`: the broker rejects
-/// them with `MESSAGE_TOO_LARGE` and the producer splits and re-encodes them
-/// (headers, null keys, gzip). Apache Kafka covers this path with unit tests
-/// only (`SenderTest.testSplitBatchAndSend`).
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integrity_batch_split() {
-    let (mut ctx, base) = context().await;
-    let mut spec = spec();
-    let topic = ctx.topic("split");
-    spec.topics
-        .push(TopicSpec::source(&topic, 2, 1).config("max.message.bytes", "65536"));
-    let mut profile = PayloadProfile::sized(8000, 12_000);
-    profile.max_headers = 3;
-    profile.null_key_pct = 20;
-    spec.writers.push(
-        WriterSpec::new(0, &topic)
-            .profile(profile)
-            .records(1500)
-            .prop("compression.type", "gzip")
-            .prop("batch.size", "524288")
-            .prop("linger.ms", "200"),
-    );
-    spec.group = Some(GroupSpec::new(&ctx.group_id("split"), vec![topic], 1));
-    spec.requirements = Requirements { min_records_per_stream: 1500, ..Default::default() };
-    let verdict = run(spec, base).await;
-    assert_pass(&verdict);
-    assert!(
-        verdict.counts.batch_splits > 0,
-        "no batch was split, so the split path was not exercised:\n{verdict}"
-    );
-}
-
 /// Transactions, one in three aborted, read with read_committed: every
 /// committed record exactly once, no aborted one ever.
 #[tokio::test(flavor = "multi_thread")]

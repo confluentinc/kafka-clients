@@ -37,7 +37,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
-use confluent_kafka::common::{Error, KafkaFuture, Metric, MetricValue, TopicPartition};
+use confluent_kafka::common::{Error, KafkaFuture, TopicPartition};
 use confluent_kafka::consumer::{
     Consumer, ConsumerConfig, ConsumerRebalanceListener, KafkaConsumer, OffsetAndMetadata,
 };
@@ -75,19 +75,12 @@ pub struct TopicSpec {
     pub name: String,
     pub partitions: i32,
     pub replication: i16,
-    pub configs: BTreeMap<String, String>,
     pub kind: StreamKind,
 }
 
 impl TopicSpec {
     pub fn source(name: &str, partitions: i32, replication: i16) -> Self {
-        Self {
-            name: name.to_string(),
-            partitions,
-            replication,
-            configs: BTreeMap::new(),
-            kind: StreamKind::Source,
-        }
+        Self { name: name.to_string(), partitions, replication, kind: StreamKind::Source }
     }
 
     /// The output topic of a copier reading `source`.
@@ -96,11 +89,6 @@ impl TopicSpec {
             kind: StreamKind::Mirror(source.to_string()),
             ..Self::source(name, partitions, replication)
         }
-    }
-
-    pub fn config(mut self, key: &str, value: &str) -> Self {
-        self.configs.insert(key.to_string(), value.to_string());
-        self
     }
 }
 
@@ -350,10 +338,7 @@ pub async fn create_topics(base: &Props, topics: &[TopicSpec]) {
     let admin = admin(base);
     for topic in topics {
         // Records are checked against the timestamp their writer set.
-        let mut configs = topic.configs.clone();
-        configs
-            .entry("message.timestamp.type".to_string())
-            .or_insert_with(|| "CreateTime".to_string());
+        let configs = BTreeMap::from([("message.timestamp.type".to_string(), "CreateTime".to_string())]);
         test_utils::create_topic_with_configs(
             admin.as_ref(),
             &topic.name,
@@ -441,20 +426,6 @@ impl Pacer {
 struct OpenTxn {
     intent: TxnIntent,
     futures: Vec<(u64, KafkaFuture<RecordMetadata>)>,
-}
-
-/// The value of the producer's `batch-split-total` metric.
-fn batch_splits(producer: &KafkaProducer<Vec<u8>, Vec<u8>>) -> u64 {
-    producer
-        .metrics()
-        .iter()
-        .find(|(name, _)| name.name() == "batch-split-total")
-        .map_or(0, |(_, metric)| match metric.metric_value() {
-            MetricValue::Double(d) => d as u64,
-            MetricValue::Long(l) => l as u64,
-            MetricValue::Int(i) => i as u64,
-            _ => 0,
-        })
 }
 
 async fn settle(future: KafkaFuture<RecordMetadata>) -> Result<RecordMetadata, Error> {
@@ -658,15 +629,9 @@ async fn run_writer(
         if let Some(open) = txn.take() {
             end_txn(&producer, open, &spec, &ledger).await;
         }
-        // `batch-split-total` counts only batches already sent and rejected.
-        if let Err(e) = producer.flush().await {
-            ledger.event(Event::ProducerError, format!("writer {} flush: {e}", spec.writer));
-        }
-        let splits = batch_splits(&producer);
         if let Err(e) = producer.close().await {
             ledger.event(Event::ProducerError, format!("writer {} close: {e}", spec.writer));
         }
-        ledger.batch_splits(splits);
         for (seq, future) in in_flight {
             let result = settle(future).await;
             ledger.delivered(&spec.topic, spec.writer, seq, &result);

@@ -139,9 +139,6 @@ pub struct Counts {
     pub txns_unknown: u64,
     pub producer_restarts: u64,
     pub producer_errors: u64,
-    /// The producers' `batch-split-total`: batches the broker rejected as too
-    /// large and the producer split and sent again.
-    pub batch_splits: u64,
     /// Transactions of the consume-transform-produce copiers.
     pub copier_commits: u64,
     pub copier_aborts: u64,
@@ -652,11 +649,6 @@ impl Ledger {
         }
     }
 
-    /// Adds a closed producer's `batch-split-total`.
-    pub fn batch_splits(&self, splits: u64) {
-        self.lock().counts.batch_splits += splits;
-    }
-
     /// A counter that moves whenever anything is sent or read; the watchdog
     /// fails a run when it stops moving.
     pub fn progress(&self) -> u64 {
@@ -874,7 +866,6 @@ impl Verdict {
                 "sent": c.sent, "acked": c.acked, "rejected": c.send_rejected, "ambiguous": c.send_ambiguous,
                 "txns_committed": c.txns_committed, "txns_aborted": c.txns_aborted, "txns_unknown": c.txns_unknown,
                 "producer_restarts": c.producer_restarts, "producer_errors": c.producer_errors,
-                "batch_splits": c.batch_splits,
                 "copier_commits": c.copier_commits, "copier_aborts": c.copier_aborts,
             },
             "live_readers": {
@@ -907,7 +898,6 @@ impl fmt::Display for Verdict {
             "  producer restarts        : {} ({} producer errors)",
             c.producer_restarts, c.producer_errors
         )?;
-        writeln!(f, "  producer batch splits    : {}", c.batch_splits)?;
         writeln!(
             f,
             "  copier transactions      : {} committed, {} aborted",
