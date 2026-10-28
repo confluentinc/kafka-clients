@@ -145,7 +145,8 @@
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
 //! consumer state reads the C handle's single-owner guard can refuse
-//! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
+//! ([`C_GUARDED_READS`]) and the map setters that refuse a `NULL` value
+//! ([`C_NULL_CHECKED_MAPS`]) are fallible in C only; an `Option<i64>` whose
 //! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
 //! flag and an out-parameter instead of a `-1` sentinel; a live map's
 //! snapshot ([`C_SNAPSHOT_ITERATORS`]) crosses as an iterator over it; the factories of an error
@@ -295,6 +296,12 @@ const C_GUARDED_READS: &[&str] = &[
     "kafka_consumer_Consumer_paused",
     "kafka_consumer_Consumer_subscription",
 ];
+
+/// Setters taking a `kafka_Map_t` of strings that are infallible in Rust but
+/// fallible in C: Rust's `String` value is never null, while a C map value may
+/// be `NULL`, so the C form refuses one through `out_err` with an
+/// `IllegalArgumentError` and leaves the object unchanged.
+const C_NULL_CHECKED_MAPS: &[&str] = &["kafka_admin_NewTopic_set_configs"];
 
 /// Methods returning `Option<i64>` whose value domain includes `-1`, so the
 /// `-1`-for-`None` mapping of a scalar `Option` would lose a value: Java's
@@ -2279,6 +2286,9 @@ fn expect_method(
             blocking.ret = v.as_ref().map(CType::render);
         },
         (Output::Value(_), Some(v), _) => blocking.ret = Some(v.render()),
+        (Output::Unit | Output::Fluent, None, _) if C_NULL_CHECKED_MAPS.contains(&name.as_str()) => {
+            blocking.params.push(Param::out_err());
+        },
         _ => {},
     }
     if let Some((_, hook)) = C_RELEASE_HOOKS.iter().find(|(f, _)| *f == name) {
@@ -4793,6 +4803,41 @@ mod tests {
             "expected `fn(self: *const kafka_consumer_Consumer_t, partition: i32) -> i64`, \
              found `fn(self_: *const kafka_consumer_Consumer_t, partition: i32, \
              out_err: *mut *mut kafka_common_Error_t) -> i64`"
+        );
+    }
+
+    /// A map setter listed in `C_NULL_CHECKED_MAPS` is expected with a trailing
+    /// `out_err` (C may pass a `NULL` value Rust cannot hold); any other fluent
+    /// setter keeps the plain form.
+    #[test]
+    fn test_null_checked_map_setters_are_fallible_in_c() {
+        let rust = r#"
+            pub mod admin {
+                #[doc(alias = "org.apache.kafka.clients.admin.NewTopic")]
+                pub struct NewTopic;
+                impl NewTopic {
+                    pub fn set_configs(self, configs: i32) -> Self { self }
+                    pub fn set_other(self, other: i32) -> Self { self }
+                }
+            }
+        "#;
+        let ffi = r#"
+            #[repr(C)] pub struct kafka_common_Error_t { _p: [u8; 0] }
+            #[repr(C)] pub struct kafka_admin_NewTopic_t { _p: [u8; 0] }
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_NewTopic_set_configs(self_: *mut kafka_admin_NewTopic_t, configs: i32) {}
+            #[unsafe(no_mangle)] pub unsafe extern "C" fn kafka_admin_NewTopic_set_other(self_: *mut kafka_admin_NewTopic_t, other: i32, out_err: *mut *mut kafka_common_Error_t) {}
+        "#;
+        let findings = run("null-checked-maps", rust, ffi);
+        assert_eq!(
+            detail(&findings, "shape kafka_admin_NewTopic_set_configs"),
+            "expected `fn(self: *mut kafka_admin_NewTopic_t, configs: i32, \
+             out_err: *mut *mut kafka_common_Error_t)`, found `fn(self_: *mut kafka_admin_NewTopic_t, configs: i32)`"
+        );
+        assert_eq!(
+            detail(&findings, "shape kafka_admin_NewTopic_set_other"),
+            "expected `fn(self: *mut kafka_admin_NewTopic_t, other: i32)`, \
+             found `fn(self_: *mut kafka_admin_NewTopic_t, other: i32, \
+             out_err: *mut *mut kafka_common_Error_t)`"
         );
     }
 

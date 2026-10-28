@@ -839,6 +839,9 @@ def _round_two_rows() -> list[tuple[str, dict[str, Any], type[Exception] | None,
         ("create_topics", {"new_topics": [NewTopic(name=None, num_partitions=1,  # type: ignore[arg-type]
                                                    replication_factor=1)]},
          TypeError, "new_topics must not contain a NewTopic with a None name"),
+        ("create_topics", {"new_topics": [NewTopic(name="t", num_partitions=1, replication_factor=1)
+                                          .configs(configs={"retention.ms": None})]},  # type: ignore[dict-item]
+         TypeError, "new_topics must not contain a NewTopic with a None config value"),
         # Item 11: later-path ids (CoordinatorStrategy#handleResponse), after options.
         ("describe_consumer_groups", {"group_ids": [None]},
          TypeError, "group_ids must not contain None"),

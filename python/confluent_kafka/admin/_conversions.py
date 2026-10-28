@@ -503,6 +503,10 @@ def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
             # topic's future fails. The FFI cannot carry it: TypeError up front.
             raise TypeError("new_topics must not contain a NewTopic with a None name")
         configs = topic.configs()
+        if configs is not None and any(v is None for v in configs.values()):
+            # The broker rejects a null config value of a new topic with
+            # INVALID_CONFIG, and the FFI refuses it: TypeError up front.
+            raise TypeError("new_topics must not contain a NewTopic with a None config value")
         assignments = topic.replicas_assignments()
         spec.append((
             topic.name(), topic.num_partitions(), topic.replication_factor(),

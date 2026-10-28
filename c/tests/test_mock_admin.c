@@ -1349,8 +1349,20 @@ static void test_mock_admin_new_topic_configs(void) {
     kafka_Map_t *configs = kafka_Map_new();
     kafka_Map_put(configs, (void *)"retention.ms", (void *)"60000");
     kafka_Map_put(configs, (void *)"cleanup.policy", (void *)"compact");
-    kafka_admin_NewTopic_set_configs(topic, configs);
+    kafka_common_Error_t *err = NULL;
+    kafka_admin_NewTopic_set_configs(topic, configs, &err);
+    TEST_ASSERT_NULL(err);
     kafka_Map_destroy(configs); /* copied by the setter */
+
+    /* A NULL value is refused, as the broker would reject it, and the configs stay. */
+    kafka_Map_t *null_value = kafka_Map_new();
+    kafka_Map_put(null_value, (void *)"retention.ms", NULL);
+    kafka_admin_NewTopic_set_configs(topic, null_value, &err);
+    kafka_Map_destroy(null_value);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT8(1, kafka_common_Error_is_local_illegal_argument_error(err));
+    TEST_ASSERT_EQUAL_STRING("The value of config retention.ms must not be null", kafka_common_Error_message(err));
+    kafka_common_Error_destroy(err);
     kafka_Map_t *copy = kafka_admin_NewTopic_configs(topic);
     TEST_ASSERT_NOT_NULL(copy);
     TEST_ASSERT_EQUAL_INT32(2, kafka_Map_size(copy));

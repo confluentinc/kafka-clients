@@ -8501,7 +8501,7 @@ static PyObject* py_Admin_create_topics(PyObject* self, PyObject* args) {
                 if (!PyArg_ParseTuple(PySequence_Fast_GET_ITEM(cfast, j), "ss", &k, &v)
                     || ffi_raise((kafka_Map_put_err(cmap, (void*)k, (void*)v, &ffi_err), ffi_take(&ffi_err)))) { ok = 0; break; }
             }
-            if (ok) ok = !ffi_raise((kafka_admin_NewTopic_set_configs_err(t, cmap, &ffi_err), ffi_take(&ffi_err)));
+            if (ok) ok = !ffi_raise((kafka_admin_NewTopic_set_configs(t, cmap, &ffi_err), ffi_take(&ffi_err)));
             ffi_unraisable((kafka_Map_destroy_err(cmap, &ffi_err), ffi_take(&ffi_err)));
             Py_DECREF(cfast);
             if (!ok) goto fail;
