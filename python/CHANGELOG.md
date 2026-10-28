@@ -6,8 +6,8 @@ Before GA the public API is not stable, and an interface may change even in a mi
 
 ## [Unreleased]
 
-First preview release of the Python client built on the Rust client. Its API is
-the Apache Kafka Java client's (4.4.0), in Python form.
+First preview release of the 4.4.0 Python client built on a new Rust core. Its
+API is the Apache Kafka Java client's (4.4.0), in Python form.
 
 > **Preview:** not yet recommended for production use. The public API is not
 > stable before the GA release and may change. We welcome your feedback while
