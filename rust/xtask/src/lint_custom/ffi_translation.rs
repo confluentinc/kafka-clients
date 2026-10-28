@@ -353,9 +353,9 @@ const C_RELEASE_HOOKS: &[(&str, &str)] = &[(
 
 /// `__as_<Trait>` views of a mutable trait that take the handle `const` and
 /// still return the mutable view, as C's `strchr` does: C receives these
-/// handles read-only (a deserializer's headers, a record's `headers()`) and
+/// handles read-only (a record's `headers()`) and
 /// only the reading methods may be called on the view then, while a handle
-/// received non-`const` (a serializer's headers) may be changed through the
+/// received non-`const` (a serde's headers) may be changed through the
 /// same view. One function serves both, with no cast on the read-only side.
 const CONST_SELF_VIEWS: &[&str] = &["kafka_common_header_internals_RecordHeaders__as_Headers"];
 

@@ -179,8 +179,13 @@ breaking changes.
   only, `kafka_common_GroupAuthorizationError_with_group_id` the pair, and
   `kafka_common_GroupAuthorizationError_group_id` returns `NULL` when the
   group is unknown.
-- **Breaking:** a C deserializer's `*_with_headers*` methods receive the record's headers
-  as a mutable `kafka_common_header_internals_RecordHeaders_t *`.
+- **Breaking:** a C deserializer receives the record's own headers as a
+  mutable `kafka_common_header_internals_RecordHeaders_t *` and may change
+  them, as Java's may: `Deserializer_deserialize_with_headers`,
+  `Deserializer_deserialize_with_headers_bytes`, their `_cb` twins and the
+  `deserialize_with_headers_async_fn_t` /
+  `deserialize_with_headers_bytes_async_fn_t` function-pointer types drop
+  `const`.
 - `kafka_common_KafkaFuture_then_apply` runs the C function once, when the
   source future completes, and completes the returned future with its result:
   inside the call when the source is already complete, else from the client's
