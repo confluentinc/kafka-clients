@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "translation-agent"
-version = "4.4.0a1.dev2"
+version = "4.4.0b1.dev1"
 description = "Orchestrator producing Rust translations of Apache Kafka commits via r2 sandbox claude"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
