@@ -310,7 +310,7 @@ pub(crate) unsafe fn serializer_ref<'a>(
 /// Takes the handle a `*mut` parameter received: an owned handle's reference
 /// passes to the caller, a view's is cloned and the view stays with its class
 /// handle. The consumers are `KafkaProducer_new` and the `MockProducer`
-/// options (CLAUDE.md §4 rule 6); they keep the returned `Arc`, so the
+/// options (CLAUDE.md §4, generic types); they keep the returned `Arc`, so the
 /// handle pointer stays valid for `__set_callback_result` until that client
 /// is destroyed.
 ///

@@ -60,7 +60,7 @@ use crate::ffi::ffi_guard;
 /// `s` must be null or an owned string returned by this API and not yet freed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-// an owned-string destructor standing for `java.lang.String` (CLAUDE.md §4 rule 6)
+// an owned-string destructor standing for `java.lang.String` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub unsafe extern "C" fn kafka_string_destroy(s: *mut c_char) {
     if !s.is_null() {
@@ -138,7 +138,7 @@ pub(crate) unsafe fn c_str_to_option(s: *const c_char) -> Option<String> {
 /// C API — every other integer is a signed fixed-width type.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-// a borrowed `byte[]` view standing for the JDK array type (CLAUDE.md §4 rule 6)
+// a borrowed `byte[]` view standing for the JDK array type (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Bytes_t {
     /// The first byte, or null for a Java `null` array.
@@ -211,7 +211,7 @@ pub(crate) fn box_bytes(bytes: bytes::Bytes) -> *mut kafka_Bytes_t {
 /// `bytes` must be null or an owned array not yet destroyed.
 #[ffi_guard]
 #[unsafe(no_mangle)]
-// an owned-array destructor standing for `byte[]` (CLAUDE.md §4 rule 6)
+// an owned-array destructor standing for `byte[]` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub unsafe extern "C" fn kafka_Bytes_destroy(bytes: *mut kafka_Bytes_t) {
     if !bytes.is_null() {
@@ -311,7 +311,7 @@ impl Drop for ListInner {
 /// the list afterwards. A list returned by Rust owns its elements and frees
 /// them in `kafka_List_destroy`, so the caller destroys only the list.
 #[repr(C)]
-// a `void *` list standing for `java.util.List` (CLAUDE.md §4 rule 6)
+// a `void *` list standing for `java.util.List` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_List_t {
     _private: [u8; 0],
@@ -611,7 +611,7 @@ impl Drop for MapInner {
 /// values and frees them in `kafka_Map_destroy`, so the caller destroys only
 /// the map.
 #[repr(C)]
-// a `void *` map standing for `java.util.Map` (CLAUDE.md §4 rule 6)
+// a `void *` map standing for `java.util.Map` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Map_t {
     _private: [u8; 0],
@@ -956,7 +956,7 @@ impl Drop for IteratorInner {
 /// which frees it when the iterator owns its elements. An iterator is used by
 /// one thread at a time, as Java's.
 #[repr(C)]
-// a `void *` iterator standing for `java.util.Iterator` (CLAUDE.md §4 rule 6)
+// a `void *` iterator standing for `java.util.Iterator` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Iterator_t {
     _private: [u8; 0],
@@ -1089,7 +1089,7 @@ impl Drop for MapEntryInner {
 ///
 /// The function returning the iterator documents the key and value types.
 #[repr(C)]
-// a `void *` entry standing for `java.util.Map.Entry` (CLAUDE.md §4 rule 6)
+// a `void *` entry standing for `java.util.Map.Entry` (CLAUDE.md §4, generic types)
 #[doc(alias = "rust-only")]
 pub struct kafka_Map_Entry_t {
     _private: [u8; 0],
