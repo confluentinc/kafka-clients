@@ -487,13 +487,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         producer exists and until it is destroyed: on the producer's loop, or
         on the helper thread once that loop has closed (see
         :meth:`_schedule_pump`), which also drops what the loop left."""
-        if not self._c_producer or not self._pump_use():
-            return
-        try:
+        with self._pump_use() as counted:
+            if not counted:
+                return
             with self._drain_lock:
                 _lib.Producer__execute_callbacks(self._c_producer)
-        finally:
-            self._end_use()
         loop = self._binding.loop
         if loop is not None and loop.is_closed():
             self._undelivered.free_closed()
@@ -553,13 +551,11 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         # Counted like a pump run, not a _use(): a close() begun meanwhile
         # must not make the first async call raise here; it clears the fd
         # again in _destroy.
-        if not self._pump_use():
+        with self._pump_use() as counted:
+            if counted:
+                _lib.Producer__set_wake_fd(self._c_producer, writer.fileno())
+        if not counted:
             self._release_wake()
-            return
-        try:
-            _lib.Producer__set_wake_fd(self._c_producer, writer.fileno())
-        finally:
-            self._end_use()
 
     def _move_wake_off(self, closed: asyncio.AbstractEventLoop) -> None:
         """``close()`` moved the producer off ``closed``, its bound loop that
@@ -572,11 +568,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         self._wake_tried = False
         if reader is None or writer is None:
             return
-        if self._pump_use():
-            try:
+        with self._pump_use() as counted:
+            if counted:
                 _lib.Producer__set_wake_fd(self._c_producer, -1)
-            finally:
-                self._end_use()
         reader.close()
         writer.close()
 
@@ -598,11 +592,9 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if reader is None or writer is None:
             return
         self._wake_r = self._wake_w = None
-        if self._pump_use():
-            try:
+        with self._pump_use() as counted:
+            if counted:
                 _lib.Producer__set_wake_fd(self._c_producer, -1)
-            finally:
-                self._end_use()
         loop = self._binding.loop
 
         def unregister(bound: asyncio.AbstractEventLoop) -> None:
@@ -729,7 +721,7 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         lifecycle lock and only while the handle is alive: :meth:`_destroy` sets
         ``_destroyed`` under it before it frees the handle, which completes what
         is left unreported."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if self._destroyed or not self._c_producer:
                 return
             _lib.Producer__set_callback_result(self._c_producer, callback_id, failure)

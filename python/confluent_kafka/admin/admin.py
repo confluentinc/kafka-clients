@@ -243,6 +243,11 @@ _LOG = logging.getLogger("confluent_kafka.admin")
 #: (``KafkaAdminClient.java:1601``).
 CLOSED_MESSAGE = "Cannot accept new calls when AdminClient is closing."
 
+
+def _closed_error() -> IllegalStateError:
+    """The error of an RPC once ``close()`` has begun (``_rpc_use``)."""
+    return IllegalStateError(message=CLOSED_MESSAGE)
+
 #: ``close()``'s timeout: Java's ``Duration.ofMillis(Long.MAX_VALUE)`` crosses as -1.
 _CLOSE_FOREVER_MS = -1
 
@@ -255,9 +260,9 @@ class _AdminState:
     ``Admin`` and ``AsyncAdmin``.
 
     The handle lives until the teardown frees it. Every RPC is one *use* of it,
-    counted under ``_lifecycle`` around its extension call, which returns at once
-    with the call's C result; a use cannot start once ``_closed`` is set. A run of
-    the client's queued callbacks is a use too (:meth:`_begin_pump`), which can
+    counted under ``_lifecycle_lock`` around its extension call, which returns at
+    once with the call's C result; a use cannot start once ``_closed`` is set. A
+    run of the client's queued callbacks is a use too (:meth:`_pump_use`), which can
     start until the teardown begins, so the close's own completion still runs.
     ``close()`` sets ``_closed`` under the same lock, so exactly one ``close()``
     tears the client down; the teardown waits until no use is left, then frees the
@@ -269,8 +274,15 @@ class _AdminState:
         self._c_admin: int = 0
         self._closed = False
         self._tearing_down = False
-        self._lifecycle = threading.Condition()
+        # The lifecycle lock is the C RLock, taken directly (never through the
+        # Condition's Python-level __enter__ / __exit__, where a Ctrl+C could
+        # leave it held); the Condition over it only waits and wakes.
+        self._lifecycle_lock = threading.RLock()
+        self._lifecycle = threading.Condition(self._lifecycle_lock)
         self._uses = 0
+        # The use of every RPC, built once: a call use holds no per-use state,
+        # so one serves every RPC at once.
+        self._rpc_use = _lib.Use(self, _lib.USE_CALL, "_c_admin", error=_closed_error)
 
     def _start(self, configs: dict[str, Any]) -> None:
         """Java's ``KafkaAdminClient.createInternal(new AdminClientConfig(configs,
@@ -292,29 +304,12 @@ class _AdminState:
         schedules the pump."""
         raise NotImplementedError
 
-    def _begin_use(self) -> int:
-        """Start a use of the handle and return it; ``IllegalStateError`` with
-        Java's message once ``close()`` has begun."""
-        with self._lifecycle:
-            if self._closed:
-                raise IllegalStateError(message=CLOSED_MESSAGE)
-            self._uses += 1
-            return self._c_admin
-
-    def _begin_pump(self) -> bool:
-        """Start a run of the client's queued callbacks: ``False`` once the
-        teardown has begun (it runs what is left itself)."""
-        with self._lifecycle:
-            if self._tearing_down or not self._c_admin:
-                return False
-            self._uses += 1
-            return True
-
-    def _end_use(self) -> None:
-        with self._lifecycle:
-            self._uses -= 1
-            if self._uses == 0:
-                self._lifecycle.notify_all()
+    def _pump_use(self) -> Any:
+        """A run of the client's queued callbacks, counted as a use of the
+        handle: ``with self._pump_use() as counted:``, ``counted`` being
+        ``False`` (and nothing counted) once the teardown has begun (it runs
+        what is left itself)."""
+        return _lib.Use(self, _lib.USE_PUMP, "_c_admin", flag="_tearing_down")
 
     def _check_not_closed(self) -> None:
         if self._closed:
@@ -322,7 +317,7 @@ class _AdminState:
 
     def _begin_close(self) -> bool:
         """Set ``_closed``; whether this call did (and so must tear down)."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             if self._closed:
                 return False
             self._closed = True
@@ -331,7 +326,7 @@ class _AdminState:
     def _teardown(self) -> None:
         """Wait until no use is left (none can start any more), then free the
         handle, which runs the callbacks still pending on this thread."""
-        with self._lifecycle:
+        with self._lifecycle_lock:
             self._tearing_down = True
             while self._uses:
                 self._lifecycle.wait()
@@ -342,11 +337,8 @@ class _AdminState:
     def _call(self, entry: Callable[..., Any], *args: Any) -> Any:
         """One RPC: ``entry(handle, *args)``, an ``Admin_<rpc>`` of the extension,
         which returns the C result at once (Java's RPCs return at once)."""
-        c_admin = self._begin_use()
-        try:
+        with self._rpc_use as c_admin:
             return entry(c_admin, *args)
-        finally:
-            self._end_use()
 
 
 class _Pump:
@@ -395,14 +387,13 @@ class _Pump:
             self._event.clear()
             if self._stopping:
                 break
-            if not state._begin_pump():
-                break
-            try:
-                _lib.Admin__execute_callbacks(state._c_admin)
-            except Exception:  # noqa: BLE001 - the pump thread has no caller
-                _LOG.exception("Error running the admin client's callbacks")
-            finally:
-                state._end_use()
+            with state._pump_use() as counted:
+                if not counted:
+                    break
+                try:
+                    _lib.Admin__execute_callbacks(state._c_admin)
+                except Exception:  # noqa: BLE001 - the pump thread has no caller
+                    _LOG.exception("Error running the admin client's callbacks")
         after = self._after
         if after is not None:
             after()

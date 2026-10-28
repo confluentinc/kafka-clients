@@ -680,7 +680,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         self._listener_tasks.add(task)
         task.add_done_callback(self._listener_tasks.discard)
         if report_now:
-            with self._lifecycle:
+            with self._lifecycle_lock:
                 if self._h:
                     _lib.Consumer__set_callback_result(self._h, callback_id, None)
         return True
@@ -700,7 +700,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         interrupted: KeyboardInterrupt | None = None
         while True:
             try:
-                with self._lifecycle:
+                with self._lifecycle_lock:
                     self._unacked.pop(callback_id, None)
                     if self._h:
                         _lib.Consumer__set_callback_result(self._h, callback_id, error)

@@ -287,12 +287,10 @@ class Producer(Generic[K, V], _ProducerState):
         mark_completion_thread(self)
         c_producer = self._c_producer
         while not self._stop_completions:
-            if not self._pump_use():
-                return
-            try:
+            with self._pump_use() as counted:
+                if not counted:
+                    return
                 _lib.Producer_poll(c_producer, _PUMP_WAIT_MS)
-            finally:
-                self._end_use()
             if self._teardown_on_completion_thread:
                 # The close() a callback asked for has completed (see close).
                 self._destroy()

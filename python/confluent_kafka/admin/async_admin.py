@@ -271,13 +271,11 @@ class AsyncAdmin(_AdminState):
     def _run_pump(self) -> None:
         """Run the client's queued callbacks on this thread, until the teardown
         begins (it runs what is left itself)."""
-        if not self._begin_pump():
-            return
-        try:
+        with self._pump_use() as counted:
+            if not counted:
+                return
             with self._drain_lock:
                 _lib.Admin__execute_callbacks(self._c_admin)
-        finally:
-            self._end_use()
 
     def _rpc_loop(self) -> asyncio.AbstractEventLoop | None:
         """The loop an RPC's futures complete on: the client's; an RPC called on a
