@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.common import TopicPartition
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 __all__ = ["AbortTransactionResult"]
 
 
-class AbortTransactionResult(Generic[KindT]):
+class AbortTransactionResult(_Result, Generic[KindT]):
     """The result of ``Admin.abort_transaction()``.
 
     Java: ``org.apache.kafka.clients.admin.AbortTransactionResult``.
@@ -51,7 +51,7 @@ class AbortTransactionResult(Generic[KindT]):
              kind: type[Sync] | type[Async]) -> AbortTransactionResult[Any]:
         """Java's package-private ``AbortTransactionResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

@@ -42,7 +42,7 @@ class AbstractOptions:
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if type(self) is AbstractOptions:
-            raise TypeError("AbstractOptions is an abstract class; use one of its subclasses")
+            raise TypeError("AbstractOptions cannot be constructed directly; use one of its subclasses")
         # Java's field initializer: ``protected Integer timeoutMs = null``.
         self._timeout_ms: int | None = None
         # The setters that ran, the latest last (``_record``): the client runs the same

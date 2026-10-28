@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from ._args import MISSING
 
 if TYPE_CHECKING:
-    from .common.headers import Headers
+    from .common.header.headers import Headers
 
 __all__ = [
     "cause_message",
@@ -43,8 +43,10 @@ __all__ = [
     "init",
     "kwargs",
     "message_text",
+    "non_null",
     "rebuild",
     "reduce",
+    "shallow_copy",
     "singleton",
     "to_string",
     "view",
@@ -83,11 +85,26 @@ def message_text(t: BaseException) -> str:
 
 def to_string(t: BaseException) -> str:
     """Java's ``Throwable.toString()``: ``"<module>.<class>"``, plus
-    ``": <message>"`` when the throwable has a message."""
+    ``": <message>"`` when the throwable has a message; a class overriding
+    ``toString()`` (``QuotaViolationException``) uses its override, with the
+    Python class path (CLAUDE.md, Python Binding Conventions, Errors)."""
+    override = getattr(t, "_java_to_string", None)
+    text = None if override is None else override()
+    if text is not None:
+        return str(text)
     cls = type(t)
     name = f"{cls.__module__}.{cls.__qualname__}"
     message = java_message(t)
     return name if message is None else f"{name}: {message}"
+
+
+def non_null(value: _T, name: str) -> _T:
+    """``value``, which Java dereferences here (a ``toString()`` override's
+    ``field.method()``): ``TypeError("<name> must not be None")`` for a ``None``
+    (CLAUDE.md, Python Binding Conventions, Types)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    return value
 
 
 def cause_message(cause: BaseException | None) -> str | None:
@@ -110,27 +127,21 @@ def rebuild(cls: type[BaseException], arguments: dict[str, Any]) -> BaseExceptio
         return cls(**arguments)
 
 
-def _portable(value: Any) -> Any:
-    """A constructor argument as it pickles: a ``memoryview`` (a buffer the
-    error views, such as a fetched record's key) as the bytes it shows."""
-    if isinstance(value, memoryview):
-        return value.tobytes()
-    if isinstance(value, (list, tuple)):
-        return type(value)(_portable(v) for v in value)
-    return value
-
-
 def reduce(self: BaseException) -> str | tuple[Any, ...]:
     """``__reduce__`` for every generated error: a singleton pickles by name;
     any other error rebuilds from its constructor arguments by keyword. The
     constructor rebuilds the error's own state; only attributes a caller added
-    (public names) and the cause travel as state. The cause travels because an
+    (public names), the notes (``add_note``) and the cause travel as state, as
+    Python's own exceptions keep their notes. The cause travels because an
     error from the core gets it (``kafka_common_Error_source``) after
     construction, so the constructor arguments do not carry it."""
     singleton_name = self.__dict__.get(_SINGLETON)
     if singleton_name is not None:
         return str(singleton_name)
     public = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+    notes = self.__dict__.get("__notes__")
+    if notes is not None:
+        public["__notes__"] = notes
     if self.__cause__ is not None:
         public["__cause__"] = self.__cause__
     state = public or None
@@ -139,7 +150,21 @@ def reduce(self: BaseException) -> str | tuple[Any, ...]:
         # Built without its constructor (an error from the core whose Java
         # constructors cannot take what the core reported): keep the message.
         return (_rebuild_private, (type(self), java_message(self)), state)
-    return (rebuild, (type(self), {k: _portable(v) for k, v in arguments.items()}), state)
+    return (rebuild, (type(self), dict(arguments)), state)
+
+
+def shallow_copy(self: _E) -> _E:
+    """``__copy__`` of an error Java cannot serialize, whose ``__reduce__``
+    refuses: the rebuild :func:`reduce` describes, sharing the arguments and
+    the state as ``copy.copy`` does for every other error."""
+    reduced = reduce(self)
+    if isinstance(reduced, str):
+        return self
+    build, arguments, state = reduced
+    copied = build(*arguments)
+    if state:
+        copied.__setstate__(state)
+    return cast(_E, copied)
 
 
 def _rebuild_private(cls: type[BaseException], message: str | None) -> BaseException:
@@ -164,7 +189,9 @@ def singleton(cls: type[BaseException], name: str, message: str | None,
     return error
 
 
+_T = TypeVar("_T")
 _I = TypeVar("_I", bound="Iterable[Any] | None")
+_E = TypeVar("_E", bound=BaseException)
 
 
 def materialize(value: _I) -> _I:
@@ -173,7 +200,7 @@ def materialize(value: _I) -> _I:
     generator) as a tuple of its elements, in order."""
     if value is None or value is MISSING or isinstance(value, Collection):
         return value
-    from .common.headers import Headers
+    from .common.header.headers import Headers
 
     if isinstance(value, Headers):
         # Kept as it is, as Java keeps a `Headers` argument.
@@ -191,6 +218,33 @@ def copy_dict(value: Mapping[Any, Any] | None) -> dict[Any, Any] | None:
     return None if value is None else dict(value)
 
 
+def checked_set(value: Iterable[Any] | None, name: str, *, elements: bool) -> set[Any]:
+    """A ``Set`` field from Java's ``Set.copyOf(x)`` (``elements``) or
+    ``Collections.unmodifiableSet(x)``: both dereference ``x``, so a ``None``
+    raises ``TypeError("<name> must not be None")``; ``Set.copyOf`` also
+    rejects a ``None`` element (``"<name> must not contain None"``), as Java's
+    NullPointerException (CLAUDE.md, Python Binding Conventions, Types)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    copied = set(value)
+    if elements and None in copied:
+        raise TypeError(f"{name} must not contain None")
+    return copied
+
+
+def checked_dict(value: Mapping[Any, Any] | None, name: str, *, entries: bool) -> dict[Any, Any]:
+    """A ``Map`` field from Java's ``Map.copyOf(x)`` (``entries``) or
+    ``Collections.unmodifiableMap(x)``: both dereference ``x``, so a ``None``
+    raises ``TypeError("<name> must not be None")``; ``Map.copyOf`` also
+    rejects a ``None`` key or value (``"<name> must not contain None"``)."""
+    if value is None:
+        raise TypeError(f"{name} must not be None")
+    copied = dict(value)
+    if entries and any(k is None or v is None for k, v in copied.items()):
+        raise TypeError(f"{name} must not contain None")
+    return copied
+
+
 def view(value: bytes | bytearray | memoryview | None) -> memoryview | None:
     """A ``ByteBuffer`` field: a ``memoryview`` of the argument, never a copy."""
     return None if value is None else memoryview(value)
@@ -200,6 +254,6 @@ def headers(value: Iterable[Any]) -> Headers:
     """A ``Headers`` field: a ``Headers`` argument as it is, as Java keeps the
     object it is given; any other iterable of ``Header`` s or ``(key, value)``
     pairs as a new ``Headers`` (header values viewed, never copied)."""
-    from .common.headers import _kept
+    from .common.header.headers import _kept
 
     return _kept(value)

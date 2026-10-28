@@ -14,10 +14,10 @@
 
 # GENERATED, DO NOT EDIT (stub for confluent_kafka.common.metrics.QuotaViolationError).
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from confluent_kafka.common.kafka_error import KafkaError
-from confluent_kafka.common.kafka_metric import KafkaMetric
+from confluent_kafka.common.metrics.kafka_metric import KafkaMetric
 
 __all__ = ["QuotaViolationError"]
 
@@ -27,3 +27,5 @@ class QuotaViolationError(KafkaError):
     def metric(self) -> KafkaMetric: ...
     def value(self) -> float: ...
     def bound(self) -> float: ...
+    def __reduce__(self) -> str | tuple[Any, ...]: ...
+    def __copy__(self) -> QuotaViolationError: ...

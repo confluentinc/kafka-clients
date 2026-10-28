@@ -40,7 +40,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Generic
 
 from confluent_kafka._java import java_str
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 from confluent_kafka.admin._internals import (
     _DescribeUserScramCredentialsResponseData,
     _errors_for_code,
@@ -63,7 +63,7 @@ _RESOURCE_NOT_FOUND_CODE = 91
 _UserResult = _DescribeUserScramCredentialsResponseData.DescribeUserScramCredentialsResult
 
 
-class DescribeUserScramCredentialsResult(Generic[KindT]):
+class DescribeUserScramCredentialsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_user_scram_credentials()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeUserScramCredentialsResult``.
@@ -181,6 +181,11 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
         exceptionally. Note that if the given user does not exist in the list of described
         users then the returned future will complete exceptionally with
         ``ResourceNotFoundError``."""
+        if self._client is not None and user_name is None:
+            # A null user cannot cross the FFI and is never a described user: Java's
+            # answer, the request's error or ``ResourceNotFoundError``, composed over
+            # ``users()``, which fails exactly when the request does (exception 4).
+            return self._no_such_user(self._client("users", None), user_name)
         if self._client is not None:
             return self._client("description", user_name)  # type: ignore[no-any-return]
         from confluent_kafka.admin.user_scram_credentials_description import (
@@ -217,6 +222,25 @@ class DescribeUserScramCredentialsResult(Generic[KindT]):
 
         assert self._data_future is not None
         self._data_future.when_complete(action=action)
+        return self._kind._FUTURE._of_impl(retval)
+
+    def _no_such_user(self, users: KafkaFuture[list[str]] | AsyncKafkaFuture[list[str]],
+                      user_name: str | None
+                      ) -> KafkaFuture[UserScramCredentialsDescription] | AsyncKafkaFuture[UserScramCredentialsDescription]:
+        """A future failed as ``users`` fails, else with Java's
+        ``ResourceNotFoundException("No such user: " + userName)``."""
+        from confluent_kafka.common.errors import ResourceNotFoundError
+
+        retval: _KafkaFutureImpl[UserScramCredentialsDescription] = _KafkaFutureImpl()
+
+        def action(_users: list[str] | None, throwable: BaseException | None) -> None:
+            if throwable is not None:
+                retval.complete_with_error(throwable)
+            else:
+                retval.complete_with_error(ResourceNotFoundError(
+                    message="No such user: " + java_str(user_name)))
+
+        users.when_complete(action=action)
         return self._kind._FUTURE._of_impl(retval)
 
     @staticmethod

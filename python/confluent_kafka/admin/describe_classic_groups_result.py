@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync, _kind_of
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result, _kind_of
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.classic_group_description import ClassicGroupDescription
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeClassicGroupsResult"]
 
 
-class DescribeClassicGroupsResult(Generic[KindT]):
+class DescribeClassicGroupsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_classic_groups()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeClassicGroupsResult``.
@@ -49,6 +49,8 @@ class DescribeClassicGroupsResult(Generic[KindT]):
     def __init__(
             self, *,
             futures: Mapping[str, KafkaFuture[ClassicGroupDescription] | AsyncKafkaFuture[ClassicGroupDescription]]) -> None:
+        if futures is None:
+            raise TypeError("futures must not be None")
         self._futures = dict(futures)
         self._kind: type[Sync] | type[Async] = _kind_of(self._futures.values())
 
@@ -60,7 +62,7 @@ class DescribeClassicGroupsResult(Generic[KindT]):
         """The clients' builder: Java's public ``DescribeClassicGroupsResult(futures)``
         with the client kind set by the caller."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

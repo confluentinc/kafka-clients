@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Generic
 
-from confluent_kafka.admin._futures import Async, KindT, Sync
+from confluent_kafka.admin._futures import Async, KindT, Sync, _Result
 
 if TYPE_CHECKING:
     from confluent_kafka.admin.log_dir_description import LogDirDescription
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 __all__ = ["DescribeLogDirsResult"]
 
 
-class DescribeLogDirsResult(Generic[KindT]):
+class DescribeLogDirsResult(_Result, Generic[KindT]):
     """The result of the ``Admin.describe_log_dirs()`` call.
 
     Java: ``org.apache.kafka.clients.admin.DescribeLogDirsResult``.
@@ -54,7 +54,7 @@ class DescribeLogDirsResult(Generic[KindT]):
             kind: type[Sync] | type[Async]) -> DescribeLogDirsResult[Any]:
         """Java's package-private ``DescribeLogDirsResult(futures)``."""
         result = cls.__new__(cls)
-        result._futures = dict(futures)
+        result._futures = None if futures is None else dict(futures)
         result._kind = kind
         return result
 

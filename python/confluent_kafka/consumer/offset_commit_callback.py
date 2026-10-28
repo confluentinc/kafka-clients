@@ -42,8 +42,7 @@ callbacks still starting one at a time in the order the commits complete. The
 synchronous consumers reject one: ``KafkaConsumer`` closes its coroutine and
 the delivering call raises ``TypeError``, ``MockConsumer`` raises ``TypeError``
 from ``commit_nowait()``. This protocol stays Java's
-plain callback; ``AsyncConsumer.commit_nowait`` spells out the coroutine form
-beside it.
+plain callback; its asyncio form is ``AsyncOffsetCommitCallback``.
 """
 
 from __future__ import annotations

@@ -18,11 +18,13 @@ Conventions, Class family). ``rebalance`` and ``lose_partitions`` are
 ``async def``: Java's wait on the listener they run, which may be ``async def``
 here and is awaited. ``commit_nowait()`` is ``async def`` too, as on
 ``AsyncKafkaConsumer``: its callback may be ``async def``, and it is awaited
-inside the call, as Java's mock runs the callback inside ``commitAsync``."""
+inside the call, as Java's mock runs the callback inside ``commitAsync``.
+``schedule_poll_task`` takes a plain or an ``async def`` task, which ``poll()``
+awaits."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ._mock_core import MockConsumerCore
@@ -66,3 +68,15 @@ class AsyncMockConsumer(MockConsumerCore[K, V], AsyncConsumer[K, V], Generic[K, 
         ``ConcurrentModificationError`` *(deviation: Java's caller waits for
         the synchronized losePartitions)*."""
         await self._a_lose_partitions(partitions_lost)
+
+    def schedule_poll_task(
+            self, *, task: Callable[[], None] | Callable[[], Awaitable[None]]) -> None:
+        """See :meth:`MockConsumer.schedule_poll_task`. By rule 3 the task may
+        also be ``async def``: the ``poll()`` that runs it awaits it on the event
+        loop, the mock's locks released around the await as for
+        :meth:`rebalance`, and until it returns a call from another task or
+        thread raises ``ConcurrentModificationError`` *(deviation: Java's caller
+        waits for the synchronized poll)*; the task's own calls into the
+        consumer pass. A plain task runs on the event loop and must not block
+        it."""
+        self._schedule_poll_task(task)

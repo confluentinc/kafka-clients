@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, TypeVar
 
-from confluent_kafka.common.headers import Headers
+from confluent_kafka.common.header.headers import Headers
 
 __all__ = ["Serializer"]
 

@@ -12,17 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``confluent_kafka.common.metrics``: the errors of Java's ``org.apache.kafka.common.metrics``.
+"""``confluent_kafka.common.metrics``: Java's ``org.apache.kafka.common.metrics``.
 
-GENERATED, DO NOT EDIT. Produced from the Java source by
-``cargo xtask generate-error-codes`` (CLAUDE.md, Python Binding Conventions,
-Errors) and validated for staleness by ``cargo xtask check-generated``.
+``KafkaMetric``, the placeholders ``MetricConfig``, ``Measurable``,
+``MetricValueProvider`` and ``Gauge``, and the errors of the Java package
+(``QuotaViolationError``). One file per class; import the classes from
+this module, never from the files (CLAUDE.md, Python Binding Conventions, Modules).
 """
 
 from __future__ import annotations
 
-from .quota_violation_error import QuotaViolationError as QuotaViolationError
+from .gauge import Gauge as Gauge
+from .kafka_metric import KafkaMetric as KafkaMetric
+from .measurable import Measurable as Measurable
+from .metric_config import MetricConfig as MetricConfig
+from .metric_value_provider import MetricValueProvider as MetricValueProvider
 
 __all__ = [
+    "Gauge",
+    "KafkaMetric",
+    "Measurable",
+    "MetricConfig",
+    "MetricValueProvider",
+]
+
+# BEGIN GENERATED ERRORS (cargo xtask generate-error-codes; do not edit)
+from .quota_violation_error import QuotaViolationError as QuotaViolationError
+__all__ += [
     "QuotaViolationError",
 ]
+# END GENERATED ERRORS
