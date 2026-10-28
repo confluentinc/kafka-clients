@@ -1589,7 +1589,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "QuotaViolationError: '{}' violated quota. Actual: 6, Threshold: 5",
+                "QuotaViolationError: '{}' violated quota. Actual: 6.0, Threshold: 5.0",
                 metrics.metric_name("test1.total", "grp1")
             )
         );

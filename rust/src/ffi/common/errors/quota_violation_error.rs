@@ -267,7 +267,7 @@ mod tests {
             assert_eq!(
                 CStr::from_ptr(s).to_str().unwrap(),
                 "QuotaViolationError: 'MetricName [name=n1, group=g1, description=d, tags={}]' violated quota. \
-                 Actual: 1, Threshold: 0.5"
+                 Actual: 1.0, Threshold: 0.5"
             );
             kafka_string_destroy(s);
             kafka_common_QuotaViolationError_destroy(built);

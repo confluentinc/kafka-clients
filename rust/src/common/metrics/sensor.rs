@@ -771,7 +771,7 @@ mod tests {
         assert_eq!(error.message(), "");
         assert_eq!(
             error.to_string(),
-            format!("QuotaViolationError: '{metric_name}' violated quota. Actual: 10, Threshold: 5")
+            format!("QuotaViolationError: '{metric_name}' violated quota. Actual: 10.0, Threshold: 5.0")
         );
     }
 
@@ -828,7 +828,7 @@ mod tests {
         assert!(error.is_quota_violation_error());
         assert_eq!(
             error.to_string(),
-            format!("QuotaViolationError: '{child_value}' violated quota. Actual: 10, Threshold: 5")
+            format!("QuotaViolationError: '{child_value}' violated quota. Actual: 10.0, Threshold: 5.0")
         );
         // The child's stats are recorded before the check, the parent's are not.
         assert_eq!(value_of(&child_value), 10.0);

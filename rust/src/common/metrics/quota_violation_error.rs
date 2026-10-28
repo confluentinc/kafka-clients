@@ -14,6 +14,7 @@
 
 //! `org.apache.kafka.common.metrics.QuotaViolationException`.
 
+use crate::common::config::config_def::java_double_to_string;
 use crate::common::error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::{Error, MetricName};
 
@@ -129,7 +130,9 @@ impl std::fmt::Display for QuotaViolationError {
         write!(
             f,
             "QuotaViolationError: '{}' violated quota. Actual: {}, Threshold: {}",
-            self.metric_name, self.value, self.bound
+            self.metric_name,
+            java_double_to_string(self.value),
+            java_double_to_string(self.bound)
         )
     }
 }
