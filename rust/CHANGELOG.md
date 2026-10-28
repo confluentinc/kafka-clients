@@ -5,7 +5,7 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 Before 1.0 the public API is not stable, and any minor release may contain
 breaking changes.
 
-## [Unreleased]
+## 1.0.0-rc.1
 
 ### Consumer
 
