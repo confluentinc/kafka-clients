@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::common::MetricName;
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::{Avg, Max, Meter, WindowedCount};
 use crate::common::metrics::{Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
@@ -105,9 +106,7 @@ impl OffsetCommitMetricsManager {
 
     /// Java: `recordRequestLatency(long responseLatencyMs)`.
     pub(crate) fn record_request_latency(&self, response_latency_ms: i64) {
-        // The client's sensors are built from a `MetricConfig` without a quota, so
-        // `record` cannot fail and its result is discarded.
-        let _ = self.commit_sensor.record_with_value(response_latency_ms as f64);
+        record_or_log(self.commit_sensor.record_with_value(response_latency_ms as f64));
     }
 
     /// Removes every sensor and metric this manager registered. Java inherits

@@ -691,6 +691,19 @@ impl Stat for CompoundStatBox {
     }
 }
 
+/// Logs the error a client's own `record` call returns, instead of passing it on.
+///
+/// The client builds its sensors without a quota, but `KafkaMetric::set_config` can add one, and
+/// then `record` reports the violation. Java's I/O tasks log what a sensor throws
+/// (`org.apache.kafka.clients.producer.internals.Sender#run`,
+/// `org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread#run`); here the operation
+/// the metric measures then carries on.
+pub(crate) fn record_or_log(result: Result<(), Error>) {
+    if let Err(error) = result {
+        log::error!("Recording a client metric failed: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,6 +746,32 @@ mod tests {
     /// An upper bound is crossed once the recorded value exceeds it, and the
     /// error carries the metric, the offending value and the bound — Java's
     /// three `QuotaViolationException` fields.
+    /// New test, no Java original: a quota violation a client's own `record` reports is
+    /// logged at error level, as Java's I/O tasks log what they catch, and an `Ok` logs nothing.
+    #[test]
+    fn record_or_log_logs_the_violation() {
+        let sensor = standalone(quota_config(Quota::upper_bound(5.0)), 60, RecordingLevel::Info);
+        assert!(
+            sensor
+                .add_with_metric_name(name("value", "test-group"), Box::new(Value::new()))
+                .unwrap()
+        );
+        let ((), lines) = crate::test_log_capture::capture_logs(|| {
+            record_or_log(sensor.record_with_value_time_ms(4.0, 1));
+            record_or_log(sensor.record_with_value_time_ms(10.0, 2));
+        });
+        let errors: Vec<_> = lines.into_iter().filter(|(level, _)| *level == log::Level::Error).collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .1
+                .starts_with("Recording a client metric failed: QuotaViolationError: "),
+            "{}",
+            errors[0].1
+        );
+        assert!(errors[0].1.ends_with("Actual: 10.0, Threshold: 5.0"), "{}", errors[0].1);
+    }
+
     #[test]
     fn test_check_quotas_reports_an_upper_bound_violation() {
         let sensor = standalone(quota_config(Quota::upper_bound(5.0)), 60, RecordingLevel::Info);

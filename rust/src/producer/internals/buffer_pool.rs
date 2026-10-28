@@ -46,6 +46,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::Error;
 use crate::common::metrics::TimeUnit;
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::Meter;
 use crate::common::metrics::{Metrics, Sensor};
 use crate::common::utils::Time;
@@ -963,11 +964,10 @@ impl BufferPool {
     #[doc(alias = "org.apache.kafka.clients.producer.internals.BufferPool#recordBufferExhausted")]
     pub(crate) fn record_buffer_exhausted(&self) {
         // Recorded outside the pool lock (value/timestamp are independent of pool state).
-        // The client's sensors are built from a `MetricConfig` without a quota, so
-        // `record` cannot fail and its result is discarded.
-        let _ = self
-            .buffer_exhausted_sensor
-            .record_with_value_time_ms(1.0, self.time.milliseconds());
+        record_or_log(
+            self.buffer_exhausted_sensor
+                .record_with_value_time_ms(1.0, self.time.milliseconds()),
+        );
     }
 
     /// Return previously-reserved non-pooled bytes to the pool and signal the next waiter. Takes

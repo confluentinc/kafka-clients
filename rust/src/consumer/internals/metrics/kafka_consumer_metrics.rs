@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 #[cfg(test)]
 use crate::common::MetricName;
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::{Avg, CumulativeSum, Max};
 use crate::common::metrics::{ClosureMeasurable, Metrics, Sensor};
 use crate::consumer::internals::ConsumerUtils;
@@ -168,9 +169,7 @@ impl KafkaConsumerMetrics {
             0
         };
         self.time_since_last_poll_ms.store(time_since_last_poll_ms, Ordering::SeqCst);
-        // The client's sensors are built from a `MetricConfig` without a quota, so
-        // `record` cannot fail and its result is discarded.
-        let _ = self.time_between_poll_sensor.record_with_value(time_since_last_poll_ms as f64);
+        record_or_log(self.time_between_poll_sensor.record_with_value(time_since_last_poll_ms as f64));
         self.last_poll_ms.store(poll_start_ms, Ordering::SeqCst);
     }
 
@@ -187,17 +186,17 @@ impl KafkaConsumerMetrics {
         } else {
             poll_time_ms as f64 * 1.0 / poll_cycle_time_ms as f64
         };
-        let _ = self.poll_idle_sensor.record_with_value(poll_idle_ratio);
+        record_or_log(self.poll_idle_sensor.record_with_value(poll_idle_ratio));
     }
 
     /// Java: `recordCommitSync(long duration)`.
     pub(crate) fn record_commit_sync(&self, duration: i64) {
-        let _ = self.commit_sync_sensor.record_with_value(duration as f64);
+        record_or_log(self.commit_sync_sensor.record_with_value(duration as f64));
     }
 
     /// Java: `recordCommitted(long duration)`.
     pub(crate) fn record_committed(&self, duration: i64) {
-        let _ = self.committed_sensor.record_with_value(duration as f64);
+        record_or_log(self.committed_sensor.record_with_value(duration as f64));
     }
 
     /// Removes every sensor and metric this manager registered. Since

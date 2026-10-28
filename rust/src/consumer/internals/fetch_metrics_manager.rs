@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::common::MetricValue;
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::WindowedCount;
 use crate::common::metrics::{Metrics, Sensor, gauge};
 use crate::common::{Error, TopicPartition};
@@ -258,13 +259,11 @@ impl FetchMetricsManager {
     /// and, if present, the per-node latency sensor.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordLatency")]
     pub(crate) fn record_latency(&self, node: &str, request_latency_ms: i64) {
-        // The client's sensors are built from a `MetricConfig` without a quota, so
-        // `record` cannot fail and its result is discarded.
-        let _ = self.fetch_latency.record_with_value(request_latency_ms as f64);
+        record_or_log(self.fetch_latency.record_with_value(request_latency_ms as f64));
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.inner.metrics().get_sensor(&node_time_name) {
-                let _ = node_request_time.record_with_value(request_latency_ms as f64);
+                record_or_log(node_request_time.record_with_value(request_latency_ms as f64));
             }
         }
     }
@@ -272,13 +271,13 @@ impl FetchMetricsManager {
     /// Records the number of bytes fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordBytesFetched")]
     pub(crate) fn record_bytes_fetched(&self, bytes: i32) {
-        let _ = self.bytes_fetched.record_with_value(bytes as f64);
+        record_or_log(self.bytes_fetched.record_with_value(bytes as f64));
     }
 
     /// Records the number of records fetched at the client level.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordRecordsFetched")]
     pub(crate) fn record_records_fetched(&self, records: i32) {
-        let _ = self.records_fetched.record_with_value(records as f64);
+        record_or_log(self.records_fetched.record_with_value(records as f64));
     }
 
     /// Records the number of bytes fetched for a single topic.
@@ -301,7 +300,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        let _ = bytes_fetched.record_with_value(bytes as f64);
+        record_or_log(bytes_fetched.record_with_value(bytes as f64));
     }
 
     /// Records the number of records fetched for a single topic.
@@ -324,7 +323,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        let _ = records_fetched.record_with_value(records as f64);
+        record_or_log(records_fetched.record_with_value(records as f64));
     }
 
     /// Records the lag for a single partition.
@@ -336,7 +335,7 @@ impl FetchMetricsManager {
     /// metric set per partition per poll — the accepted Java-parity cost.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLag")]
     pub(crate) fn record_partition_lag(&self, tp: &TopicPartition, lag: i64) {
-        let _ = self.records_lag.record_with_value(lag as f64);
+        record_or_log(self.records_lag.record_with_value(lag as f64));
 
         let name = FetchMetricsManager::partition_records_lag_metric_name(tp);
 
@@ -352,7 +351,7 @@ impl FetchMetricsManager {
         let Some(records_lag) = FetchMetricsManager::resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
         };
-        let _ = records_lag.record_with_value(lag as f64);
+        record_or_log(records_lag.record_with_value(lag as f64));
     }
 
     /// Records the lead for a single partition.
@@ -362,7 +361,7 @@ impl FetchMetricsManager {
     /// as Java does (see [`Self::record_partition_lag`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchMetricsManager#recordPartitionLead")]
     pub(crate) fn record_partition_lead(&self, tp: &TopicPartition, lead: i64) {
-        let _ = self.records_lead.record_with_value(lead as f64);
+        record_or_log(self.records_lead.record_with_value(lead as f64));
 
         let name = FetchMetricsManager::partition_records_lead_metric_name(tp);
 
@@ -379,7 +378,7 @@ impl FetchMetricsManager {
         else {
             return;
         };
-        let _ = records_lead.record_with_value(lead as f64);
+        record_or_log(records_lead.record_with_value(lead as f64));
     }
 
     /// Called before requesting fetches to update the set of per-partition

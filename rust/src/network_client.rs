@@ -22,6 +22,7 @@
 //!
 //! This class is not thread-safe!
 
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::security::authenticator::SaslClientAuthenticator;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1070,9 +1071,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
                         // before deciding whether to actually throttle.
                         if let Some(sensor) = &self.throttle_time_sensor {
-                            // The client's sensors are built from a `MetricConfig` without a quota, so
-                            // `record` cannot fail and its result is discarded.
-                            let _ = sensor.record_with_value_time_ms(response.throttle_time_ms() as f64, now);
+                            record_or_log(sensor.record_with_value_time_ms(response.throttle_time_ms() as f64, now));
                         }
 
                         // Handle throttle

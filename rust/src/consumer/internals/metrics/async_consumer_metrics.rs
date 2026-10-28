@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crate::common::metrics::sensor::record_or_log;
 use crate::common::metrics::stats::{Avg, Max, Value};
 use crate::common::metrics::{Metrics, Sensor};
 use crate::consumer::internals::metrics::{AbstractConsumerMetricsManager, MetricsLedger};
@@ -295,62 +296,64 @@ impl AsyncConsumerMetrics {
 
     /// Java: `recordTimeBetweenNetworkThreadPoll(long)`.
     pub(crate) fn record_time_between_network_thread_poll(&self, time_between_network_thread_poll: i64) {
-        // The client's sensors are built from a `MetricConfig` without a quota, so
-        // `record` cannot fail and its result is discarded.
-        let _ = self
-            .time_between_network_thread_poll_sensor
-            .record_with_value(time_between_network_thread_poll as f64);
+        record_or_log(
+            self.time_between_network_thread_poll_sensor
+                .record_with_value(time_between_network_thread_poll as f64),
+        );
     }
 
     /// Java: `recordApplicationEventQueueSize(int)`.
     pub(crate) fn record_application_event_queue_size(&self, size: i32) {
-        let _ = self.application_event_queue_size_sensor.record_with_value(size as f64);
+        record_or_log(self.application_event_queue_size_sensor.record_with_value(size as f64));
     }
 
     /// Java: `recordApplicationEventQueueTime(long)`.
     pub(crate) fn record_application_event_queue_time(&self, time: i64) {
-        let _ = self.application_event_queue_time_sensor.record_with_value(time as f64);
+        record_or_log(self.application_event_queue_time_sensor.record_with_value(time as f64));
     }
 
     /// Java: `recordApplicationEventQueueProcessingTime(long)`.
     pub(crate) fn record_application_event_queue_processing_time(&self, processing_time: i64) {
-        let _ = self
-            .application_event_queue_processing_time_sensor
-            .record_with_value(processing_time as f64);
+        record_or_log(
+            self.application_event_queue_processing_time_sensor
+                .record_with_value(processing_time as f64),
+        );
     }
 
     /// Java: `recordApplicationEventExpiredSize(long)`.
     pub(crate) fn record_application_event_expired_size(&self, size: i64) {
-        let _ = self.application_event_expired_size_sensor.record_with_value(size as f64);
+        record_or_log(self.application_event_expired_size_sensor.record_with_value(size as f64));
     }
 
     /// Java: `recordUnsentRequestsQueueSize(int size, long timeMs)`.
     pub(crate) fn record_unsent_requests_queue_size(&self, size: i32, time_ms: i64) {
-        let _ = self
-            .unsent_requests_queue_size_sensor
-            .record_with_value_time_ms(size as f64, time_ms);
+        record_or_log(
+            self.unsent_requests_queue_size_sensor
+                .record_with_value_time_ms(size as f64, time_ms),
+        );
     }
 
     /// Java: `recordUnsentRequestsQueueTime(long)`.
     pub(crate) fn record_unsent_requests_queue_time(&self, time: i64) {
-        let _ = self.unsent_requests_queue_time_sensor.record_with_value(time as f64);
+        record_or_log(self.unsent_requests_queue_time_sensor.record_with_value(time as f64));
     }
 
     /// Java: `recordBackgroundEventQueueSize(int)`.
     pub(crate) fn record_background_event_queue_size(&self, size: i32) {
-        let _ = self.background_event_queue_size_sensor.record_with_value(size as f64);
+        record_or_log(self.background_event_queue_size_sensor.record_with_value(size as f64));
     }
 
     /// Java: `recordBackgroundEventQueueTime(long)`.
     pub(crate) fn record_background_event_queue_time(&self, time: i64) {
-        let _ = self.background_event_queue_time_sensor.record_with_value(time as f64);
+        record_or_log(self.background_event_queue_time_sensor.record_with_value(time as f64));
     }
 
     /// Java: `recordBackgroundEventQueueProcessingTime(long)`.
     pub(crate) fn record_background_event_queue_processing_time(&self, processing_time: i64) {
-        let _ = self
-            .background_event_queue_processing_time_sensor
-            .record_with_value(processing_time as f64);
+        record_or_log(
+            self.background_event_queue_processing_time_sensor
+                .record_with_value(processing_time as f64),
+        );
     }
 
     /// Removes every sensor and metric this manager registered. Since
