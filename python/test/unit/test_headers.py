@@ -30,7 +30,9 @@ says.
 from __future__ import annotations
 
 import copy
+import pickle
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -437,21 +439,36 @@ def test_headers_equality_hash_and_string_are_record_headers() -> None:
     assert str(b).endswith("isReadOnly = True)")
 
 
-def test_a_shallow_copy_shares_the_header_objects_but_not_the_list() -> None:
-    # Java's RecordHeaders and RecordHeader are not Serializable, so nothing is
-    # promised for pickle or deepcopy (CLAUDE.md, Types); copy.copy is a new
-    # Headers holding the same Header objects, with the same read-only state.
-    headers = Headers(headers=[("k", bytearray(b"\x01v")), ("n", None)])
-    shallow = copy.copy(headers)
-    assert shallow == headers and shallow is not headers
-    assert shallow.to_array()[0] is headers.to_array()[0]
-    shallow.add(key="x", value=b"1")
-    assert len(headers.to_array()) == 2 and len(shallow.to_array()) == 3
+def test_headers_pickle_and_deep_copy_with_values_as_bytes() -> None:
+    # Not Java's (RecordHeaders is not Serializable): a record carries its
+    # headers, and Python's default pickling of a record needs them to pickle
+    # (CLAUDE.md, Behaviour with no other home); a viewed value pickles as its bytes.
+    raw = bytearray(b"\x01v")
+    headers = Headers(headers=[("k", raw), ("n", None), Header(key="m", value=memoryview(b"x"))])
     headers._set_read_only()  # noqa: SLF001
-    assert copy.copy(headers)._is_read_only()  # noqa: SLF001
+    for copied in (pickle.loads(pickle.dumps(headers)), copy.deepcopy(headers)):
+        assert copied == headers and copied is not headers
+        assert copied._is_read_only()  # noqa: SLF001
+        assert all(isinstance(h, Header) for h in copied)
+        raw[1] = ord("V")  # the copy holds its own bytes now
+        assert bytes(copied.to_array()[0].value() or b"") == b"\x01v"
+        raw[1] = ord("v")
+    shallow = copy.copy(headers)
+    assert shallow == headers and shallow.to_array()[0] is headers.to_array()[0]
     header = Header(key="k", value=b"v")
-    copied = copy.copy(header)
-    assert copied == header and copied is not header
+    assert pickle.loads(pickle.dumps(header)) == header == copy.deepcopy(header)
+    assert copy.copy(header) == header
+    error = RecordDeserializationError(
+        origin=RecordDeserializationError.DeserializationExceptionOrigin.VALUE,
+        partition=TopicPartition(topic="t", partition=0), offset=1, timestamp=2,
+        timestamp_type=TimestampType.CREATE_TIME, key_buffer=None, value_buffer=b"v",
+        headers=headers, message="m", cause=None)
+    # The error still refuses pickle and deepcopy, as Java's cannot be
+    # serialized; copy.copy shares its headers.
+    for refuse in (pickle.dumps, copy.deepcopy):
+        with pytest.raises(TypeError):
+            refuse(error)
+    assert copy.copy(error).headers() is error.headers()
 
 
 class _MyHeader(Header):
@@ -479,7 +496,8 @@ class _Lazy(Header):
 
 
 class _Secretive(Header):
-    """A subclass with a private slot, stored as ``_Secretive__secret``."""
+    """A subclass with a private slot, stored as ``_Secretive__secret``; module
+    level so that pickle can find it."""
 
     __slots__ = ("__secret",)
 
@@ -491,29 +509,34 @@ class _Secretive(Header):
         return self.__secret
 
 
-def test_a_private_slot_of_a_subclass_survives_copy() -> None:
+def test_a_private_slot_of_a_subclass_survives_copy_and_pickle() -> None:
     # The state helper lists slots as copyreg does, mangled name included.
     original = _Secretive(key="k", value=b"v", secret=7)
-    again = copy.copy(original)
-    assert type(again) is _Secretive and again == original and again.secret() == 7
+    for again in (copy.copy(original), copy.deepcopy(original), pickle.loads(pickle.dumps(original))):
+        assert type(again) is _Secretive and again == original and again.secret() == 7
 
 
-def test_subclasses_keep_their_class_through_copy() -> None:
+def test_subclasses_keep_their_class_through_copy_deepcopy_and_pickle() -> None:
     mine = _MyHeader(key="k", value=memoryview(b"v"))
     mine.extra = 7
     lazy = _Lazy("l", b"z")
     headers = _MyHeaders(headers=[mine, lazy, ("p", b"1")])
     headers._set_read_only()  # noqa: SLF001
-    for header in (mine, lazy):
-        copied = copy.copy(header)
-        assert type(copied) is type(header) and copied == header
-        assert (copied.key(), bytes(copied.value() or b"")) == (
-            header.key(), bytes(header.value() or b""))
-    assert copy.copy(mine).extra == 7
-    copied_headers = copy.copy(headers)
-    assert type(copied_headers) is _MyHeaders and copied_headers == headers
-    assert copied_headers._is_read_only()  # noqa: SLF001
-    assert [type(h) for h in copied_headers] == [_MyHeader, _Lazy, Header]
+    def pickled(o: Any) -> Any:
+        return pickle.loads(pickle.dumps(o))
+
+    clones: tuple[Callable[[Any], Any], ...] = (copy.copy, copy.deepcopy, pickled)
+    for clone in clones:
+        for header in (mine, lazy):
+            copied = clone(header)
+            assert type(copied) is type(header) and copied == header
+            assert (copied.key(), bytes(copied.value() or b"")) == (
+                header.key(), bytes(header.value() or b""))
+        assert clone(mine).extra == 7
+        copied_headers = clone(headers)
+        assert type(copied_headers) is _MyHeaders and copied_headers == headers
+        assert copied_headers._is_read_only()  # noqa: SLF001
+        assert [type(h) for h in copied_headers] == [_MyHeader, _Lazy, Header]
     error = RecordDeserializationError(
         origin=RecordDeserializationError.DeserializationExceptionOrigin.KEY,
         partition=TopicPartition(topic="t", partition=0), offset=1, timestamp=2,
@@ -654,3 +677,43 @@ def test_poll_hands_out_writable_headers_after_the_deserializers() -> None:
     record.headers().add(key="k", value=None)
     _assert_header("added", "by-deserializer", record.headers().to_array()[0])
     assert record.headers().last_header(key="k") is not None
+
+
+def test_records_with_header_values_pickle_and_deep_copy() -> None:
+    # The records keep Python's default pickling (CLAUDE.md, Types: a class Java
+    # does not mark Serializable keeps Python's default), which needs their
+    # headers to pickle.
+    from confluent_kafka.consumer import ConsumerRecord
+    from confluent_kafka.producer import ProducerRecord
+
+    produced = ProducerRecord(topic="t", partition=None, key=None, value=b"v",
+                              headers=[("h", bytearray(b"x")), ("n", None)])
+    consumed: ConsumerRecord[bytes, bytes] = ConsumerRecord(topic="t", partition=0, offset=1,
+                                                            key=None, value=b"v")
+    consumed.headers().add(key="h", value=memoryview(b"y"))
+    for clone in (lambda o: pickle.loads(pickle.dumps(o)), copy.deepcopy):
+        again = clone(produced)
+        assert again == produced
+        assert [(h.key(), None if h.value() is None else bytes(h.value()))  # type: ignore[arg-type]
+                for h in again.headers()] == [("h", b"x"), ("n", None)]
+        value = again.headers().last_header(key="h").value()
+        assert isinstance(value, memoryview) and value.readonly
+        record = clone(consumed)
+        assert (record.topic(), record.partition(), record.offset(), record.value()) == (
+            "t", 0, 1, b"v")
+        assert [(h.key(), bytes(h.value() or b"")) for h in record.headers()] == [("h", b"y")]
+
+
+def test_a_header_pickled_under_the_earlier_module_path_loads() -> None:
+    # Earlier releases defined Header in the module confluent_kafka.common.header,
+    # with this same state (a value as its bytes); the package still exports it.
+    header = Header(key="k", value=b"v")
+    try:
+        Header.__module__ = "confluent_kafka.common.header"
+        data = pickle.dumps(header)
+    finally:
+        Header.__module__ = "confluent_kafka.common.header.header"
+    assert b"confluent_kafka.common.header.header" not in data
+    loaded = pickle.loads(data)
+    assert type(loaded) is Header and loaded == header
+    assert isinstance(loaded.value(), memoryview)

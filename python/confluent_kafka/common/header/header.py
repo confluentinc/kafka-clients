@@ -125,6 +125,32 @@ class Header:
     def __str__(self) -> str:
         return f"RecordHeader(key = {self.key()}, value = {_signed_bytes(self.value())})"
 
+    def __copy__(self) -> Header:
+        # A shallow copy, of the same class and state, shares the viewed
+        # bytes, as Java's header reference.
+        copied = type(self).__new__(type(self))
+        _set_state(copied, _state(self))
+        return copied
+
+    def __getstate__(self) -> dict[str, Any]:
+        """``pickle`` and ``deepcopy`` keep the class and its state, a viewed
+        value as its bytes, restored as a read-only view *(deviation: Java's
+        ``RecordHeader`` is not ``Serializable``. Why: a record carries its
+        headers, and Python's default pickling of a record needs them to
+        pickle)* (CLAUDE.md, Python Binding Conventions, Behaviour with no other
+        home)."""
+        state = _state(self)
+        value = state.get("_value")
+        if isinstance(value, memoryview):
+            state["_value"] = value.tobytes()
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        value = state.get("_value")
+        if isinstance(value, bytes):
+            state = {**state, "_value": memoryview(value)}
+        _set_state(self, state)
+
 
 def _of(key: str, value: memoryview | None) -> Header:
     """A ``Header`` holding ``key`` and the read-only byte view ``value`` as
