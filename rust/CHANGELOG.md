@@ -7,6 +7,10 @@ breaking changes.
 
 ## [Unreleased]
 
+### General availability
+
+- First generally available (GA) release of the Rust client, version 1.0.0.
+
 ### Consumer
 
 - **Breaking:** `Consumer::committed` / `committed_with_timeout` return
