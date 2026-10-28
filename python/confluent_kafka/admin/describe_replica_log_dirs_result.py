@@ -61,8 +61,8 @@ class DescribeReplicaLogDirsResult(_Result, Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "ReplicaLogDirInfo cannot be constructed directly; use the admin client's "
-                "describe_replica_log_dirs()")
+                "DescribeReplicaLogDirsResult.ReplicaLogDirInfo cannot be constructed "
+                "directly; use the futures of DescribeReplicaLogDirsResult.values()")
 
         @classmethod
         @java_forms(

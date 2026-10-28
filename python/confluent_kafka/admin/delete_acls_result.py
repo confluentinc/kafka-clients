@@ -57,8 +57,8 @@ class DeleteAclsResult(_Result, Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "FilterResult cannot be constructed directly; use the admin client's "
-                "delete_acls()")
+                "DeleteAclsResult.FilterResult cannot be constructed directly; use "
+                "DeleteAclsResult.FilterResults.values()")
 
         @classmethod
         def _new(cls, *, binding: AclBinding | None,
@@ -88,8 +88,8 @@ class DeleteAclsResult(_Result, Generic[KindT]):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             raise TypeError(
-                "FilterResults cannot be constructed directly; use the admin client's "
-                "delete_acls()")
+                "DeleteAclsResult.FilterResults cannot be constructed directly; use the "
+                "futures of DeleteAclsResult.values()")
 
         @classmethod
         def _new(cls, *, values: Iterable[DeleteAclsResult.FilterResult]
