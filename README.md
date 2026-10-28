@@ -11,7 +11,9 @@ It also contains bindings for multiple languages, automatically generated follow
 
 **Rust Client: Preview**. The Rust client is in preview and not yet recommended for production use. The public API is not stable before the 1.0 GA release and may change. We welcome your feedback while the design is still open.
 
-**Python, C and .NET Clients: In Development**. The API is subject to large changes and the stability is not guaranteed.
+**Python Client: Preview**. The Python client is in preview and not yet recommended for production use. The public API is not stable before the GA release and may change. We welcome your feedback while the design is still open.
+
+**C and .NET Clients: In Development**. The API is subject to large changes and the stability is not guaranteed.
 
 ## Repository Structure
 
