@@ -112,4 +112,3 @@ class _Result:
         if _holds_native(values):
             raise not_copyable(type(self).__name__, "it holds the admin client's native result")
         return super().__reduce_ex__(protocol)
-
