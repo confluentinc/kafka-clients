@@ -631,6 +631,8 @@ async fn consume_and_verify_records_with_max_poll(
                 &expected_value,
                 "{backend} backend"
             );
+            assert_eq!(record.serialized_key_size(), expected_key.len() as i32, "{backend} backend");
+            assert_eq!(record.serialized_value_size(), expected_value.len() as i32, "{backend} backend");
             next_index += 1;
         }
         // Java assertion: each individual `poll()` returns at most
