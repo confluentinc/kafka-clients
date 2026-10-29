@@ -388,15 +388,14 @@ impl ChaosHarness {
 
     /// Container-network bootstrap for the run's `--security-protocol`
     /// listener — what a gRPC backend's client connects to when its server runs
-    /// in a sibling container on the cluster's network. `None` for
-    /// SASL_PLAINTEXT, the one protocol with no CONTAINER listener;
-    /// `ChaosConfig::from_env` rejects that combination up front.
-    pub fn container_protocol_bootstrap(&self) -> Option<&str> {
+    /// in a sibling container on the cluster's network. Every protocol has one
+    /// (CONTAINER, CTLSONLY, CSASLTLS, CSASLPLAIN).
+    pub fn container_protocol_bootstrap(&self) -> &str {
         match self.security_protocol {
-            SecurityProtocol::Plaintext => Some(self.cluster.container_bootstrap_servers()),
-            SecurityProtocol::Ssl => Some(self.cluster.container_ssl_bootstrap_servers()),
-            SecurityProtocol::SaslSsl => Some(self.cluster.container_sasl_ssl_bootstrap_servers()),
-            SecurityProtocol::SaslPlaintext => None,
+            SecurityProtocol::Plaintext => self.cluster.container_bootstrap_servers(),
+            SecurityProtocol::Ssl => self.cluster.container_ssl_bootstrap_servers(),
+            SecurityProtocol::SaslSsl => self.cluster.container_sasl_ssl_bootstrap_servers(),
+            SecurityProtocol::SaslPlaintext => self.cluster.container_sasl_plaintext_bootstrap_servers(),
         }
     }
 
@@ -791,7 +790,7 @@ impl ChaosHarness {
     fn workload_ctx(&self, topic: &str) -> WorkloadContext {
         WorkloadContext {
             bootstrap: self.protocol_bootstrap().to_string(),
-            container_bootstrap: self.container_protocol_bootstrap().unwrap_or_default().to_string(),
+            container_bootstrap: self.container_protocol_bootstrap().to_string(),
             security: self.security_props(),
             topic: topic.to_string(),
             topics: self.topics.clone(),
