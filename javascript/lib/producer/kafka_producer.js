@@ -161,8 +161,12 @@ class KafkaProducer {
     const onHandover = (error) => {
       if (!inCall) {
         // Queued. Its completion may run in another send()'s pump, with no
-        // event-loop turn since the count started: the count stays.
-        settle(error);
+        // event-loop turn since the count started: the count stays, and while
+        // a deferral turn is pending it settles in that turn too, after the
+        // sends already deferred (an await on it would otherwise resume in a
+        // microtask, with no turn).
+        if (this.#deferred !== null) this.#deferSettlement(settle, error);
+        else settle(error);
       } else if (this.#fastPathSends++ >= FAST_PATH_YIELD_EVERY) {
         this.#deferSettlement(settle, error);
       } else {
