@@ -124,8 +124,8 @@ impl MultilanguageAdmin {
         self.admin_id
     }
 
-    /// Issues one unary RPC on a cloned client, mapping a transport failure to a
-    /// `Error` that names the backend.
+    /// Issues one unary RPC on a cloned client; a transport failure panics with
+    /// the backend's name (`status_to_kafka_error`).
     ///
     /// The clone is what lets the RPC methods take `&self`: tonic's generated
     /// client needs `&mut self`, and `AdminBackend` is `&self` because Java's

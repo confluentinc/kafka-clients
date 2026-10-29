@@ -722,9 +722,10 @@ pub trait AdminBackend {
     ///
     /// `timeout` of `None` is Java's no-argument `close()`. Java's
     /// `Admin.close(Duration)` is `void` and so is the Rust `Admin::close`; the
-    /// `Result` here exists because the gRPC backends can fail at the transport
-    /// or binding level, which is a harness failure the scenario must see rather
-    /// than a Kafka-level error.
+    /// `Result` here exists because the gRPC backends can fail at the binding
+    /// level, which is a harness failure the scenario must see rather than a
+    /// Kafka-level error (a transport failure panics, see
+    /// `status_to_kafka_error`).
     async fn close(&self, timeout: Option<Duration>) -> Result<(), Error>;
 
     /// Short backend label used in assertion messages.
@@ -734,9 +735,9 @@ pub trait AdminBackend {
 /// The already-resolved per-key outcomes of one Admin RPC: convention #1 of
 /// [`AdminBackend`]'s signature rules, named so the method signatures stay
 /// readable. The outer `Result` on every method is the whole-call failure that
-/// precedes any per-key future (a synchronous throw, an unknown handle, a
-/// transport error); this map is what a Java caller would read out of the
-/// `*Result`'s per-key `KafkaFuture`s.
+/// precedes any per-key future (a synchronous throw, an unknown handle; a
+/// transport error panics instead, see `status_to_kafka_error`); this map is
+/// what a Java caller would read out of the `*Result`'s per-key `KafkaFuture`s.
 pub type Outcomes<K, V> = HashMap<K, Result<V, Error>>;
 
 /// The already-resolved outcome of an RPC whose Java `*Result` splits **one**
