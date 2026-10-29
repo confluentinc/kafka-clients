@@ -722,9 +722,12 @@ static PyTypeObject ConsumerGroupMetadataType = {
 // the count and the code that ends it (the entry of an __exit__, a
 // Condition.__enter__ around the lock). Here both ends are C methods: the
 // with statement calls __enter__ and sets up its __exit__ with no check point
-// in between, and the count, the release and the lock all happen inside one C
-// call, with the lock taken through the C RLock (``state._lifecycle_lock``),
-// never through threading.Condition's Python-level __enter__ / __exit__.
+// in between (except on CPython 3.14, which checks for signals after __enter__
+// returns, so a KeyboardInterrupt there skips __exit__ and leaves the use
+// counted: CPython gh-148874, fixed in 3.15), and the count, the release and
+// the lock all happen inside one C call, with the lock taken through the C
+// RLock (``state._lifecycle_lock``), never through threading.Condition's
+// Python-level __enter__ / __exit__.
 //
 // The only Python code run under the lock is the waiters' wake-up
 // (``state._lifecycle.notify_all()``) and, on the consumer's start path before

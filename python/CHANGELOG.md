@@ -73,3 +73,10 @@ API is the Apache Kafka Java client's (4.4.0), in Python form.
 - Free-threaded Python (3.13t, 3.14t) is not supported yet: no wheels are built
   for it, and a build from source turns the GIL back on when the module is
   imported.
+- On Python 3.14, a Ctrl+C (`KeyboardInterrupt`) can, rarely, leave a client
+  call counted, so that a later `close()` waits forever, or leave a mock
+  client's lock held. It happens when the Ctrl+C arrives right after a `with`
+  block takes its lock and before the block starts. The bug is in CPython 3.14
+  and affects every `with` block
+  ([python/cpython#148874](https://github.com/python/cpython/issues/148874));
+  Python 3.15 has the fix.

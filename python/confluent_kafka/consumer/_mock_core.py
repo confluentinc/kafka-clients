@@ -148,8 +148,10 @@ class _Monitor:
     while it awaits the listener (``owner``). A block enters it as
     ``with self._lock.rlock: self._lock.check()``: the C ``RLock``'s own
     ``__enter__`` / ``__exit__``, so no Python frame sits between the acquire and
-    the release and a ``KeyboardInterrupt`` cannot leave the lock held, and the
-    owner check as the block's first statement, so a refusal releases it too.
+    the release and a ``KeyboardInterrupt`` cannot leave the lock held (except on
+    CPython 3.14, which checks for signals after ``__enter__`` returns and before
+    the block starts: CPython gh-148874, fixed in 3.15), and the owner check as
+    the block's first statement, so a refusal releases it too.
     Entering it from any other task or thread while it has an owner raises
     ``ConcurrentModificationError``; the owner, and anyone while there is none,
     enter as the lock lets them.
