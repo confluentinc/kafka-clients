@@ -18,6 +18,16 @@
 //!
 //! # Methods classification
 //!
+//! Every translated test is a multilanguage scenario
+//! ([`multilanguage_consumer_test!`], [`assignment_interval_consumer_test!`]):
+//! the consumers under test also run on the Python (sync, asyncio) and C
+//! backends, while the broker bounces and every fixture (producer, admin) stay
+//! native. Each name gains the backend suffix (`__rust`, `__grpc_python`,
+//! `__grpc_python_async`, `__grpc_c`). Java's `ConsumerAssignmentPoller` tracks
+//! the assignment through the consumer's callback log
+//! ([`ConsumerAssignmentPoller::start_with_log`]), and `checkClosedState`'s
+//! listener is the log's `assigned` entries.
+//!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
 //! - `testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
@@ -62,18 +72,17 @@
 //! restart brokers through `KafkaCluster::shutdown_broker` / `start_broker`:
 //!
 //! - `testAsyncConsumerConsumptionWithBrokerFailures`
-//!   → `test_async_consumer_consumption_with_broker_failures`, a multilanguage
-//!   scenario ([`multilanguage_consumer_test!`]): the consumer under test also
-//!   runs on the Python (sync, asyncio) and C backends, while the broker bounces
-//!   and every fixture stay native. Its name gains the backend suffix
-//!   (`__rust`, `__grpc_python`, `__grpc_python_async`, `__grpc_c`).
+//!   → `test_async_consumer_consumption_with_broker_failures`
 //! - `testAsyncConsumerSeekAndCommitWithBrokerFailures`
-//!   → `test_async_consumer_seek_and_commit_with_broker_failures`, a
-//!   multilanguage scenario like the previous one.
+//!   → `test_async_consumer_seek_and_commit_with_broker_failures`
 //! - `testAsyncSubscribeWhenTopicUnavailable`
 //!   → `test_async_subscribe_when_topic_unavailable`
 //! - `testAsyncClose`, including its coordinator-failure and
-//!   cluster-failure parts → `test_async_close`
+//!   cluster-failure parts → `test_async_close`. Its three gRPC arms skip
+//!   themselves, saying so on stderr: on every containerized backend a `close`
+//!   with every broker down sometimes overruns its bound by 2 s or more
+//!   (finding #3 of `design/current/multilanguage-conversion-findings.md`). Its
+//!   `__rust` arm runs.
 //!
 //! ## Rust-only harness coverage (no Java counterpart)
 //!
@@ -105,7 +114,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use confluent_kafka::admin::Admin;
 use confluent_kafka::admin::AdminClient;
 use confluent_kafka::admin::AdminClientConfig;
@@ -114,12 +122,8 @@ use confluent_kafka::admin::NewTopic;
 use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::consumer::CloseOptions;
-use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::ConsumerRebalanceListener;
-use confluent_kafka::consumer::KafkaConsumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -128,11 +132,11 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::seq::IndexedRandom;
 
+use crate::assignment_interval_consumer_test;
 use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::callback_log::ConsumerCallbackLog;
+use crate::common::callback_log::KIND_ASSIGNED;
 use crate::common::cluster_config::ClusterConfig;
-use crate::common::cluster_config::broker_has_assignment_interval;
-use crate::common::cluster_config::log_assignment_interval_skip;
-use crate::common::cluster_config::with_assignment_interval;
 use crate::common::consumer_assignment_poller::BytesConsumer;
 use crate::common::consumer_assignment_poller::ConsumerAssignmentPoller;
 use crate::common::kafka_cluster::KafkaCluster;
@@ -183,23 +187,10 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
-/// `org.apache.kafka.common.test.ClusterInstance#consumer(Map)`:
-/// byte-array deserializers, `auto.offset.reset=earliest` and a fresh
-/// `group_<random>` group id unless overridden, on the KIP-848 protocol this
-/// suite translates.
-fn create_consumer(ctx: &TestContext, configs: &HashMap<String, String>) -> BytesConsumer {
-    let props = consumer_props(ctx, ctx.bootstrap_servers(), configs);
-    Box::new(
-        KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-            ConsumerConfig::new(&props).expect("valid consumer config"),
-            ByteArrayDeserializer::default(),
-            ByteArrayDeserializer::default(),
-        )
-        .expect("KafkaConsumer::new should succeed"),
-    )
-}
-
-/// The properties of [`create_consumer`], over `bootstrap`.
+/// The properties of `org.apache.kafka.common.test.ClusterInstance#consumer(Map)`
+/// over `bootstrap`: byte-array deserializers, `auto.offset.reset=earliest`
+/// and a fresh `group_<random>` group id unless overridden, on the KIP-848
+/// protocol this suite translates.
 fn consumer_props(ctx: &TestContext, bootstrap: &str, configs: &HashMap<String, String>) -> HashMap<String, String> {
     static NEXT_DEFAULT_GROUP: AtomicUsize = AtomicUsize::new(0);
     let default_group = ctx.group_id(&format!("group_{}", NEXT_DEFAULT_GROUP.fetch_add(1, Ordering::SeqCst)));
@@ -213,23 +204,43 @@ fn consumer_props(ctx: &TestContext, bootstrap: &str, configs: &HashMap<String, 
     props
 }
 
-/// [`create_consumer`] for the backend under test of a multilanguage scenario:
-/// the same properties over the PLAINTEXT bootstrap the backend reaches (the
-/// CONTAINER listener for a containerized backend, host loopback otherwise).
+/// The PLAINTEXT bootstrap the backend under test reaches: the CONTAINER
+/// listener for a containerized backend, host loopback otherwise.
+fn backend_bootstrap<F: ConsumerBackendFactory>(ctx: &TestContext, factory: &F) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
+/// `clusterInstance.consumer(configs)` for the backend under test of a
+/// multilanguage scenario: the [`consumer_props`] over [`backend_bootstrap`].
 async fn create_consumer_for<F: ConsumerBackendFactory>(
     ctx: &TestContext,
     factory: &F,
     configs: &HashMap<String, String>,
 ) -> BytesConsumer {
-    let bootstrap = if factory.needs_container_bootstrap() {
-        ctx.container_bootstrap_servers()
-    } else {
-        ctx.bootstrap_servers()
-    };
     factory
-        .create(consumer_props(ctx, bootstrap, configs))
+        .create(consumer_props(ctx, &backend_bootstrap(ctx, factory), configs))
         .await
         .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
+}
+
+/// [`create_consumer_for`] together with the consumer's callback log, for a
+/// consumer whose rebalance listener the test observes (a
+/// [`ConsumerAssignmentPoller::start_with_log`] poller, or
+/// [`check_closed_state`]'s assignment wait).
+async fn create_consumer_with_log_for<F: ConsumerBackendFactory>(
+    ctx: &TestContext,
+    factory: &F,
+    configs: &HashMap<String, String>,
+) -> (BytesConsumer, Arc<ConsumerCallbackLog>) {
+    let (consumer, log) = factory
+        .create_with_callback_log(consumer_props(ctx, &backend_bootstrap(ctx, factory), configs))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()));
+    (consumer, Arc::new(log))
 }
 
 /// `clusterInstance.producer()`: byte-array serializers, producer defaults.
@@ -270,8 +281,9 @@ async fn close_consumer_ignoring_error(consumer: Option<BytesConsumer>) {
 
 /// Java's `addConsumersToGroup`: create `num_of_consumers_to_add`
 /// consumers in `group` and start a poller for each.
-async fn add_consumers_to_group(
+async fn add_consumers_to_group<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     consumer_pollers: &mut Vec<ConsumerAssignmentPoller>,
     num_of_consumers_to_add: usize,
     topics_to_subscribe: &[String],
@@ -281,8 +293,9 @@ async fn add_consumers_to_group(
     let mut configs = consumer_configs.clone();
     configs.insert("group.id".to_string(), group.to_string());
     for _ in 0..num_of_consumers_to_add {
-        let consumer = create_consumer(ctx, &configs);
-        consumer_pollers.push(ConsumerAssignmentPoller::start(consumer, topics_to_subscribe.to_vec()).await);
+        let (consumer, log) = create_consumer_with_log_for(ctx, factory, &configs).await;
+        consumer_pollers
+            .push(ConsumerAssignmentPoller::start_with_log(consumer, log, topics_to_subscribe.to_vec()).await);
     }
 }
 
@@ -346,8 +359,10 @@ async fn validate_group_assignment(
 
 /// Java's `addConsumersToGroupAndWaitForGroupAssignment`, with the
 /// assignment bound passed through to [`validate_group_assignment`].
-async fn add_consumers_to_group_and_wait_for_group_assignment(
+#[expect(clippy::too_many_arguments)]
+async fn add_consumers_to_group_and_wait_for_group_assignment<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     consumer_pollers: &mut Vec<ConsumerAssignmentPoller>,
     num_of_consumers_to_add: usize,
     topics_to_subscribe: &[String],
@@ -362,6 +377,7 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
     );
     add_consumers_to_group(
         ctx,
+        factory,
         consumer_pollers,
         num_of_consumers_to_add,
         topics_to_subscribe,
@@ -372,13 +388,17 @@ async fn add_consumers_to_group_and_wait_for_group_assignment(
     validate_group_assignment(consumer_pollers, subscriptions).await;
 }
 
-/// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`,
-/// run against `config`.
-async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(config: ClusterConfig) {
-    let mut ctx = TestContext::new(config).await;
+/// Java's `testConsumerReceivesFatalExceptionWhenGroupPassesMaxSize(CONSUMER)`.
+/// Every group member is the backend's under test; the producer and the admin
+/// are native fixtures.
+async fn consumer_receives_fatal_exception_when_group_passes_max_size<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let backend = factory.name();
     let group = ctx.group_id("fatal-exception-test");
     let topic = ctx.topic("fatal-exception-test");
-    let admin = create_admin(&ctx);
+    let admin = create_admin(ctx);
 
     let num_partition = MAX_GROUP_SIZE;
     let consumer_config = HashMap::from([
@@ -394,7 +414,8 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
 
     let mut consumer_pollers: Vec<ConsumerAssignmentPoller> = Vec::new();
     add_consumers_to_group_and_wait_for_group_assignment(
-        &ctx,
+        ctx,
+        factory,
         &mut consumer_pollers,
         MAX_GROUP_SIZE,
         &topics,
@@ -404,7 +425,7 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
     )
     .await;
 
-    add_consumers_to_group(&ctx, &mut consumer_pollers, 1, &topics, &group, &consumer_config).await;
+    add_consumers_to_group(ctx, factory, &mut consumer_pollers, 1, &topics, &group, &consumer_config).await;
 
     let mut rejected_consumer = consumer_pollers.pop().expect("the extra consumer's poller");
 
@@ -415,29 +436,32 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
             let thrown = rejected_consumer.thrown_error().is_some();
             async move { thrown }
         },
-        "Extra consumer did not throw an exception",
+        &format!("{backend} backend: Extra consumer did not throw an exception"),
         15_000,
         100,
     )
     .await;
 
     // Java: `assertInstanceOf(GroupMaxSizeReachedException.class, ...)`.
-    let thrown = rejected_consumer.thrown_error().expect("thrown error recorded");
+    let thrown = rejected_consumer
+        .thrown_error()
+        .unwrap_or_else(|| panic!("{backend} backend: thrown error recorded"));
     let Error::GroupMaxSizeReached(thrown) = thrown else {
-        panic!("expected GroupMaxSizeReached, got {thrown:?}");
+        panic!("{backend} backend: expected GroupMaxSizeReached, got {thrown:?}");
     };
     // Stricter than Java (which asserts only the type): the broker's message
     // (`org.apache.kafka.coordinator.group.GroupMetadataManager#throwIfConsumerGroupIsFull`) is
     // part of the contract the client surfaces verbatim (DoD §3).
     assert_eq!(
         thrown.message(),
-        format!("The consumer group has reached its maximum capacity of {MAX_GROUP_SIZE} members.")
+        format!("The consumer group has reached its maximum capacity of {MAX_GROUP_SIZE} members."),
+        "{backend} backend"
     );
     close_consumer_ignoring_error(rejected_consumer.shutdown().await).await;
 
     // assert group continues to live and the records to be distributed across all partitions.
     let data = b"data".to_vec();
-    let producer = create_producer(&ctx);
+    let producer = create_producer(ctx);
     for index in 0..num_partition * 100 {
         let record = ProducerRecord::with_partition_key(
             topic.clone(),
@@ -460,7 +484,7 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
             let all = consumer_pollers.iter().all(|p| p.received_messages() >= 100);
             async move { all }
         },
-        "The consumers in the group could not fetch the expected records",
+        &format!("{backend} backend: The consumers in the group could not fetch the expected records"),
         10_000,
         100,
     )
@@ -473,60 +497,15 @@ async fn test_consumer_receives_fatal_exception_when_group_passes_max_size(confi
     ctx.cleanup().await;
 }
 
-/// Translates `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`
-/// with the broker's default assignment
-/// behaviour, on a broker older than 4.3 only: there the broker has no
-/// assignment interval and the two Java arms skip themselves. On 4.3+ this
-/// test skips itself, since the Java arms run and the default interval would
-/// duplicate the `1000` arm. See the module docs.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size() {
-    if broker_has_assignment_interval() {
-        log_assignment_interval_skip(
-            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size",
-            "rust",
-            "the broker has group.consumer.assignment.interval.ms; the two Java arms run instead",
-        );
-        return;
-    }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(cluster_config()).await;
-}
-
-/// The `group.consumer.assignment.interval.ms=0` arm of
-/// `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
-/// Skips itself on a broker older than 4.3,
-/// which ignores the config.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0() {
-    if !broker_has_assignment_interval() {
-        log_assignment_interval_skip(
-            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_0",
-            "rust",
-            "group.consumer.assignment.interval.ms is a 4.3 broker config",
-        );
-        return;
-    }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(with_assignment_interval(cluster_config(), 0))
-        .await;
-}
-
-/// The `group.consumer.assignment.interval.ms=1000` arm of
-/// `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`.
-/// Skips itself on a broker older than 4.3,
-/// which ignores the config.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000() {
-    if !broker_has_assignment_interval() {
-        log_assignment_interval_skip(
-            "test_async_consumer_receives_fatal_exception_when_group_passes_max_size_assignment_interval_1000",
-            "rust",
-            "group.consumer.assignment.interval.ms is a 4.3 broker config",
-        );
-        return;
-    }
-    test_consumer_receives_fatal_exception_when_group_passes_max_size(with_assignment_interval(cluster_config(), 1000))
-        .await;
-}
+// Translates `ConsumerBounceTest#testAsyncConsumerReceivesFatalExceptionWhenGroupPassesMaxSize`:
+// `..._assignment_interval_0` and `..._assignment_interval_1000` are Java's two
+// arms, which skip themselves on a broker older than 4.3; the default-config
+// test runs only there (see the module docs).
+assignment_interval_consumer_test!(
+    test_async_consumer_receives_fatal_exception_when_group_passes_max_size,
+    consumer_receives_fatal_exception_when_group_passes_max_size,
+    cluster_config()
+);
 
 // ── Broker bounces (Phase 17) ──────────────────────────────────────────
 
@@ -1047,7 +1026,7 @@ multilanguage_consumer_test!(
 
 /// Java's `receiveExactRecords(poller, numRecords, timeoutMs)`:
 /// wait until the poller has received exactly `num_records` records.
-async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: usize, timeout_ms: u64) {
+async fn receive_exact_records(poller: &ConsumerAssignmentPoller, backend: &str, num_records: usize, timeout_ms: u64) {
     test_utils::wait_for_condition_with_timeout(
         || {
             let received = poller.received_messages() == num_records;
@@ -1056,7 +1035,7 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
         timeout_ms,
         || {
             format!(
-                "Consumer did not receive expected {num_records}. It received {}",
+                "{backend} backend: Consumer did not receive expected {num_records}. It received {}",
                 poller.received_messages()
             )
         },
@@ -1069,15 +1048,14 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, num_records: u
 /// `ConsumerBounceTest#testSubscribeWhenTopicUnavailable`): subscribe to a
 /// topic that does not exist yet, create it 2 s later, consume 1000 records;
 /// then stop every broker, restart them all, and consume 1000 more on the same
-/// consumer.
+/// consumer, which is the backend's under test.
 ///
 /// Deviation: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
 /// comment at the config). Everything else, including `metadata.max.age.ms=100`
 /// and the exact-count assertion on the second poller, is Java's.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_subscribe_when_topic_unavailable() {
-    let mut ctx = TestContext::new(bounce_cluster_config()).await;
-    set_up(&mut ctx).await;
+async fn async_subscribe_when_topic_unavailable<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let backend = factory.name();
+    set_up(ctx).await;
     let new_topic = ctx.topic("new-topic");
     let new_topic_partition = TopicPartition::new(new_topic.clone(), 0);
     let num_records: usize = 1000;
@@ -1092,18 +1070,23 @@ async fn test_async_subscribe_when_topic_unavailable() {
     // ended before its first auto-commit, it then resets to offset 0 and
     // receives 2000 records instead of 1000. 120000 covers the
     // restart, so the consumer survives the outage as Java's does.
-    let mut consumer = create_consumer(
-        &ctx,
+    let (mut consumer, log) = create_consumer_with_log_for(
+        ctx,
+        factory,
         &HashMap::from([
             ("max.poll.interval.ms".to_string(), "120000".to_string()),
             ("metadata.max.age.ms".to_string(), "100".to_string()),
         ]),
-    );
+    )
+    .await;
     consumer
         .subscribe_with_topics(vec![new_topic.clone()])
         .await
-        .expect("subscribe should succeed");
-    consumer.poll(Duration::ZERO).await.expect("poll should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
+    consumer
+        .poll(Duration::ZERO)
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
     // Schedule topic creation after 2 seconds
     let create_new_topic = {
         let bootstrap = ctx.bootstrap_servers().to_string();
@@ -1119,10 +1102,14 @@ async fn test_async_subscribe_when_topic_unavailable() {
     };
 
     // Start first poller
-    let mut poller = ConsumerAssignmentPoller::start(consumer, vec![new_topic.clone()]).await;
-    send_records(&ctx, &new_topic_partition, num_records).await;
-    receive_exact_records(&poller, num_records, 60_000).await;
-    let consumer = poller.shutdown().await.expect("first poller owned the consumer");
+    let mut poller =
+        ConsumerAssignmentPoller::start_with_log(consumer, Arc::clone(&log), vec![new_topic.clone()]).await;
+    send_records(ctx, &new_topic_partition, num_records).await;
+    receive_exact_records(&poller, backend, num_records, 60_000).await;
+    let consumer = poller
+        .shutdown()
+        .await
+        .unwrap_or_else(|| panic!("{backend} backend: first poller owned the consumer"));
     // Java's `assertDoesNotThrow` around the scheduled creation: surface a
     // failure of the creation task (it finished before the records arrived).
     tokio::time::timeout(Duration::from_secs(60), create_new_topic)
@@ -1141,14 +1128,20 @@ async fn test_async_subscribe_when_topic_unavailable() {
     }
 
     // Start second poller after recovery
-    let mut poller2 = ConsumerAssignmentPoller::start(consumer, vec![new_topic.clone()]).await;
+    let mut poller2 = ConsumerAssignmentPoller::start_with_log(consumer, log, vec![new_topic.clone()]).await;
 
-    send_records(&ctx, &new_topic_partition, num_records).await;
-    receive_exact_records(&poller2, num_records, 60_000).await;
+    send_records(ctx, &new_topic_partition, num_records).await;
+    receive_exact_records(&poller2, backend, num_records, 60_000).await;
 
     // Java's `tearDown`.
     close_consumer(poller2.shutdown().await).await;
 }
+
+multilanguage_consumer_test!(
+    test_async_subscribe_when_topic_unavailable,
+    async_subscribe_when_topic_unavailable,
+    bounce_cluster_config()
+);
 
 /// Java's `gracefulCloseTimeMs`.
 const GRACEFUL_CLOSE_TIME_MS: u64 = 1000;
@@ -1160,8 +1153,10 @@ const LONG_MAX_VALUE_MS: u64 = i64::MAX as u64;
 /// polled by a [`ConsumerAssignmentPoller`] until it has received exactly
 /// `num_records` records; the poller is then shut down and the consumer
 /// returned.
-async fn create_consumer_and_receive(
+#[expect(clippy::too_many_arguments)]
+async fn create_consumer_and_receive<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     topic: &str,
     topic_partition: &TopicPartition,
     group_id: &str,
@@ -1171,126 +1166,140 @@ async fn create_consumer_and_receive(
 ) -> BytesConsumer {
     let mut configs = consumer_config.clone();
     configs.insert("group.id".to_string(), group_id.to_string());
-    let consumer = create_consumer(ctx, &configs);
     let mut poller = if manual_assign {
+        let consumer = create_consumer_for(ctx, factory, &configs).await;
         ConsumerAssignmentPoller::start_with_partitions_to_assign(consumer, vec![topic_partition.clone()]).await
     } else {
-        ConsumerAssignmentPoller::start(consumer, vec![topic.to_string()]).await
+        let (consumer, log) = create_consumer_with_log_for(ctx, factory, &configs).await;
+        ConsumerAssignmentPoller::start_with_log(consumer, log, vec![topic.to_string()]).await
     };
-    receive_exact_records(&poller, num_records, 60_000).await;
-    poller.shutdown().await.expect("the poller owned the consumer")
+    receive_exact_records(&poller, factory.name(), num_records, 60_000).await;
+    poller
+        .shutdown()
+        .await
+        .unwrap_or_else(|| panic!("{} backend: the poller owned the consumer", factory.name()))
 }
+
+/// How long [`close_and_validate`] waits for a close before it fails the test as
+/// hung. Java's `.get()` waits with no bound; this guard only keeps a wedged close
+/// from hanging the run, so it is far past every bound the test asserts (at most
+/// 6 s + Java's 2 s `closeGraceTimeMs`) and cannot fail a close Java would pass.
+const CLOSE_HANG_GUARD: Duration = Duration::from_secs(300);
 
 /// Java's `submitCloseAndValidate` followed by `.get()` — every
 /// Java call site waits for the close at once, so the executor hop is
 /// dropped: close with `close_timeout_ms` and check the elapsed time against
 /// the optional bounds (with Java's 2 s `closeGraceTimeMs` on the upper one).
 ///
-/// A failing `close()` fails the test, as the rethrow from Java's `get()`
-/// does. The close is bounded by the upper limit, so a close that would take
-/// too long fails with Java's message instead of hanging the test.
+/// The elapsed time is measured on the wall clock, as Java's
+/// `System.currentTimeMillis()` measures it: the core's close timers read the
+/// wall clock too, so a step of the clock moves the close's end and the
+/// measurement by the same amount, and cannot fail the check, as in Java. A
+/// failing `close()` fails the test, as the rethrow from Java's `get()` does;
+/// only [`CLOSE_HANG_GUARD`] bounds the wait.
 async fn close_and_validate(
     mut consumer: BytesConsumer,
+    backend: &str,
     close_timeout_ms: u64,
     min_close_time_ms: Option<u64>,
     max_close_time_ms: Option<u64>,
 ) {
-    const CLOSE_GRACE_TIME_MS: u64 = 2000;
-    let start = std::time::Instant::now();
+    const CLOSE_GRACE_TIME_MS: i64 = 2000;
+    let start_ms = current_time_ms();
     eprintln!("Closing consumer with timeout {close_timeout_ms} ms.");
     let close = consumer.close_with_options(CloseOptions::new_with_timeout(Duration::from_millis(close_timeout_ms)));
-    let result = match max_close_time_ms {
-        Some(ms) => tokio::time::timeout(Duration::from_millis(ms + CLOSE_GRACE_TIME_MS), close)
-            .await
-            .unwrap_or_else(|_| panic!("Close took too long {}", start.elapsed().as_millis())),
-        None => close.await,
-    };
-    let time_taken_ms = start.elapsed().as_millis() as u64;
-    result.expect("consumer close should succeed");
+    let result = tokio::time::timeout(CLOSE_HANG_GUARD, close)
+        .await
+        .unwrap_or_else(|_| panic!("{backend} backend: close did not return within {CLOSE_HANG_GUARD:?}"));
+    let time_taken_ms = current_time_ms() - start_ms;
+    result.unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 
     if let Some(ms) = max_close_time_ms {
-        assert!(time_taken_ms < ms + CLOSE_GRACE_TIME_MS, "Close took too long {time_taken_ms}");
+        assert!(
+            time_taken_ms < ms as i64 + CLOSE_GRACE_TIME_MS,
+            "{backend} backend: Close took too long {time_taken_ms}"
+        );
     }
     if let Some(ms) = min_close_time_ms {
-        assert!(time_taken_ms >= ms, "Close finished too quickly {time_taken_ms}");
+        assert!(
+            time_taken_ms >= ms as i64,
+            "{backend} backend: Close finished too quickly {time_taken_ms}"
+        );
     }
     eprintln!("consumer.close() completed in {time_taken_ms} ms.");
 }
 
-/// The anonymous `ConsumerRebalanceListener` of Java's `checkClosedState`:
-/// releases a permit of `assignSemaphore` per assignment.
-struct AssignSemaphoreListener {
-    permits: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl ConsumerRebalanceListener for AssignSemaphoreListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-        // Do nothing
-        Ok(())
-    }
-
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-        self.permits.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-/// Java's `checkClosedState`: a new consumer in `group_id` must be
-/// assigned partitions promptly and, when `committed_records > 0`, see that
-/// offset committed for `topic_partition`.
+/// Java's `checkClosedState`: a new consumer in `group_id`, the backend's under
+/// test, must be assigned partitions promptly and, when `committed_records > 0`,
+/// see that offset committed for `topic_partition`.
+///
+/// Java's anonymous listener releases a permit of `assignSemaphore` per
+/// `onPartitionsAssigned`, and the wait takes one: here the consumer's callback
+/// log records each `onPartitionsAssigned` and the wait ends at the first.
 ///
 /// Deviation: Java's `clusterInstance.consumer(...)` here leaves
 /// `group.protocol` at its `classic` default; this client implements only the
 /// KIP-848 protocol (`consumer-threading.md` §20), so the checking consumer
 /// joins with `consumer`.
-async fn check_closed_state(
+async fn check_closed_state<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     topic: &str,
     topic_partition: &TopicPartition,
     group_id: &str,
     committed_records: i64,
 ) {
+    let backend = factory.name();
     // Check that close was graceful with offsets committed and leave group sent.
     // New instance of consumer should be assigned partitions immediately and should see committed offsets.
-    let assign_semaphore = Arc::new(AtomicUsize::new(0));
-    let mut consumer = create_consumer(ctx, &HashMap::from([("group.id".to_string(), group_id.to_string())]));
-    consumer
-        .subscribe_with_topics_listener(
-            vec![topic.to_string()],
-            Arc::new(AssignSemaphoreListener { permits: Arc::clone(&assign_semaphore) }),
-        )
+    let (mut consumer, log) =
+        create_consumer_with_log_for(ctx, factory, &HashMap::from([("group.id".to_string(), group_id.to_string())]))
+            .await;
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic.to_string()])
         .await
-        .expect("subscribe should succeed");
+        .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
 
     // Java: `TestUtils.waitForCondition(() -> { poll(100ms); return
     // assignSemaphore.tryAcquire(); }, ...)` with the default 15 s bound.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        consumer.poll(Duration::from_millis(100)).await.expect("poll should succeed");
-        if assign_semaphore
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |permits| permits.checked_sub(1))
-            .is_ok()
-        {
+        consumer
+            .poll(Duration::from_millis(100))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
+        let entries = log
+            .entries()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: read the consumer callback log: {e}"));
+        if entries.iter().any(|entry| entry.kind == KIND_ASSIGNED) {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "Assignment did not complete on time");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{backend} backend: Assignment did not complete on time"
+        );
     }
 
     if committed_records > 0 {
         let committed = consumer
             .committed(std::slice::from_ref(topic_partition))
             .await
-            .expect("committed should succeed");
+            .unwrap_or_else(|e| panic!("{backend} backend: committed should succeed: {e}"));
         let offset = committed
             .get(topic_partition)
             .and_then(Option::as_ref)
-            .expect("a committed offset for the partition")
+            .unwrap_or_else(|| panic!("{backend} backend: a committed offset for the partition"))
             .offset();
-        assert_eq!(committed_records, offset, "Committed offset does not match expected value.");
+        assert_eq!(
+            committed_records, offset,
+            "{backend} backend: Committed offset does not match expected value."
+        );
     }
     // Java's try-with-resources `close()`.
-    consumer.close().await.expect("consumer close should succeed");
+    consumer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
 /// Java's `findCoordinators`: the ids of the brokers coordinating
@@ -1339,37 +1348,64 @@ async fn find_coordinators(admin: &dyn Admin, groups: &[String]) -> BTreeSet<i32
 /// Java's `checkCloseGoodPath`: closed while the cluster is
 /// healthy, the consumer commits and leaves; a new member joins at once and
 /// sees the committed offset.
-async fn check_close_good_path(
+async fn check_close_good_path<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     topic: &str,
     topic_partition: &TopicPartition,
     num_records: usize,
     group_id: &str,
 ) {
-    let consumer =
-        create_consumer_and_receive(ctx, topic, topic_partition, group_id, false, num_records, &HashMap::new()).await;
-    close_and_validate(consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
-    check_closed_state(ctx, topic, topic_partition, group_id, num_records as i64).await;
+    let consumer = create_consumer_and_receive(
+        ctx,
+        factory,
+        topic,
+        topic_partition,
+        group_id,
+        false,
+        num_records,
+        &HashMap::new(),
+    )
+    .await;
+    close_and_validate(consumer, factory.name(), LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
+    check_closed_state(ctx, factory, topic, topic_partition, group_id, num_records as i64).await;
 }
 
 /// Java's `checkCloseWithCoordinatorFailure`: closed while the
 /// coordinator is down, the group-managed consumer's close completes after its
 /// commit attempt, and the manually assigned consumer's commit succeeds since
 /// a broker is available.
-async fn check_close_with_coordinator_failure(
+async fn check_close_with_coordinator_failure<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     topic: &str,
     topic_partition: &TopicPartition,
     num_records: usize,
     dynamic_group: &str,
     manual_group: &str,
 ) {
-    let dynamic_consumer =
-        create_consumer_and_receive(ctx, topic, topic_partition, dynamic_group, false, num_records, &HashMap::new())
-            .await;
-    let manual_consumer =
-        create_consumer_and_receive(ctx, topic, topic_partition, manual_group, true, num_records, &HashMap::new())
-            .await;
+    let dynamic_consumer = create_consumer_and_receive(
+        ctx,
+        factory,
+        topic,
+        topic_partition,
+        dynamic_group,
+        false,
+        num_records,
+        &HashMap::new(),
+    )
+    .await;
+    let manual_consumer = create_consumer_and_receive(
+        ctx,
+        factory,
+        topic,
+        topic_partition,
+        manual_group,
+        true,
+        num_records,
+        &HashMap::new(),
+    )
+    .await;
 
     let admin = create_admin(ctx);
     let coordinators = find_coordinators(admin.as_ref(), &[dynamic_group.to_string(), manual_group.to_string()]).await;
@@ -1378,33 +1414,66 @@ async fn check_close_with_coordinator_failure(
         ctx.cluster().shutdown_broker(id).await;
     }
 
-    close_and_validate(dynamic_consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
-    close_and_validate(manual_consumer, LONG_MAX_VALUE_MS, None, Some(GRACEFUL_CLOSE_TIME_MS)).await;
+    close_and_validate(
+        dynamic_consumer,
+        factory.name(),
+        LONG_MAX_VALUE_MS,
+        None,
+        Some(GRACEFUL_CLOSE_TIME_MS),
+    )
+    .await;
+    close_and_validate(
+        manual_consumer,
+        factory.name(),
+        LONG_MAX_VALUE_MS,
+        None,
+        Some(GRACEFUL_CLOSE_TIME_MS),
+    )
+    .await;
 
     restart_dead_brokers(ctx.cluster()).await;
-    check_closed_state(ctx, topic, topic_partition, dynamic_group, 0).await;
-    check_closed_state(ctx, topic, topic_partition, manual_group, num_records as i64).await;
+    check_closed_state(ctx, factory, topic, topic_partition, dynamic_group, 0).await;
+    check_closed_state(ctx, factory, topic, topic_partition, manual_group, num_records as i64).await;
 }
 
 /// Java's `checkCloseWithClusterFailure`: closed while every broker
 /// is down, nothing can be committed; close must honour a short timeout, and
 /// with a very large timeout return after the request timeout.
-async fn check_close_with_cluster_failure(
+async fn check_close_with_cluster_failure<F: ConsumerBackendFactory>(
     ctx: &TestContext,
+    factory: &F,
     topic: &str,
     topic_partition: &TopicPartition,
     num_records: usize,
     group1: &str,
     group2: &str,
 ) {
-    let consumer1 =
-        create_consumer_and_receive(ctx, topic, topic_partition, group1, false, num_records, &HashMap::new()).await;
+    let consumer1 = create_consumer_and_receive(
+        ctx,
+        factory,
+        topic,
+        topic_partition,
+        group1,
+        false,
+        num_records,
+        &HashMap::new(),
+    )
+    .await;
 
     // Java also sets session/heartbeat timeouts for the CLASSIC arm only.
     let request_timeout: u64 = 6000;
     let consumer_config = HashMap::from([("request.timeout.ms".to_string(), request_timeout.to_string())]);
-    let consumer2 =
-        create_consumer_and_receive(ctx, topic, topic_partition, group2, true, num_records, &consumer_config).await;
+    let consumer2 = create_consumer_and_receive(
+        ctx,
+        factory,
+        topic,
+        topic_partition,
+        group2,
+        true,
+        num_records,
+        &consumer_config,
+    )
+    .await;
 
     let cluster = ctx.cluster();
     for id in cluster.broker_ids() {
@@ -1412,24 +1481,35 @@ async fn check_close_with_cluster_failure(
     }
 
     let close_timeout: u64 = 2000;
-    close_and_validate(consumer1, close_timeout, None, Some(close_timeout)).await;
-    close_and_validate(consumer2, LONG_MAX_VALUE_MS, None, Some(request_timeout)).await;
+    close_and_validate(consumer1, factory.name(), close_timeout, None, Some(close_timeout)).await;
+    close_and_validate(consumer2, factory.name(), LONG_MAX_VALUE_MS, None, Some(request_timeout)).await;
 }
 
 /// Translates `ConsumerBounceTest#testAsyncClose` (body `ConsumerBounceTest#testClose`):
 /// the good path, coordinator failure and whole-cluster failure close scenarios,
-/// in Java's order on one cluster.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_close() {
-    let mut ctx = TestContext::new(bounce_cluster_config()).await;
-    let topic = set_up(&mut ctx).await;
+/// in Java's order on one cluster. Every consumer is the backend's under test.
+async fn async_close<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    // MULTILANGUAGE: blocked by finding #3 (gRPC-backed close overruns its bound with every broker down)
+    if factory.name() != "rust" {
+        use std::io::Write;
+        // Outside libtest's capture, as `log_assignment_interval_skip` writes;
+        // best effort, so a closed stderr does not panic the test.
+        let _ = writeln!(
+            std::io::stderr(),
+            "[multilanguage] test_async_close backend=grpc_{} skipped: blocked by finding #3",
+            factory.name()
+        );
+        return;
+    }
+    let topic = set_up(ctx).await;
     let topic_partition = TopicPartition::new(topic.clone(), 0);
     let num_records: usize = 10;
-    send_records(&ctx, &topic_partition, num_records).await;
+    send_records(ctx, &topic_partition, num_records).await;
 
-    check_close_good_path(&ctx, &topic, &topic_partition, num_records, &ctx.group_id("group1")).await;
+    check_close_good_path(ctx, factory, &topic, &topic_partition, num_records, &ctx.group_id("group1")).await;
     check_close_with_coordinator_failure(
-        &ctx,
+        ctx,
+        factory,
         &topic,
         &topic_partition,
         num_records,
@@ -1438,7 +1518,8 @@ async fn test_async_close() {
     )
     .await;
     check_close_with_cluster_failure(
-        &ctx,
+        ctx,
+        factory,
         &topic,
         &topic_partition,
         num_records,
@@ -1447,3 +1528,5 @@ async fn test_async_close() {
     )
     .await;
 }
+
+multilanguage_consumer_test!(test_async_close, async_close, bounce_cluster_config());
