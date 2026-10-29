@@ -14,10 +14,7 @@
 
 //! Integration tests translated from
 //! `kafka/clients/clients-integration-tests/src/test/java/org/apache/kafka/clients/consumer/PlaintextConsumerPollTest.java`
-//! (Apache Kafka 4.4.0, the `kafka/` submodule; first translated at commit
-//! `a18251bae0b825c69794a50dffd4c3100cf5ca5b`, and
-//! `testAsyncConsumerMaxPollIntervalMsDelayInRevocation` since updated to the 4.4
-//! shape of KAFKA-20112).
+//! at pinned commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 //!
 //! These tests exercise the consumer **poll path** semantics
 //! (`max.poll.records`, `max.poll.interval.ms`, `poll(Duration::ZERO)`,
@@ -801,8 +798,10 @@ async fn async_consumer_max_poll_interval_ms<F: ConsumerBackendFactory>(ctx: &mu
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`
-/// (the Kafka 4.4 shape, after KAFKA-20112).
+/// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`.
+/// Subscribes with a listener that sleeps + commits inside
+/// `on_partitions_revoked`. Forces a rebalance via `subscribe(otherTopic)`
+/// and asserts that the in-callback commit succeeded.
 ///
 /// Java's anonymous listener, from inside `onPartitionsRevoked` when the
 /// partitions contain `tp`, sleeps 1.5 s (longer than the session timeout),
@@ -812,12 +811,6 @@ async fn async_consumer_max_poll_interval_ms<F: ConsumerBackendFactory>(ctx: &mu
 /// listener runs the same steps (`Sleep`, `Position`, `CommitSyncPosition`)
 /// through its binding's reentrancy path and logs each one; its lost callback
 /// runs nothing, as Java's.
-///
-/// One record is sent to `tp` and one to `tpOther`. Consuming the record of
-/// `tp` before forcing the rebalance ensures the first rebalance completed and
-/// `tp`'s position is initialized (it is then read inside the callback);
-/// consuming the record of `tpOther` afterwards ensures the second rebalance
-/// completed. The position committed from inside the callback is therefore 1.
 ///
 /// Per §31 the listener runs on the caller's task — the one currently inside
 /// `consumer.poll()` — and the reentrant `position` / `commit_sync` calls are
@@ -832,16 +825,26 @@ async fn async_consumer_max_poll_interval_ms_delay_in_revocation<F: ConsumerBack
     let other_topic = ctx.topic("otherTopic");
     let group_id = ctx.group_id("g_max_poll_interval_revocation");
     let tp = TopicPartition::new(topic.clone(), 0);
-    let tp_other = TopicPartition::new(other_topic.clone(), 0);
 
+    // Create the topics EMPTY, via the admin client — the same thing Java's
+    // `cluster.createTopic(...)` does.
+    //
+    // This test must NOT provision the topic by *producing* a `__provisioner__`
+    // record to each partition (broker auto-create). With
+    // `auto.offset.reset=earliest` the consumer then starts at offset 0 and, if
+    // it manages to fetch before the revocation fires, consumes that record and
+    // `position(tp)` returns 1 instead of 0 — an intermittent failure
+    // (reproduced 1 run in 5). Java's assertion `assertEquals(0,
+    // committedPosition.get())` holds only because the partition is genuinely
+    // empty, and the comment in the callback says exactly that: "no records have
+    // been consumed".
     // `topic` comes from the suite's `@BeforeEach` (2 partitions, RF
-    // `BROKER_COUNT`). Java auto-creates `otherTopic` by producing to it; it is
-    // created through the admin client here first, so the produce does not
-    // race the broker-side auto-create (see `create_test_topic`).
+    // `BROKER_COUNT`); Java auto-creates `otherTopic` by producing, which the
+    // Rust test replaces with an admin create for the reason above.
     create_test_topic(ctx, &topic, 2).await;
-    create_test_topic(ctx, &other_topic, 2).await;
-    send_records_bytes(ctx, &tp, 1, current_time_ms()).await;
-    send_records_bytes(ctx, &tp_other, 1, current_time_ms()).await;
+    let admin = admin_for(ctx);
+    create_topic(admin.as_ref(), &other_topic, 2, 1).await;
+    admin.close_with_timeout(Duration::from_secs(5)).await;
 
     let (mut consumer, log) = create_consumer_with_log(
         ctx,
@@ -853,7 +856,9 @@ async fn async_consumer_max_poll_interval_ms_delay_in_revocation<F: ConsumerBack
 
     // On the second rebalance (after we have joined the group initially),
     // sleep longer than session timeout and then try a commit. We should
-    // still be in the group, so the commit should succeed.
+    // still be in the group, so the commit should succeed. `position` returns
+    // 0 here because no records were consumed — the assignment was made but
+    // `poll()` returned an empty batch.
     let action = ListenerAction::new().on_revoked(
         ListenerTrigger::WhenContains(tp.clone()),
         vec![
@@ -866,29 +871,80 @@ async fn async_consumer_max_poll_interval_ms_delay_in_revocation<F: ConsumerBack
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: subscribe_with_topics_listener should succeed: {e}"));
 
-    // Consume records to ensure the rebalance completed and positions are
-    // initialized (position then used in callback, triggered on next
-    // rebalance).
-    await_non_empty_records_count(&mut consumer, &tp, backend, Duration::from_millis(100), Duration::from_secs(60))
-        .await;
+    // Rebalance to get the initial assignment.
+    await_rebalance_with_deadline(&mut consumer, &log, backend, Duration::from_secs(60)).await;
+
+    // ...and then wait for `tp` itself. The helper above mirrors Java's
+    // `awaitRebalance`, which returns on the first `on_partitions_assigned`
+    // invocation whatever it carries — and that first invocation can carry an
+    // EMPTY set while the target assignment's topic ids are still unresolved
+    // (see `await_partition_assigned`). The `position(&tp)` assertion below is
+    // a Rust-side precondition Java's test does not have, and without this
+    // wait it fails intermittently under load with "You can only check the
+    // position for partitions assigned to this consumer" — the partition
+    // genuinely was not assigned yet.
+    await_partition_assigned(&mut consumer, &tp, backend, Duration::from_secs(60)).await;
+
+    // Resolve the position BEFORE forcing the rebalance — the precondition the
+    // in-callback `position()` below depends on, and the one Java's test relies
+    // on without saying so.
+    //
+    // Reconciliation calls `mark_pending_revocation(revoked)` BEFORE it enqueues
+    // the revoked callback, and `should_initialize()` is
+    // `fetch_state == Initializing && !pending_revocation` — byte-for-byte Java's
+    // `org.apache.kafka.clients.consumer.internals.SubscriptionState.TopicPartitionState#shouldInitialize`.
+    // So a position that is not already resolved when the callback runs can
+    // NEVER be resolved: the partition is excluded from initialization, and
+    // `position()` waits out `default.api.timeout.ms` (60 s) inside the
+    // listener.
+    //
+    // Java gets away with it because `awaitRebalance` polls in a loop and the
+    // poll delivering the assignment also runs `updateFetchPositions`. Ours
+    // returns the instant `calls_to_assigned` increments, potentially before
+    // the ListOffsets round trip that resolves an empty partition's position.
+    //
+    // Asserting 0 here also pins the other half of the contract: the topic is
+    // created empty (via the admin client, as Java does), so nothing has been
+    // consumed.
+    assert_eq!(
+        0,
+        consumer
+            .position(&tp)
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: position must resolve before the rebalance: {e}")),
+        "{backend} backend: position should be 0 on an empty partition with nothing consumed"
+    );
 
     // Force a rebalance to trigger an invocation of the revocation callback
-    // while in the group. Java passes the SAME listener to both `subscribe`
-    // calls, and so must this: a subscribe REPLACES the stored listener, so
-    // the second one carries the same script.
+    // while still in the group. Java passes the SAME listener to both
+    // `subscribe` calls:
+    //
+    //     consumer.subscribe(List.of(topic), listener);
+    //     awaitRebalance(consumer, listener);
+    //     consumer.subscribe(List.of("otherTopic"), listener);
+    //
+    // and so must this: a subscribe REPLACES the stored listener, so the
+    // second one carries the same script.
     log.subscribe_with_logging_listener_action(&mut consumer, vec![other_topic.clone()], action)
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: second subscribe should succeed: {e}"));
-    // Consume records to ensure positions for otherTopic are initialized,
-    // and so that the second rebalance completed.
-    await_non_empty_records_count(
-        &mut consumer,
-        &tp_other,
-        backend,
-        Duration::from_millis(100),
-        Duration::from_secs(90),
-    )
-    .await;
+
+    // Drive the rebalance by polling until it completes and the in-callback
+    // commit has been logged.
+    //
+    // `tokio::select!` is still avoided here (CLAUDE.md §11.6): it cancels the
+    // losing branch mid-execution, and the consumer's poll has side effects on
+    // internal state that are not cancellation-safe.
+    let committed =
+        |actions: &[CallbackLogEntry]| actions.iter().any(|e| e.step == "COMMIT_SYNC_POSITION" && e.error.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let initial_assigned = calls_to_assigned(&log).await;
+    while Instant::now() < deadline {
+        let _ = consumer.poll(Duration::from_millis(200)).await;
+        if calls_to_assigned(&log).await > initial_assigned && committed(&action_entries(&log).await) {
+            break;
+        }
+    }
 
     // Report the cause before asserting the effect: "the revoked callback never
     // fired for this partition" and "it fired and its reentrant call failed"
@@ -908,15 +964,14 @@ async fn async_consumer_max_poll_interval_ms_delay_in_revocation<F: ConsumerBack
          Callback log: {entries:?}"
     );
 
-    // Java: `assertEquals(1, committedPosition.get())`, `assertTrue(commitCompleted.get())`.
     let commit = actions
         .iter()
         .find(|e| e.step == "COMMIT_SYNC_POSITION")
         .unwrap_or_else(|| panic!("{backend} backend: commit inside revocation listener should have completed"));
     assert_eq!(
         commit.offset_for(tp.topic(), tp.partition()),
-        Some(1),
-        "{backend} backend: committed position should be 1 (one record consumed)"
+        Some(0),
+        "{backend} backend: committed position should be 0 (no records consumed)"
     );
 
     consumer
