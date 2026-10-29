@@ -340,6 +340,60 @@ test('a loop awaiting one send in seven lets the event loop run', { skip: SKIP, 
   }
 });
 
+test('queued hand-overs of a second caller do not keep the first from yielding', { skip: SKIP, timeout: 300000 }, async () => {
+  // Caller B's hand-overs are queued and complete inside caller A's pumps,
+  // with no event-loop turn between them: they must not restart the count A's
+  // sends taken at once reach the deferral with.
+  const topic = freshTopic('yield-two-callers');
+  const producer = new KafkaProducer({ 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 5, 'max.block.ms': 1 });
+  try {
+    // With max.block.ms 1 the first sends may time out before the metadata
+    // arrives: retry until partition 0 is known.
+    for (let i = 0; ; i++) {
+      try {
+        await (await producer.send(new ProducerRecord({ topic, partition: 0, value: 'warm' }))).get();
+        break;
+      } catch (e) {
+        if (i > 200) throw e;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    const SENDS = 300000;
+    const value = Buffer.alloc(100, 0x78);
+    let aDone = false;
+    let bSends = 0;
+    let bFirst = null;
+    const watch = eventLoopWatch();
+    // Partition 1000 does not exist: each hand-over is queued and resolves
+    // about 1 ms later with a future failed with REQUEST_TIMED_OUT.
+    const b = (async () => {
+      while (!aDone) {
+        const future = await producer.send(new ProducerRecord({ topic, partition: 1000, value: 'b' }));
+        const outcome = future.get().then(() => 'ok', (e) => e.name);
+        if (bFirst === null) bFirst = await outcome;
+        bSends++;
+      }
+    })();
+    for (let i = 0; i < SENDS; i++) {
+      watch.sends++;
+      await producer.send(new ProducerRecord({ topic, partition: 0, value }));
+    }
+    aDone = true;
+    watch.stop();
+    await b;
+    assert.ok(bSends > 0, 'caller B never handed a record over');
+    assert.equal(bFirst, 'REQUEST_TIMED_OUT');
+    assert.ok(watch.turns > 0, 'the event loop never turned during the loop');
+    assert.ok(
+      watch.maxSendsPerTurn <= MAX_SENDS_PER_TURN,
+      `${watch.maxSendsPerTurn} sends ran between two event-loop turns`,
+    );
+    await producer.flush();
+  } finally {
+    await producer.close();
+  }
+});
+
 test('send() runs the delivery callbacks already due before handing its record over', { skip: SKIP, timeout: 300000 }, async () => {
   const { topic, producer } = await warmedProducer('pump');
   try {
