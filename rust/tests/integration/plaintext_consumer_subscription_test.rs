@@ -27,6 +27,8 @@
 //! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
 //! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
 //! are native fixtures; only the consumer is under test.
+//! `test_async_consumer_unsubscribe_topic` runs on the native backend only,
+//! under its plain name, blocked by findings log #1 (see its comment).
 //!
 //! # Methods classification
 //!
@@ -111,7 +113,8 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
-use crate::common::backend_factory::ConsumerBackendFactory;
+use crate::common::backend_factory::{ConsumerBackendFactory, RustNativeFactory};
+use crate::common::callback_log::{CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
@@ -934,13 +937,13 @@ multilanguage_consumer_test!(
 /// Translates Java's `testAsyncConsumerUnsubscribeTopic`.
 /// Subscribes to a topic with a listener, awaits the listener callback
 /// (rebalance), then re-subscribes to an empty list (== unsubscribe)
-/// and asserts the assignment is cleared.
+/// and asserts at once that the assignment is cleared.
 ///
-/// The Java test passes a `TestConsumerReassignmentListener` and calls
-/// `awaitRebalance(consumer, listener)`. The Rust translation
-/// substitutes a simpler "wait until the assignment is non-empty",
-/// which observes the same end-state. The listener call itself is
-/// covered by `consumer-threading.md` §31 unit tests.
+/// Java's `TestConsumerReassignmentListener` is the backend's logging
+/// listener; `awaitRebalance` polls until its log gains an `assigned` entry.
+/// Java checks the assignment right after `subscribe(List.of())` returns: its
+/// `subscribeInternal` calls `unsubscribe()`, which waits for the
+/// `UnsubscribeEvent`, and the core translates the same path.
 async fn async_consumer_unsubscribe_topic<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let backend = factory.name();
     let topic = ctx.topic("topic");
@@ -950,39 +953,44 @@ async fn async_consumer_unsubscribe_topic<F: ConsumerBackendFactory>(ctx: &mut T
     create_test_topic(ctx, &topic, 2).await;
     producer.close().await.expect("producer close should succeed");
 
-    let mut consumer = create_consumer(ctx, factory, &group_id, &[]).await;
+    let (mut consumer, log) = factory
+        .create_with_callback_log(make_consumer_props(ctx, factory, &group_id, &[]))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create consumer: {e}"));
 
-    consumer
-        .subscribe_with_topics(vec![topic.clone()])
+    log.subscribe_with_logging_listener(&mut consumer, vec![topic.clone()])
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
 
-    // Java's `awaitRebalance` blocks until the rebalance listener has
-    // been invoked. We mirror by waiting until `assignment()` is
-    // non-empty — same observable end-state. (§31 listener-thread
-    // semantics are exercised by the dedicated unit tests.)
-    let mut initial: HashSet<TopicPartition> = HashSet::new();
-    initial.insert(TopicPartition::new(topic.clone(), 0));
-    initial.insert(TopicPartition::new(topic.clone(), 1));
-    await_assignment_with_deadline(&mut *consumer, backend, &initial, Duration::from_secs(90)).await;
+    // Java's `ClientsTestUtils#awaitRebalance`: `poll(100ms)` until
+    // `callsToAssigned` advances, within `waitForCondition`'s default 15 s.
+    let assigned = |entries: &[CallbackLogEntry]| entries.iter().filter(|e| e.kind == KIND_ASSIGNED).count();
+    let read = async |log: &ConsumerCallbackLog| {
+        log.entries()
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: read consumer callback log: {e}"))
+    };
+    let before = assigned(&read(&log).await);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        consumer
+            .poll(Duration::from_millis(100))
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
+        if assigned(&read(&log).await) > before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out before expected rebalance completed ({backend} backend)"
+        );
+    }
 
     // Subscribe to empty list (== unsubscribe).
     consumer
         .subscribe_with_topics(vec![])
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: subscribe(empty) should succeed: {e}"));
-    // After unsubscribe the assignment should drop to empty. The Java
-    // test asserts immediately because Java's `subscribe(emptyList)`
-    // path inside the classic protocol completes synchronously; in
-    // KIP-848 the assignment is cleared on the same event, so a
-    // bounded poll-and-check is sufficient.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if consumer.assignment().is_empty() {
-            break;
-        }
-        let _ = consumer.poll(Duration::from_millis(100)).await;
-    }
     assert_eq!(
         consumer.assignment().len(),
         0,
@@ -995,11 +1003,15 @@ async fn async_consumer_unsubscribe_topic<F: ConsumerBackendFactory>(ctx: &mut T
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-multilanguage_consumer_test!(
-    test_async_consumer_unsubscribe_topic,
-    async_consumer_unsubscribe_topic,
-    cluster_config_with_kip848_3brokers()
-);
+// MULTILANGUAGE: blocked by finding #1 (the Python bindings release the
+// listener on `subscribe([])` while the core still calls it from `close()`).
+// The body is the scenario form, so converting is replacing this test by a
+// `multilanguage_consumer_test!` line.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_async_consumer_unsubscribe_topic() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
+    async_consumer_unsubscribe_topic(&mut ctx, &RustNativeFactory).await;
+}
 
 /// Translates Java's
 /// `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe`.
