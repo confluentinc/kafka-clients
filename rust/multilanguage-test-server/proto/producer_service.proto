@@ -305,11 +305,32 @@ message CallbackLogPartition {
 //   "lost"      | the lost partitions       | empty                          | listener failure
 //   "commit"    | the committed partitions  | committed offset per partition | commit failure
 //   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+//   "listener_action" | the callback's partitions | see below            | the action's failure
 // ```
 //
 // `offsets` keys are always `"<topic>-<partition>"` (e.g. `"my-topic-0"`).
+//
+// A "listener_action" entry records the consumer call a logging rebalance
+// listener made from inside `on_partitions_assigned` / `on_partitions_revoked`,
+// as configured by consumer_service.proto's SetListenerAction. It is appended
+// right after the "assigned" / "revoked" entry of the same invocation, and
+// `method` names that invocation ("assigned" or "revoked"). The result goes in:
+//
+// ```text
+//   action            | result_partitions        | offsets
+//   ------------------+--------------------------+-------------------------------------
+//   ASSIGNMENT        | assignment() as returned | empty
+//   BEGINNING_OFFSETS | empty                    | beginningOffsets([tp]) as returned
+//   POSITION          | empty                    | {"<tp>": position(tp)}
+//   SEEK_AND_PAUSE    | empty                    | empty (seek(tp, offset), then pause([tp]))
+// ```
+//
+// On failure `error` holds the failing call's message and the result fields
+// stay empty; the listener itself still returns normally, so the rebalance is
+// not failed by the action.
 message CallbackLogEntry {
-  // One of "assigned", "revoked", "lost", "commit", "delivery".
+  // One of "assigned", "revoked", "lost", "commit", "delivery",
+  // "listener_action".
   string kind = 1;
   repeated CallbackLogPartition partitions = 2;
   // `"<topic>-<partition>"` -> offset. Empty for the rebalance kinds.
@@ -317,6 +338,12 @@ message CallbackLogEntry {
   // The callback's error message; empty string when the callback was
   // invoked with no error.
   string error = 4;
+  // "listener_action" only: the listener method the action ran in,
+  // "assigned" or "revoked". Empty for every other kind.
+  string method = 5;
+  // "listener_action" only: the partition set the ASSIGNMENT action read.
+  // Empty for every other kind and action.
+  repeated CallbackLogPartition result_partitions = 6;
 }
 
 message CallbackLogResponse {

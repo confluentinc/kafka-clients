@@ -47,6 +47,7 @@
 //! immediately — see `poll_until_kind` in the integration tests.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -67,6 +68,9 @@ pub const KIND_LOST: &str = "lost";
 pub const KIND_COMMIT: &str = "commit";
 /// `kind` value for a producer delivery callback.
 pub const KIND_DELIVERY: &str = "delivery";
+/// `kind` value for the consumer call a logging listener made from inside a
+/// rebalance callback (see [`ListenerAction`]).
+pub const KIND_LISTENER_ACTION: &str = "listener_action";
 
 /// One recorded user-callback invocation, normalized across backends.
 ///
@@ -84,6 +88,12 @@ pub struct CallbackLogEntry {
     pub offsets: HashMap<String, i64>,
     /// The callback's error message; empty when the callback saw no error.
     pub error: String,
+    /// [`KIND_LISTENER_ACTION`] only: the listener method the action ran in,
+    /// [`KIND_ASSIGNED`] or [`KIND_REVOKED`]. Empty for every other kind.
+    pub method: String,
+    /// [`KIND_LISTENER_ACTION`] only: the `assignment()` the
+    /// [`ListenerActionKind::Assignment`] action read. Empty otherwise.
+    pub result_partitions: Vec<(String, i32)>,
 }
 
 impl CallbackLogEntry {
@@ -110,12 +120,144 @@ fn push(log: &SharedLog, entry: CallbackLogEntry) {
     log.lock().expect("callback log poisoned").push(entry);
 }
 
+fn tp_pairs<'a>(partitions: impl IntoIterator<Item = &'a TopicPartition>) -> Vec<(String, i32)> {
+    partitions
+        .into_iter()
+        .map(|tp| (tp.topic().to_string(), tp.partition()))
+        .collect()
+}
+
 fn rebalance_entry(kind: &str, partitions: &[TopicPartition]) -> CallbackLogEntry {
-    CallbackLogEntry {
-        kind: kind.to_string(),
-        partitions: partitions.iter().map(|tp| (tp.topic().to_string(), tp.partition())).collect(),
-        offsets: HashMap::new(),
-        error: String::new(),
+    CallbackLogEntry { kind: kind.to_string(), partitions: tp_pairs(partitions), ..Default::default() }
+}
+
+// ---------------------------------------------------------------------------
+// Listener actions
+// ---------------------------------------------------------------------------
+
+/// The consumer call of a [`ListenerAction`] (the proto `ListenerAction`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerActionKind {
+    /// Java's `consumer.assignment()`; the result is the entry's
+    /// `result_partitions`.
+    Assignment,
+    /// Java's `consumer.beginningOffsets(List.of(tp))`; the result is the
+    /// entry's `offsets`.
+    BeginningOffsets,
+    /// Java's `consumer.position(tp)`; the result is the entry's `offsets`,
+    /// keyed by `tp`.
+    Position,
+    /// Java's `consumer.seek(tp, offset)` then `consumer.pause(List.of(tp))`;
+    /// success is an empty `error`.
+    SeekAndPause(i64),
+}
+
+/// A call back into the consumer that a logging rebalance listener makes from
+/// inside one of its methods, once, the first time that method's partitions
+/// contain `partition` — the in-callback reentrancy of `consumer-threading.md`
+/// §31. Registered with
+/// [`ConsumerCallbackLog::subscribe_with_logging_listener_action`], logged as a
+/// [`KIND_LISTENER_ACTION`] entry right after the invocation's own
+/// `assigned` / `revoked` entry.
+#[derive(Debug, Clone)]
+pub struct ListenerAction {
+    kind: ListenerActionKind,
+    method: &'static str,
+    partition: TopicPartition,
+}
+
+impl ListenerAction {
+    /// Run `kind` against `partition` inside `on_partitions_assigned`.
+    pub fn on_assigned(kind: ListenerActionKind, partition: TopicPartition) -> Self {
+        Self { kind, method: KIND_ASSIGNED, partition }
+    }
+
+    /// Run `kind` against `partition` inside `on_partitions_revoked`.
+    pub fn on_revoked(kind: ListenerActionKind, partition: TopicPartition) -> Self {
+        Self { kind, method: KIND_REVOKED, partition }
+    }
+
+    /// The listener method that runs the action, as a log `kind`.
+    pub fn method(&self) -> &'static str {
+        self.method
+    }
+
+    /// The partition the action waits for and acts on.
+    pub fn partition(&self) -> &TopicPartition {
+        &self.partition
+    }
+
+    /// The consumer call.
+    pub fn kind(&self) -> ListenerActionKind {
+        self.kind
+    }
+
+    /// Run the action through `handle` (Java's listener calling back into its
+    /// captured `consumer`) and build its log entry.
+    async fn run(&self, handle: &ConsumerHandle, partitions: &[TopicPartition]) -> CallbackLogEntry {
+        let mut entry = CallbackLogEntry {
+            kind: KIND_LISTENER_ACTION.to_string(),
+            partitions: tp_pairs(partitions),
+            method: self.method.to_string(),
+            ..Default::default()
+        };
+        let tp = &self.partition;
+        let result: Result<(), Error> = match self.kind {
+            ListenerActionKind::Assignment => {
+                let mut assignment: Vec<TopicPartition> = handle.assignment().into_iter().collect();
+                assignment.sort_by(|a, b| (a.topic(), a.partition()).cmp(&(b.topic(), b.partition())));
+                entry.result_partitions = tp_pairs(&assignment);
+                Ok(())
+            },
+            ListenerActionKind::BeginningOffsets => {
+                handle.beginning_offsets(std::slice::from_ref(tp)).await.map(|offsets| {
+                    for (p, offset) in offsets {
+                        entry
+                            .offsets
+                            .insert(CallbackLogEntry::offset_key(p.topic(), p.partition()), offset);
+                    }
+                })
+            },
+            ListenerActionKind::Position => handle.position(tp).await.map(|position| {
+                entry
+                    .offsets
+                    .insert(CallbackLogEntry::offset_key(tp.topic(), tp.partition()), position);
+            }),
+            ListenerActionKind::SeekAndPause(offset) => {
+                async {
+                    handle.seek_with_offset(tp.clone(), offset).await?;
+                    handle.pause(std::slice::from_ref(tp)).await
+                }
+                .await
+            },
+        };
+        if let Err(e) = result {
+            entry.error = e.to_string();
+        }
+        entry
+    }
+}
+
+/// A native listener's pending [`ListenerAction`], with the handle it calls
+/// the consumer back through.
+struct NativeListenerAction {
+    action: ListenerAction,
+    handle: ConsumerHandle,
+    done: AtomicBool,
+}
+
+impl NativeListenerAction {
+    /// Run the action if `method` and `partitions` are its trigger and it has
+    /// not run yet.
+    async fn maybe_run(&self, log: &SharedLog, method: &str, partitions: &[TopicPartition]) {
+        if method != self.action.method || !partitions.contains(&self.action.partition) {
+            return;
+        }
+        if self.done.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let entry = self.action.run(&self.handle, partitions).await;
+        push(log, entry);
     }
 }
 
@@ -129,19 +271,33 @@ fn rebalance_entry(kind: &str, partitions: &[TopicPartition]) -> CallbackLogEntr
 /// trait's Java-faithful "delegate to revoked" default) so a lost callback is
 /// distinguishable from a revoke in the log — otherwise the two kinds could not
 /// be told apart, and `unsubscribe`/fence paths fire `lost`.
+///
+/// With an `action` it also runs that [`ListenerAction`] from inside the
+/// targeted method, through the consumer's [`ConsumerHandle`], as the servers'
+/// listeners do through their bindings.
 struct LoggingRebalanceListener {
     log: SharedLog,
+    action: Option<NativeListenerAction>,
+}
+
+impl LoggingRebalanceListener {
+    async fn log_and_act(&self, kind: &str, partitions: &[TopicPartition]) {
+        push(&self.log, rebalance_entry(kind, partitions));
+        if let Some(action) = &self.action {
+            action.maybe_run(&self.log, kind, partitions).await;
+        }
+    }
 }
 
 #[async_trait]
 impl ConsumerRebalanceListener for LoggingRebalanceListener {
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        push(&self.log, rebalance_entry(KIND_REVOKED, partitions));
+        self.log_and_act(KIND_REVOKED, partitions).await;
         Ok(())
     }
 
     async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        push(&self.log, rebalance_entry(KIND_ASSIGNED, partitions));
+        self.log_and_act(KIND_ASSIGNED, partitions).await;
         Ok(())
     }
 
@@ -168,6 +324,7 @@ impl OffsetCommitCallback for LoggingCommitCallback {
             partitions: Vec::with_capacity(offsets.len()),
             offsets: HashMap::with_capacity(offsets.len()),
             error: error.map(|e| e.to_string()).unwrap_or_default(),
+            ..Default::default()
         };
         for (tp, oam) in offsets {
             entry.partitions.push((tp.topic().to_string(), tp.partition()));
@@ -238,11 +395,39 @@ impl ConsumerCallbackLog {
     ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
-                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log) });
+                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log), action: None });
                 consumer.subscribe_with_topics_listener(topics, listener).await
             },
             #[cfg(feature = "multilanguage-tests")]
             ConsumerCallbackLog::Grpc(remote) => remote.subscribe_with_listener(topics).await,
+        }
+    }
+
+    /// [`Self::subscribe_with_logging_listener`] with a listener that also runs
+    /// `action` from inside the method it targets, and logs the result as a
+    /// [`KIND_LISTENER_ACTION`] entry.
+    ///
+    /// The native arm's listener runs the action through `consumer.handle()`
+    /// (the Rust form of a Java listener capturing `consumer`). The gRPC arm
+    /// sends `SetListenerAction` and then `Subscribe` with `with_listener =
+    /// true`, so the server's own listener makes the call through its binding.
+    pub async fn subscribe_with_logging_listener_action(
+        &self,
+        consumer: &mut Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>,
+        topics: Vec<String>,
+        action: ListenerAction,
+    ) -> Result<(), Error> {
+        match self {
+            ConsumerCallbackLog::Native(log) => {
+                let action = NativeListenerAction { action, handle: consumer.handle(), done: AtomicBool::new(false) };
+                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log), action: Some(action) });
+                consumer.subscribe_with_topics_listener(topics, listener).await
+            },
+            #[cfg(feature = "multilanguage-tests")]
+            ConsumerCallbackLog::Grpc(remote) => {
+                remote.set_listener_action(&action).await?;
+                remote.subscribe_with_listener(topics).await
+            },
         }
     }
 
@@ -258,7 +443,7 @@ impl ConsumerCallbackLog {
     ) -> Result<(), Error> {
         match self {
             ConsumerCallbackLog::Native(log) => {
-                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log) });
+                let listener = Arc::new(LoggingRebalanceListener { log: Arc::clone(log), action: None });
                 consumer.subscribe_with_pattern_listener(pattern, listener).await
             },
             #[cfg(feature = "multilanguage-tests")]
@@ -477,8 +662,8 @@ pub mod grpc {
     use multilanguage_test_server::proto::{self};
     use tonic::transport::Channel;
 
-    use super::CallbackLogEntry;
-    use crate::common::multilanguage_consumer::offset_map_to_proto;
+    use super::{CallbackLogEntry, ListenerAction, ListenerActionKind};
+    use crate::common::multilanguage_consumer::{offset_map_to_proto, tp_to_proto};
     use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
     fn entries_from_proto(response: proto::CallbackLogResponse) -> Vec<CallbackLogEntry> {
@@ -490,6 +675,8 @@ pub mod grpc {
                 partitions: e.partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
                 offsets: e.offsets,
                 error: e.error,
+                method: e.method,
+                result_partitions: e.result_partitions.into_iter().map(|p| (p.topic, p.partition)).collect(),
             })
             .collect()
     }
@@ -553,6 +740,33 @@ pub mod grpc {
                     consumer_id: self.consumer_id,
                     offsets: offset_map_to_proto(offsets),
                     with_callback: true,
+                })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, self.backend))?
+                .into_inner();
+            match response.error {
+                Some(err) => Err(kafka_error_from_proto(err)),
+                None => Ok(()),
+            }
+        }
+
+        /// `SetListenerAction`: the listener the next `Subscribe` with
+        /// `with_listener = true` registers runs `action`.
+        pub async fn set_listener_action(&self, action: &ListenerAction) -> Result<(), Error> {
+            let (kind, offset) = match action.kind() {
+                ListenerActionKind::Assignment => (proto::ListenerAction::Assignment, 0),
+                ListenerActionKind::BeginningOffsets => (proto::ListenerAction::BeginningOffsets, 0),
+                ListenerActionKind::Position => (proto::ListenerAction::Position, 0),
+                ListenerActionKind::SeekAndPause(offset) => (proto::ListenerAction::SeekAndPause, offset),
+            };
+            let mut client = self.client.clone();
+            let response = client
+                .set_listener_action(proto::ListenerActionRequest {
+                    consumer_id: self.consumer_id,
+                    action: kind as i32,
+                    method: action.method().to_string(),
+                    partition: Some(tp_to_proto(action.partition())),
+                    offset,
                 })
                 .await
                 .map_err(|s| status_to_kafka_error(&s, self.backend))?

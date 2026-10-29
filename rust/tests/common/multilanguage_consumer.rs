@@ -886,7 +886,7 @@ fn group_membership_operation_name(operation: GroupMembershipOperation) -> &'sta
     }
 }
 
-fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
+pub(crate) fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
     proto::TopicPartition { topic: tp.topic().to_string(), partition: tp.partition() }
 }
 

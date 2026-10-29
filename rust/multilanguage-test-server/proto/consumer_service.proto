@@ -122,6 +122,20 @@ service ConsumerService {
   // performed so far. CallbackLogEntry / CallbackLogResponse are defined in
   // producer_service.proto and shared by both services.
   rpc GetCallbackLog(CallbackLogRequest) returns (CallbackLogResponse);
+
+  // Give the logging listener that the consumer's NEXT Subscribe with
+  // with_listener = true registers an action: a call back into the consumer
+  // that the listener makes from inside one of its methods, the in-callback
+  // reentrancy Java's listeners rely on (consumer-threading.md §31). The
+  // listener runs it once, the first time `method`'s partitions contain
+  // `partition`, through its binding's own reentrancy path (Python: the
+  // consumer object, called from inside the listener; C: the
+  // kafka_consumer_ConsumerHandle_* entry points of kafka_consumer_Consumer_handle),
+  // and logs the result as a "listener_action" entry (see CallbackLogEntry in
+  // producer_service.proto). The action belongs to that one registration: a
+  // later Subscribe with a listener and no new SetListenerAction registers a
+  // plain logging listener again. LISTENER_ACTION_NONE clears a pending action.
+  rpc SetListenerAction(ListenerActionRequest) returns (StatusResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -465,4 +479,36 @@ message CurrentLagResponse {
 // request is service-specific because the log is keyed by consumer id here.
 message CallbackLogRequest {
   uint64 consumer_id = 1;
+}
+
+// The consumer call a logging listener makes from inside a rebalance callback
+// (SetListenerAction).
+enum ListenerAction {
+  // No action: the listener only logs.
+  LISTENER_ACTION_NONE = 0;
+  // Java's `consumer.assignment()`.
+  LISTENER_ACTION_ASSIGNMENT = 1;
+  // Java's `consumer.beginningOffsets(List.of(partition))`.
+  LISTENER_ACTION_BEGINNING_OFFSETS = 2;
+  // Java's `consumer.position(partition)`.
+  LISTENER_ACTION_POSITION = 3;
+  // Java's `consumer.seek(partition, offset)` followed by
+  // `consumer.pause(List.of(partition))`; the pause is skipped when the seek
+  // fails.
+  LISTENER_ACTION_SEEK_AND_PAUSE = 4;
+}
+
+message ListenerActionRequest {
+  uint64 consumer_id = 1;
+  ListenerAction action = 2;
+  // The listener method that runs the action: "assigned"
+  // (on_partitions_assigned) or "revoked" (on_partitions_revoked). Any other
+  // value is rejected with a LOCAL_ILLEGAL_ARGUMENT error, unless `action` is
+  // LISTENER_ACTION_NONE.
+  string method = 3;
+  // The action runs the first time the method is invoked with partitions
+  // containing this one, and it is the partition the action acts on.
+  TopicPartition partition = 4;
+  // LISTENER_ACTION_SEEK_AND_PAUSE only: the offset to seek to.
+  int64 offset = 5;
 }
