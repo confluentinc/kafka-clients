@@ -35,25 +35,29 @@
 //!
 //! ## Translated (CONSUMER arm)
 //!
+//! Java's `@ClusterTemplate("autoCreateTopicsConfigs")` runs each test on a
+//! broker with `auto.create.topics.enable` true and one with it false; each
+//! Java test is therefore two macro lines, the broker-disallows one with the
+//! `_broker_disallow` suffix:
+//!
 //! - `testAsyncConsumerTopicCreationIfConsumerAllowToCreateTopic`
-//!   → `test_async_consumer_topic_creation_if_consumer_allow_to_create_topic`
+//!   → `test_async_consumer_topic_creation_if_consumer_allow_to_create_topic`,
+//!   `test_async_consumer_topic_creation_if_consumer_allow_to_create_topic_broker_disallow`
 //! - `testAsyncConsumerTopicCreationIfConsumerDisallowToCreateTopic`
-//!   → `test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic`
+//!   → `test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic`,
+//!   `test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic_broker_disallow`
 //!
-//! ## Translation deviation: topic-existence oracle
-//!
-//! Java verifies topic existence via `admin.listTopics()`. The Rust
-//! integration harness has no admin client, so we use the consumer's own
-//! `list_topics()` as the existence oracle. `list_topics()` issues a
-//! Metadata request for ALL topics (Java `KafkaConsumer.listTopics`), so
-//! it observes whether the broker materialized the topic — the same
-//! observable the Java admin query checks.
+//! Topic existence is checked as Java's `getAllTopics` does, through a native
+//! admin client's `list_topics()`, never through the consumer under test. The
+//! check retries over a short window (Java checks once) to absorb metadata
+//! propagation after the poll.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
+use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use confluent_kafka::consumer::DynConsumer;
 
 use crate::common::backend_factory::ConsumerBackendFactory;
@@ -109,47 +113,58 @@ async fn make_consumer<F: ConsumerBackendFactory>(
         .unwrap_or_else(|e| panic!("{} backend: create consumer: {e}", factory.name()))
 }
 
-/// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms).
+/// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms). A
+/// poll error fails the test, as Java's `poll` throws through.
 async fn subscribe_and_poll(consumer: &mut BytesConsumer, topic: &str, backend: &str) {
     consumer
         .subscribe_with_topics(vec![topic.to_string()])
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: subscribe should succeed: {e}"));
-    let _ = consumer.poll(Duration::from_millis(1000)).await;
+    consumer
+        .poll(Duration::from_millis(1000))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: poll should succeed: {e}"));
 }
 
-/// Returns whether `topic` is present in the broker's metadata, polling
-/// `list_topics()` over a short window to absorb the metadata-propagation
-/// delay after a `subscribe + poll`.
-async fn topic_exists(consumer: &mut BytesConsumer, topic: &str, settle: Duration, backend: &str) -> bool {
+/// Java's `getAllTopics`: the topic names a native admin client lists
+/// (`cluster.admin()`, `admin.listTopics()`), not the consumer under test.
+/// Returns whether `topic` is among them, retrying over `settle` to absorb
+/// the metadata-propagation delay after a `subscribe + poll`.
+async fn topic_exists(ctx: &TestContext, topic: &str, settle: Duration, backend: &str) -> bool {
+    let mut props = HashMap::from([("client.id".to_string(), "topic-creation-test-admin".to_string())]);
+    ctx.configure(&mut props);
+    let admin: Box<dyn Admin> =
+        AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client");
     let deadline = Instant::now() + settle;
-    loop {
-        let topics = consumer
+    let exists = loop {
+        let names = admin
             .list_topics()
+            .names()
+            .get()
             .await
-            .unwrap_or_else(|e| panic!("{backend} backend: list_topics should succeed: {e}"));
-        if topics.contains_key(topic) {
-            return true;
+            .unwrap_or_else(|e| panic!("{backend} backend: admin list_topics should succeed: {e}"));
+        if names.contains(topic) {
+            break true;
         }
         if Instant::now() >= deadline {
-            return false;
+            break false;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    };
+    admin.close_with_timeout(Duration::from_secs(5)).await;
+    exists
 }
 
 /// Translates Java's
 /// `testAsyncConsumerTopicCreationIfConsumerAllowToCreateTopic`.
 /// With consumer `allow.auto.create.topics=true`, the topic is created on
-/// `subscribe + poll` iff the broker also allows auto-create.
-///
-/// Run with broker `auto.create.topics.enable=true`, so the topic IS
-/// created (Java runs both broker variants via the `ClusterTemplate`; we
-/// translate the broker-allows branch here and the broker-disallows
-/// behavior is covered by the disallow test below + this assertion path).
-async fn async_consumer_topic_creation_if_consumer_allow_to_create_topic<F: ConsumerBackendFactory>(
+/// `subscribe + poll` iff the broker also allows auto-create
+/// (`assertTopicCreateBasedOnPermission`). Java's `ClusterTemplate` runs it
+/// on both broker settings; so does this file, one macro line each.
+async fn consumer_allow_to_create_topic<F: ConsumerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
+    broker_allows: bool,
 ) {
     let backend = factory.name();
     // Java's fixed `TOPIC = "topic"`, made unique per arm (see the module doc).
@@ -159,16 +174,32 @@ async fn async_consumer_topic_creation_if_consumer_allow_to_create_topic<F: Cons
     let mut consumer = make_consumer(ctx, factory, &group_id, true).await;
     subscribe_and_poll(consumer.as_mut(), &topic, backend).await;
 
-    // Both consumer-allow AND broker-allow are true → topic IS created.
-    assert!(
-        topic_exists(consumer.as_mut(), &topic, Duration::from_secs(15), backend).await,
-        "topic should be auto-created when both broker and consumer allow it ({backend} backend)"
-    );
+    if broker_allows {
+        // Both consumer-allow AND broker-allow are true → topic IS created.
+        assert!(
+            topic_exists(ctx, &topic, Duration::from_secs(15), backend).await,
+            "topic should be auto-created when both broker and consumer allow it ({backend} backend)"
+        );
+    } else {
+        assert!(
+            !topic_exists(ctx, &topic, Duration::from_secs(8), backend).await,
+            "Both auto.create.topics.enable and allow.auto.create.topics need to be true to create topic \
+             automatically ({backend} backend)"
+        );
+    }
 
     consumer
         .close()
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
+}
+
+/// [`consumer_allow_to_create_topic`] on the broker that allows auto-create.
+async fn async_consumer_topic_creation_if_consumer_allow_to_create_topic<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    consumer_allow_to_create_topic(ctx, factory, true).await;
 }
 
 multilanguage_consumer_test!(
@@ -177,18 +208,27 @@ multilanguage_consumer_test!(
     cluster_config_auto_create(true)
 );
 
-/// Translates Java's
-/// `testAsyncConsumerTopicCreationIfConsumerDisallowToCreateTopic`.
-/// With consumer `allow.auto.create.topics=false`, the topic is NOT
-/// created regardless of the broker setting.
-///
-/// Run with broker `auto.create.topics.enable=true` (the permissive broker)
-/// to prove that the consumer-side disallow is sufficient to suppress
-/// creation — the load-bearing assertion of the Java test.
-async fn async_consumer_topic_creation_if_consumer_disallow_to_create_topic<F: ConsumerBackendFactory>(
+/// [`consumer_allow_to_create_topic`] on the broker that disallows
+/// auto-create.
+async fn async_consumer_topic_creation_if_consumer_allow_to_create_topic_broker_disallow<F: ConsumerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
 ) {
+    consumer_allow_to_create_topic(ctx, factory, false).await;
+}
+
+multilanguage_consumer_test!(
+    test_async_consumer_topic_creation_if_consumer_allow_to_create_topic_broker_disallow,
+    async_consumer_topic_creation_if_consumer_allow_to_create_topic_broker_disallow,
+    cluster_config_auto_create(false)
+);
+
+/// Translates Java's
+/// `testAsyncConsumerTopicCreationIfConsumerDisallowToCreateTopic`.
+/// With consumer `allow.auto.create.topics=false`, the topic is NOT
+/// created regardless of the broker setting (`assertTopicNotCreate`); Java's
+/// `ClusterTemplate` runs it on both broker settings, as this file does.
+async fn consumer_disallow_to_create_topic<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let backend = factory.name();
     let topic = ctx.topic("topic-disallow");
     let group_id = ctx.group_id("g_topic_create_disallow");
@@ -196,12 +236,11 @@ async fn async_consumer_topic_creation_if_consumer_disallow_to_create_topic<F: C
     let mut consumer = make_consumer(ctx, factory, &group_id, false).await;
     subscribe_and_poll(consumer.as_mut(), &topic, backend).await;
 
-    // Consumer disallows auto-create → topic NOT created even though the
-    // broker would allow it. Java: "Both ... need to be true to create
-    // topic automatically".
+    // Java: "Both ... need to be true to create topic automatically".
     assert!(
-        !topic_exists(consumer.as_mut(), &topic, Duration::from_secs(8), backend).await,
-        "topic must NOT be auto-created when the consumer disallows it (allow.auto.create.topics=false) ({backend} backend)"
+        !topic_exists(ctx, &topic, Duration::from_secs(8), backend).await,
+        "Both auto.create.topics.enable and allow.auto.create.topics need to be true to create topic \
+         automatically ({backend} backend)"
     );
 
     consumer
@@ -210,8 +249,34 @@ async fn async_consumer_topic_creation_if_consumer_disallow_to_create_topic<F: C
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
+/// [`consumer_disallow_to_create_topic`] on the broker that allows
+/// auto-create: the consumer-side disallow alone suppresses creation.
+async fn async_consumer_topic_creation_if_consumer_disallow_to_create_topic<F: ConsumerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    consumer_disallow_to_create_topic(ctx, factory).await;
+}
+
 multilanguage_consumer_test!(
     test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic,
     async_consumer_topic_creation_if_consumer_disallow_to_create_topic,
     cluster_config_auto_create(true)
+);
+
+/// [`consumer_disallow_to_create_topic`] on the broker that disallows
+/// auto-create.
+async fn async_consumer_topic_creation_if_consumer_disallow_to_create_topic_broker_disallow<
+    F: ConsumerBackendFactory,
+>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    consumer_disallow_to_create_topic(ctx, factory).await;
+}
+
+multilanguage_consumer_test!(
+    test_async_consumer_topic_creation_if_consumer_disallow_to_create_topic_broker_disallow,
+    async_consumer_topic_creation_if_consumer_disallow_to_create_topic_broker_disallow,
+    cluster_config_auto_create(false)
 );
