@@ -20,7 +20,12 @@
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - `testWithGroupMetadata` → `test_with_group_metadata`
+//! - `testWithGroupMetadata` → `test_with_group_metadata`, a multilanguage
+//!   scenario ([`crate::multilanguage_test`]): the transactional producer and the
+//!   copying consumer, whose `groupMetadata()` the producer's
+//!   `sendOffsetsToTransaction` takes, come from the backend under test; the
+//!   seed producer, the verifying consumer and the admin client are native
+//!   fixtures. Each backend arm starts its own dedicated cluster.
 //!
 //! ## SKIPped
 //!
@@ -38,7 +43,8 @@
 //! held by its `BrokerProxy` across a restart). `server.shutdown()` +
 //! `awaitShutdown()` / `server.startup()` become
 //! `KafkaCluster::shutdown_broker` / `start_broker` (a `docker stop` sends
-//! SIGTERM, so `controlled.shutdown.enable=true` still applies).
+//! SIGTERM, so `controlled.shutdown.enable=true` still applies). A gRPC
+//! backend's container reaches a restarted broker at the same address.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,10 +52,11 @@ use std::time::{Duration, Instant};
 
 use confluent_kafka::admin::{Admin, AdminClient, AdminClientConfig};
 use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
+use confluent_kafka::common::serialization::ByteArrayDeserializer;
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, ConsumerRecord, KafkaConsumer};
-use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig};
+use confluent_kafka::producer::Producer;
 
+use crate::common::backend_factory::{ConsumerBackendFactory, ProducerBackendFactory};
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::kafka_cluster::KafkaCluster;
 use crate::common::test_context::TestContext;
@@ -124,21 +131,52 @@ async fn create_topics(bootstrap: &str, input_topic: &str, output_topic: &str) {
 
 /// Java `createTransactionalProducer(transactionalId)`
 /// (`TransactionsBounceTest.scala:157-164`) over `IntegrationTestHarness`'s
-/// producer defaults (`acks=-1`, byte-array serializers).
-fn create_transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+/// producer defaults (`acks=-1`, byte-array serializers), on the backend under
+/// test.
+async fn create_transactional_producer<F: ProducerBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    transactional_id: &str,
+) -> F::Producer {
+    let mut props = HashMap::from([
+        (
+            "bootstrap.servers".to_string(),
+            ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+                .to_string(),
+        ),
         ("acks".to_string(), "all".to_string()),
         ("batch.size".to_string(), "512".to_string()),
         ("transactional.id".to_string(), transactional_id.to_string()),
         ("enable.idempotence".to_string(), "true".to_string()),
     ]);
-    KafkaProducer::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
-    .expect("build producer")
+    ctx.apply_security(&mut props);
+    factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("failed to build a producer on the {} backend: {e:?}", factory.name()))
+}
+
+/// [`create_consumer_and_subscribe`] on the backend under test, for the copying
+/// consumer whose group metadata the producer commits with.
+async fn create_backend_consumer_and_subscribe<F: ConsumerBackendFactory>(
+    factory: &F,
+    ctx: &TestContext,
+    group_id: &str,
+    topics: Vec<String>,
+    read_committed: bool,
+) -> Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>> {
+    let mut props = consumer_props(
+        ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap()),
+        group_id,
+        read_committed,
+    );
+    ctx.apply_security(&mut props);
+    let mut consumer = factory
+        .create(props)
+        .await
+        .unwrap_or_else(|e| panic!("failed to build a consumer on the {} backend: {e:?}", factory.name()));
+    consumer.subscribe_with_topics(topics).await.expect("subscribe");
+    consumer
 }
 
 /// Java `createConsumerAndSubscribe(groupId, topics, readCommitted)`
@@ -151,7 +189,20 @@ async fn create_consumer_and_subscribe(
     topics: Vec<String>,
     read_committed: bool,
 ) -> Box<dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>> {
-    let props = HashMap::from([
+    let props = consumer_props(bootstrap, group_id, read_committed);
+    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
+        ConsumerConfig::new(&props).expect("valid consumer config"),
+        ByteArrayDeserializer::default(),
+        ByteArrayDeserializer::default(),
+    )
+    .expect("build consumer");
+    consumer.subscribe_with_topics(topics).await.expect("subscribe");
+    Box::new(consumer)
+}
+
+/// The properties of [`create_consumer_and_subscribe`].
+fn consumer_props(bootstrap: &str, group_id: &str, read_committed: bool) -> HashMap<String, String> {
+    HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
@@ -166,15 +217,7 @@ async fn create_consumer_and_subscribe(
             }
             .to_string(),
         ),
-    ]);
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        ConsumerConfig::new(&props).expect("valid consumer config"),
-        ByteArrayDeserializer::default(),
-        ByteArrayDeserializer::default(),
-    )
-    .expect("build consumer");
-    consumer.subscribe_with_topics(topics).await.expect("subscribe");
-    Box::new(consumer)
+    ])
 }
 
 /// `TestUtils.pollUntilAtLeastNumRecords(consumer, numRecords, waitTimeMs)`
@@ -252,7 +295,7 @@ impl BounceScheduler {
 /// Java's `testBrokerFailure(commit)` (`TransactionsBounceTest.scala:85-155`)
 /// with `testWithGroupMetadata`'s `commit`:
 /// `producer.sendOffsetsToTransaction(consumerPositions(consumer), consumer.groupMetadata())`.
-async fn test_broker_failure(ctx: &mut TestContext) {
+async fn test_broker_failure<F: ProducerBackendFactory + ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // basic idea is to seed a topic with 10000 records, and copy it transactionally while bouncing brokers
     // constantly through the period.
     let consumer_group = "myGroup";
@@ -264,8 +307,8 @@ async fn test_broker_failure(ctx: &mut TestContext) {
 
     seed_topic_with_numbered_records(&bootstrap, &input_topic, num_input_records).await;
     let mut consumer =
-        create_consumer_and_subscribe(&bootstrap, consumer_group, vec![input_topic.clone()], false).await;
-    let producer = create_transactional_producer(&bootstrap, "test-txn");
+        create_backend_consumer_and_subscribe(factory, ctx, consumer_group, vec![input_topic.clone()], false).await;
+    let producer = create_transactional_producer(factory, ctx, "test-txn").await;
 
     producer.init_transactions().await.expect("initTransactions");
 
@@ -330,18 +373,24 @@ async fn test_broker_failure(ctx: &mut TestContext) {
     for partition_values in records_by_partition.values() {
         let mut sorted = partition_values.clone();
         sorted.sort();
-        assert_eq!(*partition_values, sorted, "Out of order messages detected");
+        assert_eq!(
+            *partition_values,
+            sorted,
+            "Out of order messages detected ({} backend)",
+            ProducerBackendFactory::name(factory)
+        );
         output_records.extend_from_slice(partition_values);
     }
 
+    let backend = ProducerBackendFactory::name(factory);
     let record_set: BTreeSet<i32> = output_records.into_iter().collect();
-    assert_eq!(num_input_records, record_set.len());
+    assert_eq!(num_input_records, record_set.len(), "{backend} backend");
 
     let expected_values: BTreeSet<i32> = (0..num_input_records as i32).collect();
     assert_eq!(
         expected_values,
         record_set,
-        "Missing messages: {:?}",
+        "Missing messages ({backend} backend): {:?}",
         expected_values.difference(&record_set).collect::<Vec<_>>()
     );
 
@@ -352,8 +401,7 @@ async fn test_broker_failure(ctx: &mut TestContext) {
 
 /// Translated from `TransactionsBounceTest.testWithGroupMetadata`
 /// (`TransactionsBounceTest.scala:80`), the `consumer` group-protocol arm.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_with_group_metadata() {
-    let mut ctx = TestContext::new(bounce_cluster_config()).await;
-    test_broker_failure(&mut ctx).await;
+async fn with_group_metadata<F: ProducerBackendFactory + ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    test_broker_failure(ctx, factory).await;
 }
+crate::multilanguage_test!(test_with_group_metadata, with_group_metadata, bounce_cluster_config());
