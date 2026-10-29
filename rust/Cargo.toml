@@ -326,6 +326,32 @@ path = "examples/admin/unregister_controller.rs"
 name = "admin_update_features"
 path = "examples/admin/update_features.rs"
 
+# Schema Registry examples: one producer and one consumer per schema format
+# under `examples/schemaregistry/`, which Cargo does not discover on its own.
+[[example]]
+name = "avro_producer"
+path = "examples/schemaregistry/avro_producer.rs"
+
+[[example]]
+name = "avro_consumer"
+path = "examples/schemaregistry/avro_consumer.rs"
+
+[[example]]
+name = "protobuf_producer"
+path = "examples/schemaregistry/protobuf_producer.rs"
+
+[[example]]
+name = "protobuf_consumer"
+path = "examples/schemaregistry/protobuf_consumer.rs"
+
+[[example]]
+name = "json_schema_producer"
+path = "examples/schemaregistry/json_schema_producer.rs"
+
+[[example]]
+name = "json_schema_consumer"
+path = "examples/schemaregistry/json_schema_consumer.rs"
+
 [[test]]
 name = "producer"
 path = "tests/producer/main.rs"

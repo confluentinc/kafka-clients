@@ -2,6 +2,8 @@
 
 Runnable programs that use the client against a real Kafka broker. Each `.rs`
 file in this directory is one example, and its file name is the example name.
+Two groups have their own folder: `schemaregistry/` (Schema Registry
+serializers) and `admin/` (one example per `Admin` RPC).
 
 ## Start a broker
 
@@ -29,9 +31,9 @@ Tear down with `docker rm -f kafka-examples`. This also deletes all topic data.
 
 ## Start a Schema Registry
 
-The Schema Registry examples need a Confluent Schema Registry: each
-producer registers the schema of its records there and its consumer fetches
-it back by the id each record carries. There is one pair per schema format:
+The Schema Registry examples, in `examples/schemaregistry/`, need a
+Confluent Schema Registry: each producer registers the schema of its records
+there and its consumer fetches it back by the id each record carries. There is one pair per schema format:
 
 | Format | Producer | Consumer | Topic |
 |---|---|---|---|
