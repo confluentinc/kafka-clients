@@ -105,6 +105,12 @@ These decide every question, in this order:
   `IllegalStateException` throws a `KafkaError` with the core's own code for
   that class (`LOCAL_ILLEGAL_ARGUMENT`, `LOCAL_ILLEGAL_STATE`) and Java's
   message; a value of the wrong JS type throws `TypeError`.
+- After a completed `close()`, `send` throws `LOCAL_ILLEGAL_STATE` with Java's
+  `throwIfProducerClosed` message, and `flush()` resolves at once: Java's
+  `flush()` has no closed check and returns immediately on the empty
+  accumulator a completed close leaves. A `close({timeoutMs})` the core
+  rejects (a negative timeout, Java's `IllegalArgumentException`) closes
+  nothing, and the producer stays usable.
 - Configuration is a plain object (or a `Map`) of Java's config keys; values
   are stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
   joined with `,`), `null` / `undefined` dropped. The core validates them.

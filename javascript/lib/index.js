@@ -12,13 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 'use strict';
 
-// Public exports of the Node.js client.
+// Public exports of the Node.js client: the producer slice of Java's API.
 
 const native = require('./_native');
+const { KafkaError } = require('./common/kafka_error');
+const { KafkaProducer } = require('./producer/kafka_producer');
+const { ProducerRecord } = require('./producer/producer_record');
+const { RecordMetadata } = require('./producer/record_metadata');
+
+// The native layer builds its errors and metadata through these.
+native.setFactories(
+  (fields) => KafkaError._from(fields),
+  (fields) => new RecordMetadata(fields),
+);
 
 module.exports = {
-  /** @internal Proves the addon loaded and links libconfluent_kafka. */
-  _probe: () => native.probe(),
+  KafkaError,
+  KafkaProducer,
+  ProducerRecord,
+  RecordMetadata,
 };
