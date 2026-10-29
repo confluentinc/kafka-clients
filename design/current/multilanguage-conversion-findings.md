@@ -55,20 +55,55 @@ state:
     (container exit 139), and the test sees
     `python gRPC backend transport error (Unknown): transport error`.
   - Python asyncio: the core logs `User provided listener failed on invocation of
-    onPartitionsLost ...: LocalCallbackError: 'function' object has no attribute '_on_lost'` (the
-    freed adapter's memory now holds another Python object), and the test fails with
+    onPartitionsLost ...: LocalCallbackError: 'function' object has no attribute '_on_lost'`, and
+    the test fails with
     `python_async backend: consumer close should succeed: Failed to close kafka consumer`.
-- **The C contract states the same release point**: the doc of
-  `kafka_consumer_ConsumerRebalanceListener_new` (`# Safety`: the caller keeps `self_` alive "until
-  the next `subscribe_*`, `unsubscribe` or the consumer's destruction releases it"),
-  `kafka_consumer_Consumer_subscribe_with_topics` ("Replaces the listener registered by an earlier
-  `subscribe_*`, releasing its `self`") and `kafka_consumer_Consumer_unsubscribe` ("releases the
-  registered listener"). The core keeps the listener after both `unsubscribe()` and
-  `subscribe_with_topics([])`, and `close()` calls it whenever the member had partitions, so a C
-  caller who frees `self_` where the header allows gets the same use-after-free. The C arm passes
-  only because the C server's `self_` (its `LogState`) lives for the whole session and so outlives
-  every release point; the arm never tests the release point. Fixing the binding alone would leave
-  the C contract wrong.
+    What the core calls is the freed context, not only the freed adapter: `PyMem_Free` (pymalloc,
+    CPython 3.11 in the image) writes its free-list link into the block's first word,
+    `ctx->adapter`. Inference, not traced: the block (16 bytes, the size class of a `VoidCbCtx`
+    too) is reused by `py_Consumer_close_cb`'s `VoidCbCtx`, whose one field is `close()`'s own
+    completion `cb`, a Python function, so `ctx->adapter` reads that function; the second word,
+    `ctx->consumer`, is untouched, so the error is reported cleanly.
+- **Texts that state the wrong release point** (each checked verbatim):
+  - `kafka_consumer_Consumer_subscribe_with_topics_listener`, the registering function: "its `self`
+    must stay alive until the next `subscribe_*`, `unsubscribe` or the consumer's destruction
+    releases it". `kafka_consumer_Consumer_subscribe_with_pattern_listener` points to it ("see
+    `subscribe_with_topics_listener` for the listener's lifetime") and both `_cb` twins say "As
+    the blocking form". It is also the C form of the `subscribe(topics=[], callback=X)` case: the
+    core ignores X and keeps the old listener, whose `self` this text lets the caller free.
+  - `kafka_consumer_ConsumerRebalanceListener_new` (`# Safety`: the caller keeps `self_` alive
+    "until the next `subscribe_*`, `unsubscribe` or the consumer's destruction releases it"),
+    `kafka_consumer_Consumer_subscribe_with_topics` ("Replaces the listener registered by an
+    earlier `subscribe_*`, releasing its `self`") and `kafka_consumer_Consumer_unsubscribe`
+    ("releases the registered listener").
+  - The Python `Consumer.subscribe` docstring (`python/confluent_kafka/consumer/consumer.py`):
+    "Subscribing without one releases the previous listener." For `topics=[]` this is the
+    defect, and it contradicts the same docstring's "An empty ``topics`` is the same as
+    ``unsubscribe()``". A binding fix must change it.
+  - Smaller texts resting on the same release point: the SAFETY comment of
+    `ListenerRegistration::fire` ("which another operation cannot overlap to release the
+    listener", after the same "until the next `subscribe_*`, `unsubscribe` or the consumer's
+    destruction" wording); the core comment in `AsyncKafkaConsumer::unsubscribe` ("The retained
+    listener is released by the next `subscribe(...)`", which misses `subscribe([])`); and both
+    test servers' comments (`python/grpc_server.py` `Subscribe`: "a listener-less Subscribe
+    releases it"; `c/grpc_server/server.cc` at its `subscribe_with_topics_listener` call: "the next
+    subscribe_*, unsubscribe, or the consumer's destruction").
+
+  The core keeps the listener after both `unsubscribe()` and `subscribe_with_topics([])`, and
+  `close()` calls it whenever the group-assignment snapshot is non-empty, so a C caller who frees
+  `self_` where the header allows gets the same use-after-free. The C arm passes only because the
+  C server's `self_` (its `LogState`) lives for the whole session and so outlives every release
+  point; the arm never tests the release point. Fixing the binding alone would leave the C
+  contract wrong.
+- **Target release point** (what the core does, and so Java's `SubscriptionState`, which only the
+  `subscribe(...)` overloads write): the listener, and the `self` behind it, stays alive until a
+  later successful `subscribe_*` with a non-empty topic list or with a pattern replaces it (with a
+  new listener or with none), or until the consumer is closed or destroyed (the core drops the
+  listener at the end of `close()`, after its last callback). `unsubscribe()`, `subscribe([])`
+  (with or without a listener) and `assign(...)` keep it, and `close()` may still call it. The
+  binding's `ListenerCtx` comment already says this for `unsubscribe()` ("an unsubscribe leaves
+  the Java listener registered"); the binding, the C header texts and the comments above should
+  all say it in one text.
 - **State**: reverted to Rust-only (`// MULTILANGUAGE: blocked by finding #1`); needs owner (Python
   binding and C header fix, outside this run). Found by the Java-parity change of COMMENTS.121
   item 5 (owner decision 4, approved); the previous form of the test registered no listener and so
