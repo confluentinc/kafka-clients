@@ -27,8 +27,6 @@
 //! below gains the macro's backend suffix (`__rust`, `__grpc_python`,
 //! `__grpc_python_async`, `__grpc_c`). The setup producer and admin client
 //! are native fixtures; only the consumer is under test.
-//! `test_async_consumer_unsubscribe_topic` runs on the native backend only,
-//! under its plain name, blocked by findings log #1 (see its comment).
 //!
 //! # `group.consumer.assignment.interval.ms` (KIP-1263, KAFKA-20291)
 //!
@@ -38,7 +36,7 @@
 //! `testAsyncConsumerExpandingTopicSubscriptions`,
 //! `testAsyncConsumerShrinkingTopicSubscriptions` and
 //! `testAsyncConsumerUnsubscribeTopic` on two broker configs, the interval at
-//! `0` and at `1000`. Each of the five translated here is three scenarios
+//! `0` and at `1000`. Each of these six is three scenarios
 //! ([`assignment_interval_consumer_test!`], as `consumer_bounce_test.rs` does):
 //! `<name>_assignment_interval_0` and `<name>_assignment_interval_1000` are
 //! Java's two arms and run on a 4.3+ broker; `<name>` runs the default config
@@ -130,7 +128,7 @@ use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::assignment_interval_consumer_test;
-use crate::common::backend_factory::{ConsumerBackendFactory, RustNativeFactory};
+use crate::common::backend_factory::ConsumerBackendFactory;
 use crate::common::callback_log::{CallbackLogEntry, ConsumerCallbackLog, KIND_ASSIGNED};
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
@@ -1020,15 +1018,11 @@ async fn async_consumer_unsubscribe_topic<F: ConsumerBackendFactory>(ctx: &mut T
         .unwrap_or_else(|e| panic!("{backend} backend: consumer close should succeed: {e}"));
 }
 
-// MULTILANGUAGE: blocked by finding #1 (the Python bindings release the
-// listener on `subscribe([])` while the core still calls it from `close()`).
-// The body is the scenario form, so converting is replacing this test by a
-// `multilanguage_consumer_test!` line.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_unsubscribe_topic() {
-    let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
-    async_consumer_unsubscribe_topic(&mut ctx, &RustNativeFactory).await;
-}
+assignment_interval_consumer_test!(
+    test_async_consumer_unsubscribe_topic,
+    async_consumer_unsubscribe_topic,
+    cluster_config_with_kip848_3brokers()
+);
 
 /// Translates Java's
 /// `testAsyncConsumerSubscribeInvalidTopicCanUnsubscribe`.
