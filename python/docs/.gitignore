@@ -1,0 +1,3 @@
+# Written by the build: the HTML, and one page per public module (conf.py).
+_build/
+api/
