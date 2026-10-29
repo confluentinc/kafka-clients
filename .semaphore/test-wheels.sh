@@ -191,6 +191,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
     set -x
     install_uv /tmp/uv/bin
     export PATH="/tmp/uv/bin:$PATH"
+    # macOS's default open-file limit (usually 256) is too low for the unit
+    # tests, which then fail with "Too many open files". Raised as the CI
+    # macOS jobs raise it (dependencies-macos.sh), to the hard limit if that
+    # is lower.
+    ulimit -n 10240 2>/dev/null || ulimit -n "$(ulimit -Hn)"
+    echo "ulimit -n: $(ulimit -n)"
     run_matrix "$PWD" "$full"
 else
     : "${DISTRO_IMAGES:=almalinux:8 almalinux:9 ubuntu:22.04 debian:12 ubuntu:24.04}"
