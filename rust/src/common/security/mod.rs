@@ -17,5 +17,7 @@
 pub mod auth;
 pub(crate) mod authenticator;
 pub mod scram;
+// TLS, behind the `rustls` feature.
+#[cfg(feature = "rustls")]
 pub(crate) mod ssl;
 pub mod token;

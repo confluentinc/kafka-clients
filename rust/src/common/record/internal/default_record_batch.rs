@@ -1453,6 +1453,7 @@ mod tests {
     /// Before this behaviour was restored the arm was `Ok(0) | Err(_) => {}`, so
     /// this batch parsed clean and handed the caller three records from a
     /// provably corrupt stream.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_corrupt_compressed_stream_fails_the_remaining_bytes_check() {
         let now = 1_700_000_000_000_i64;
@@ -1538,6 +1539,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testStreamingIteratorRejectsForgedBodySizeExceedingArrayLengthLimit"
     )]
+    #[cfg(feature = "gzip")]
     fn test_streaming_iterator_rejects_forged_body_size_exceeding_array_length_limit() {
         let poison = poisoned_compressed_v2_batch(
             Compression::of(CompressionType::Gzip).build(),
@@ -1616,6 +1618,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooManyCompressedV2"
     )]
+    #[cfg(feature = "gzip")]
     fn test_invalid_record_count_too_many_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 5);
@@ -1628,6 +1631,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testInvalidRecordCountTooLittleCompressedV2"
     )]
+    #[cfg(feature = "gzip")]
     fn test_invalid_record_count_too_little_compressed_v2() {
         let now = 1_700_000_000_000_i64;
         let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 2);
@@ -1793,13 +1797,16 @@ mod tests {
     #[test]
     #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecordBatchTest#testStreamingIteratorConsistency")]
     fn test_streaming_iterator_consistency() {
-        for compression_type in &[
+        for compression_type in [
             CompressionType::None,
             CompressionType::Gzip,
             CompressionType::Snappy,
             CompressionType::Lz4,
             CompressionType::Zstd,
-        ] {
+        ]
+        .iter()
+        .filter(|compression_type| Compression::is_enabled(**compression_type))
+        {
             let compression = Compression::of(*compression_type).build();
             let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
                 RecordBatch::MAGIC_VALUE_V2,
@@ -1920,6 +1927,7 @@ mod tests {
     /// fails with Java's premature-EOF text once its real records run out — the
     /// uncompressed iterator's (`DefaultRecordBatch#uncompressedIterator`), and for every
     /// codec `DefaultRecordBatch.StreamRecordIterator#readNext`'s.
+    #[cfg(feature = "gzip")]
     #[test]
     fn test_iter_records_with_i32_max_record_count_errors_instead_of_aborting() {
         let uncompressed = records_with_invalid_record_count(1_700_000_000_000, CompressionType::None, i32::MAX);

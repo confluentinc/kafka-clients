@@ -15,6 +15,16 @@ breaking changes.
 
 ### Common
 
+- The compression codecs, TLS and SCRAM credential salting are optional, each
+  behind a default feature: `gzip`, `snappy`, `lz4`, `zstd`, `rustls` and
+  `aws-lc-rs` (which `rustls` implies). With default features on nothing
+  changes. With one off, the client fails with an explicit error where it
+  would need it: a disabled `compression.type` fails the producer's
+  configuration, a fetched batch in a disabled codec fails with
+  `InvalidRecordError`, `SSL` and `SASL_SSL` fail the client's construction,
+  and a SCRAM upsertion fails its user's future with
+  `LocalUnsupportedOperationError`. See "Cargo features" in `README.md`.
+  `serde` and `serde_json` are no longer dependencies of the library.
 - **Breaking:** Mozilla's root certificates, trusted without
   `ssl.truststore.location` or `ssl.truststore.certificates`, now come from the
   default feature `webpki-roots`. With default features on nothing changes. A

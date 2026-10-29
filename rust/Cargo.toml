@@ -36,14 +36,31 @@ include = [
 
 
 [features]
+# Every optional dependency of the client is a default feature, so the default
+# build supports every compression type, TLS and SCRAM credential salting.
+# `default-features = false` drops them; a disabled one fails with an explicit
+# error where it is needed (see the "Cargo features" section of README.md).
+default = ["gzip", "snappy", "lz4", "zstd", "aws-lc-rs", "rustls", "webpki-roots"]
+# The compression codecs of `compression.type` and of fetched record batches.
+gzip = ["dep:flate2"]
+snappy = ["dep:snap"]
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:zstd"]
+# PBKDF2-HMAC for the admin client's SCRAM credential upsertions, and the
+# crypto provider of `rustls`, which therefore enables it.
+aws-lc-rs = ["dep:aws-lc-rs"]
+# TLS: `security.protocol` SSL and SASL_SSL. It needs a default trust store,
+# so it is enabled through `webpki-roots` below.
+rustls = ["dep:rustls", "dep:tokio-rustls", "aws-lc-rs"]
 # Without `ssl.truststore.location` or `ssl.truststore.certificates` the broker
 # certificate is verified against Mozilla's root certificates, compiled in by
 # `webpki-roots`. It is a default feature so that another default trust store
 # can be added later as a feature of its own: `default-features = false` then
 # selects that one, without the Mozilla bundle.
-default = ["webpki-roots"]
-webpki-roots = ["dep:webpki-roots"]
-integration-tests = []
+webpki-roots = ["rustls", "dep:webpki-roots"]
+# The integration tests run every security protocol and compression type
+# against a real broker, so they need all of the features above.
+integration-tests = ["gzip", "snappy", "lz4", "zstd", "webpki-roots"]
 # Run the producer integration tests against multiple language backends
 # (native Rust, Python via gRPC, C via gRPC). See
 # design/history/MILESTONE-6/DESIGN-multilanguage-tests.md for details.
@@ -58,16 +75,14 @@ crate-type = ["lib", "staticlib", "cdylib"]
 bytes = "1"
 ambassador = "0.5"
 regex = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
 tokio-util = "0.7"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", optional = true }
 # At least 0.23.46: earlier releases print TLS session secrets in the `Debug`
 # output of their client session values (RUSTSEC-2026-0346).
-rustls = { version = "0.23.46", features = ["logging", "std", "tls12"] }
+rustls = { version = "0.23.46", features = ["logging", "std", "tls12"], optional = true }
 # At least 1.0.10: earlier releases trust the leaked emSign intermediate CAs
 # (RUSTSEC-2026-0381).
 webpki-roots = { version = "1.0.10", optional = true }
@@ -86,26 +101,26 @@ env_logger = { version = "0.11", optional = true }
 # package-check` and the crates.io release blocks in `.semaphore/semaphore.yml`
 # both make that edit.
 ffi-macros = { path = "ffi-macros", optional = true }
-flate2 = "1"
-snap = "1"
-lz4_flex = "0.11"
-zstd = "0.13"
+flate2 = { version = "1", optional = true }
+snap = { version = "1", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+zstd = { version = "0.13", optional = true }
 crc32c = "0.6"
 # IEEE 802.3 / zlib CRC-32 (poly 0x04C11DB7, reflected). Used as the default
 # producer key partitioner hash (`KeyHasher::Crc32`), matching librdkafka's
 # `consistent_random` partitioner and Python `zlib.crc32`. This is a DIFFERENT
 # polynomial from `crc32c` above (CRC-32C/Castagnoli, used for record-batch
-# CRCs) — do NOT conflate the two. Already present transitively via `flate2`,
-# so this adds no new compiled crate.
+# CRCs) — do NOT conflate the two. Present transitively via `flate2` too,
+# when the `gzip` feature is on.
 crc32fast = "1"
 # FIPS-capable crypto backend (already the project's chosen rustls provider, see
 # `security/ssl/ssl_factory.rs` installing `rustls::crypto::aws_lc_rs`). Used for
-# PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). Already
-# present transitively via rustls, so this adds no new compiled crate.
+# PBKDF2-HMAC in `ScramFormatter::hi` (SCRAM credential salting, KIP-554). With the
+# `rustls` feature it is present transitively via rustls too.
 # `default-features = false` mirrors rustls's own feature selection: it drops the
 # `ring-io`/`ring-sig-verify` compat shims (which would pull an extra `untrusted`
 # crate we don't need for PBKDF2), keeping the dependency graph unchanged.
-aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"], optional = true }
 # Reverse DNS (`getnameinfo` with `NI_NAMEREQD`) for Java's
 # `InetAddress.getCanonicalHostName()` in
 # `client.dns.lookup=resolve_canonical_bootstrap_servers_only`
@@ -118,6 +133,10 @@ futures-util = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+# The Schema Registry examples and the performance tests; the library does not
+# use them (the build script has its own entries, for the message generator).
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"

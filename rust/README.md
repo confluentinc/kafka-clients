@@ -149,6 +149,42 @@ Generated code is automatically updated on build. To force regeneration:
 cargo clean && cargo build
 ```
 
+## Cargo features
+
+Every optional dependency is a default feature, so a default build supports
+every compression type, TLS and SCRAM credential salting:
+
+| Feature | Default | What it enables |
+|---|---|---|
+| `gzip` | yes | `compression.type=gzip`, and reading gzip batches (`flate2`) |
+| `snappy` | yes | `compression.type=snappy`, and reading snappy batches (`snap`) |
+| `lz4` | yes | `compression.type=lz4`, and reading lz4 batches (`lz4_flex`) |
+| `zstd` | yes | `compression.type=zstd`, and reading zstd batches (`zstd`) |
+| `aws-lc-rs` | yes | PBKDF2 for `Admin::alter_user_scram_credentials` upsertions, and the crypto provider of `rustls` |
+| `rustls` | yes | `security.protocol` `SSL` and `SASL_SSL`; implies `aws-lc-rs` |
+| `webpki-roots` | yes | Mozilla's root certificates, trusted without `ssl.truststore.location` or `ssl.truststore.certificates`; implies `rustls` |
+| `ffi` | no | the C API |
+| `integration-tests` | no | the broker-backed test suites; implies every codec and `webpki-roots` |
+
+With a feature off, the client fails with an explicit error where it would
+need it:
+
+- a disabled `compression.type` fails the producer's configuration with a
+  `ConfigError`, and a fetched batch in a disabled codec fails with an
+  `InvalidRecordError`;
+- `SSL` and `SASL_SSL` fail the client's construction with a `ConfigError`;
+- a SCRAM upsertion without `aws-lc-rs` fails its user's future with a
+  `LocalUnsupportedOperationError`, while deletions still work.
+
+`rustls` needs a default trust store, and `webpki-roots` is the only one so
+far, so TLS is enabled through `webpki-roots`. For example, a client with lz4
+and TLS only:
+
+```toml
+[dependencies]
+confluent-kafka = { version = "1.0.0-rc.1", default-features = false, features = ["lz4", "webpki-roots"] }
+```
+
 ## Examples
 
 See [./examples/README.md](./examples/README.md).

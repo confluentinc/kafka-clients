@@ -100,7 +100,9 @@ use crate::common::requests::{
     renew_delegation_token_request,
 };
 use crate::common::security::auth::KafkaPrincipal;
-use crate::common::security::scram::internals::{ScramFormatter, ScramMechanism as InternalScramMechanism};
+#[cfg(feature = "aws-lc-rs")]
+use crate::common::security::scram::internals::ScramFormatter;
+use crate::common::security::scram::internals::ScramMechanism as InternalScramMechanism;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::{
     SystemTime, Time,
@@ -2242,17 +2244,14 @@ fn get_alter_user_scram_credentials_call(
 ///
 /// Returns an [`Errors::UnsupportedSaslMechanism`] error if the public mechanism
 /// has no internal SCRAM mapping (the Rust analog of Java's
-/// `NoSuchAlgorithmException`).
+/// `NoSuchAlgorithmException`), and a `LocalUnsupportedOperationError` when
+/// the client was built without the `aws-lc-rs` feature, which provides PBKDF2.
 #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getScramCredentialUpsertion")]
 fn get_scram_credential_upsertion(upsertion: &UserScramCredentialUpsertion) -> Result<ScramCredentialUpsertion, Error> {
     let public_mechanism = upsertion.credential_info().mechanism();
     let internal = InternalScramMechanism::for_mechanism_name(public_mechanism.mechanism_name())
         .ok_or_else(|| unsupported_sasl_mechanism("Unknown SCRAM mechanism"))?;
-    let salted_password = ScramFormatter::new(internal).hi(
-        upsertion.password(),
-        upsertion.salt(),
-        upsertion.credential_info().iterations(),
-    );
+    let salted_password = get_salted_password(internal, upsertion)?;
     let mut wire = ScramCredentialUpsertion::new();
     wire.set_name(upsertion.user().to_string())
         .set_mechanism(public_mechanism.r#type())
@@ -2261,6 +2260,38 @@ fn get_scram_credential_upsertion(upsertion: &UserScramCredentialUpsertion) -> R
         .set_salted_password(salted_password);
     Ok(wire)
 }
+
+/// The SCRAM salted password of `upsertion`: `ScramFormatter.hi` over its
+/// password, salt and iterations.
+#[cfg(feature = "aws-lc-rs")]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getSaltedPassword")]
+fn get_salted_password(
+    mechanism: InternalScramMechanism,
+    upsertion: &UserScramCredentialUpsertion,
+) -> Result<Vec<u8>, Error> {
+    Ok(ScramFormatter::new(mechanism).hi(
+        upsertion.password(),
+        upsertion.salt(),
+        upsertion.credential_info().iterations(),
+    ))
+}
+
+/// Without the `aws-lc-rs` feature the client has no PBKDF2, so an upsertion
+/// fails, and with it only that user's future.
+#[cfg(not(feature = "aws-lc-rs"))]
+#[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClient#getSaltedPassword")]
+fn get_salted_password(
+    _mechanism: InternalScramMechanism,
+    _upsertion: &UserScramCredentialUpsertion,
+) -> Result<Vec<u8>, Error> {
+    Err(Error::local_unsupported_operation(SCRAM_UPSERTION_DISABLED_MESSAGE))
+}
+
+/// The error message of a SCRAM credential upsertion on a client built
+/// without the `aws-lc-rs` feature.
+#[cfg(not(feature = "aws-lc-rs"))]
+const SCRAM_UPSERTION_DISABLED_MESSAGE: &str =
+    "SCRAM credential upsertion is not available: the client was built without the `aws-lc-rs` feature";
 
 /// Builds the wire deletion for a user. Mirrors
 /// `KafkaAdminClient.getScramCredentialDeletion`.
@@ -6892,6 +6923,7 @@ mod tests {
     #[doc(
         alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testAlterUserScramCredentialsUnknownMechanism"
     )]
+    #[cfg(feature = "aws-lc-rs")]
     async fn test_alter_user_scram_credentials_unknown_mechanism() {
         let (admin, mut runnable, _time, _nodes) = env();
 
@@ -6957,6 +6989,7 @@ mod tests {
     /// but the C and Python bindings depend on it: their marshaling layer
     /// deliberately passes an empty password through rather than failing the
     /// whole call.
+    #[cfg(feature = "aws-lc-rs")]
     #[tokio::test]
     async fn test_alter_user_scram_credentials_empty_password_fails_only_that_user() {
         let (admin, mut runnable, _time, _nodes) = env();
@@ -6997,11 +7030,54 @@ mod tests {
         result_data["user1"].get().await.unwrap();
     }
 
+    /// Without the `aws-lc-rs` feature there is no PBKDF2 to salt a password
+    /// with: an upsertion fails its user's future with an explicit error,
+    /// while a deletion, which needs no salting, is still sent.
+    #[cfg(not(feature = "aws-lc-rs"))]
+    #[tokio::test]
+    async fn test_alter_user_scram_credentials_upsertion_needs_aws_lc_rs() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let mut result0 = WireAlterResult::new();
+        result0.set_user("user0".to_string()).set_error_code(Errors::None.code());
+        let mut response_data = AlterUserScramCredentialsResponseData::new();
+        response_data.set_results(vec![result0]);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::AlterUserScramCredentials(
+                AlterUserScramCredentialsResponse::new(response_data, 0),
+            ));
+
+        let alterations: Vec<UserScramCredentialAlteration> = vec![
+            UserScramCredentialDeletion::new("user0", PublicScramMechanism::ScramSha256).into(),
+            UserScramCredentialUpsertion::with_str(
+                "user1",
+                ScramCredentialInfo::new(PublicScramMechanism::ScramSha512, 8192),
+                "password",
+            )
+            .into(),
+        ];
+        let result =
+            admin.alter_user_scram_credentials_with_options(&alterations, AlterUserScramCredentialsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.values();
+        assert_eq!(result_data.len(), 2);
+        let err = result_data["user1"].get().await.unwrap_err();
+        assert!(err.is_local_unsupported_operation_error(), "{err:?}");
+        assert_eq!(
+            err.message(),
+            "SCRAM credential upsertion is not available: the client was built without the `aws-lc-rs` feature"
+        );
+        result_data["user0"].get().await.unwrap();
+    }
+
     /// Translated from `KafkaAdminClientTest.testAlterUserScramCredentials`.
     ///
     /// The Java test has no `throws` and runs real PBKDF2 synchronously; the
     /// Rust equivalent exercises the same crypto path (each upsertion computes a
     /// salted password via `ScramFormatter::hi`).
+    #[cfg(feature = "aws-lc-rs")]
     #[tokio::test]
     #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientConfigTest#testAlterUserScramCredentials")]
     async fn test_alter_user_scram_credentials() {
