@@ -22,7 +22,7 @@
 //!   `testPartitionTooLargeForReplicationWithAckAll`,
 //!   `testResponseTooLargeForReplicationWithAckAll`,
 //!   `testCannotSendToInternalTopic`,
-//!   `testNotEnoughReplicasAfterBrokerShutdown` (native only, dedicated cluster)
+//!   `testNotEnoughReplicasAfterBrokerShutdown` (dedicated cluster)
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
 //!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
@@ -2546,9 +2546,11 @@ crate::multilanguage_test!(test_ssl_close, ssl_close_inner, producer_send_cluste
 crate::multilanguage_test!(test_ssl_flush, ssl_flush_inner, producer_send_cluster_config());
 
 // ---------------------------------------------------------------------------
-// Broker fault injection (native only under both feature sets: the scenarios
-// stop brokers of a dedicated cluster, and the bindings add nothing to what the
-// native producer proves here).
+// Broker fault injection: the scenarios stop a broker of a dedicated cluster.
+// The gRPC containers reach a restarted broker through its container listener,
+// so `test_not_enough_replicas_after_broker_shutdown` runs on every backend;
+// `test_send_to_partition_with_follower_shutdown_should_not_timeout` stays native
+// (see its `MULTILANGUAGE:` line).
 // ---------------------------------------------------------------------------
 
 /// [`producer_failure_handling_cluster_config`]'s broker properties on a
@@ -2570,16 +2572,7 @@ fn producer_failure_handling_dedicated_cluster_config() -> ClusterConfig {
 /// awaiting it (the admin's close drains it) and lets the first send wait for
 /// metadata, whereas here the creation is awaited together with the partition
 /// leader (`create_topic_with_admin_config`), so the first send cannot race
-/// the leader election.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_not_enough_replicas_after_broker_shutdown() {
-    let mut ctx = TestContext::new(producer_failure_handling_dedicated_cluster_config()).await;
-    not_enough_replicas_after_broker_shutdown_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
-    ctx.cleanup().await;
-}
-
-/// Body of [`test_not_enough_replicas_after_broker_shutdown`], generic so that
-/// `send` resolves to `Producer::send`.
+/// the leader election. The topic admin stays native.
 async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2596,41 +2589,56 @@ async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFacto
     let record = || ProducerRecord::with_key(topic_name.clone(), Some(b("key")), Some(b("value")));
 
     let producer = factory
-        .create(failure_producer_config(ctx.bootstrap_servers(), -1))
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), -1))
         .await
         .expect("Failed to create producer");
+    let backend = factory.name();
     // this should work with all brokers up and running
     producer
         .send(record())
         .await
-        .expect("send should succeed")
+        .unwrap_or_else(|e| panic!("{backend} backend: send should succeed: {e:?}"))
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
-        .expect("the send should work with all brokers up and running");
+        .unwrap_or_else(|e| panic!("{backend} backend: the send should work with all brokers up and running: {e:?}"));
 
     // shut down one broker: Java's `clusterInstance.brokers().get(0)` is broker id 0
     let one_broker = 0;
     ctx.cluster().shutdown_broker(one_broker).await;
 
-    let e = producer
+    let result = producer
         .send(record())
         .await
-        .expect("send should accept the request")
+        .unwrap_or_else(|e| panic!("{backend} backend: send should accept the request: {e:?}"))
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
-        .await
-        .expect_err("the send must fail with a broker down and min.insync.replicas = brokers");
+        .await;
+    let Err(e) = result else {
+        panic!(
+            "{backend} backend: the send must fail with a broker down and min.insync.replicas = brokers, got {result:?}"
+        );
+    };
     assert!(
         matches!(
             e,
             Error::NotEnoughReplicas(_) | Error::NotEnoughReplicasAfterAppend(_) | Error::Timeout(_)
         ),
-        "expected NotEnoughReplicas, NotEnoughReplicasAfterAppend or Timeout, got {e:?}"
+        "{backend} backend: expected NotEnoughReplicas, NotEnoughReplicasAfterAppend or Timeout, got {e:?}"
     );
 
     // restart the server
     ctx.cluster().start_broker(one_broker).await;
-    producer.close().await.expect("close should succeed");
+    producer
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close should succeed: {e:?}"));
+    ctx.cleanup().await;
 }
+
+crate::multilanguage_test!(
+    test_not_enough_replicas_after_broker_shutdown,
+    not_enough_replicas_after_broker_shutdown_inner,
+    producer_failure_handling_dedicated_cluster_config()
+);
 
 /// [`producer_send_cluster_config`]'s broker shape on a dedicated `Type.KRAFT`
 /// cluster (two brokers plus one isolated controller, as Scala's KRaft
