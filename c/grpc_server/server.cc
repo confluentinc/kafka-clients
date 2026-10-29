@@ -2713,6 +2713,9 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     // -1 for Java's Optional.empty(): the optional proto field stays unset.
     const int32_t epoch = kafka_consumer_ConsumerRecord_leader_epoch(rec);
     if (epoch >= 0) dst->set_leader_epoch(epoch);
+    // The binding's own sizes, -1 (Java's NULL_SIZE) for a null key or value.
+    dst->set_serialized_key_size(kafka_consumer_ConsumerRecord_serialized_key_size(rec));
+    dst->set_serialized_value_size(kafka_consumer_ConsumerRecord_serialized_value_size(rec));
     // headers(): BORROWED from the record. The RecordHeaders handle is only
     // enumerable through its `Headers` view, which `__as_Headers` hands out
     // for the read-only handle; nothing below writes through it, and the view
