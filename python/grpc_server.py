@@ -169,6 +169,7 @@ from grpc_translate import (  # noqa: E402
     _tp,
     _tp_to_proto,
     ignore_commit_completion,
+    install_error_replies,
     make_logging_commit_callback,
     make_logging_delivery_callback,
 )
@@ -522,7 +523,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         def do(c):
             offsets = _proto_offsets_to_dict(request.offsets)
             timeout_kwargs = _consumer_timeout(request)
-            if offsets:
+            if offsets or request.with_offsets:
                 c.commit(offsets=offsets, **timeout_kwargs)
             else:
                 c.commit(**timeout_kwargs)
@@ -540,7 +541,7 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             # waits for its offsets runs here, on this thread (the binding keeps
             # this thread draining the queue meanwhile).
             offsets = _proto_offsets_to_dict(request.offsets)
-            if offsets:
+            if offsets or request.with_offsets:
                 c.commit_nowait(offsets=offsets,
                                 callback=callback or ignore_commit_completion)
             else:
@@ -1613,6 +1614,13 @@ def _log_level(rust_log):
     if level in ("DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"):
         return level
     return "INFO"
+
+
+# Every binding error is returned as its reply's error, never as a transport
+# failure (grpc_translate.install_error_replies).
+install_error_replies(ProducerService, pb, "ProducerService")
+install_error_replies(ConsumerService, cpb, "ConsumerService")
+install_error_replies(AdminService, apb, "AdminService")
 
 
 def main():

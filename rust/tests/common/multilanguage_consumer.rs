@@ -315,9 +315,20 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>, timeout: Option<Duration>) -> Result<(), Error> {
+    /// `CommitSync`: `offsets` `None` is Java's `commitSync([Duration])`,
+    /// `Some` its `commitSync(Map[, Duration])`, an empty map included.
+    async fn commit_rpc(
+        &self,
+        offsets: Option<Vec<proto::OffsetMapEntry>>,
+        timeout: Option<Duration>,
+    ) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets, timeout_ms: timeout_ms(timeout) };
+        let req = proto::CommitSyncRequest {
+            consumer_id: self.consumer_id,
+            with_offsets: offsets.is_some(),
+            offsets: offsets.unwrap_or_default(),
+            timeout_ms: timeout_ms(timeout),
+        };
         self.status_rpc(client.commit_sync(req)).await
     }
 
@@ -657,18 +668,18 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── commit ──
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), Some(timeout)).await
+        self.commit_rpc(None, Some(timeout)).await
     }
 
     async fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), None).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), None).await
     }
 
     async fn commit_sync_with_offsets_timeout(
@@ -676,14 +687,14 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), Some(timeout)).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), Some(timeout)).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
         // Mapped to a synchronous commit server-side; the offset ends up
         // committed. Tests that depend on async-not-yet-committed timing are
         // native-Rust-only and never reach this backend.
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
