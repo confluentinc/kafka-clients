@@ -138,7 +138,11 @@ These decide every question, in this order:
   `flush()` has no closed check and returns immediately on the empty
   accumulator a completed close leaves. A `close({timeoutMs})` the core
   rejects (a negative timeout, Java's `IllegalArgumentException`) closes
-  nothing, and the producer stays usable.
+  nothing, and the producer stays usable. While a close is in progress or
+  after it completed, the native producer no longer checks the timeout, so
+  the binding rejects a negative one itself, with `LOCAL_ILLEGAL_ARGUMENT` and
+  Java's message "The timeout cannot be negative.", as Java's `close(Duration)`
+  checks it before anything else.
 - Configuration is a plain object (or a `Map`) of Java's config keys; values
   are stringified (`true` → `"true"`, numbers and bigints by `String`, arrays
   joined with `,`), `null` / `undefined` dropped. The core validates them.

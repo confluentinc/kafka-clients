@@ -20,13 +20,15 @@
 
 const native = require('../_native');
 const { configEntries } = require('../_config');
-const { illegalState } = require('../common/kafka_error');
+const { illegalArgument, illegalState } = require('../common/kafka_error');
 const { KafkaFuture } = require('../common/kafka_future');
 const { checkCallback, thrownMessage } = require('./callback');
 const { ProducerRecord } = require('./producer_record');
 
 // Java's KafkaProducer.throwIfProducerClosed message.
 const CLOSED_MESSAGE = 'Cannot perform operation after producer has been closed';
+// Java's KafkaProducer.close(Duration) message for a negative timeout.
+const NEGATIVE_TIMEOUT_MESSAGE = 'The timeout cannot be negative.';
 
 /**
  * A Kafka client that publishes records to the Kafka cluster.
@@ -163,16 +165,15 @@ class KafkaProducer {
    * close(Duration)), then releases the native client. The records waited
    * for are those whose `send()` had resolved before `close()` was called.
    * Calling it again returns the close in progress, or resolves once the
-   * producer is closed.
+   * producer is closed; a negative `timeoutMs` is rejected whatever the
+   * producer's state, as Java's close(Duration) checks it first.
    *
    * @param {{timeoutMs?: number}} [options] `timeoutMs`: the maximum time to wait for the
    *   producer to complete any pending requests. A timeout of zero means do not wait.
-   * @returns {Promise<void>}
+   * @returns {Promise<void>} rejecting with `LOCAL_ILLEGAL_ARGUMENT` for a negative `timeoutMs`
    * @throws {TypeError} when `timeoutMs` is not an integer
    */
   close(options) {
-    if (this.#closing !== null) return this.#closing;
-    if (this.#destroyed) return Promise.resolve();
     let timeoutMs = null;
     if (options !== undefined && options !== null) {
       if (typeof options !== 'object') throw new TypeError('close takes an options object {timeoutMs}');
@@ -182,6 +183,12 @@ class KafkaProducer {
         }
         timeoutMs = options.timeoutMs;
       }
+    }
+    if (this.#closing !== null || this.#destroyed) {
+      // The native producer, closing or gone, no longer checks the timeout:
+      // Java's close(Duration) rejects a negative one first, whatever the state.
+      if (timeoutMs !== null && timeoutMs < 0) return Promise.reject(illegalArgument(NEGATIVE_TIMEOUT_MESSAGE));
+      return this.#closing !== null ? this.#closing : Promise.resolve();
     }
     this.#closed = true;
     this.#closing = new Promise((resolve, reject) => {

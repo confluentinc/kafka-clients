@@ -178,6 +178,27 @@ test('after close: send throws, flush resolves, close is idempotent', async () =
   await producer.flush();
 });
 
+test("close checks its timeout as Java's close(Duration) does, whatever the state", async () => {
+  const negative = (e) => {
+    assert.ok(e instanceof KafkaError);
+    assert.equal(e.name, 'LOCAL_ILLEGAL_ARGUMENT');
+    assert.equal(e.code, -3);
+    assert.equal(e.message, 'The timeout cannot be negative.');
+    return true;
+  };
+  const producer = new KafkaProducer(UNREACHABLE);
+  const first = producer.close();
+  // While a close is in progress.
+  await assert.rejects(producer.close({ timeoutMs: -1 }), negative);
+  assert.throws(() => producer.close({ timeoutMs: 1.5 }), { name: 'TypeError', message: 'timeoutMs must be an integer' });
+  await first;
+  // And once closed.
+  await assert.rejects(producer.close({ timeoutMs: -1 }), negative);
+  assert.throws(() => producer.close({ timeoutMs: 1.5 }), { name: 'TypeError', message: 'timeoutMs must be an integer' });
+  assert.throws(() => producer.close(5), { name: 'TypeError', message: 'close takes an options object {timeoutMs}' });
+  await producer.close({ timeoutMs: 0 });
+});
+
 test('a negative close timeout is rejected by the core and closes nothing', async () => {
   const producer = new KafkaProducer(UNREACHABLE);
   await assert.rejects(producer.close({ timeoutMs: -1 }), (e) => {
